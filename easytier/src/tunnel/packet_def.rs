@@ -764,6 +764,7 @@ impl ZCPacket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{hint::black_box, time::Instant};
 
     #[test]
     fn test_zc_packet() {
@@ -808,5 +809,46 @@ mod tests {
         let mut packet = ZCPacket::new_from_buf(BytesMut::from(&b"\x01"[..]), ZCPacketType::UDP);
 
         assert!(packet.mut_wg_tunnel_header().is_none());
+    }
+
+    fn bench_packet_bytes_extraction(payload_len: usize, iterations: usize) {
+        let data = vec![0u8; payload_len];
+
+        let now = Instant::now();
+        let mut checksum = 0usize;
+        for _ in 0..iterations {
+            let p = ZCPacket::new_with_payload(black_box(&data));
+            let b = black_box(p).payload_bytes();
+            checksum = checksum.wrapping_add(b.len());
+        }
+        let payload_elapsed = now.elapsed().as_secs_f64();
+
+        let now = Instant::now();
+        let mut checksum2 = 0usize;
+        for _ in 0..iterations {
+            let p = ZCPacket::new_with_payload(black_box(&data));
+            let b = black_box(p).tunnel_payload_bytes();
+            checksum2 = checksum2.wrapping_add(b.len());
+        }
+        let tunnel_elapsed = now.elapsed().as_secs_f64();
+
+        println!(
+            "packet_bytes payload_len={} iterations={} payload_pps={:.0} payload_bytes_per_sec={:.0} tunnel_pps={:.0} tunnel_bytes_per_sec={:.0} checksums={}/{}",
+            payload_len,
+            iterations,
+            iterations as f64 / payload_elapsed,
+            (payload_len * iterations) as f64 / payload_elapsed,
+            iterations as f64 / tunnel_elapsed,
+            (payload_len * iterations) as f64 / tunnel_elapsed,
+            checksum,
+            checksum2
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark helper; run with --ignored --nocapture"]
+    fn packet_bytes_extraction_bench() {
+        bench_packet_bytes_extraction(1280, 1_000_000);
+        bench_packet_bytes_extraction(4096, 500_000);
     }
 }
