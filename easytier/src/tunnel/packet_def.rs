@@ -1,10 +1,10 @@
 use bytes::Buf;
 use bytes::Bytes;
 use bytes::BytesMut;
-use zerocopy::byteorder::*;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
 use zerocopy::FromZeroes;
+use zerocopy::byteorder::*;
 
 type DefaultEndian = LittleEndian;
 
