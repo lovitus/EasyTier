@@ -1,10 +1,10 @@
 use bytes::Buf;
 use bytes::Bytes;
 use bytes::BytesMut;
+use zerocopy::byteorder::*;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
 use zerocopy::FromZeroes;
-use zerocopy::byteorder::*;
 
 type DefaultEndian = LittleEndian;
 
@@ -845,7 +845,7 @@ mod tests {
             iterations as f64 / payload_elapsed,
             (payload_len * iterations) as f64 / payload_elapsed,
             iterations as f64 / tunnel_elapsed,
-            (payload_len * iterations) as f64 / tunnel_elapsed,
+            checksum2 as f64 / tunnel_elapsed,
             checksum,
             checksum2
         );

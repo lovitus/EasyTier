@@ -180,7 +180,7 @@ impl ZCPacketToBytes for TunZCPacketToBytes {
         assert!(payload_offset >= 4);
 
         let ret = if self.has_packet_info {
-            let mut inner = inner.split_off(payload_offset - 4);
+            inner.advance(payload_offset - 4);
             let proto = infer_proto(&inner[4..]);
             self.fill_packet_info(&mut inner[0..4], proto)?;
             inner
