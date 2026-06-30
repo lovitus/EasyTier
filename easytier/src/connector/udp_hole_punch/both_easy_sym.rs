@@ -12,7 +12,9 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::{
     common::{PeerId, stun::StunInfoCollectorTrait},
     connector::udp_hole_punch::common::{
-        HOLE_PUNCH_PACKET_BODY_LEN, UdpHolePunchListener, try_connect_with_socket,
+        HOLE_PUNCH_PACKET_BODY_LEN, UdpHolePunchListener,
+        disable_udp_stealth_for_selected_listener, negotiate_udp_listener_stealth,
+        should_request_udp_stealth, try_connect_with_socket,
     },
     connector::udp_hole_punch::handle_rpc_result,
     peers::peer_manager::PeerManager,
@@ -64,6 +66,10 @@ impl PunchBothEasySymHoleServer {
         }
 
         let global_ctx = self.common.get_global_ctx();
+        let stealth_enabled = negotiate_udp_listener_stealth(
+            request.use_stealth,
+            global_ctx.get_feature_flags().stealth_supported,
+        );
         let cur_mapped_addr = global_ctx
             .get_stun_info_collector()
             .get_udp_port_mapping(0)
@@ -119,16 +125,20 @@ impl PunchBothEasySymHoleServer {
                     let remote_addr = s.remote_addr;
                     drop(s);
 
-                    let listener =
-                        match UdpHolePunchListener::new_ext(peer_mgr.clone(), false, Some(port))
-                            .await
-                        {
-                            Ok(l) => l,
-                            Err(e) => {
-                                tracing::warn!(?e, "failed to create listener");
-                                continue;
-                            }
-                        };
+                    let listener = match UdpHolePunchListener::new_ext(
+                        peer_mgr.clone(),
+                        false,
+                        Some(port),
+                        stealth_enabled,
+                    )
+                    .await
+                    {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::warn!(?e, "failed to create listener");
+                            continue;
+                        }
+                    };
                     punched.push((listener.get_socket().await, remote_addr));
                     listeners.push(listener);
                 }
@@ -167,6 +177,7 @@ impl PunchBothEasySymHoleServer {
         return Ok(SendPunchPacketBothEasySymResponse {
             is_busy: false,
             base_mapped_addr: Some(cur_mapped_addr.into()),
+            stealth_enabled: Some(stealth_enabled),
         });
     }
 }
@@ -194,6 +205,7 @@ impl PunchBothEasySymHoleClient {
         dst_peer_id: PeerId,
         my_nat_info: UdpNatType,
         peer_nat_info: UdpNatType,
+        disable_udp_stealth: bool,
         is_busy: &mut bool,
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // Check if peer is blacklisted
@@ -211,6 +223,7 @@ impl PunchBothEasySymHoleClient {
         udp_array.start().await?;
 
         let global_ctx = self.peer_mgr.get_global_ctx();
+        let use_stealth = should_request_udp_stealth(&global_ctx, disable_udp_stealth);
         let cur_mapped_addr = global_ctx
             .get_stun_info_collector()
             .get_udp_port_mapping(0)
@@ -258,6 +271,7 @@ impl PunchBothEasySymHoleClient {
                     } as u32,
                     udp_socket_count: UDP_ARRAY_SIZE_FOR_BOTH_EASY_SYM as u32,
                     wait_time_ms: REMOTE_WAIT_TIME_MS as u32,
+                    use_stealth: Some(use_stealth),
                 },
             )
             .await;
@@ -268,6 +282,8 @@ impl PunchBothEasySymHoleClient {
             *is_busy = true;
             anyhow::bail!("remote is busy");
         }
+        let disable_udp_stealth =
+            disable_udp_stealth_for_selected_listener(remote_ret.stealth_enabled);
 
         let mut remote_mapped_addr = remote_ret
             .base_mapped_addr
@@ -320,6 +336,7 @@ impl PunchBothEasySymHoleClient {
                     global_ctx.clone(),
                     socket.socket.clone(),
                     remote_mapped_addr.into(),
+                    disable_udp_stealth,
                 )
                 .await
                 {

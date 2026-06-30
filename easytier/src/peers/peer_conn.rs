@@ -64,6 +64,7 @@ use crate::{
         mpsc::{MpscTunnel, MpscTunnelSender},
         packet_def::{PacketType, ZCPacket},
         stats::{Throughput, WindowLatency},
+        stealth::OuterSessionState,
     },
     use_global_var,
 };
@@ -300,6 +301,7 @@ pub struct PeerConn {
     secure_mode_cfg: Option<SecureModeConfig>,
     session_filter: PeerSessionTunnelFilter,
     noise_handshake_result: Option<NoiseHandshakeResult>,
+    outer_session_state: Option<Arc<OuterSessionState>>,
 
     tunnel: Arc<Mutex<Box<dyn Any + Send + 'static>>>,
     sink: MpscTunnelSender,
@@ -354,6 +356,10 @@ impl PeerConn {
         peer_session_store: Arc<PeerSessionStore>,
     ) -> Self {
         let flags = global_ctx.get_flags();
+        let outer_session_state = tunnel
+            .data()
+            .and_then(|data| data.downcast_ref::<Arc<OuterSessionState>>())
+            .cloned();
         let tunnel_info = tunnel.info();
         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
 
@@ -387,6 +393,7 @@ impl PeerConn {
             secure_mode_cfg,
             session_filter,
             noise_handshake_result: None,
+            outer_session_state,
 
             tunnel: Arc::new(hotpath::mutex!(tokio::sync::Mutex::new(Box::new(
                 guard!([mut mpsc_tunnel] mpsc_tunnel.close()),
@@ -425,6 +432,11 @@ impl PeerConn {
             .as_ref()
             .map(|cfg| cfg.enabled)
             .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    fn outer_session_state(&self) -> Option<Arc<OuterSessionState>> {
+        self.outer_session_state.clone()
     }
 
     // pri, pub
@@ -683,6 +695,11 @@ impl PeerConn {
         let msg_len = hs
             .write_message(&payload, &mut msg)
             .map_err(|e| Error::WaitRespError(format!("noise write msg1 failed: {e:?}")))?;
+        if packet_type as u8 == PacketType::NoiseHandshakeMsg3 as u8
+            && let Some(state) = self.outer_session_state.as_ref()
+        {
+            state.promote_outer_key_after_next_seal(hs.get_handshake_hash());
+        }
         let mut pkt = ZCPacket::new_with_payload(&msg[..msg_len]);
         pkt.fill_peer_manager_hdr(self.my_peer_id, remote_peer_id, packet_type as u8);
         let pkt_len = pkt.buf_len() as u64;
@@ -1268,6 +1285,7 @@ impl PeerConn {
             self.session_filter.set_session(noise.session.clone());
             self.session_filter.set_peer_id(noise.peer_id);
             self.noise_handshake_result = Some(noise);
+            self.install_stealth_outer_key();
 
             self.info = Some(handshake_rsp);
             self.is_client = Some(false);
@@ -1299,6 +1317,21 @@ impl PeerConn {
     #[tracing::instrument]
     pub async fn do_handshake_as_server(&mut self) -> Result<(), Error> {
         self.do_handshake_as_server_ext(|_, _| Ok(())).await
+    }
+
+    /// Phase-2 stealth handoff: once Noise completes, derive the connection-level
+    /// outer key from the handshake hash and install it into the per-connection
+    /// `OuterSessionState` shared with the UDP tunnel. No-op when stealth is off
+    /// or the tunnel did not carry a stealth state (e.g. non-UDP underlays).
+    fn install_stealth_outer_key(&self) {
+        if let (Some(state), Some(noise)) = (
+            self.outer_session_state.as_ref(),
+            self.noise_handshake_result.as_ref(),
+        ) {
+            if state.is_enabled() {
+                state.set_outer_key_from_handshake_hash(&noise.handshake_hash);
+            }
+        }
     }
 
     #[tracing::instrument]
@@ -1620,10 +1653,15 @@ pub mod tests {
     use crate::common::stats_manager::{LabelSet, LabelType, MetricName};
     use crate::peers::create_packet_recv_chan;
     use crate::peers::recv_packet_from_chan;
+    use crate::tunnel::common::TunnelWrapper;
     use crate::tunnel::common::tests::wait_for_condition;
     use crate::tunnel::filter::PacketRecorderTunnelFilter;
     use crate::tunnel::filter::tests::DropSendTunnelFilter;
-    use crate::tunnel::ring::create_ring_tunnel_pair;
+    use crate::tunnel::{
+        TunnelConnector, TunnelListener,
+        ring::{RingSink, RingStream, RingTunnel, create_ring_tunnel_pair},
+        udp::{UdpTunnelConnector, UdpTunnelListener},
+    };
     use tokio_util::task::AbortOnDropHandle;
 
     pub fn set_secure_mode_cfg(global_ctx: &GlobalCtx, enabled: bool) {
@@ -1651,6 +1689,88 @@ pub mod tests {
             )
             .map(|metric| metric.value)
             .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn peer_conn_caches_outer_session_state_from_tunnel() {
+        let state = Arc::new(OuterSessionState::new(b"secret".to_vec(), 60));
+        let tunnel = TunnelWrapper::new_with_associate_data(
+            Box::new(RingStream::new(Arc::new(RingTunnel::new(8)))),
+            Box::new(RingSink::new(Arc::new(RingTunnel::new(8)))),
+            None,
+            Some(Box::new(state.clone())),
+        );
+
+        let peer = PeerConn::new(
+            new_peer_id(),
+            get_mock_global_ctx(),
+            Box::new(tunnel),
+            Arc::new(PeerSessionStore::new()),
+        );
+
+        let cached = peer
+            .outer_session_state()
+            .expect("peer conn should keep the per-connection stealth state");
+        assert!(Arc::ptr_eq(&cached, &state));
+    }
+
+    #[tokio::test]
+    async fn peer_conn_secure_udp_stealth_handshake_switches_after_msg3() {
+        let c_ctx = get_mock_global_ctx();
+        let s_ctx = get_mock_global_ctx();
+        for ctx in [&c_ctx, &s_ctx] {
+            ctx.config
+                .set_network_identity(NetworkIdentity::new("net1".to_owned(), "sec1".to_owned()));
+            set_secure_mode_cfg(ctx, true);
+        }
+
+        let mut listener = UdpTunnelListener::new("udp://127.0.0.1:0".parse().unwrap());
+        listener.set_stealth(crate::tunnel::stealth::build_outer_session(
+            Some("sec1"),
+            true,
+            true,
+            0,
+        ));
+        listener.listen().await.unwrap();
+
+        let mut connector = UdpTunnelConnector::new(listener.local_url());
+        connector.set_stealth(crate::tunnel::stealth::build_outer_session(
+            Some("sec1"),
+            true,
+            true,
+            0,
+        ));
+        let client_tunnel = connector.connect().await.unwrap();
+        let server_tunnel = listener.accept().await.unwrap();
+
+        let mut client = PeerConn::new(
+            new_peer_id(),
+            c_ctx,
+            client_tunnel,
+            Arc::new(PeerSessionStore::new()),
+        );
+        let mut server = PeerConn::new(
+            new_peer_id(),
+            s_ctx,
+            server_tunnel,
+            Arc::new(PeerSessionStore::new()),
+        );
+
+        let (client_ret, server_ret) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                client.do_handshake_as_client(),
+                server.do_handshake_as_server()
+            )
+        })
+        .await
+        .expect("stealth Noise handshake timed out");
+        client_ret.unwrap();
+        server_ret.unwrap();
+
+        let client_outer_key = client.outer_session_state().unwrap().outer_key();
+        let server_outer_key = server.outer_session_state().unwrap().outer_key();
+        assert!(client_outer_key.is_some());
+        assert_eq!(client_outer_key, server_outer_key);
     }
 
     #[tokio::test]

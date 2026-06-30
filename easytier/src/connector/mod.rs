@@ -51,6 +51,13 @@ pub(crate) fn should_background_p2p_with_peer(
     ) && (!lazy_p2p || feature_flag.map(|flag| flag.need_p2p).unwrap_or(false))
 }
 
+pub(crate) fn should_downgrade_udp_stealth(
+    local_stealth_mode: bool,
+    remote_feature_flag: Option<&PeerFeatureFlag>,
+) -> bool {
+    local_stealth_mode && remote_feature_flag.is_some_and(|flag| !flag.stealth_supported)
+}
+
 async fn set_bind_addr_for_peer_connector(
     connector: &mut (impl TunnelConnector + ?Sized),
     is_ipv4: bool,
@@ -245,7 +252,18 @@ pub async fn create_connector_by_url(
             effective_connector_ip_version = resolved_addr.ip_version;
             let mut connector: Box<dyn TunnelConnector> = match scheme {
                 IpScheme::Tcp => TcpTunnelConnector::new(url).boxed(),
-                IpScheme::Udp => UdpTunnelConnector::new(url).boxed(),
+                IpScheme::Udp => {
+                    let mut c = UdpTunnelConnector::new(url);
+                    let flags = global_ctx.get_flags();
+                    let secure_mode = global_ctx.is_secure_mode_enabled();
+                    c.set_stealth(crate::tunnel::stealth::build_outer_session(
+                        global_ctx.get_network_identity().network_secret.as_deref(),
+                        flags.stealth_mode,
+                        secure_mode,
+                        flags.stealth_window_secs,
+                    ));
+                    c.boxed()
+                }
                 #[cfg(feature = "quic")]
                 IpScheme::Quic => {
                     tunnel::quic::QuicTunnelConnector::new(url, global_ctx.clone()).boxed()
@@ -305,8 +323,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::{
-        common::global_ctx::tests::get_mock_global_ctx, proto::common::PeerFeatureFlag,
-        tunnel::IpVersion,
+        common::global_ctx::tests::get_mock_global_ctx,
+        proto::common::PeerFeatureFlag,
+        tunnel::{IpScheme, IpVersion},
     };
 
     use super::{
@@ -326,6 +345,22 @@ mod tests {
             ret,
             Err(crate::common::error::Error::InvalidUrl(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn connector_factory_ignores_runtime_loop_suppression_for_generic_clients() {
+        let global_ctx = get_mock_global_ctx();
+        global_ctx.record_protocol_self_loop(
+            IpScheme::Tcp,
+            crate::common::global_ctx::ProtocolLoopScope::Direct,
+        );
+        global_ctx.record_protocol_self_loop(
+            IpScheme::Tcp,
+            crate::common::global_ctx::ProtocolLoopScope::Direct,
+        );
+        let ret =
+            create_connector_by_url("tcp://127.0.0.1:11010", &global_ctx, IpVersion::V4).await;
+        assert!(ret.is_ok());
     }
 
     #[test]

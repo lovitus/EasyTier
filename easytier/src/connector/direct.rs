@@ -38,8 +38,8 @@ use crate::{
 };
 
 use super::{
-    create_connector_by_url, should_background_p2p_with_peer, should_try_p2p_with_peer,
-    udp_hole_punch,
+    create_connector_by_url, should_background_p2p_with_peer, should_downgrade_udp_stealth,
+    should_try_p2p_with_peer, udp_hole_punch,
 };
 use crate::tunnel::{FromUrl, IpScheme, TunnelScheme, matches_scheme};
 use anyhow::Context;
@@ -179,9 +179,6 @@ impl PeerManagerForDirectConnector for PeerManager {
 }
 
 #[derive(Hash, Eq, PartialEq, Clone)]
-struct DstBlackListItem(PeerId, String);
-
-#[derive(Hash, Eq, PartialEq, Clone)]
 struct DstListenerUrlBlackListItem(PeerId, String);
 
 struct DirectConnectorManagerData {
@@ -199,6 +196,35 @@ impl DirectConnectorManagerData {
             dst_listener_blacklist: timedmap::TimedMap::new(),
             peer_black_list: timedmap::TimedMap::new(),
         }
+    }
+
+    fn build_udp_stealth_for_peer(
+        &self,
+        disable_udp_stealth: bool,
+    ) -> std::sync::Arc<crate::tunnel::stealth::OuterSessionState> {
+        if disable_udp_stealth {
+            std::sync::Arc::new(crate::tunnel::stealth::OuterSessionState::disabled())
+        } else {
+            let flags = self.global_ctx.get_flags();
+            let secure_mode = self.global_ctx.is_secure_mode_enabled();
+            crate::tunnel::stealth::build_outer_session(
+                self.global_ctx
+                    .get_network_identity()
+                    .network_secret
+                    .as_deref(),
+                flags.stealth_mode,
+                secure_mode,
+                flags.stealth_window_secs,
+            )
+        }
+    }
+
+    fn blacklist_direct_target(&self, dst_peer_id: PeerId, addr: &str) {
+        self.dst_listener_blacklist.insert(
+            DstListenerUrlBlackListItem(dst_peer_id, addr.to_owned()),
+            (),
+            std::time::Duration::from_secs(DIRECT_CONNECTOR_BLACKLIST_TIMEOUT_SEC),
+        );
     }
 
     async fn remote_send_udp_hole_punch_packet(
@@ -257,6 +283,7 @@ impl DirectConnectorManagerData {
         &self,
         dst_peer_id: PeerId,
         remote_url: &url::Url,
+        disable_udp_stealth: bool,
     ) -> Result<(PeerId, PeerConnId), Error> {
         let local_socket = Arc::new(
             UdpSocket::bind("[::]:0")
@@ -305,7 +332,8 @@ impl DirectConnectorManagerData {
             );
         }
 
-        let udp_connector = UdpTunnelConnector::new(remote_url.clone());
+        let mut udp_connector = UdpTunnelConnector::new(remote_url.clone());
+        udp_connector.set_stealth(self.build_udp_stealth_for_peer(disable_udp_stealth));
         let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V6).await?;
         let ret = udp_connector
             .try_connect_with_socket(local_socket, remote_addr)
@@ -321,6 +349,7 @@ impl DirectConnectorManagerData {
         &self,
         dst_peer_id: PeerId,
         remote_url: &url::Url,
+        disable_udp_stealth: bool,
     ) -> Result<(PeerId, PeerConnId), Error> {
         let local_socket = {
             let _g = self.global_ctx.net_ns.guard();
@@ -342,7 +371,8 @@ impl DirectConnectorManagerData {
             .remote_send_udp_hole_punch_packet(dst_peer_id, vec![connector_addr], None, remote_url)
             .await;
 
-        let udp_connector = UdpTunnelConnector::new(remote_url.clone());
+        let mut udp_connector = UdpTunnelConnector::new(remote_url.clone());
+        udp_connector.set_stealth(self.build_udp_stealth_for_peer(disable_udp_stealth));
         let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V4).await?;
         let ret = udp_connector
             .try_connect_with_socket(local_socket, remote_addr)
@@ -353,17 +383,29 @@ impl DirectConnectorManagerData {
             .await
     }
 
-    async fn do_try_connect_to_ip(&self, dst_peer_id: PeerId, addr: String) -> Result<(), Error> {
-        let connector = create_connector_by_url(&addr, &self.global_ctx, IpVersion::Both).await?;
+    async fn do_try_connect_to_ip(
+        &self,
+        dst_peer_id: PeerId,
+        addr: String,
+        disable_udp_stealth: bool,
+    ) -> Result<(), Error> {
+        let mut connector =
+            create_connector_by_url(&addr, &self.global_ctx, IpVersion::Both).await?;
+        if disable_udp_stealth {
+            connector.disable_stealth();
+        }
         let remote_url = connector.remote_url();
         let (peer_id, conn_id) = if matches_scheme!(remote_url, TunnelScheme::Ip(IpScheme::Udp)) {
             match remote_url.host() {
                 Some(Host::Ipv6(_)) => {
-                    self.connect_to_public_ipv6(dst_peer_id, &remote_url)
+                    self.connect_to_public_ipv6(dst_peer_id, &remote_url, disable_udp_stealth)
                         .await?
                 }
                 Some(Host::Ipv4(ip)) if is_public_ipv4(ip) => {
-                    match self.connect_to_public_ipv4(dst_peer_id, &remote_url).await {
+                    match self
+                        .connect_to_public_ipv4(dst_peer_id, &remote_url, disable_udp_stealth)
+                        .await
+                    {
                         Ok(ret) => ret,
                         Err(err) => {
                             tracing::debug!(
@@ -419,6 +461,7 @@ impl DirectConnectorManagerData {
         self: Arc<DirectConnectorManagerData>,
         dst_peer_id: PeerId,
         addr: String,
+        disable_udp_stealth: bool,
     ) -> Result<(), Error> {
         let mut rand_gen = rand::rngs::OsRng;
         let backoff_ms = [1000, 2000, 4000];
@@ -427,11 +470,9 @@ impl DirectConnectorManagerData {
         tracing::debug!(?dst_peer_id, ?addr, "try_connect_to_ip start");
 
         self.dst_listener_blacklist.cleanup();
+        let blacklist_item = DstListenerUrlBlackListItem(dst_peer_id, addr.clone());
 
-        if self
-            .dst_listener_blacklist
-            .contains(&DstListenerUrlBlackListItem(dst_peer_id, addr.clone()))
-        {
+        if self.dst_listener_blacklist.contains(&blacklist_item) {
             return Err(Error::UrlInBlacklist);
         }
 
@@ -439,12 +480,21 @@ impl DirectConnectorManagerData {
             if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
                 return Ok(());
             }
+            if self.dst_listener_blacklist.contains(&blacklist_item) {
+                return Err(Error::UrlInBlacklist);
+            }
 
             tracing::debug!(?dst_peer_id, ?addr, "try_connect_to_ip start one round");
-            let ret = self.do_try_connect_to_ip(dst_peer_id, addr.clone()).await;
+            let ret = self
+                .do_try_connect_to_ip(dst_peer_id, addr.clone(), disable_udp_stealth)
+                .await;
             tracing::debug!(?ret, ?dst_peer_id, ?addr, "try_connect_to_ip return");
             if ret.is_ok() {
                 return Ok(());
+            }
+            if ret.as_ref().is_err_and(Error::is_self_loop_signal) {
+                self.blacklist_direct_target(dst_peer_id, &addr);
+                return ret;
             }
 
             if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
@@ -464,11 +514,7 @@ impl DirectConnectorManagerData {
                 backoff_idx += 1;
                 continue;
             } else {
-                self.dst_listener_blacklist.insert(
-                    DstListenerUrlBlackListItem(dst_peer_id, addr),
-                    (),
-                    std::time::Duration::from_secs(DIRECT_CONNECTOR_BLACKLIST_TIMEOUT_SEC),
-                );
+                self.blacklist_direct_target(dst_peer_id, &addr);
                 return ret;
             }
         }
@@ -478,6 +524,7 @@ impl DirectConnectorManagerData {
         self: &Arc<DirectConnectorManagerData>,
         dst_peer_id: PeerId,
         ip_list: &GetIpListResponse,
+        disable_udp_stealth: bool,
         listener: &url::Url,
         tasks: &mut JoinSet<Result<(), Error>>,
     ) {
@@ -529,6 +576,7 @@ impl DirectConnectorManagerData {
                                     self.clone(),
                                     dst_peer_id,
                                     addr.to_string(),
+                                    disable_udp_stealth,
                                 ));
                             } else {
                                 tracing::error!(
@@ -550,6 +598,7 @@ impl DirectConnectorManagerData {
                             self.clone(),
                             dst_peer_id,
                             listener.to_string(),
+                            disable_udp_stealth,
                         ));
                     }
                 }
@@ -584,6 +633,7 @@ impl DirectConnectorManagerData {
                                     self.clone(),
                                     dst_peer_id,
                                     addr.to_string(),
+                                    disable_udp_stealth,
                                 ));
                             } else {
                                 tracing::error!(
@@ -610,6 +660,7 @@ impl DirectConnectorManagerData {
                             self.clone(),
                             dst_peer_id,
                             listener.to_string(),
+                            disable_udp_stealth,
                         ));
                     }
                 }
@@ -626,6 +677,21 @@ impl DirectConnectorManagerData {
         dst_peer_id: PeerId,
         ip_list: GetIpListResponse,
     ) -> Result<(), Error> {
+        let route = self.peer_manager.get_route();
+        let remote_feature_flag = route
+            .get_peer_info(dst_peer_id)
+            .await
+            .and_then(|info| info.feature_flag);
+        let disable_udp_stealth = should_downgrade_udp_stealth(
+            self.global_ctx.get_flags().stealth_mode,
+            remote_feature_flag.as_ref(),
+        );
+        if disable_udp_stealth {
+            tracing::debug!(
+                ?dst_peer_id,
+                "downgrade UDP direct-connect stealth because peer advertises stealth unsupported"
+            );
+        }
         let enable_ipv6 = self.global_ctx.get_flags().enable_ipv6;
         let available_listeners = ip_list
             .listeners
@@ -669,14 +735,31 @@ impl DirectConnectorManagerData {
                 }
 
                 tracing::debug!("try direct connect to peer with listener: {}", listener);
-                self.spawn_direct_connect_task(dst_peer_id, &ip_list, listener, &mut tasks)
-                    .await;
+                self.spawn_direct_connect_task(
+                    dst_peer_id,
+                    &ip_list,
+                    disable_udp_stealth,
+                    listener,
+                    &mut tasks,
+                )
+                .await;
 
                 listener_list.push(listener.clone().to_string());
                 available_listeners.pop();
             }
 
-            let ret = tasks.join_all().await;
+            let mut ret = Vec::new();
+            while let Some(joined) = tasks.join_next().await {
+                match joined {
+                    Ok(item) => ret.push(item),
+                    Err(err) => tracing::warn!(
+                        ?err,
+                        ?dst_peer_id,
+                        ?cur_scheme,
+                        "direct connect task join failed"
+                    ),
+                }
+            }
             tracing::debug!(
                 ?ret,
                 ?dst_peer_id,
@@ -886,13 +969,16 @@ mod tests {
             connect_peer_manager, create_mock_peer_manager, wait_route_appear,
             wait_route_appear_with_cost,
         },
+        proto::common::PeerFeatureFlag,
         proto::peer_rpc::GetIpListResponse,
         tunnel::{IpScheme, TunnelScheme, matches_scheme},
     };
 
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-    use super::{TESTING, mapped_listener_port, resolve_mapped_listener_addrs};
+    use super::{
+        TESTING, mapped_listener_port, resolve_mapped_listener_addrs, should_downgrade_udp_stealth,
+    };
 
     #[tokio::test]
     async fn public_ipv6_candidate_rejects_easytier_managed_addr_even_in_tests() {
@@ -1111,5 +1197,31 @@ mod tests {
                     "tcp://127.0.0.1:10222".parse().unwrap()
                 ))
         );
+    }
+
+    #[test]
+    fn direct_connector_downgrades_udp_stealth_only_when_peer_disables_it() {
+        assert!(!should_downgrade_udp_stealth(
+            false,
+            Some(&PeerFeatureFlag {
+                stealth_supported: false,
+                ..Default::default()
+            }),
+        ));
+        assert!(!should_downgrade_udp_stealth(
+            true,
+            Some(&PeerFeatureFlag {
+                stealth_supported: true,
+                ..Default::default()
+            }),
+        ));
+        assert!(!should_downgrade_udp_stealth(true, None,));
+        assert!(should_downgrade_udp_stealth(
+            true,
+            Some(&PeerFeatureFlag {
+                stealth_supported: false,
+                ..Default::default()
+            }),
+        ));
     }
 }

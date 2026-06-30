@@ -84,6 +84,13 @@ message FlagsInConfig {
   // applied via setsockopt. Requires CAP_NET_ADMIN; silently ignored on
   // non-Linux platforms.
   optional uint32 socket_mark = 43;
+
+  // Stealth outer-protection (opt-in). Requires secure_mode. When enabled, the
+  // UDP underlay authenticates/obfuscates its transport handshake and data so an
+  // unauthenticated active prober gets no distinguishable response.
+  bool stealth_mode = 44;
+  // Rolling window (seconds) for the stealth pre-auth gate key. 0 = default (60).
+  uint32 stealth_window_secs = 45;
 }
 
 message RpcDescriptor {
@@ -235,6 +242,8 @@ message PeerFeatureFlag {
   bool need_p2p = 9;
   bool disable_p2p = 10;
   bool ipv6_public_addr_provider = 11;
+  // peer advertises support for stealth outer-protection underlay
+  bool stealth_supported = 12;
 }
 
 enum SocketType {

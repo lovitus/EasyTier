@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     sync::Arc,
     task::{Context, Poll},
 };
@@ -206,6 +207,10 @@ where
             Box::pin(Self::wrap_stream(filter.clone(), stream)),
             Box::pin(Self::wrap_sink(filter, sink)),
         )
+    }
+
+    fn data(&self) -> Option<&(dyn Any + Send + 'static)> {
+        self.inner.data()
     }
 }
 

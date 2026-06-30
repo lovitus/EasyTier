@@ -26,7 +26,7 @@ use crate::{
         compressor::{Compressor as _, DefaultCompressor},
         constants::EASYTIER_VERSION,
         error::Error,
-        global_ctx::{ArcGlobalCtx, GlobalCtxEvent, NetworkIdentity},
+        global_ctx::{ArcGlobalCtx, GlobalCtxEvent, NetworkIdentity, ProtocolLoopScope},
         shrink_dashmap,
         stats_manager::{CounterHandle, LabelSet, LabelType, MetricName},
         stun::StunInfoCollectorTrait,
@@ -48,13 +48,14 @@ use crate::{
             self, ListGlobalForeignNetworkResponse,
             list_global_foreign_network_response::OneForeignNetwork,
         },
+        common::TunnelInfo,
         peer_rpc::{
             ForeignNetworkRouteInfoEntry, ForeignNetworkRouteInfoKey, PeerIdentityType,
             RouteForeignNetworkSummary,
         },
     },
     tunnel::{
-        self, Tunnel, TunnelConnector,
+        self, IpScheme, Tunnel, TunnelConnector,
         packet_def::{CompressorAlgo, PacketType, ZCPacket},
     },
 };
@@ -628,6 +629,51 @@ impl PeerManager {
         is_directly_connected: bool,
         peer_id_hint: Option<PeerId>,
     ) -> Result<(PeerId, PeerConnId), Error> {
+        self.add_client_tunnel_with_peer_id_hint_inner(
+            tunnel,
+            is_directly_connected,
+            peer_id_hint,
+            true,
+        )
+        .await
+    }
+
+    pub(crate) async fn add_client_tunnel_without_runtime_loop_record(
+        &self,
+        tunnel: Box<dyn Tunnel>,
+        is_directly_connected: bool,
+    ) -> Result<(PeerId, PeerConnId), Error> {
+        // Hole-punch uses this entrypoint specifically to avoid reviving the
+        // old scheme-global suppression path in GlobalCtx. Keep the old
+        // record_runtime_loop=true path for direct-connect and for callers that
+        // explicitly still want the global kill switch semantics.
+        self.add_client_tunnel_with_peer_id_hint_inner(tunnel, is_directly_connected, None, false)
+            .await
+    }
+
+    pub(crate) async fn add_client_tunnel_with_peer_id_hint_without_runtime_loop_record(
+        &self,
+        tunnel: Box<dyn Tunnel>,
+        is_directly_connected: bool,
+        peer_id_hint: Option<PeerId>,
+    ) -> Result<(PeerId, PeerConnId), Error> {
+        self.add_client_tunnel_with_peer_id_hint_inner(
+            tunnel,
+            is_directly_connected,
+            peer_id_hint,
+            false,
+        )
+        .await
+    }
+
+    async fn add_client_tunnel_with_peer_id_hint_inner(
+        &self,
+        tunnel: Box<dyn Tunnel>,
+        is_directly_connected: bool,
+        peer_id_hint: Option<PeerId>,
+        record_runtime_loop: bool,
+    ) -> Result<(PeerId, PeerConnId), Error> {
+        let tunnel_info = tunnel.info();
         let mut peer = PeerConn::new_with_peer_id_hint(
             self.my_peer_id,
             self.global_ctx.clone(),
@@ -636,7 +682,16 @@ impl PeerManager {
             self.peer_session_store.clone(),
         );
         peer.set_is_hole_punched(!is_directly_connected);
-        peer.do_handshake_as_client().await?;
+        if let Err(err) = peer.do_handshake_as_client().await {
+            if record_runtime_loop {
+                self.record_runtime_loop_protocol_from_tunnel_info(
+                    tunnel_info.as_ref(),
+                    is_directly_connected,
+                    &err,
+                );
+            }
+            return Err(err);
+        }
         let conn_id = peer.get_conn_id();
         let peer_id = peer.get_peer_id();
         if peer.get_network_identity().network_name
@@ -727,6 +782,29 @@ impl PeerManager {
         Ok(())
     }
 
+    fn record_runtime_loop_protocol_from_tunnel_info(
+        &self,
+        tunnel_info: Option<&TunnelInfo>,
+        is_directly_connected: bool,
+        err: &Error,
+    ) {
+        if !err.is_self_loop_signal() {
+            return;
+        }
+        let Some(tunnel_info) = tunnel_info else {
+            return;
+        };
+        let Some(scheme) = IpScheme::from_tunnel_type(&tunnel_info.tunnel_type) else {
+            return;
+        };
+        let scope = if is_directly_connected {
+            ProtocolLoopScope::Direct
+        } else {
+            ProtocolLoopScope::HolePunch
+        };
+        self.global_ctx.record_protocol_self_loop(scheme, scope);
+    }
+
     fn release_reserved_peer_id(&self, network_name: &str) {
         self.reserved_my_peer_id_map.remove(network_name);
         shrink_dashmap(&self.reserved_my_peer_id_map, None);
@@ -738,8 +816,31 @@ impl PeerManager {
         tunnel: Box<dyn Tunnel>,
         is_directly_connected: bool,
     ) -> Result<(), Error> {
+        self.add_tunnel_as_server_inner(tunnel, is_directly_connected, true)
+            .await
+    }
+
+    pub(crate) async fn add_tunnel_as_server_without_runtime_loop_record(
+        &self,
+        tunnel: Box<dyn Tunnel>,
+        is_directly_connected: bool,
+    ) -> Result<(), Error> {
+        // Companion to add_client_tunnel_without_runtime_loop_record(): used by
+        // hole-punch responders so a self-loop only feeds local/peer-scoped
+        // blacklists instead of escalating into scheme-global suppression.
+        self.add_tunnel_as_server_inner(tunnel, is_directly_connected, false)
+            .await
+    }
+
+    async fn add_tunnel_as_server_inner(
+        &self,
+        tunnel: Box<dyn Tunnel>,
+        is_directly_connected: bool,
+        record_runtime_loop: bool,
+    ) -> Result<(), Error> {
         tracing::info!("add tunnel as server start");
         self.check_remote_addr_not_from_virtual_network(&tunnel)?;
+        let tunnel_info = tunnel.info();
 
         let mut conn = PeerConn::new(
             self.my_peer_id,
@@ -778,6 +879,13 @@ impl PeerManager {
         .await;
 
         if let Err(err) = handshake_ret {
+            if record_runtime_loop {
+                self.record_runtime_loop_protocol_from_tunnel_info(
+                    tunnel_info.as_ref(),
+                    is_directly_connected,
+                    &err,
+                );
+            }
             if let Some(network_name) = reserved_peer_id_network_name {
                 self.release_reserved_peer_id(&network_name);
             }
@@ -3128,6 +3236,50 @@ mod tests {
             Duration::from_secs(10),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn hole_punch_self_connect_without_runtime_loop_record_does_not_suppress_protocol() {
+        let peer_mgr = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
+        set_secure_mode_cfg(&peer_mgr.get_global_ctx(), true);
+
+        let mut listener =
+            crate::tunnel::tcp::TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
+        {
+            let _g = peer_mgr.get_global_ctx().net_ns.guard();
+            listener.listen().await.unwrap();
+        }
+        let listen_url = listener.local_url();
+
+        let peer_mgr_server = peer_mgr.clone();
+        let server_task = tokio::spawn(async move {
+            let tunnel = listener.accept().await.unwrap();
+            peer_mgr_server
+                .add_tunnel_as_server_without_runtime_loop_record(tunnel, false)
+                .await
+        });
+
+        let client_tunnel = peer_mgr
+            .connect_tunnel(crate::tunnel::tcp::TcpTunnelConnector::new(listen_url))
+            .await
+            .unwrap();
+        let client_ret = peer_mgr
+            .add_client_tunnel_without_runtime_loop_record(client_tunnel, false)
+            .await;
+        let server_ret = server_task.await.unwrap();
+
+        assert!(
+            client_ret
+                .as_ref()
+                .is_err_and(crate::common::error::Error::is_self_loop_signal)
+                || server_ret
+                    .as_ref()
+                    .is_err_and(crate::common::error::Error::is_self_loop_signal)
+        );
+        assert!(!peer_mgr.get_global_ctx().is_protocol_loop_suppressed(
+            crate::tunnel::IpScheme::Tcp,
+            crate::common::global_ctx::ProtocolLoopScope::HolePunch,
+        ));
     }
 
     #[tokio::test]

@@ -66,6 +66,10 @@ where
     fn info(&self) -> Option<TunnelInfo> {
         self.info.clone()
     }
+
+    fn data(&self) -> Option<&(dyn Any + Send + 'static)> {
+        self.associate_data.as_deref()
+    }
 }
 
 // a length delimited codec for async reader

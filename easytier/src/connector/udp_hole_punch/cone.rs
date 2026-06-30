@@ -8,7 +8,8 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::{
     common::{PeerId, upnp},
     connector::udp_hole_punch::common::{
-        HOLE_PUNCH_PACKET_BODY_LEN, UdpSocketArray, try_connect_with_socket,
+        HOLE_PUNCH_PACKET_BODY_LEN, UdpSocketArray, disable_udp_stealth_for_selected_listener,
+        should_request_udp_stealth, try_connect_with_socket,
     },
     connector::udp_hole_punch::handle_rpc_result,
     peers::peer_manager::PeerManager,
@@ -100,6 +101,7 @@ impl PunchConeHoleClient {
     pub(crate) async fn do_hole_punching(
         &self,
         dst_peer_id: PeerId,
+        disable_udp_stealth: bool,
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // Check if peer is blacklisted
         if self.blacklist.contains(&dst_peer_id) {
@@ -111,6 +113,7 @@ impl PunchConeHoleClient {
         let tid = rand::random();
 
         let global_ctx = self.peer_mgr.get_global_ctx();
+        let use_stealth = should_request_udp_stealth(&global_ctx, disable_udp_stealth);
         let udp_array = UdpSocketArray::new(1, global_ctx.net_ns.clone());
 
         let rpc_stub = self
@@ -129,11 +132,13 @@ impl PunchConeHoleClient {
                 SelectPunchListenerRequest {
                     force_new: false,
                     prefer_port_mapping: true,
+                    use_stealth: Some(use_stealth),
                 },
             )
             .await;
 
         let resp = handle_rpc_result(resp, dst_peer_id, &self.blacklist)?;
+        let disable_udp_stealth = disable_udp_stealth_for_selected_listener(resp.stealth_enabled);
 
         let remote_mapped_addr = resp.listener_mapped_addr.ok_or(anyhow::anyhow!(
             "select_punch_listener response missing listener_mapped_addr"
@@ -223,6 +228,7 @@ impl PunchConeHoleClient {
                     global_ctx.clone(),
                     socket.socket.clone(),
                     remote_mapped_addr.into(),
+                    disable_udp_stealth,
                 )
                 .await
                 {
@@ -299,7 +305,7 @@ pub mod tests {
         reset_udp_port_mapping_attempts_for_test();
 
         let ret = PunchConeHoleClient::new(p_a.clone(), Arc::new(timedmap::TimedMap::new()))
-            .do_hole_punching(p_c.my_peer_id())
+            .do_hole_punching(p_c.my_peer_id(), false)
             .await;
 
         assert!(ret.is_err());

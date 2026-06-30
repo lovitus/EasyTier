@@ -874,7 +874,23 @@ impl<C: NatDstConnector> TcpProxy<C> {
     }
 
     pub fn get_fake_local_ipv4(local_ip: &Ipv4Inet) -> Ipv4Addr {
-        local_ip.first_address()
+        let first = u32::from(local_ip.first_address());
+        let last = u32::from(local_ip.last_address());
+        let local = u32::from(local_ip.address());
+
+        match last.saturating_sub(first) {
+            0 => local_ip.address(),
+            1 => Ipv4Addr::from(if local == first { last } else { first }),
+            _ => {
+                let first_host = first + 1;
+                let fake = if first_host == local {
+                    first_host + 1
+                } else {
+                    first_host
+                };
+                Ipv4Addr::from(fake)
+            }
+        }
     }
 
     async fn try_handle_peer_packet(&self, packet: &mut ZCPacket) -> Option<()> {
@@ -1032,5 +1048,42 @@ impl<C: NatDstConnector> TcpProxyRpcService<C> {
         Self {
             tcp_proxy: Arc::downgrade(&tcp_proxy),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fake_local_ipv4_uses_unicast_host_address() {
+        let local: Ipv4Inet = "10.144.144.1/24".parse().unwrap();
+        let fake = TcpProxy::<NatDstTcpConnector>::get_fake_local_ipv4(&local);
+
+        assert_eq!(fake, Ipv4Addr::new(10, 144, 144, 2));
+        assert_ne!(fake, local.first_address());
+        assert_ne!(fake, local.last_address());
+        assert_ne!(fake, local.address());
+    }
+
+    #[test]
+    fn fake_local_ipv4_handles_small_subnets() {
+        let slash_30: Ipv4Inet = "10.0.0.1/30".parse().unwrap();
+        assert_eq!(
+            TcpProxy::<NatDstTcpConnector>::get_fake_local_ipv4(&slash_30),
+            Ipv4Addr::new(10, 0, 0, 2)
+        );
+
+        let slash_31: Ipv4Inet = "10.0.0.0/31".parse().unwrap();
+        assert_eq!(
+            TcpProxy::<NatDstTcpConnector>::get_fake_local_ipv4(&slash_31),
+            Ipv4Addr::new(10, 0, 0, 1)
+        );
+
+        let slash_32: Ipv4Inet = "10.0.0.1/32".parse().unwrap();
+        assert_eq!(
+            TcpProxy::<NatDstTcpConnector>::get_fake_local_ipv4(&slash_32),
+            slash_32.address()
+        );
     }
 }

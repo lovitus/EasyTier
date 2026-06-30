@@ -1,5 +1,6 @@
 use std::{
-    collections::hash_map::DefaultHasher, hash::Hasher, net::SocketAddr, pin::Pin, sync::Arc,
+    any::Any, collections::hash_map::DefaultHasher, hash::Hasher, net::SocketAddr, pin::Pin,
+    sync::Arc,
 };
 
 use crate::{
@@ -23,6 +24,7 @@ pub mod mpsc;
 pub mod packet_def;
 pub mod ring;
 pub mod stats;
+pub mod stealth;
 pub mod tcp;
 pub mod udp;
 pub(crate) mod udp_src;
@@ -103,6 +105,9 @@ pub type SplitTunnel = (Pin<Box<dyn ZCPacketStream>>, Pin<Box<dyn ZCPacketSink>>
 pub trait Tunnel: Send {
     fn split(&self) -> SplitTunnel;
     fn info(&self) -> Option<TunnelInfo>;
+    fn data(&self) -> Option<&(dyn Any + Send + 'static)> {
+        None
+    }
 }
 
 #[auto_impl::auto_impl(Arc)]
@@ -147,6 +152,10 @@ pub trait TunnelConnector: Send {
     /// untouched; `Some(mark)` applies that exact value (including `Some(0)`).
     /// Default impl is a no-op; IP-based connectors override.
     fn set_socket_mark(&mut self, _socket_mark: Option<u32>) {}
+    /// Disable optional tunnel-layer stealth on connectors that support it.
+    /// Used by the direct connector to downgrade UDP dials when the target
+    /// explicitly advertises no stealth support.
+    fn disable_stealth(&mut self) {}
 }
 
 pub fn build_url_from_socket_addr(addr: &String, scheme: &str) -> url::Url {
@@ -343,6 +352,41 @@ impl IpScheme {
             #[cfg(feature = "websocket")]
             Self::Wss => 443,
             _ => 11010 + self.port_offset(),
+        }
+    }
+
+    pub const fn loop_avoidance_bit(self) -> u64 {
+        match self {
+            Self::Tcp => 1 << 0,
+            Self::Udp => 1 << 1,
+            #[cfg(feature = "wireguard")]
+            Self::Wg => 1 << 2,
+            #[cfg(feature = "quic")]
+            Self::Quic => 1 << 3,
+            #[cfg(feature = "websocket")]
+            Self::Ws => 1 << 4,
+            #[cfg(feature = "websocket")]
+            Self::Wss => 1 << 5,
+            #[cfg(feature = "faketcp")]
+            Self::FakeTcp => 1 << 6,
+        }
+    }
+
+    pub fn from_tunnel_type(tunnel_type: &str) -> Option<Self> {
+        match tunnel_type {
+            "tcp" => Some(Self::Tcp),
+            "udp" => Some(Self::Udp),
+            #[cfg(feature = "wireguard")]
+            "wg" => Some(Self::Wg),
+            #[cfg(feature = "quic")]
+            "quic" => Some(Self::Quic),
+            #[cfg(feature = "websocket")]
+            "ws" => Some(Self::Ws),
+            #[cfg(feature = "websocket")]
+            "wss" => Some(Self::Wss),
+            #[cfg(feature = "faketcp")]
+            s if s.starts_with("faketcp") => Some(Self::FakeTcp),
+            _ => None,
         }
     }
 }

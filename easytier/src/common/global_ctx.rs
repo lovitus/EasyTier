@@ -29,7 +29,7 @@ use crate::{
         peer_rpc::PeerGroupInfo,
     },
     rpc_service::protected_port,
-    tunnel::matches_protocol,
+    tunnel::{IpScheme, matches_protocol},
 };
 use crossbeam::atomic::AtomicCell;
 use hmac::{Hmac, Mac};
@@ -37,6 +37,32 @@ use sha2::Sha256;
 use socket2::Protocol;
 
 pub type NetworkIdentity = crate::common::config::NetworkIdentity;
+
+const PROTOCOL_LOOP_TRACKED_SCHEMES: usize = 8;
+const PROTOCOL_LOOP_SCOPE_COUNT: usize = 2;
+const PROTOCOL_LOOP_STATE_SLOTS: usize = PROTOCOL_LOOP_TRACKED_SCHEMES * PROTOCOL_LOOP_SCOPE_COUNT;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolLoopScope {
+    Direct,
+    HolePunch,
+}
+
+impl ProtocolLoopScope {
+    const fn index(self) -> usize {
+        match self {
+            Self::Direct => 0,
+            Self::HolePunch => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ProtocolLoopSuppressionSlot {
+    strike_count: u8,
+    first_hit_at_secs: u64,
+    suppressed_until_secs: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GlobalCtxEvent {
@@ -221,6 +247,7 @@ pub struct GlobalCtx {
     advertised_ipv6_public_addr_prefix: Mutex<Option<cidr::Ipv6Cidr>>,
 
     flags: ArcSwap<Flags>,
+    protocol_loop_suppression: Mutex<[ProtocolLoopSuppressionSlot; PROTOCOL_LOOP_STATE_SLOTS]>,
 
     // Runtime/base advertised feature flags before config-owned fields are
     // overlaid by set_flags. Keep this separate so config patches do not erase
@@ -258,6 +285,22 @@ impl std::fmt::Debug for GlobalCtx {
 pub type ArcGlobalCtx = std::sync::Arc<GlobalCtx>;
 
 impl GlobalCtx {
+    const PROTOCOL_LOOP_STRIKE_THRESHOLD: u8 = 2;
+    const PROTOCOL_LOOP_STRIKE_WINDOW_SECS: u64 = 30;
+    const PROTOCOL_LOOP_SUPPRESS_SECS: u64 = 300;
+
+    fn stealth_supported_for_config(
+        flags: &Flags,
+        secure_mode: bool,
+        network_secret: Option<&str>,
+    ) -> bool {
+        crate::tunnel::stealth::is_stealth_effectively_enabled(
+            network_secret,
+            flags.stealth_mode,
+            secure_mode,
+        )
+    }
+
     fn apply_disable_relay_data_flag(
         flags: &Flags,
         mut feature_flags: PeerFeatureFlag,
@@ -268,7 +311,11 @@ impl GlobalCtx {
         feature_flags
     }
 
-    fn derive_feature_flags(flags: &Flags, mut feature_flags: PeerFeatureFlag) -> PeerFeatureFlag {
+    fn derive_feature_flags(
+        flags: &Flags,
+        mut feature_flags: PeerFeatureFlag,
+        stealth_supported: bool,
+    ) -> PeerFeatureFlag {
         feature_flags.kcp_input = !flags.disable_kcp_input;
         feature_flags.no_relay_kcp = flags.disable_relay_kcp;
         feature_flags.support_conn_list_sync = true;
@@ -276,6 +323,7 @@ impl GlobalCtx {
         feature_flags.no_relay_quic = flags.disable_relay_quic;
         feature_flags.need_p2p = flags.need_p2p;
         feature_flags.disable_p2p = flags.disable_p2p;
+        feature_flags.stealth_supported = stealth_supported;
         Self::apply_disable_relay_data_flag(flags, feature_flags)
     }
 
@@ -306,7 +354,18 @@ impl GlobalCtx {
         let flags = config_fs.get_flags();
 
         let base_feature_flags = PeerFeatureFlag::default();
-        let feature_flags = Self::derive_feature_flags(&flags, base_feature_flags);
+        let feature_flags = Self::derive_feature_flags(
+            &flags,
+            base_feature_flags,
+            Self::stealth_supported_for_config(
+                &flags,
+                config_fs
+                    .get_secure_mode()
+                    .map(|sm| sm.enabled)
+                    .unwrap_or(false),
+                network.network_secret.as_deref(),
+            ),
+        );
 
         let credential_storage_path = config_fs.get_credential_file();
         let credential_manager = Arc::new(CredentialManager::new(credential_storage_path));
@@ -338,6 +397,9 @@ impl GlobalCtx {
             advertised_ipv6_public_addr_prefix: Mutex::new(None),
 
             flags: ArcSwap::new(Arc::new(flags)),
+            protocol_loop_suppression: Mutex::new(
+                [ProtocolLoopSuppressionSlot::default(); PROTOCOL_LOOP_STATE_SLOTS],
+            ),
 
             base_feature_flags: AtomicCell::new(base_feature_flags),
 
@@ -532,13 +594,122 @@ impl GlobalCtx {
         self.flags.load().as_ref().clone()
     }
 
+    pub fn is_secure_mode_enabled(&self) -> bool {
+        self.config
+            .get_secure_mode()
+            .map(|sm| sm.enabled)
+            .unwrap_or(false)
+    }
+
     pub fn set_flags(&self, flags: Flags) {
         self.config.set_flags(flags.clone());
         self.feature_flags.store(Self::derive_feature_flags(
             &flags,
             self.base_feature_flags.load(),
+            Self::stealth_supported_for_config(
+                &flags,
+                self.is_secure_mode_enabled(),
+                self.get_network_identity().network_secret.as_deref(),
+            ),
         ));
         self.flags.store(Arc::new(flags));
+    }
+
+    fn protocol_loop_slot_index(scheme: IpScheme, scope: ProtocolLoopScope) -> usize {
+        let idx = (scheme.loop_avoidance_bit().trailing_zeros() as usize)
+            * PROTOCOL_LOOP_SCOPE_COUNT
+            + scope.index();
+        debug_assert!(idx < PROTOCOL_LOOP_STATE_SLOTS);
+        idx
+    }
+
+    fn clear_expired_protocol_loop_slot(slot: &mut ProtocolLoopSuppressionSlot, now_secs: u64) {
+        if slot.suppressed_until_secs != 0 && now_secs >= slot.suppressed_until_secs {
+            *slot = ProtocolLoopSuppressionSlot::default();
+        }
+    }
+
+    fn record_protocol_self_loop_at(
+        &self,
+        scheme: IpScheme,
+        scope: ProtocolLoopScope,
+        now_secs: u64,
+    ) -> bool {
+        let idx = Self::protocol_loop_slot_index(scheme, scope);
+        let mut slots = self.protocol_loop_suppression.lock().unwrap();
+        let slot = &mut slots[idx];
+        Self::clear_expired_protocol_loop_slot(slot, now_secs);
+
+        if slot.suppressed_until_secs != 0 {
+            slot.suppressed_until_secs = now_secs + Self::PROTOCOL_LOOP_SUPPRESS_SECS;
+            tracing::warn!(
+                ?scheme,
+                ?scope,
+                suppress_until_secs = slot.suppressed_until_secs,
+                "extend underlay protocol suppression after repeated self-loop detection"
+            );
+            return true;
+        }
+
+        if slot.first_hit_at_secs == 0
+            || now_secs.saturating_sub(slot.first_hit_at_secs)
+                > Self::PROTOCOL_LOOP_STRIKE_WINDOW_SECS
+        {
+            slot.first_hit_at_secs = now_secs;
+            slot.strike_count = 1;
+        } else {
+            slot.strike_count = slot.strike_count.saturating_add(1);
+        }
+
+        if slot.strike_count >= Self::PROTOCOL_LOOP_STRIKE_THRESHOLD {
+            slot.suppressed_until_secs = now_secs + Self::PROTOCOL_LOOP_SUPPRESS_SECS;
+            tracing::warn!(
+                ?scheme,
+                ?scope,
+                strikes = slot.strike_count,
+                suppress_for_secs = Self::PROTOCOL_LOOP_SUPPRESS_SECS,
+                "suppress underlay protocol for this runtime after repeated self-loop detection"
+            );
+            true
+        } else {
+            tracing::info!(
+                ?scheme,
+                ?scope,
+                strikes = slot.strike_count,
+                threshold = Self::PROTOCOL_LOOP_STRIKE_THRESHOLD,
+                "recorded underlay self-loop signal without suppressing protocol yet"
+            );
+            false
+        }
+    }
+
+    fn is_protocol_loop_suppressed_at(
+        &self,
+        scheme: IpScheme,
+        scope: ProtocolLoopScope,
+        now_secs: u64,
+    ) -> bool {
+        let idx = Self::protocol_loop_slot_index(scheme, scope);
+        let mut slots = self.protocol_loop_suppression.lock().unwrap();
+        let slot = &mut slots[idx];
+        Self::clear_expired_protocol_loop_slot(slot, now_secs);
+        slot.suppressed_until_secs != 0
+    }
+
+    pub fn record_protocol_self_loop(&self, scheme: IpScheme, scope: ProtocolLoopScope) -> bool {
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.record_protocol_self_loop_at(scheme, scope, now_secs)
+    }
+
+    pub fn is_protocol_loop_suppressed(&self, scheme: IpScheme, scope: ProtocolLoopScope) -> bool {
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.is_protocol_loop_suppressed_at(scheme, scope, now_secs)
     }
 
     pub fn flags_arc(&self) -> Arc<Flags> {
@@ -598,7 +769,13 @@ impl GlobalCtx {
     }
 
     pub fn get_feature_flags(&self) -> PeerFeatureFlag {
-        self.feature_flags.load()
+        let mut feature_flags = self.feature_flags.load();
+        feature_flags.stealth_supported = Self::stealth_supported_for_config(
+            self.flags.load().as_ref(),
+            self.is_secure_mode_enabled(),
+            self.get_network_identity().network_secret.as_deref(),
+        );
+        feature_flags
     }
 
     /// Replace the runtime/base advertised flags as a complete snapshot.
@@ -789,8 +966,12 @@ impl GlobalCtx {
 #[cfg(test)]
 pub mod tests {
     use crate::{
-        common::{config::TomlConfigLoader, new_peer_id, stun::MockStunInfoCollector},
-        proto::common::NatType,
+        common::{
+            config::{NetworkIdentity, TomlConfigLoader},
+            new_peer_id,
+            stun::MockStunInfoCollector,
+        },
+        proto::common::{NatType, SecureModeConfig},
     };
 
     use super::*;
@@ -1014,6 +1195,97 @@ pub mod tests {
         assert!(global_ctx.should_deny_proxy(&socket, false));
 
         protected_port::clear_protected_tcp_ports_for_test();
+    }
+
+    #[tokio::test]
+    async fn protocol_loop_suppression_requires_repeated_hits_and_expires() {
+        let config = TomlConfigLoader::default();
+        let global_ctx = GlobalCtx::new(config);
+
+        assert!(!global_ctx.record_protocol_self_loop_at(
+            IpScheme::Udp,
+            ProtocolLoopScope::Direct,
+            100
+        ));
+        assert!(!global_ctx.is_protocol_loop_suppressed_at(
+            IpScheme::Udp,
+            ProtocolLoopScope::Direct,
+            100
+        ));
+
+        assert!(global_ctx.record_protocol_self_loop_at(
+            IpScheme::Udp,
+            ProtocolLoopScope::Direct,
+            110
+        ));
+        assert!(global_ctx.is_protocol_loop_suppressed_at(
+            IpScheme::Udp,
+            ProtocolLoopScope::Direct,
+            111
+        ));
+
+        assert!(!global_ctx.is_protocol_loop_suppressed_at(
+            IpScheme::Udp,
+            ProtocolLoopScope::Direct,
+            110 + GlobalCtx::PROTOCOL_LOOP_SUPPRESS_SECS + 1,
+        ));
+    }
+
+    #[tokio::test]
+    async fn protocol_loop_suppression_is_scope_isolated() {
+        let config = TomlConfigLoader::default();
+        let global_ctx = GlobalCtx::new(config);
+
+        assert!(!global_ctx.record_protocol_self_loop_at(
+            IpScheme::Tcp,
+            ProtocolLoopScope::Direct,
+            200
+        ));
+        assert!(global_ctx.record_protocol_self_loop_at(
+            IpScheme::Tcp,
+            ProtocolLoopScope::Direct,
+            201
+        ));
+        assert!(global_ctx.is_protocol_loop_suppressed_at(
+            IpScheme::Tcp,
+            ProtocolLoopScope::Direct,
+            202
+        ));
+        assert!(!global_ctx.is_protocol_loop_suppressed_at(
+            IpScheme::Tcp,
+            ProtocolLoopScope::HolePunch,
+            202,
+        ));
+    }
+
+    #[tokio::test]
+    async fn stealth_supported_requires_secure_mode_and_secret() {
+        let config = TomlConfigLoader::default();
+        config.set_network_identity(NetworkIdentity {
+            network_name: "test".to_owned(),
+            network_secret: Some("secret".to_owned()),
+            network_secret_digest: None,
+        });
+        let global_ctx = GlobalCtx::new(config);
+
+        let mut flags = global_ctx.get_flags();
+        flags.stealth_mode = true;
+        global_ctx.set_flags(flags);
+
+        assert!(!global_ctx.get_feature_flags().stealth_supported);
+
+        global_ctx.config.set_secure_mode(Some(SecureModeConfig {
+            enabled: true,
+            ..Default::default()
+        }));
+        assert!(global_ctx.get_feature_flags().stealth_supported);
+
+        global_ctx.config.set_network_identity(NetworkIdentity {
+            network_name: "test".to_owned(),
+            network_secret: None,
+            network_secret_digest: None,
+        });
+        assert!(!global_ctx.get_feature_flags().stealth_supported);
     }
 
     pub fn get_mock_global_ctx_with_network(

@@ -10,7 +10,10 @@ use rand::Rng as _;
 use tokio::task::JoinSet;
 
 use crate::{
-    common::{PeerId, join_joinset_background, stun::StunInfoCollectorTrait},
+    common::{
+        PeerId, global_ctx::ProtocolLoopScope, join_joinset_background,
+        stun::StunInfoCollectorTrait,
+    },
     connector::udp_hole_punch::BackOff,
     peers::{
         peer_manager::PeerManager,
@@ -25,7 +28,7 @@ use crate::{
         rpc_types::{self, controller::BaseController},
     },
     tunnel::{
-        TunnelConnector as _, TunnelListener as _,
+        IpScheme, TunnelConnector as _, TunnelListener as _,
         tcp::{TcpTunnelConnector, TcpTunnelListener},
     },
 };
@@ -33,6 +36,7 @@ use crate::{
 use crate::connector::{should_background_p2p_with_peer, should_try_p2p_with_peer};
 
 pub const BLACKLIST_TIMEOUT_SEC: u64 = 3600;
+pub const LOOP_BLACKLIST_TIMEOUT_SEC: u64 = 300;
 
 fn handle_rpc_result<T>(
     ret: Result<T, rpc_types::error::Error>,
@@ -82,6 +86,8 @@ async fn try_connect_to_remote(
     local_port: u16,
     is_client: bool,
     max_attempts: u32,
+    loop_blacklist: Option<(PeerId, Arc<timedmap::TimedMap<PeerId, ()>>)>,
+    loop_addr_blacklist: Option<Arc<timedmap::TimedMap<SocketAddr, ()>>>,
 ) -> Result<(), Error> {
     tracing::info!(
         ?a_mapped_addr,
@@ -99,15 +105,40 @@ async fn try_connect_to_remote(
     let start = tokio::time::Instant::now();
     let mut attempts: u32 = 0;
     while start.elapsed() < Duration::from_secs(10) && attempts < max_attempts {
+        if let Some(blacklist) = loop_addr_blacklist.as_ref() {
+            blacklist.cleanup();
+            if blacklist.contains(&a_mapped_addr) {
+                tracing::warn!(
+                    ?a_mapped_addr,
+                    "tcp hole punch connect loop skipped (addr blacklisted)"
+                );
+                return Ok(());
+            }
+        }
+        // Legacy fallback: tcp hole-punch now installs tunnels through the
+        // no-record PeerManager helpers, so GlobalCtx hole-punch suppression is
+        // no longer written by the active runtime path. Keep this guard to
+        // preserve a kill switch if another caller reuses the old semantics.
+        if peer_mgr
+            .get_global_ctx()
+            .is_protocol_loop_suppressed(IpScheme::Tcp, ProtocolLoopScope::HolePunch)
+        {
+            return Ok(());
+        }
         attempts = attempts.wrapping_add(1);
         let _g = peer_mgr.get_global_ctx().net_ns.guard();
         if let Ok(Ok(tunnel)) =
             tokio::time::timeout(Duration::from_secs(3), connector.connect()).await
         {
             let add_tunnel_ret = if is_client {
-                peer_mgr.add_client_tunnel(tunnel, false).await.map(|_| ())
+                peer_mgr
+                    .add_client_tunnel_without_runtime_loop_record(tunnel, false)
+                    .await
+                    .map(|_| ())
             } else {
-                peer_mgr.add_tunnel_as_server(tunnel, false).await
+                peer_mgr
+                    .add_tunnel_as_server_without_runtime_loop_record(tunnel, false)
+                    .await
             };
             if let Err(e) = add_tunnel_ret {
                 tracing::error!(
@@ -117,6 +148,32 @@ async fn try_connect_to_remote(
                     ?e,
                     "tcp hole punch server connected and added client tunnel failed"
                 );
+                if e.is_self_loop_signal()
+                    && let Some((dst_peer_id, loop_blacklist)) = loop_blacklist.as_ref()
+                {
+                    loop_blacklist.insert(
+                        *dst_peer_id,
+                        (),
+                        Duration::from_secs(LOOP_BLACKLIST_TIMEOUT_SEC),
+                    );
+                    return Err(e.into());
+                }
+                if e.is_self_loop_signal()
+                    && let Some(loop_addr_blacklist) = loop_addr_blacklist.as_ref()
+                {
+                    loop_addr_blacklist.insert(
+                        a_mapped_addr,
+                        (),
+                        Duration::from_secs(LOOP_BLACKLIST_TIMEOUT_SEC),
+                    );
+                    return Err(e.into());
+                }
+                if peer_mgr
+                    .get_global_ctx()
+                    .is_protocol_loop_suppressed(IpScheme::Tcp, ProtocolLoopScope::HolePunch)
+                {
+                    return Err(e.into());
+                }
                 continue;
             } else {
                 tracing::info!(
@@ -154,13 +211,18 @@ async fn try_connect_to_remote(
 struct TcpHolePunchServer {
     peer_mgr: Arc<PeerManager>,
     tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
+    loop_addr_blacklist: Arc<timedmap::TimedMap<SocketAddr, ()>>,
 }
 
 impl TcpHolePunchServer {
     fn new(peer_mgr: Arc<PeerManager>) -> Arc<Self> {
         let tasks = Arc::new(std::sync::Mutex::new(JoinSet::new()));
         join_joinset_background(tasks.clone(), "tcp hole punch server".to_string());
-        Arc::new(Self { peer_mgr, tasks })
+        Arc::new(Self {
+            peer_mgr,
+            tasks,
+            loop_addr_blacklist: Arc::new(timedmap::TimedMap::new()),
+        })
     }
 }
 
@@ -208,6 +270,8 @@ impl TcpHolePunchRpc for TcpHolePunchServer {
             .await
             .with_context(|| "failed to get tcp port mapping")?;
 
+        self.loop_addr_blacklist.cleanup();
+
         tracing::info!(
             ?a_mapped_addr,
             local_port,
@@ -216,8 +280,18 @@ impl TcpHolePunchRpc for TcpHolePunchServer {
         );
 
         let peer_mgr = self.peer_mgr.clone();
+        let loop_addr_blacklist = self.loop_addr_blacklist.clone();
         self.tasks.lock().unwrap().spawn(async move {
-            let _ = try_connect_to_remote(peer_mgr, a_mapped_addr, local_port, true, 5).await;
+            let _ = try_connect_to_remote(
+                peer_mgr,
+                a_mapped_addr,
+                local_port,
+                true,
+                5,
+                None,
+                Some(loop_addr_blacklist),
+            )
+            .await;
         });
 
         Ok(TcpHolePunchResponse {
@@ -229,6 +303,7 @@ impl TcpHolePunchRpc for TcpHolePunchServer {
 struct TcpHolePunchConnectorData {
     peer_mgr: Arc<PeerManager>,
     blacklist: Arc<timedmap::TimedMap<PeerId, ()>>,
+    loop_blacklist: Arc<timedmap::TimedMap<PeerId, ()>>,
 }
 
 impl TcpHolePunchConnectorData {
@@ -236,13 +311,35 @@ impl TcpHolePunchConnectorData {
         Arc::new(Self {
             peer_mgr,
             blacklist: Arc::new(timedmap::TimedMap::new()),
+            loop_blacklist: Arc::new(timedmap::TimedMap::new()),
         })
+    }
+
+    fn blacklist_loop_peer(&self, dst_peer_id: PeerId) {
+        self.loop_blacklist.insert(
+            dst_peer_id,
+            (),
+            Duration::from_secs(LOOP_BLACKLIST_TIMEOUT_SEC),
+        );
     }
 
     async fn punch_as_initiator(self: Arc<Self>, dst_peer_id: PeerId) -> Result<(), Error> {
         let mut backoff = BackOff::new(vec![1000, 1000, 4000, 8000]);
 
         loop {
+            if self.loop_blacklist.contains(&dst_peer_id) {
+                break;
+            }
+            // Legacy fallback: see comment in try_connect_to_remote. This is
+            // retained as a cold-path brake, not as part of the primary loop
+            // avoidance strategy anymore.
+            if self
+                .peer_mgr
+                .get_global_ctx()
+                .is_protocol_loop_suppressed(IpScheme::Tcp, ProtocolLoopScope::HolePunch)
+            {
+                break;
+            }
             backoff.sleep_for_next_backoff().await;
             if self.do_punch_as_initiator(dst_peer_id).await.is_ok() {
                 break;
@@ -263,6 +360,20 @@ impl TcpHolePunchConnectorData {
     #[tracing::instrument(skip(self), fields(dst_peer_id), err)]
     async fn do_punch_as_initiator(&self, dst_peer_id: PeerId) -> Result<(), Error> {
         let global_ctx = self.peer_mgr.get_global_ctx();
+        if self.loop_blacklist.contains(&dst_peer_id) {
+            tracing::warn!(
+                dst_peer_id,
+                "tcp hole punch initiator skipped (loop-blacklisted)"
+            );
+            return Ok(());
+        }
+        // Legacy fallback: current hole-punch callers should never reach this
+        // via a freshly-recorded global suppression bit, but keep the check for
+        // compatibility with tests and any future external trigger.
+        if global_ctx.is_protocol_loop_suppressed(IpScheme::Tcp, ProtocolLoopScope::HolePunch) {
+            tracing::warn!("tcp hole punch initiator skipped (protocol loop suppressed)");
+            return Ok(());
+        }
         let my_tcp_nat_type = NatType::try_from(
             global_ctx
                 .get_stun_info_collector()
@@ -328,6 +439,8 @@ impl TcpHolePunchConnectorData {
             local_port,
             false,
             1,
+            Some((dst_peer_id, self.loop_blacklist.clone())),
+            None,
         )
         .await
         {
@@ -336,6 +449,15 @@ impl TcpHolePunchConnectorData {
                 local_port,
                 ?remote_mapped_addr,
                 "tcp hole punch initiator connected to remote mapped addr with simultaneous connection"
+            );
+            return Ok(());
+        }
+        if self.loop_blacklist.contains(&dst_peer_id) {
+            tracing::warn!(
+                dst_peer_id,
+                local_port,
+                ?remote_mapped_addr,
+                "tcp hole punch initiator aborted after self-loop signal"
             );
             return Ok(());
         }
@@ -382,8 +504,22 @@ impl TcpHolePunchConnectorData {
         loop {
             match listener.accept().await {
                 Ok(tunnel) => {
-                    if let Err(e) = self.peer_mgr.add_tunnel_as_server(tunnel, false).await {
+                    if let Err(e) = self
+                        .peer_mgr
+                        .add_tunnel_as_server_without_runtime_loop_record(tunnel, false)
+                        .await
+                    {
                         tracing::error!("tcp hole punch add tunnel error: {}", e);
+                        if e.is_self_loop_signal() {
+                            self.blacklist_loop_peer(dst_peer_id);
+                            return Err(e.into());
+                        }
+                        if self.peer_mgr.get_global_ctx().is_protocol_loop_suppressed(
+                            IpScheme::Tcp,
+                            ProtocolLoopScope::HolePunch,
+                        ) {
+                            return Err(e.into());
+                        }
                         continue;
                     }
 
@@ -421,6 +557,14 @@ impl PeerTaskLauncher for TcpHolePunchPeerTaskLauncher {
     #[tracing::instrument(skip(self, data))]
     async fn collect_peers_need_task(&self, data: &Self::Data) -> Vec<Self::CollectPeerItem> {
         let global_ctx = data.peer_mgr.get_global_ctx();
+        // Legacy fallback: production hole-punch no longer records this bit, so
+        // this collector gate is effectively dead code in the current design.
+        // Leave it in place as a defensive stop if a future path writes the
+        // suppression slot again.
+        if global_ctx.is_protocol_loop_suppressed(IpScheme::Tcp, ProtocolLoopScope::HolePunch) {
+            tracing::warn!("tcp hole punch task collect skipped (protocol loop suppressed)");
+            return vec![];
+        }
         let flags = global_ctx.get_flags();
         let lazy_p2p = flags.lazy_p2p;
         let my_tcp_nat_type = NatType::try_from(
@@ -442,6 +586,7 @@ impl PeerTaskLauncher for TcpHolePunchPeerTaskLauncher {
         let now = Instant::now();
 
         data.blacklist.cleanup();
+        data.loop_blacklist.cleanup();
 
         let mut peers_to_connect = Vec::new();
         for route in data.peer_mgr.list_routes().await.iter() {
@@ -470,6 +615,10 @@ impl PeerTaskLauncher for TcpHolePunchPeerTaskLauncher {
 
             if data.blacklist.contains(&peer_id) {
                 tracing::debug!(peer_id, "tcp hole punch task collect skip blacklisted");
+                continue;
+            }
+            if data.loop_blacklist.contains(&peer_id) {
+                tracing::debug!(peer_id, "tcp hole punch task collect skip loop-blacklisted");
                 continue;
             }
 
@@ -773,6 +922,36 @@ mod tests {
             collect_lazy_punch_peers(p_a.clone())
                 .await
                 .contains(&p_c.my_peer_id())
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_hole_punch_collect_skips_loop_blacklisted_peer() {
+        let p_a = create_mock_peer_manager().await;
+        let p_b = create_mock_peer_manager().await;
+        let p_c = create_mock_peer_manager().await;
+
+        replace_stun_info_collector(p_a.clone(), NatType::PortRestricted);
+        replace_stun_info_collector(p_b.clone(), NatType::PortRestricted);
+        replace_stun_info_collector(p_c.clone(), NatType::PortRestricted);
+
+        connect_peer_manager(p_a.clone(), p_b.clone()).await;
+        connect_peer_manager(p_b.clone(), p_c.clone()).await;
+        wait_route_appear(p_a.clone(), p_c.clone()).await.unwrap();
+
+        let launcher = TcpHolePunchPeerTaskLauncher {};
+        let data = launcher.new_data(p_a.clone());
+        data.loop_blacklist.insert(
+            p_c.my_peer_id(),
+            (),
+            Duration::from_secs(super::LOOP_BLACKLIST_TIMEOUT_SEC),
+        );
+
+        let tasks = launcher.collect_peers_need_task(&data).await;
+        assert!(
+            tasks
+                .into_iter()
+                .all(|task| task.dst_peer_id != p_c.my_peer_id())
         );
     }
 }

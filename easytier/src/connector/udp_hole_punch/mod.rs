@@ -14,7 +14,7 @@ use sym_to_cone::{PunchSymToConeHoleClient, PunchSymToConeHoleServer};
 use tokio::{sync::Mutex, task::JoinHandle};
 
 use crate::{
-    common::{PeerId, stun::StunInfoCollectorTrait},
+    common::{PeerId, global_ctx::ProtocolLoopScope, stun::StunInfoCollectorTrait},
     peers::{
         peer_manager::PeerManager,
         peer_task::{PeerTaskLauncher, PeerTaskManager},
@@ -30,10 +30,12 @@ use crate::{
         },
         rpc_types::{self, controller::BaseController},
     },
-    tunnel::Tunnel,
+    tunnel::{IpScheme, Tunnel},
 };
 
-use crate::connector::{should_background_p2p_with_peer, should_try_p2p_with_peer};
+use crate::connector::{
+    should_background_p2p_with_peer, should_downgrade_udp_stealth, should_try_p2p_with_peer,
+};
 
 pub(crate) mod both_easy_sym;
 pub(crate) mod common;
@@ -46,6 +48,7 @@ pub static RUN_TESTING: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
 // Blacklist timeout in seconds
 pub const BLACKLIST_TIMEOUT_SEC: u64 = 3600;
+pub const LOOP_BLACKLIST_TIMEOUT_SEC: u64 = 300;
 
 fn get_sym_punch_lock(peer_id: PeerId) -> Arc<Mutex<()>> {
     SYM_PUNCH_LOCK
@@ -87,14 +90,22 @@ impl UdpHolePunchRpc for UdpHolePunchServer {
         _ctrl: Self::Controller,
         input: SelectPunchListenerRequest,
     ) -> rpc_types::error::Result<SelectPunchListenerResponse> {
+        let stealth_enabled = common::negotiate_udp_listener_stealth(
+            input.use_stealth,
+            self.common
+                .get_global_ctx()
+                .get_feature_flags()
+                .stealth_supported,
+        );
         let (_, addr) = self
             .common
-            .select_listener(input.force_new, input.prefer_port_mapping)
+            .select_listener(input.force_new, input.prefer_port_mapping, stealth_enabled)
             .await
             .ok_or(anyhow::anyhow!("no listener available"))?;
 
         Ok(SelectPunchListenerResponse {
             listener_mapped_addr: Some(addr.into()),
+            stealth_enabled: Some(stealth_enabled),
         })
     }
 
@@ -204,11 +215,13 @@ struct UdpHoePunchConnectorData {
     both_easy_sym_client: PunchBothEasySymHoleClient,
     peer_mgr: Arc<PeerManager>,
     blacklist: Arc<timedmap::TimedMap<PeerId, ()>>,
+    loop_blacklist: Arc<timedmap::TimedMap<PeerId, ()>>,
 }
 
 impl UdpHoePunchConnectorData {
     pub fn new(peer_mgr: Arc<PeerManager>) -> Arc<Self> {
         let blacklist = Arc::new(timedmap::TimedMap::new());
+        let loop_blacklist = Arc::new(timedmap::TimedMap::new());
         let cone_client = PunchConeHoleClient::new(peer_mgr.clone(), blacklist.clone());
         let sym_to_cone_client = PunchSymToConeHoleClient::new(peer_mgr.clone(), blacklist.clone());
         let both_easy_sym_client =
@@ -220,16 +233,37 @@ impl UdpHoePunchConnectorData {
             both_easy_sym_client,
             peer_mgr,
             blacklist,
+            loop_blacklist,
         })
+    }
+
+    fn blacklist_loop_peer(&self, dst_peer_id: PeerId) {
+        self.loop_blacklist.insert(
+            dst_peer_id,
+            (),
+            Duration::from_secs(LOOP_BLACKLIST_TIMEOUT_SEC),
+        );
     }
 
     #[tracing::instrument(skip(self))]
     async fn handle_punch_result(
         &self,
+        dst_peer_id: PeerId,
         ret: Result<Option<Box<dyn Tunnel>>, Error>,
         backoff: Option<&mut BackOff>,
         round: Option<&mut u32>,
     ) -> bool {
+        // Legacy fallback: production hole-punch paths no longer record
+        // ProtocolLoopScope::HolePunch into GlobalCtx, so this branch is
+        // effectively dead in normal runtime. Keep it as a safety rail for
+        // tests or future callers that might still inject the global flag.
+        if self
+            .peer_mgr
+            .get_global_ctx()
+            .is_protocol_loop_suppressed(IpScheme::Udp, ProtocolLoopScope::HolePunch)
+        {
+            return true;
+        }
         let op = |rollback: bool| {
             if rollback {
                 if let Some(backoff) = backoff {
@@ -247,8 +281,23 @@ impl UdpHoePunchConnectorData {
             Ok(Some(tunnel)) => {
                 tracing::info!(?tunnel, "hole punching get tunnel success");
 
-                if let Err(e) = self.peer_mgr.add_client_tunnel(tunnel, false).await {
+                if let Err(e) = self
+                    .peer_mgr
+                    .add_client_tunnel_without_runtime_loop_record(tunnel, false)
+                    .await
+                {
                     tracing::warn!("add client tunnel failed, err: {}", e);
+                    if e.is_self_loop_signal() {
+                        self.blacklist_loop_peer(dst_peer_id);
+                        return true;
+                    }
+                    if self
+                        .peer_mgr
+                        .get_global_ctx()
+                        .is_protocol_loop_suppressed(IpScheme::Udp, ProtocolLoopScope::HolePunch)
+                    {
+                        return true;
+                    }
                     op(true);
                     false
                 } else {
@@ -273,15 +322,18 @@ impl UdpHoePunchConnectorData {
         let mut backoff = BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000]);
 
         loop {
+            if self.loop_blacklist.contains(&task_info.dst_peer_id) {
+                break;
+            }
             backoff.sleep_for_next_backoff().await;
 
             let ret = self
                 .cone_client
-                .do_hole_punching(task_info.dst_peer_id)
+                .do_hole_punching(task_info.dst_peer_id, task_info.disable_udp_stealth)
                 .await;
 
             if self
-                .handle_punch_result(ret, Some(&mut backoff), None)
+                .handle_punch_result(task_info.dst_peer_id, ret, Some(&mut backoff), None)
                 .await
             {
                 break;
@@ -299,15 +351,21 @@ impl UdpHoePunchConnectorData {
         let mut port_idx = rand::random();
 
         loop {
+            if self.loop_blacklist.contains(&task_info.dst_peer_id) {
+                break;
+            }
             backoff.sleep_for_next_backoff().await;
 
             // always try cone first
             if !RUN_TESTING.load(std::sync::atomic::Ordering::Relaxed) {
                 let ret = self
                     .cone_client
-                    .do_hole_punching(task_info.dst_peer_id)
+                    .do_hole_punching(task_info.dst_peer_id, task_info.disable_udp_stealth)
                     .await;
-                if self.handle_punch_result(ret, None, None).await {
+                if self
+                    .handle_punch_result(task_info.dst_peer_id, ret, None, None)
+                    .await
+                {
                     break;
                 }
             }
@@ -322,12 +380,18 @@ impl UdpHoePunchConnectorData {
                         round,
                         &mut port_idx,
                         task_info.my_nat_type,
+                        task_info.disable_udp_stealth,
                     )
                     .await
             };
 
             if self
-                .handle_punch_result(ret, Some(&mut backoff), Some(&mut round))
+                .handle_punch_result(
+                    task_info.dst_peer_id,
+                    ret,
+                    Some(&mut backoff),
+                    Some(&mut round),
+                )
                 .await
             {
                 break;
@@ -343,15 +407,21 @@ impl UdpHoePunchConnectorData {
             BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000, 64000]);
 
         loop {
+            if self.loop_blacklist.contains(&task_info.dst_peer_id) {
+                break;
+            }
             backoff.sleep_for_next_backoff().await;
 
             // always try cone first
             if !RUN_TESTING.load(std::sync::atomic::Ordering::Relaxed) {
                 let ret = self
                     .cone_client
-                    .do_hole_punching(task_info.dst_peer_id)
+                    .do_hole_punching(task_info.dst_peer_id, task_info.disable_udp_stealth)
                     .await;
-                if self.handle_punch_result(ret, None, None).await {
+                if self
+                    .handle_punch_result(task_info.dst_peer_id, ret, None, None)
+                    .await
+                {
                     break;
                 }
             }
@@ -367,6 +437,7 @@ impl UdpHoePunchConnectorData {
                         task_info.dst_peer_id,
                         task_info.my_nat_type,
                         task_info.dst_nat_type,
+                        task_info.disable_udp_stealth,
                         &mut is_busy,
                     )
                     .await
@@ -375,7 +446,7 @@ impl UdpHoePunchConnectorData {
             if is_busy {
                 backoff.rollback();
             } else if self
-                .handle_punch_result(ret, Some(&mut backoff), None)
+                .handle_punch_result(task_info.dst_peer_id, ret, Some(&mut backoff), None)
                 .await
             {
                 break;
@@ -394,6 +465,7 @@ struct PunchTaskInfo {
     dst_peer_id: PeerId,
     dst_nat_type: UdpNatType,
     my_nat_type: UdpNatType,
+    disable_udp_stealth: bool,
 }
 
 #[async_trait::async_trait]
@@ -407,6 +479,19 @@ impl PeerTaskLauncher for UdpHolePunchPeerTaskLauncher {
     }
 
     async fn collect_peers_need_task(&self, data: &Self::Data) -> Vec<Self::CollectPeerItem> {
+        // Legacy fallback: current hole-punch entry points use the no-record
+        // PeerManager helpers, so this global guard should stay cold in
+        // production. It is intentionally retained to preserve a hard stop if a
+        // future path reintroduces GlobalCtx-level hole-punch suppression.
+        if data
+            .peer_mgr
+            .get_global_ctx()
+            .is_protocol_loop_suppressed(IpScheme::Udp, ProtocolLoopScope::HolePunch)
+        {
+            tracing::warn!("udp hole punch task collect skipped (protocol loop suppressed)");
+            return Vec::new();
+        }
+
         let my_nat_type = data
             .peer_mgr
             .get_global_ctx()
@@ -434,6 +519,7 @@ impl PeerTaskLauncher for UdpHolePunchPeerTaskLauncher {
         let now = Instant::now();
 
         data.blacklist.cleanup();
+        data.loop_blacklist.cleanup();
 
         // collect peer list from peer manager and do some filter:
         // 1. peers without direct conns;
@@ -474,6 +560,10 @@ impl PeerTaskLauncher for UdpHolePunchPeerTaskLauncher {
                 tracing::debug!(?peer_id, "peer is blacklisted, skipping");
                 continue;
             }
+            if data.loop_blacklist.contains(&peer_id) {
+                tracing::debug!(?peer_id, "peer is loop-blacklisted, skipping");
+                continue;
+            }
 
             if data.peer_mgr.get_peer_map().has_peer(peer_id) {
                 continue;
@@ -496,6 +586,10 @@ impl PeerTaskLauncher for UdpHolePunchPeerTaskLauncher {
                 dst_peer_id: peer_id,
                 dst_nat_type: peer_nat_type,
                 my_nat_type,
+                disable_udp_stealth: should_downgrade_udp_stealth(
+                    flags.stealth_mode,
+                    route.feature_flag.as_ref(),
+                ),
             });
         }
 
@@ -638,6 +732,12 @@ pub mod tests {
             .collect()
     }
 
+    async fn collect_punch_tasks(peer_mgr: Arc<PeerManager>) -> Vec<super::PunchTaskInfo> {
+        let launcher = UdpHolePunchPeerTaskLauncher {};
+        let data = launcher.new_data(peer_mgr);
+        launcher.collect_peers_need_task(&data).await
+    }
+
     #[rstest::rstest]
     #[tokio::test]
     pub async fn test_hole_punching_blacklist(
@@ -697,6 +797,54 @@ pub mod tests {
             collect_lazy_punch_peers(p_a.clone())
                 .await
                 .contains(&p_c.my_peer_id())
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_hole_punch_collect_marks_legacy_peer_for_stealth_downgrade() {
+        let p_a = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+        let p_b = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+        let p_c = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+
+        let mut flags = p_a.get_global_ctx().get_flags();
+        flags.stealth_mode = true;
+        p_a.get_global_ctx().set_flags(flags);
+
+        connect_peer_manager(p_a.clone(), p_b.clone()).await;
+        connect_peer_manager(p_b.clone(), p_c.clone()).await;
+        wait_route_appear(p_a.clone(), p_c.clone()).await.unwrap();
+
+        let tasks = collect_punch_tasks(p_a.clone()).await;
+        let task = tasks
+            .into_iter()
+            .find(|task| task.dst_peer_id == p_c.my_peer_id())
+            .expect("expected punch task for peer");
+        assert!(task.disable_udp_stealth);
+    }
+
+    #[tokio::test]
+    async fn udp_hole_punch_collect_skips_loop_blacklisted_peer() {
+        let p_a = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+        let p_b = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+        let p_c = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+
+        connect_peer_manager(p_a.clone(), p_b.clone()).await;
+        connect_peer_manager(p_b.clone(), p_c.clone()).await;
+        wait_route_appear(p_a.clone(), p_c.clone()).await.unwrap();
+
+        let launcher = UdpHolePunchPeerTaskLauncher {};
+        let data = launcher.new_data(p_a.clone());
+        data.loop_blacklist.insert(
+            p_c.my_peer_id(),
+            (),
+            Duration::from_secs(super::LOOP_BLACKLIST_TIMEOUT_SEC),
+        );
+
+        let tasks = launcher.collect_peers_need_task(&data).await;
+        assert!(
+            tasks
+                .into_iter()
+                .all(|task| task.dst_peer_id != p_c.my_peer_id())
         );
     }
 }

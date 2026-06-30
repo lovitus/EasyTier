@@ -20,7 +20,8 @@ use crate::{
     common::{PeerId, global_ctx::ArcGlobalCtx, stun::StunInfoCollectorTrait},
     connector::udp_hole_punch::{
         common::{
-            HOLE_PUNCH_PACKET_BODY_LEN, send_symmetric_hole_punch_packet, try_connect_with_socket,
+            HOLE_PUNCH_PACKET_BODY_LEN, disable_udp_stealth_for_selected_listener,
+            send_symmetric_hole_punch_packet, should_request_udp_stealth, try_connect_with_socket,
         },
         handle_rpc_result,
     },
@@ -360,6 +361,7 @@ impl PunchSymToConeHoleClient {
         packet: &[u8],
         tid: u32,
         remote_mapped_addr: crate::proto::common::SocketAddr,
+        disable_udp_stealth: bool,
         punch_task: &AbortOnDropHandle<T>,
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // no matter what the result is, we should check if we received any hole punching packet
@@ -386,6 +388,7 @@ impl PunchSymToConeHoleClient {
                 global_ctx.clone(),
                 socket.socket.clone(),
                 remote_mapped_addr.into(),
+                disable_udp_stealth,
             )
             .await
             {
@@ -411,6 +414,7 @@ impl PunchSymToConeHoleClient {
         round: u32,
         last_port_idx: &mut usize,
         my_nat_info: UdpNatType,
+        disable_udp_stealth: bool,
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // Check if peer is blacklisted
         if self.blacklist.contains(&dst_peer_id) {
@@ -420,6 +424,7 @@ impl PunchSymToConeHoleClient {
 
         let udp_array = self.prepare_udp_array().await?;
         let global_ctx = self.peer_mgr.get_global_ctx();
+        let use_stealth = should_request_udp_stealth(&global_ctx, disable_udp_stealth);
 
         let rpc_stub = self
             .peer_mgr
@@ -437,11 +442,13 @@ impl PunchSymToConeHoleClient {
                 SelectPunchListenerRequest {
                     force_new: false,
                     prefer_port_mapping: true,
+                    use_stealth: Some(use_stealth),
                 },
             )
             .await;
 
         let resp = handle_rpc_result(resp, dst_peer_id, &self.blacklist)?;
+        let disable_udp_stealth = disable_udp_stealth_for_selected_listener(resp.stealth_enabled);
 
         let remote_mapped_addr = resp.listener_mapped_addr.ok_or(anyhow::anyhow!(
             "select_punch_listener response missing listener_mapped_addr"
@@ -453,6 +460,7 @@ impl PunchSymToConeHoleClient {
                 global_ctx.clone(),
                 Arc::new(UdpSocket::bind("0.0.0.0:0").await?),
                 remote_mapped_addr.into(),
+                disable_udp_stealth,
             )
             .await
         {
@@ -498,6 +506,7 @@ impl PunchSymToConeHoleClient {
                 &packet,
                 tid,
                 remote_mapped_addr,
+                disable_udp_stealth,
                 &punch_task,
             )
             .await?;
@@ -525,6 +534,7 @@ impl PunchSymToConeHoleClient {
             &packet,
             tid,
             remote_mapped_addr,
+            disable_udp_stealth,
             &punch_task,
         )
         .await?;

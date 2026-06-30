@@ -39,6 +39,14 @@ pub fn create_listener_by_url(
             IpScheme::Udp => {
                 let mut l = UdpTunnelListener::new(l.clone());
                 l.set_socket_mark(socket_mark);
+                let flags = global_ctx.config.get_flags();
+                let secure_mode = global_ctx.is_secure_mode_enabled();
+                l.set_stealth(crate::tunnel::stealth::build_outer_session(
+                    global_ctx.get_network_identity().network_secret.as_deref(),
+                    flags.stealth_mode,
+                    secure_mode,
+                    flags.stealth_window_secs,
+                ));
                 l.boxed()
             }
             #[cfg(feature = "wireguard")]

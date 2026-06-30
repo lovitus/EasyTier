@@ -1506,7 +1506,9 @@ async fn udp_hole_punch_listener_establishes_upnp_mapping() {
     .await;
     let mut event_rx = peer_mgr.get_global_ctx().subscribe();
 
-    let listener = UdpHolePunchListener::new(peer_mgr.clone()).await.unwrap();
+    let listener = UdpHolePunchListener::new(peer_mgr.clone(), false)
+        .await
+        .unwrap();
     let local_port = listener.get_socket().await.local_addr().unwrap().port();
 
     let event = wait_for_port_mapping_event(&mut event_rx).await;
@@ -1560,7 +1562,9 @@ async fn udp_hole_punch_listener_skips_upnp_when_disabled() {
     .await;
     let mut event_rx = peer_mgr.get_global_ctx().subscribe();
 
-    let listener = UdpHolePunchListener::new(peer_mgr.clone()).await.unwrap();
+    let listener = UdpHolePunchListener::new(peer_mgr.clone(), false)
+        .await
+        .unwrap();
     let local_port = listener.get_socket().await.local_addr().unwrap().port();
 
     let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;

@@ -290,6 +290,22 @@ struct NetworkOptions {
     default_protocol: Option<String>,
 
     #[arg(
+        long,
+        env = "ET_STEALTH_MODE",
+        help = "enable stealth outer-protection underlay (opt-in, requires secure mode)",
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    stealth_mode: Option<bool>,
+
+    #[arg(
+        long,
+        env = "ET_STEALTH_WINDOW_SECS",
+        help = "rolling window seconds for stealth pre-auth gate key (0 = default 60)"
+    )]
+    stealth_window_secs: Option<u32>,
+
+    #[arg(
         short = 'u',
         long,
         env = "ET_DISABLE_ENCRYPTION",
@@ -1096,6 +1112,10 @@ impl NetworkOptions {
         }
         if let Some(algorithm) = &self.encryption_algorithm {
             f.encryption_algorithm = algorithm.to_string();
+        }
+        f.stealth_mode = self.stealth_mode.unwrap_or(f.stealth_mode);
+        if let Some(w) = self.stealth_window_secs {
+            f.stealth_window_secs = w;
         }
         if let Some(v) = self.disable_ipv6 {
             f.enable_ipv6 = !v;

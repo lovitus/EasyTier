@@ -27,13 +27,39 @@ use crate::{
 };
 
 pub(crate) const HOLE_PUNCH_PACKET_BODY_LEN: u16 = 16;
+// This cap is per mode. Keeping separate bounded pools prevents a burst of
+// stealth listeners from starving the occasional legacy/plain negotiation.
 const MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS: usize = 4;
+
+pub(crate) fn should_request_udp_stealth(
+    global_ctx: &ArcGlobalCtx,
+    disable_udp_stealth: bool,
+) -> bool {
+    !disable_udp_stealth && global_ctx.get_feature_flags().stealth_supported
+}
+
+pub(crate) fn negotiate_udp_listener_stealth(
+    requested: Option<bool>,
+    local_stealth_enabled: bool,
+) -> bool {
+    requested.unwrap_or(false) && local_stealth_enabled
+}
+
+pub(crate) fn disable_udp_stealth_for_selected_listener(stealth_enabled: Option<bool>) -> bool {
+    !stealth_enabled.unwrap_or(false)
+}
 
 fn generate_shuffled_port_vec() -> Vec<u16> {
     let mut rng = rand::thread_rng();
     let mut port_vec: Vec<u16> = (1..=65535).collect();
     port_vec.shuffle(&mut rng);
     port_vec
+}
+
+fn tunnel_remote_socket_addr(tunnel: &dyn Tunnel) -> Option<SocketAddr> {
+    let info = tunnel.info()?;
+    let remote: url::Url = info.effective_remote_addr()?.clone().into();
+    remote.socket_addrs(|| None).ok()?.into_iter().next()
 }
 
 pub(crate) enum UdpPunchClientMethod {
@@ -353,6 +379,8 @@ pub(crate) struct UdpHolePunchListener {
     tasks: JoinSet<()>,
     running: Arc<AtomicCell<bool>>,
     mapped_addr: SocketAddr,
+    stealth_enabled: bool,
+    loop_blacklist: Arc<timedmap::TimedMap<SocketAddr, ()>>,
     has_port_mapping_lease: bool,
     _port_mapping_lease: Option<upnp::UdpPortMappingLease>,
     conn_counter: Arc<Box<dyn TunnelConnCounter>>,
@@ -364,8 +392,8 @@ pub(crate) struct UdpHolePunchListener {
 
 impl UdpHolePunchListener {
     #[instrument(err)]
-    pub async fn new(peer_mgr: Arc<PeerManager>) -> Result<Self, Error> {
-        Self::new_ext(peer_mgr, true, None).await
+    pub async fn new(peer_mgr: Arc<PeerManager>, stealth_enabled: bool) -> Result<Self, Error> {
+        Self::new_ext(peer_mgr, true, None, stealth_enabled).await
     }
 
     #[instrument(err)]
@@ -373,6 +401,7 @@ impl UdpHolePunchListener {
         peer_mgr: Arc<PeerManager>,
         with_mapped_addr: bool,
         port: Option<u16>,
+        stealth_enabled: bool,
     ) -> Result<Self, Error> {
         let socket = {
             let _g = peer_mgr.get_global_ctx().net_ns.guard();
@@ -392,6 +421,22 @@ impl UdpHolePunchListener {
         };
 
         let mut listener = UdpTunnelListener::new_with_socket(listen_url, socket.clone());
+        let stealth_enabled = if stealth_enabled {
+            let global_ctx = peer_mgr.get_global_ctx();
+            let flags = global_ctx.get_flags();
+            let secure_mode = global_ctx.is_secure_mode_enabled();
+            let stealth = crate::tunnel::stealth::build_outer_session(
+                global_ctx.get_network_identity().network_secret.as_deref(),
+                flags.stealth_mode,
+                secure_mode,
+                flags.stealth_window_secs,
+            );
+            let enabled = stealth.is_enabled();
+            listener.set_stealth(stealth);
+            enabled
+        } else {
+            false
+        };
 
         {
             let _g = peer_mgr.get_global_ctx().net_ns.guard();
@@ -401,16 +446,40 @@ impl UdpHolePunchListener {
 
         let running = Arc::new(AtomicCell::new(true));
         let running_clone = running.clone();
+        let loop_blacklist = Arc::new(timedmap::TimedMap::new());
+        let loop_blacklist_clone = loop_blacklist.clone();
 
         let conn_counter = listener.get_conn_counter();
         let mut tasks = JoinSet::new();
 
         tasks.spawn(async move {
             while let Ok(conn) = listener.accept().await {
+                loop_blacklist_clone.cleanup();
+                let remote_addr = tunnel_remote_socket_addr(conn.as_ref());
+                if remote_addr.is_some_and(|addr| loop_blacklist_clone.contains(&addr)) {
+                    tracing::warn!(
+                        ?remote_addr,
+                        "drop udp hole punch conn from loop-blacklisted remote"
+                    );
+                    continue;
+                }
                 tracing::warn!(?conn, "udp hole punching listener got peer connection");
                 let peer_mgr = peer_mgr.clone();
+                let loop_blacklist = loop_blacklist_clone.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = peer_mgr.add_tunnel_as_server(conn, false).await {
+                    if let Err(e) = peer_mgr
+                        .add_tunnel_as_server_without_runtime_loop_record(conn, false)
+                        .await
+                    {
+                        if e.is_self_loop_signal()
+                            && let Some(remote_addr) = remote_addr
+                        {
+                            loop_blacklist.insert(
+                                remote_addr,
+                                (),
+                                Duration::from_secs(super::LOOP_BLACKLIST_TIMEOUT_SEC),
+                            );
+                        }
                         tracing::error!(
                             ?e,
                             "failed to add tunnel as server in hole punch listener"
@@ -441,6 +510,8 @@ impl UdpHolePunchListener {
             socket,
             running,
             mapped_addr,
+            stealth_enabled,
+            loop_blacklist,
             has_port_mapping_lease: port_mapping_lease.is_some(),
             _port_mapping_lease: port_mapping_lease,
             conn_counter,
@@ -524,13 +595,21 @@ impl PunchHoleServerCommon {
         &self,
         use_new_listener: bool,
         prefer_port_mapping: bool,
+        stealth_enabled: bool,
     ) -> Option<(Arc<UdpSocket>, SocketAddr)> {
         let (listener_count, has_reusable_listener, has_port_mapping_listener) = {
             let locked = self.listeners.lock().await;
             (
-                locked.len(),
-                locked.iter().any(can_reuse_public_listener),
-                locked.iter().any(can_reuse_port_mapping_listener),
+                locked
+                    .iter()
+                    .filter(|listener| listener.stealth_enabled == stealth_enabled)
+                    .count(),
+                locked
+                    .iter()
+                    .any(|listener| can_reuse_public_listener(listener, stealth_enabled)),
+                locked
+                    .iter()
+                    .any(|listener| can_reuse_port_mapping_listener(listener, stealth_enabled)),
             )
         };
         let should_create = should_create_public_listener(
@@ -546,7 +625,7 @@ impl PunchHoleServerCommon {
                 max_listeners = MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS,
                 "creating udp hole punching listener"
             );
-            match UdpHolePunchListener::new(self.peer_mgr.clone()).await {
+            match UdpHolePunchListener::new(self.peer_mgr.clone(), stealth_enabled).await {
                 Ok(listener) => self.listeners.lock().await.push(listener),
                 Err(err) => {
                     tracing::warn!(?err, "failed to create udp hole punching listener");
@@ -555,21 +634,15 @@ impl PunchHoleServerCommon {
         }
 
         let mut locked = self.listeners.lock().await;
-        let listener_count = locked.len();
+        let listener_count = locked
+            .iter()
+            .filter(|listener| listener.stealth_enabled == stealth_enabled)
+            .count();
         let listener_idx = if prefer_port_mapping {
-            select_reusable_port_mapping_listener_idx(locked.as_slice())
-                .or_else(|| {
-                    if should_create && locked.last().is_some_and(can_reuse_public_listener) {
-                        Some(locked.len() - 1)
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| select_reusable_public_listener_idx(locked.as_slice()))
-        } else if should_create {
-            locked.len().checked_sub(1)
+            select_reusable_port_mapping_listener_idx(locked.as_slice(), stealth_enabled)
+                .or_else(|| select_reusable_public_listener_idx(locked.as_slice(), stealth_enabled))
         } else {
-            select_reusable_public_listener_idx(locked.as_slice())
+            select_reusable_public_listener_idx(locked.as_slice(), stealth_enabled)
         };
 
         let Some(listener_idx) = listener_idx else {
@@ -587,13 +660,15 @@ impl PunchHoleServerCommon {
                 has_port_mapping_listener,
             ) {
                 drop(locked);
-                return self.select_listener(true, prefer_port_mapping).await;
+                return self
+                    .select_listener(true, prefer_port_mapping, stealth_enabled)
+                    .await;
             }
             return None;
         };
 
         let listener = &mut locked[listener_idx];
-        if !can_reuse_public_listener(listener) {
+        if !can_reuse_public_listener(listener, stealth_enabled) {
             tracing::warn!(
                 ?use_new_listener,
                 ?prefer_port_mapping,
@@ -620,29 +695,37 @@ impl PunchHoleServerCommon {
     }
 }
 
-fn can_reuse_public_listener(listener: &UdpHolePunchListener) -> bool {
-    listener.running.load() && !listener.mapped_addr.ip().is_unspecified()
+fn can_reuse_public_listener(listener: &UdpHolePunchListener, stealth_enabled: bool) -> bool {
+    listener.stealth_enabled == stealth_enabled
+        && listener.running.load()
+        && !listener.mapped_addr.ip().is_unspecified()
 }
 
-fn can_reuse_port_mapping_listener(listener: &UdpHolePunchListener) -> bool {
-    can_reuse_public_listener(listener) && listener.has_port_mapping_lease
+fn can_reuse_port_mapping_listener(listener: &UdpHolePunchListener, stealth_enabled: bool) -> bool {
+    can_reuse_public_listener(listener, stealth_enabled) && listener.has_port_mapping_lease
 }
 
-fn select_reusable_public_listener_idx(listeners: &[UdpHolePunchListener]) -> Option<usize> {
+fn select_reusable_public_listener_idx(
+    listeners: &[UdpHolePunchListener],
+    stealth_enabled: bool,
+) -> Option<usize> {
     // Reuse the listener that was active most recently.
     listeners
         .iter()
         .enumerate()
-        .filter(|(_, listener)| can_reuse_public_listener(listener))
+        .filter(|(_, listener)| can_reuse_public_listener(listener, stealth_enabled))
         .max_by_key(|(_, listener)| listener.last_active_time.load())
         .map(|(idx, _)| idx)
 }
 
-fn select_reusable_port_mapping_listener_idx(listeners: &[UdpHolePunchListener]) -> Option<usize> {
+fn select_reusable_port_mapping_listener_idx(
+    listeners: &[UdpHolePunchListener],
+    stealth_enabled: bool,
+) -> Option<usize> {
     listeners
         .iter()
         .enumerate()
-        .filter(|(_, listener)| can_reuse_port_mapping_listener(listener))
+        .filter(|(_, listener)| can_reuse_port_mapping_listener(listener, stealth_enabled))
         .max_by_key(|(_, listener)| listener.last_active_time.load())
         .map(|(idx, _)| idx)
 }
@@ -749,8 +832,9 @@ pub(crate) async fn try_connect_with_socket(
     global_ctx: ArcGlobalCtx,
     socket: Arc<UdpSocket>,
     remote_mapped_addr: SocketAddr,
+    disable_udp_stealth: bool,
 ) -> Result<Box<dyn Tunnel>, Error> {
-    let connector = UdpTunnelConnector::new(
+    let mut connector = UdpTunnelConnector::new(
         format!(
             "udp://{}:{}",
             remote_mapped_addr.ip(),
@@ -759,6 +843,20 @@ pub(crate) async fn try_connect_with_socket(
         .parse()
         .unwrap(),
     );
+    {
+        let flags = global_ctx.get_flags();
+        let secure_mode = global_ctx.is_secure_mode_enabled();
+        if disable_udp_stealth {
+            connector.disable_stealth();
+        } else {
+            connector.set_stealth(crate::tunnel::stealth::build_outer_session(
+                global_ctx.get_network_identity().network_secret.as_deref(),
+                flags.stealth_mode,
+                secure_mode,
+                flags.stealth_window_secs,
+            ));
+        }
+    }
 
     check_udp_socket_local_addr(global_ctx, remote_mapped_addr).await?;
 
@@ -770,13 +868,27 @@ pub(crate) async fn try_connect_with_socket(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, net::SocketAddr};
+    use std::{
+        collections::BTreeSet,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::Arc,
+        time::Duration,
+    };
 
-    use crate::common::global_ctx::tests::get_mock_global_ctx;
+    use tokio::net::UdpSocket;
+
+    use crate::{
+        common::{global_ctx::NetworkIdentity, global_ctx::tests::get_mock_global_ctx},
+        connector::udp_hole_punch::tests::create_mock_peer_manager_with_mock_stun,
+        peers::peer_conn::tests::set_secure_mode_cfg,
+        proto::common::NatType,
+    };
 
     use super::{
-        MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS, easytier_managed_local_addr_error,
-        should_create_public_listener, should_retry_public_listener_selection,
+        MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS, UdpHolePunchListener,
+        disable_udp_stealth_for_selected_listener, easytier_managed_local_addr_error,
+        negotiate_udp_listener_stealth, should_create_public_listener,
+        should_retry_public_listener_selection,
     };
 
     #[tokio::test]
@@ -791,6 +903,124 @@ mod tests {
             easytier_managed_local_addr_error(&global_ctx, local_addr),
             Some("local address is easytier-managed ipv6")
         );
+    }
+
+    #[tokio::test]
+    async fn hole_punch_listener_matches_stealth_connector_when_enabled() {
+        let server = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+        let client = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+
+        for peer_mgr in [&server, &client] {
+            peer_mgr
+                .get_global_ctx()
+                .config
+                .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            set_secure_mode_cfg(&peer_mgr.get_global_ctx(), true);
+            let mut flags = peer_mgr.get_global_ctx().get_flags();
+            flags.stealth_mode = true;
+            peer_mgr.get_global_ctx().set_flags(flags);
+        }
+
+        let listener = UdpHolePunchListener::new_ext(server.clone(), false, Some(0), true)
+            .await
+            .unwrap();
+        assert!(listener.stealth_enabled);
+        let listener_port = listener.get_socket().await.local_addr().unwrap().port();
+        let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listener_port);
+        let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await.unwrap());
+
+        let ret = tokio::time::timeout(
+            Duration::from_secs(3),
+            super::try_connect_with_socket(client.get_global_ctx(), socket, remote_addr, false),
+        )
+        .await
+        .expect("udp stealth hole-punch handshake timed out");
+
+        assert!(
+            ret.is_ok(),
+            "udp stealth hole-punch connector should match listener"
+        );
+    }
+
+    #[tokio::test]
+    async fn hole_punch_listener_can_negotiate_plain_on_stealth_node() {
+        let server = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+        let client = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+
+        for peer_mgr in [&server, &client] {
+            peer_mgr
+                .get_global_ctx()
+                .config
+                .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            set_secure_mode_cfg(&peer_mgr.get_global_ctx(), true);
+            let mut flags = peer_mgr.get_global_ctx().get_flags();
+            flags.stealth_mode = true;
+            peer_mgr.get_global_ctx().set_flags(flags);
+        }
+
+        let listener = UdpHolePunchListener::new_ext(server, false, Some(0), false)
+            .await
+            .unwrap();
+        assert!(!listener.stealth_enabled);
+        let remote_addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            listener.get_socket().await.local_addr().unwrap().port(),
+        );
+        let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await.unwrap());
+
+        let ret = tokio::time::timeout(
+            Duration::from_secs(3),
+            super::try_connect_with_socket(client.get_global_ctx(), socket, remote_addr, true),
+        )
+        .await
+        .expect("plain UDP hole-punch handshake timed out");
+        assert!(ret.is_ok());
+    }
+
+    #[tokio::test]
+    async fn hole_punch_self_connect_does_not_suppress_udp_protocol() {
+        let peer_mgr = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+        let listener = UdpHolePunchListener::new_ext(peer_mgr.clone(), false, Some(0), false)
+            .await
+            .unwrap();
+        let listener_port = listener.get_socket().await.local_addr().unwrap().port();
+        let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listener_port);
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let client_addr = socket.local_addr().unwrap();
+
+        let tunnel = tokio::time::timeout(
+            Duration::from_secs(3),
+            super::try_connect_with_socket(peer_mgr.get_global_ctx(), socket, remote_addr, true),
+        )
+        .await
+        .expect("udp self-connect attempt timed out")
+        .expect("udp self-connect tunnel build failed");
+
+        let ret = peer_mgr
+            .add_client_tunnel_without_runtime_loop_record(tunnel, false)
+            .await;
+        assert!(
+            ret.as_ref()
+                .is_err_and(crate::common::error::Error::is_self_loop_signal)
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(listener.loop_blacklist.contains(&client_addr));
+        assert!(!peer_mgr.get_global_ctx().is_protocol_loop_suppressed(
+            crate::tunnel::IpScheme::Udp,
+            crate::common::global_ctx::ProtocolLoopScope::HolePunch,
+        ));
+    }
+
+    #[test]
+    fn udp_listener_stealth_negotiation_is_backward_compatible() {
+        assert!(negotiate_udp_listener_stealth(Some(true), true));
+        assert!(!negotiate_udp_listener_stealth(Some(true), false));
+        assert!(!negotiate_udp_listener_stealth(Some(false), true));
+        assert!(!negotiate_udp_listener_stealth(None, true));
+
+        assert!(!disable_udp_stealth_for_selected_listener(Some(true)));
+        assert!(disable_udp_stealth_for_selected_listener(Some(false)));
+        assert!(disable_udp_stealth_for_selected_listener(None));
     }
 
     #[test]
