@@ -1450,6 +1450,77 @@ pub async fn quic_proxy() {
     drop_insts(insts).await;
 }
 
+#[cfg(all(feature = "quic", feature = "kcp"))]
+#[tokio::test]
+#[serial_test::serial]
+pub async fn proxy_destination_refused_falls_back_to_native_without_health_penalty() {
+    let insts = init_three_node_ex(
+        "udp",
+        |cfg| {
+            if cfg.get_inst_name() == "inst3" {
+                cfg.add_proxy_cidr("10.1.2.0/24".parse().unwrap(), None)
+                    .unwrap();
+            } else if cfg.get_inst_name() == "inst1" {
+                let mut flags = cfg.get_flags();
+                flags.enable_quic_proxy = true;
+                flags.enable_kcp_proxy = true;
+                cfg.set_flags(flags);
+            }
+            cfg
+        },
+        false,
+    )
+    .await;
+
+    wait_proxy_route_appear(
+        &insts[0].get_peer_manager(),
+        "10.144.144.3/24",
+        insts[2].peer_id(),
+        "10.1.2.0/24",
+    )
+    .await;
+
+    let mut connector = TcpTunnelConnector::new("tcp://10.144.144.3:22999".parse().unwrap());
+    let net_ns = NetNS::new(Some("net_a".into()));
+    let _guard = net_ns.guard();
+    let result = tokio::time::timeout(Duration::from_secs(5), connector.connect()).await;
+    assert!(
+        !matches!(result, Ok(Ok(_))),
+        "connection to an unused destination unexpectedly succeeded"
+    );
+    drop(_guard);
+
+    let selector = insts[0]
+        .get_proxy_failover_selector()
+        .expect("proxy failover selector was not started");
+    let status = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(status) = selector
+                .list_statuses()
+                .await
+                .into_iter()
+                .find(|entry| entry.dst.as_ref().is_some_and(|dst| dst.port == 22999))
+                && status.selected_transport == "native"
+            {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("native fallback status was not recorded");
+
+    assert_eq!(
+        status.fallback_reason,
+        "quic_destination_failed,kcp_destination_failed"
+    );
+    assert_eq!(status.consecutive_failures, 0);
+    assert_eq!(status.ambiguous_timeout_strikes, 0);
+
+    drop(selector);
+    drop_insts(insts).await;
+}
+
 #[rstest::rstest]
 #[serial_test::serial]
 #[tokio::test]

@@ -624,6 +624,17 @@ struct Config {
     source: Option<ConfigSourceConfig>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StealthConfigurationWarning {
+    ProtocolNotImplemented(crate::common::stealth_registry::StealthProtocol),
+    SecureModeDisabled,
+    NetworkSecretMissing,
+    NoCompiledProtocol,
+    StealthOptionsWithoutMode,
+    CustomWindow(u32),
+    LegacyRejectWithoutUdpStealth,
+}
+
 fn format_toml_parse_error(source_name: &str, config_str: &str, error: &toml::de::Error) -> String {
     let message = format!("failed to parse config TOML from {source_name}");
 
@@ -711,14 +722,6 @@ impl TomlConfigLoader {
         let stealth_protocols =
             crate::common::stealth_registry::StealthProtocolSet::parse(&flags.stealth_protocols)
                 .context("failed to parse stealth_protocols")?;
-        for protocol in stealth_protocols.configured_protocols() {
-            if !protocol.is_implemented() {
-                tracing::warn!(
-                    protocol = protocol.as_str(),
-                    "configured stealth protocol is not implemented; skipping"
-                );
-            }
-        }
         Self::warn_stealth_configuration(&config, &flags, &stealth_protocols);
         config.flags_struct = Some(flags);
         let has_network_identity = config.network_identity.is_some();
@@ -757,6 +760,47 @@ impl TomlConfigLoader {
         flags: &Flags,
         protocols: &crate::common::stealth_registry::StealthProtocolSet,
     ) {
+        for warning in Self::stealth_configuration_warnings(config, flags, protocols) {
+            match warning {
+                StealthConfigurationWarning::ProtocolNotImplemented(protocol) => {
+                    tracing::warn!(
+                        protocol = protocol.as_str(),
+                        "configured stealth protocol is not implemented; skipping"
+                    );
+                }
+                StealthConfigurationWarning::SecureModeDisabled => tracing::warn!(
+                    "stealth_mode is enabled but secure_mode is disabled; stealth is inactive"
+                ),
+                StealthConfigurationWarning::NetworkSecretMissing => tracing::warn!(
+                    "stealth_mode is enabled but network_secret is missing or empty; stealth is inactive"
+                ),
+                StealthConfigurationWarning::NoCompiledProtocol => tracing::warn!(
+                    "stealth_mode is enabled but no configured stealth protocol is compiled; stealth is inactive"
+                ),
+                StealthConfigurationWarning::StealthOptionsWithoutMode => tracing::warn!(
+                    "stealth_protocols or stealth_window_secs is configured while stealth_mode is disabled"
+                ),
+                StealthConfigurationWarning::CustomWindow(stealth_window_secs) => tracing::warn!(
+                    stealth_window_secs,
+                    "custom stealth gate window must match every stealth node in this network"
+                ),
+                StealthConfigurationWarning::LegacyRejectWithoutUdpStealth => tracing::warn!(
+                    "disable_legacy_udp_hole_punch rejects legacy requests without a stealth preference even though UDP stealth is inactive; explicit plain requests from new peers remain allowed"
+                ),
+            }
+        }
+    }
+
+    fn stealth_configuration_warnings(
+        config: &Config,
+        flags: &Flags,
+        protocols: &crate::common::stealth_registry::StealthProtocolSet,
+    ) -> Vec<StealthConfigurationWarning> {
+        let mut warnings = protocols
+            .configured_protocols()
+            .filter(|protocol| !protocol.is_implemented())
+            .map(StealthConfigurationWarning::ProtocolNotImplemented)
+            .collect::<Vec<_>>();
         let secure_mode = config
             .secure_mode
             .as_ref()
@@ -769,41 +813,31 @@ impl TomlConfigLoader {
         let effective = flags.stealth_mode && secure_mode && has_secret;
 
         if flags.stealth_mode && !secure_mode {
-            tracing::warn!(
-                "stealth_mode is enabled but secure_mode is disabled; stealth is inactive"
-            );
+            warnings.push(StealthConfigurationWarning::SecureModeDisabled);
         } else if flags.stealth_mode && !has_secret {
-            tracing::warn!(
-                "stealth_mode is enabled but network_secret is missing or empty; stealth is inactive"
-            );
+            warnings.push(StealthConfigurationWarning::NetworkSecretMissing);
         } else if flags.stealth_mode && protocols.effective_protocols(true).is_empty() {
-            tracing::warn!(
-                "stealth_mode is enabled but no configured stealth protocol is compiled; stealth is inactive"
-            );
+            warnings.push(StealthConfigurationWarning::NoCompiledProtocol);
         } else if !flags.stealth_mode
             && (!flags.stealth_protocols.trim().is_empty() || flags.stealth_window_secs != 0)
         {
-            tracing::warn!(
-                "stealth_protocols or stealth_window_secs is configured while stealth_mode is disabled"
-            );
+            warnings.push(StealthConfigurationWarning::StealthOptionsWithoutMode);
         }
 
         if flags.stealth_window_secs != 0
             && flags.stealth_window_secs != crate::tunnel::stealth::DEFAULT_GATE_WINDOW_SECS as u32
         {
-            tracing::warn!(
-                stealth_window_secs = flags.stealth_window_secs,
-                "custom stealth gate window must match every stealth node in this network"
-            );
+            warnings.push(StealthConfigurationWarning::CustomWindow(
+                flags.stealth_window_secs,
+            ));
         }
 
         let udp_stealth = effective
             && protocols.contains(true, crate::common::stealth_registry::StealthProtocol::Udp);
         if flags.disable_legacy_udp_hole_punch && !udp_stealth {
-            tracing::warn!(
-                "disable_legacy_udp_hole_punch rejects legacy requests without a stealth preference even though UDP stealth is inactive; explicit plain requests from new peers remain allowed"
-            );
+            warnings.push(StealthConfigurationWarning::LegacyRejectWithoutUdpStealth);
         }
+        warnings
     }
 
     fn gen_flags(
@@ -1420,6 +1454,80 @@ pub mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
+
+    fn stealth_warnings(
+        config_toml: &str,
+        configure_flags: impl FnOnce(&mut Flags),
+        protocols: &str,
+    ) -> Vec<StealthConfigurationWarning> {
+        let config = toml::from_str::<Config>(config_toml).unwrap();
+        let mut flags = gen_default_flags();
+        configure_flags(&mut flags);
+        flags.stealth_protocols = protocols.to_string();
+        let protocols =
+            crate::common::stealth_registry::StealthProtocolSet::parse(protocols).unwrap();
+        TomlConfigLoader::stealth_configuration_warnings(&config, &flags, &protocols)
+    }
+
+    #[test]
+    fn stealth_configuration_diagnostics_cover_inactive_and_mismatched_options() {
+        let warnings = stealth_warnings(
+            "",
+            |flags| {
+                flags.stealth_mode = true;
+                flags.stealth_window_secs = 61;
+                flags.disable_legacy_udp_hole_punch = true;
+            },
+            "udp",
+        );
+        assert_eq!(
+            warnings,
+            [
+                StealthConfigurationWarning::SecureModeDisabled,
+                StealthConfigurationWarning::CustomWindow(61),
+                StealthConfigurationWarning::LegacyRejectWithoutUdpStealth,
+            ]
+        );
+
+        let warnings = stealth_warnings(
+            "[secure_mode]\nenabled = true",
+            |flags| flags.stealth_mode = true,
+            "udp",
+        );
+        assert_eq!(
+            warnings,
+            [StealthConfigurationWarning::NetworkSecretMissing]
+        );
+
+        let warnings = stealth_warnings("", |flags| flags.stealth_window_secs = 30, "tcp");
+        assert_eq!(
+            warnings,
+            [
+                StealthConfigurationWarning::StealthOptionsWithoutMode,
+                StealthConfigurationWarning::CustomWindow(30),
+            ]
+        );
+    }
+
+    #[test]
+    fn valid_udp_stealth_configuration_has_no_diagnostics() {
+        let warnings = stealth_warnings(
+            r#"
+[secure_mode]
+enabled = true
+
+[network_identity]
+network_name = "test"
+network_secret = "secret"
+"#,
+            |flags| {
+                flags.stealth_mode = true;
+                flags.disable_legacy_udp_hole_punch = true;
+            },
+            "udp",
+        );
+        assert!(warnings.is_empty());
+    }
 
     #[test]
     fn invalid_toml_error_includes_location_and_source_line() {

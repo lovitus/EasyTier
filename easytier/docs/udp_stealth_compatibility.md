@@ -187,6 +187,11 @@ route 变化、late result、健康降级和 native fallback 均有界处理，p
 不会向未请求 ACK 的旧源端写入额外字节。QUIC/KCP Proxy 的选择顺序固定为
 `QUIC -> KCP -> Native`，不受 `transport_priority` 控制。
 
+仅收到 `ACCEPTED` 后超时记为 ambiguous soft strike；严格连续两次才折算一次 transport
+failure，任一明确的 transport/业务结果都会中断该 soft-strike 序列。远端明确返回策略
+拒绝、目标连接失败或业务超时不会降低 transport 健康度。全部候选失败进入 Native 时，
+状态接口保留每个候选的具体失败原因，而不是只报告通用失败。
+
 ## 6. Direct-connect 协议优先级
 
 `transport_priority` 使用统一单行格式，例如：

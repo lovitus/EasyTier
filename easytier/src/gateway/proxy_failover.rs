@@ -475,6 +475,12 @@ impl TransportHealth {
             return HealthTransition::None;
         }
 
+        self.ambiguous_timeout_strikes = 0;
+        self.record_hard_failure(now)
+    }
+
+    fn record_hard_failure(&mut self, now: Instant) -> HealthTransition {
+        self.updated_at = now;
         self.consecutive_successes = 0;
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         if self.consecutive_failures >= 3 && !self.degraded {
@@ -489,10 +495,16 @@ impl TransportHealth {
         self.updated_at = now;
         self.consecutive_successes = 0;
         self.ambiguous_timeout_strikes = self.ambiguous_timeout_strikes.saturating_add(1);
-        if self.ambiguous_timeout_strikes % 2 != 0 {
+        if self.ambiguous_timeout_strikes < 2 {
             return HealthTransition::None;
         }
-        self.record_result(now, false)
+        self.ambiguous_timeout_strikes = 0;
+        self.record_hard_failure(now)
+    }
+
+    fn clear_ambiguous_timeout(&mut self, now: Instant) {
+        self.updated_at = now;
+        self.ambiguous_timeout_strikes = 0;
     }
 }
 
@@ -616,6 +628,17 @@ impl DeferredProxySelector {
         }
     }
 
+    async fn clear_ambiguous_timeout(&self, peer: PeerId, transport: ProxyTransport) {
+        let Some(health) = self
+            .health
+            .get(&(peer, transport))
+            .map(|entry| entry.clone())
+        else {
+            return;
+        };
+        health.lock().await.clear_ambiguous_timeout(Instant::now());
+    }
+
     async fn health_entry(
         &self,
         peer: PeerId,
@@ -687,18 +710,19 @@ impl DeferredProxySelector {
         &self,
         flow: FlowKey,
         entry: &Arc<Mutex<DeferredFlow>>,
-        reason: &'static str,
+        reason: impl Into<String>,
     ) {
         if !self.flow_is_current(flow, entry) {
             return;
         }
+        let reason = reason.into();
         let (packet, context, dst_peer_id, generation) = {
             let mut entry = entry.lock().await;
             if entry.decision == FlowDecision::Native {
                 return;
             }
             entry.decision = FlowDecision::Native;
-            entry.fallback_reason = reason.to_string();
+            entry.fallback_reason = reason.clone();
             entry.updated_at = Instant::now();
             (
                 entry.original_syn.clone(),
@@ -711,7 +735,7 @@ impl DeferredProxySelector {
             ?flow,
             dst_peer_id,
             generation,
-            fallback_reason = reason,
+            fallback_reason = %reason,
             "proxy selector chose native transport"
         );
         if let Err(error) = self.runtime.send_after_pipeline(packet, context).await {
@@ -807,8 +831,10 @@ impl DeferredProxySelector {
                             }
                             ProxyPrepareFailureClass::Destination
                             | ProxyPrepareFailureClass::Policy
-                            | ProxyPrepareFailureClass::RouteStale
-                            | ProxyPrepareFailureClass::BusinessTimeout => {}
+                            | ProxyPrepareFailureClass::BusinessTimeout => {
+                                self.clear_ambiguous_timeout(peer, kind).await;
+                            }
+                            ProxyPrepareFailureClass::RouteStale => {}
                         }
                         fallback_reasons.push(match kind {
                             ProxyTransport::Quic => match error.class {
@@ -887,7 +913,12 @@ impl DeferredProxySelector {
             }
 
             let Some((transport, stream)) = prepared_result else {
-                self.inject_native(flow, &entry, "all_proxy_failed").await;
+                let reason = if fallback_reasons.is_empty() {
+                    "all_proxy_failed".to_string()
+                } else {
+                    fallback_reasons.join(",")
+                };
+                self.inject_native(flow, &entry, reason).await;
                 return;
             };
             if created.elapsed() >= PENDING_TTL {
@@ -1427,8 +1458,28 @@ mod tests {
         assert_eq!(health.ambiguous_timeout_strikes, 1);
         assert_eq!(health.record_ambiguous_timeout(now), HealthTransition::None);
         assert_eq!(health.consecutive_failures, 1);
+        assert_eq!(health.ambiguous_timeout_strikes, 0);
         health.record_result(now, true);
         assert_eq!(health.consecutive_failures, 0);
+        assert_eq!(health.ambiguous_timeout_strikes, 0);
+    }
+
+    #[test]
+    fn non_ambiguous_result_breaks_soft_strike_sequence() {
+        let now = Instant::now();
+        let mut health = TransportHealth::default();
+        health.record_ambiguous_timeout(now);
+        assert_eq!(health.ambiguous_timeout_strikes, 1);
+
+        health.record_result(now, false);
+        assert_eq!(health.consecutive_failures, 1);
+        assert_eq!(health.ambiguous_timeout_strikes, 0);
+
+        health.record_ambiguous_timeout(now);
+        assert_eq!(health.consecutive_failures, 1);
+        assert_eq!(health.ambiguous_timeout_strikes, 1);
+
+        health.clear_ambiguous_timeout(now);
         assert_eq!(health.ambiguous_timeout_strikes, 0);
     }
 
@@ -1892,7 +1943,7 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].requested_transport, "quic,native");
         assert_eq!(statuses[0].selected_transport, "native");
-        assert_eq!(statuses[0].fallback_reason, "all_proxy_failed");
+        assert_eq!(statuses[0].fallback_reason, "quic_prepare_failed");
         assert_eq!(statuses[0].consecutive_failures, 1);
     }
 
@@ -2111,7 +2162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_change_discards_stale_success_and_restarts_with_new_peer() {
+    async fn route_change_after_ready_discards_stale_success() {
         let runtime = Arc::new(FakeRuntime::default());
         let dst = "10.44.0.3".parse().unwrap();
         let capabilities = CapabilitySnapshot {
@@ -2155,7 +2206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_change_wins_over_ambiguous_prepare_failure() {
+    async fn route_change_while_waiting_for_ready_wins_over_ambiguous_timeout() {
         let runtime = Arc::new(FakeRuntime::default());
         let dst = "10.44.0.3".parse().unwrap();
         let capabilities = CapabilitySnapshot {
@@ -2181,6 +2232,60 @@ mod tests {
             not_send_to_self: false,
         };
         let (mut packet, _) = tcp_syn(106);
+
+        assert_eq!(
+            selector
+                .try_process_packet_from_nic(&mut packet, &context)
+                .await,
+            NicPacketFilterAction::Consume
+        );
+        transport.wait_for_calls(1).await;
+        runtime.set_route(dst, 10, capabilities);
+        release.notify_one();
+        transport.wait_for_calls(2).await;
+        runtime.wait_for_sent(1).await;
+
+        let stale_health = selector
+            .health
+            .get(&(9, ProxyTransport::Quic))
+            .unwrap()
+            .clone();
+        let stale_health = stale_health.lock().await;
+        assert_eq!(stale_health.consecutive_failures, 0);
+        assert_eq!(stale_health.ambiguous_timeout_strikes, 0);
+        drop(stale_health);
+        let statuses = selector.list_statuses().await;
+        assert_eq!(statuses[0].dst_peer_id, 10);
+        assert_eq!(statuses[0].selected_transport, "quic");
+    }
+
+    #[tokio::test]
+    async fn route_change_while_waiting_for_accepted_wins_over_transport_failure() {
+        let runtime = Arc::new(FakeRuntime::default());
+        let dst = "10.44.0.3".parse().unwrap();
+        let capabilities = CapabilitySnapshot {
+            quic: true,
+            kcp: false,
+            prepare_ack_version: 1,
+        };
+        runtime.set_route(dst, 9, capabilities);
+        let release = Arc::new(Notify::new());
+        let transport = Arc::new(FakeTransport::new(
+            ProxyTransport::Quic,
+            [
+                FakePrepareResult::WaitThenFailure(
+                    release.clone(),
+                    ProxyPrepareFailureClass::Transport,
+                ),
+                FakePrepareResult::Success,
+            ],
+        ));
+        let selector = fake_selector(runtime.clone(), vec![transport.clone()]);
+        let context = NicPacketContext {
+            ip_addr: IpAddr::V4(dst),
+            not_send_to_self: false,
+        };
+        let (mut packet, _) = tcp_syn(107);
 
         assert_eq!(
             selector

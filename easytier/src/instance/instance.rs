@@ -1190,6 +1190,11 @@ impl Instance {
         self.peer_manager.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn get_proxy_failover_selector(&self) -> Option<DeferredProxySelector> {
+        self.proxy_failover_selector.clone()
+    }
+
     #[cfg(feature = "ffi-dataplane")]
     pub fn get_socks5_server(&self) -> Arc<Socks5Server> {
         self.socks5_server.clone()
