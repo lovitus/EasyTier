@@ -1359,6 +1359,65 @@ mod tests {
         assert_eq!(error.class, ProxyPrepareFailureClass::Transport);
     }
 
+    #[tokio::test]
+    async fn explicit_prepare_failures_keep_their_health_classification() {
+        for (status, expected) in [
+            (
+                ProxyPrepareAckStatus::DestinationFailed,
+                ProxyPrepareFailureClass::Destination,
+            ),
+            (
+                ProxyPrepareAckStatus::PolicyDenied,
+                ProxyPrepareFailureClass::Policy,
+            ),
+            (
+                ProxyPrepareAckStatus::BusinessTimeout,
+                ProxyPrepareFailureClass::BusinessTimeout,
+            ),
+        ] {
+            let (client, mut server) = tokio::io::duplex(64);
+            tokio::spawn(async move {
+                server
+                    .write_all(&ack_frame(ProxyPrepareAckStatus::Accepted))
+                    .await
+                    .unwrap();
+                server.write_all(&ack_frame(status)).await.unwrap();
+            });
+
+            let error = match await_proxy_prepare_ready(
+                Box::new(client),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            {
+                Ok(_) => panic!("explicit proxy failure unexpectedly succeeded"),
+                Err(error) => error,
+            };
+            assert_eq!(error.class, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn eof_after_accepted_is_transport_failure() {
+        let (client, mut server) = tokio::io::duplex(64);
+        server
+            .write_all(&ack_frame(ProxyPrepareAckStatus::Accepted))
+            .await
+            .unwrap();
+        drop(server);
+
+        let error = match await_proxy_prepare_ready(
+            Box::new(client),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        {
+            Ok(_) => panic!("EOF after ACCEPTED unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert_eq!(error.class, ProxyPrepareFailureClass::Transport);
+    }
+
     #[test]
     fn ambiguous_timeouts_are_scoped_soft_strikes() {
         let now = Instant::now();
