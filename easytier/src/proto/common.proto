@@ -85,11 +85,11 @@ message FlagsInConfig {
   // non-Linux platforms.
   optional uint32 socket_mark = 43;
 
-  // Stealth outer-protection (opt-in). Requires secure_mode. When enabled, the
-  // UDP underlay authenticates/obfuscates its transport handshake and data so an
-  // unauthenticated active prober gets no distinguishable response.
+  // Multi-transport stealth outer-protection (opt-in). Requires secure_mode and
+  // a non-empty network_secret.
   bool stealth_mode = 44;
-  // Rolling window (seconds) for the stealth pre-auth gate key. 0 = default (60).
+  // Network-wide rolling gate-key window in seconds. 0 = default (60). Every
+  // stealth node in the same network must use the same effective value.
   uint32 stealth_window_secs = 45;
   // Reject UDP hole-punch RPCs from legacy peers that do not advertise a
   // stealth preference. Explicit plain requests from new peers remain valid.
@@ -254,6 +254,9 @@ message PeerFeatureFlag {
   // peer advertises support for stealth outer-protection underlay
   bool stealth_supported = 12;
   repeated TransportStealthCapability stealth_capabilities = 13;
+  // Highest supported proxy prepare acknowledgement protocol version.
+  // Version 0 is the legacy fire-and-forget proxy stream setup.
+  uint32 proxy_prepare_ack_version = 14;
 }
 
 enum StealthTransportProtocol {

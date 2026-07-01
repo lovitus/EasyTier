@@ -181,6 +181,12 @@ Deferred-SYN selector 在改写前冻结目标 peer、原始 SYN 和发送 conte
 route 变化、late result、健康降级和 native fallback 均有界处理，proxy 分发保持本地
 自投递，不设置额外 wire `no_proxy`。
 
+新版本 peer 通过 `proxy_prepare_ack_version` 宣告就绪确认能力。双方支持 v1 时，
+远端 proxy 在 ACL 通过后返回 `ACCEPTED`，目标 TCP 建立成功后返回 `READY`；源端只有
+收到 `READY` 才提交 prepared stream。旧 peer 仍使用原有 fire-and-forget 流程，新远端
+不会向未请求 ACK 的旧源端写入额外字节。QUIC/KCP Proxy 的选择顺序固定为
+`QUIC -> KCP -> Native`，不受 `transport_priority` 控制。
+
 ## 6. Direct-connect 协议优先级
 
 `transport_priority` 使用统一单行格式，例如：
@@ -193,11 +199,15 @@ global:tcp,udp;wan:quic,wss;lan:udp,faketcp;10.44.0.3:tcp,quic
 LAN/WAN bucket；LAN 全部失败后才进入 WAN。同协议地址并发，协议组间隔 300ms。
 listener 不会因远端偏好而动态启动。
 
+exact virtual IP 规则针对 peer 级 direct tunnel。双栈 peer 的 IPv4 和 IPv6 地址同时
+配置 exact 规则时，确定性采用 IPv4 规则；一条 direct tunnel 会同时承载该 peer 的
+IPv4/IPv6 流量。
+
 ## 7. 当前安全边界
 
 - stealth listener 不会因为旧 peer 存在而接受未认证 probe。
 - phase-2 普通数据不会回退到 gate key。
-- connector 侧的兼容降级只影响该次 outbound UDP 尝试。
+- connector 侧的兼容降级只影响该次 outbound transport 尝试，不放宽本地 listener。
 - hole-punch plain listener 是协商后按需创建，不会把固定 stealth listener 改为
   plain。
 - stealth 依赖共享 `network_secret`，不适用于没有该 secret 的公共共享 listener。
@@ -209,6 +219,10 @@ listener 不会因远端偏好而动态启动。
 
 - 不按远端请求动态启用未配置 listener。
 - manual/bootstrap 显式 URL 不受 `transport_priority` 重排。
+- `stealth_window_secs` 是网络级参数；`0` 等价于 60 秒，同一网络的 stealth 节点必须
+  使用相同有效值。
+- `disable_quic_input`/`disable_kcp_input` 只控制对应 Proxy 入站能力，不关闭底层
+  `quic://` listener。
 - LAN bucket 完整失败后才进入 WAN，这是明确接受的局域网优先取舍。
 - 旧的 scheme-global suppression 兼容结构暂时保留，但 direct/hole-punch 的新增回环
   避退使用目标级 TTL。

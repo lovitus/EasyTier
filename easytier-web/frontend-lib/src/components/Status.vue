@@ -309,7 +309,7 @@ function proxySocketAddr(addr: any): string {
 
 function proxyHealth(entry: any): string {
   const state = entry.transport_degraded ? t('proxy_failover.degraded') : t('proxy_failover.healthy')
-  return `${state} (${entry.consecutive_failures}/${entry.consecutive_successes})`
+  return `${state} (${entry.consecutive_failures}/${entry.consecutive_successes}, ${t('proxy_failover.ambiguous')}: ${entry.ambiguous_timeout_strikes})`
 }
 
 // calculate tx/rx rate every 2 seconds

@@ -17,8 +17,9 @@ use pnet::packet::{
     ipv4::Ipv4Packet,
     tcp::{TcpFlags, TcpPacket},
 };
+use prost::Message;
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::Mutex,
     task::AbortHandle,
 };
@@ -31,6 +32,7 @@ use crate::{
             ListTcpProxyEntryRequest, ListTcpProxyEntryResponse, TcpProxyEntry, TcpProxyEntryState,
             TcpProxyEntryTransportType, TcpProxyRpc,
         },
+        peer_rpc::{ProxyPrepareAck, ProxyPrepareAckStatus},
         rpc_types::{self, controller::BaseController},
     },
     tunnel::packet_def::ZCPacket,
@@ -47,6 +49,17 @@ const MAX_PENDING_FLOWS: usize = 4096;
 const MAX_HEALTH_ENTRIES: usize = 4096;
 const HEALTH_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_ROUTE_RESTARTS: u8 = 2;
+const PROXY_PREPARE_ACK_MAX_FRAME: usize = 64;
+pub(crate) const PROXY_TARGET_CONNECT_TIMEOUT: Duration = Duration::from_millis(800);
+pub(crate) use crate::common::constants::PROXY_PREPARE_ACK_VERSION;
+
+pub(crate) fn requested_proxy_prepare_version(remote_version: u32) -> u32 {
+    if remote_version >= PROXY_PREPARE_ACK_VERSION {
+        PROXY_PREPARE_ACK_VERSION
+    } else {
+        0
+    }
+}
 
 pub trait ProxyStream: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
 impl<T> ProxyStream for T where T: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
@@ -59,6 +72,7 @@ pub enum ProxyPrepareFailureClass {
     Policy,
     RouteStale,
     BusinessTimeout,
+    AmbiguousTimeout,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -81,8 +95,120 @@ impl ProxyPrepareError {
         Self::new(ProxyPrepareFailureClass::Transport, source)
     }
 
-    fn affects_transport_health(&self) -> bool {
-        self.class == ProxyPrepareFailureClass::Transport
+    pub fn destination(source: impl Into<anyhow::Error>) -> Self {
+        Self::new(ProxyPrepareFailureClass::Destination, source)
+    }
+
+    pub fn policy(source: impl Into<anyhow::Error>) -> Self {
+        Self::new(ProxyPrepareFailureClass::Policy, source)
+    }
+
+    pub fn business_timeout(source: impl Into<anyhow::Error>) -> Self {
+        Self::new(ProxyPrepareFailureClass::BusinessTimeout, source)
+    }
+
+    pub fn ambiguous_timeout(source: impl Into<anyhow::Error>) -> Self {
+        Self::new(ProxyPrepareFailureClass::AmbiguousTimeout, source)
+    }
+}
+
+pub(crate) async fn write_proxy_prepare_ack(
+    stream: &mut (impl AsyncWrite + Unpin + ?Sized),
+    status: ProxyPrepareAckStatus,
+) -> anyhow::Result<()> {
+    let payload = ProxyPrepareAck {
+        status: status.into(),
+    }
+    .encode_to_vec();
+    anyhow::ensure!(
+        payload.len() <= PROXY_PREPARE_ACK_MAX_FRAME,
+        "proxy prepare ACK frame is too large"
+    );
+    stream.write_u16(payload.len() as u16).await?;
+    stream.write_all(&payload).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+async fn read_proxy_prepare_ack(
+    stream: &mut (impl AsyncRead + Unpin + ?Sized),
+) -> anyhow::Result<ProxyPrepareAckStatus> {
+    let len = stream.read_u16().await? as usize;
+    anyhow::ensure!(
+        len <= PROXY_PREPARE_ACK_MAX_FRAME,
+        "proxy prepare ACK frame is too large: {len}"
+    );
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).await?;
+    let ack = ProxyPrepareAck::decode(payload.as_slice())?;
+    ProxyPrepareAckStatus::try_from(ack.status)
+        .map_err(|_| anyhow::anyhow!("unknown proxy prepare ACK status: {}", ack.status))
+}
+
+pub(crate) async fn await_proxy_prepare_ready(
+    mut stream: BoxProxyStream,
+    deadline: Instant,
+) -> Result<BoxProxyStream, ProxyPrepareError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let first = tokio::time::timeout(remaining, read_proxy_prepare_ack(stream.as_mut()))
+        .await
+        .map_err(|_| ProxyPrepareError::transport(anyhow::anyhow!("proxy ACCEPTED timed out")))?
+        .map_err(ProxyPrepareError::transport)?;
+    match first {
+        ProxyPrepareAckStatus::Accepted => {}
+        ProxyPrepareAckStatus::Ready => return Ok(stream),
+        ProxyPrepareAckStatus::DestinationFailed => {
+            return Err(ProxyPrepareError::destination(anyhow::anyhow!(
+                "proxy destination connection failed"
+            )));
+        }
+        ProxyPrepareAckStatus::PolicyDenied => {
+            return Err(ProxyPrepareError::policy(anyhow::anyhow!(
+                "proxy destination denied by policy"
+            )));
+        }
+        ProxyPrepareAckStatus::BusinessTimeout => {
+            return Err(ProxyPrepareError::business_timeout(anyhow::anyhow!(
+                "proxy destination connection timed out"
+            )));
+        }
+        ProxyPrepareAckStatus::Unspecified => {
+            return Err(ProxyPrepareError::transport(anyhow::anyhow!(
+                "unspecified proxy prepare ACK"
+            )));
+        }
+    }
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(ProxyPrepareError::ambiguous_timeout(anyhow::anyhow!(
+            "proxy READY timed out after ACCEPTED"
+        )));
+    }
+    let second = tokio::time::timeout(remaining, read_proxy_prepare_ack(stream.as_mut()))
+        .await
+        .map_err(|_| {
+            ProxyPrepareError::ambiguous_timeout(anyhow::anyhow!(
+                "proxy READY timed out after ACCEPTED"
+            ))
+        })?
+        .map_err(ProxyPrepareError::transport)?;
+    match second {
+        ProxyPrepareAckStatus::Ready => Ok(stream),
+        ProxyPrepareAckStatus::DestinationFailed => Err(ProxyPrepareError::destination(
+            anyhow::anyhow!("proxy destination connection failed"),
+        )),
+        ProxyPrepareAckStatus::PolicyDenied => Err(ProxyPrepareError::policy(anyhow::anyhow!(
+            "proxy destination denied by policy"
+        ))),
+        ProxyPrepareAckStatus::BusinessTimeout => Err(ProxyPrepareError::business_timeout(
+            anyhow::anyhow!("proxy destination connection timed out"),
+        )),
+        ProxyPrepareAckStatus::Accepted | ProxyPrepareAckStatus::Unspecified => {
+            Err(ProxyPrepareError::transport(anyhow::anyhow!(
+                "invalid final proxy prepare ACK: {second:?}"
+            )))
+        }
     }
 }
 
@@ -122,6 +248,7 @@ impl ProxySelectorRuntime for PeerManagerSelectorRuntime {
             CapabilitySnapshot {
                 quic: feature.quic_input,
                 kcp: feature.kcp_input,
+                prepare_ack_version: feature.proxy_prepare_ack_version,
             },
         ))
     }
@@ -249,6 +376,8 @@ pub trait ProxyPrepareTransport: Send + Sync {
         &self,
         flow: FlowKey,
         dst_peer_id: PeerId,
+        prepare_ack_version: u32,
+        deadline: Instant,
     ) -> Result<BoxProxyStream, ProxyPrepareError>;
 }
 
@@ -263,6 +392,7 @@ enum FlowDecision {
 struct CapabilitySnapshot {
     quic: bool,
     kcp: bool,
+    prepare_ack_version: u32,
 }
 
 struct DeferredFlow {
@@ -285,6 +415,7 @@ struct DeferredFlow {
 struct TransportHealth {
     consecutive_failures: u8,
     consecutive_successes: u8,
+    ambiguous_timeout_strikes: u32,
     degraded: bool,
     last_probe: Option<Instant>,
     updated_at: Instant,
@@ -295,6 +426,7 @@ impl Default for TransportHealth {
         Self {
             consecutive_failures: 0,
             consecutive_successes: 0,
+            ambiguous_timeout_strikes: 0,
             degraded: false,
             last_probe: None,
             updated_at: Instant::now(),
@@ -330,6 +462,7 @@ impl TransportHealth {
         self.updated_at = now;
         if success {
             self.consecutive_failures = 0;
+            self.ambiguous_timeout_strikes = 0;
             if self.degraded {
                 self.consecutive_successes = self.consecutive_successes.saturating_add(1);
                 if self.consecutive_successes >= 3 {
@@ -350,6 +483,16 @@ impl TransportHealth {
             return HealthTransition::Degraded;
         }
         HealthTransition::None
+    }
+
+    fn record_ambiguous_timeout(&mut self, now: Instant) -> HealthTransition {
+        self.updated_at = now;
+        self.consecutive_successes = 0;
+        self.ambiguous_timeout_strikes = self.ambiguous_timeout_strikes.saturating_add(1);
+        if self.ambiguous_timeout_strikes % 2 != 0 {
+            return HealthTransition::None;
+        }
+        self.record_result(now, false)
     }
 }
 
@@ -453,6 +596,23 @@ impl DeferredProxySelector {
                 tracing::info!(?peer, ?transport, "proxy transport recovered");
             }
             HealthTransition::None => {}
+        }
+    }
+
+    async fn record_ambiguous_timeout(&self, peer: PeerId, transport: ProxyTransport) {
+        let health = self.health_entry(peer, transport).await;
+        match health.lock().await.record_ambiguous_timeout(Instant::now()) {
+            HealthTransition::Degraded => {
+                tracing::warn!(?peer, ?transport, "proxy transport degraded");
+            }
+            HealthTransition::Recovered => {}
+            HealthTransition::None => {
+                tracing::warn!(
+                    ?peer,
+                    ?transport,
+                    "proxy transport READY timed out ambiguously"
+                );
+            }
         }
     }
 
@@ -616,9 +776,11 @@ impl DeferredProxySelector {
                     self.inject_native(flow, &entry, "pending_timeout").await;
                     return;
                 }
+                let candidate_budget = PREPARE_TIMEOUT.min(remaining);
+                let deadline = Instant::now() + candidate_budget;
                 let result = tokio::time::timeout(
-                    PREPARE_TIMEOUT.min(remaining),
-                    transport.prepare(flow, peer),
+                    candidate_budget + Duration::from_millis(10),
+                    transport.prepare(flow, peer, capabilities.prepare_ack_version, deadline),
                 )
                 .await;
                 match result {
@@ -636,17 +798,40 @@ impl DeferredProxySelector {
                             route_change = Some(current);
                             break;
                         }
-                        if error.affects_transport_health() {
-                            self.record_prepare_result(peer, kind, false).await;
+                        match error.class {
+                            ProxyPrepareFailureClass::Transport => {
+                                self.record_prepare_result(peer, kind, false).await;
+                            }
+                            ProxyPrepareFailureClass::AmbiguousTimeout => {
+                                self.record_ambiguous_timeout(peer, kind).await;
+                            }
+                            ProxyPrepareFailureClass::Destination
+                            | ProxyPrepareFailureClass::Policy
+                            | ProxyPrepareFailureClass::RouteStale
+                            | ProxyPrepareFailureClass::BusinessTimeout => {}
                         }
                         fallback_reasons.push(match kind {
                             ProxyTransport::Quic => match error.class {
                                 ProxyPrepareFailureClass::Transport => "quic_prepare_failed",
-                                _ => "quic_non_transport_failure",
+                                ProxyPrepareFailureClass::Destination => "quic_destination_failed",
+                                ProxyPrepareFailureClass::Policy => "quic_policy_denied",
+                                ProxyPrepareFailureClass::RouteStale => "quic_route_stale",
+                                ProxyPrepareFailureClass::BusinessTimeout => {
+                                    "quic_business_timeout"
+                                }
+                                ProxyPrepareFailureClass::AmbiguousTimeout => {
+                                    "quic_ambiguous_timeout"
+                                }
                             },
                             ProxyTransport::Kcp => match error.class {
                                 ProxyPrepareFailureClass::Transport => "kcp_prepare_failed",
-                                _ => "kcp_non_transport_failure",
+                                ProxyPrepareFailureClass::Destination => "kcp_destination_failed",
+                                ProxyPrepareFailureClass::Policy => "kcp_policy_denied",
+                                ProxyPrepareFailureClass::RouteStale => "kcp_route_stale",
+                                ProxyPrepareFailureClass::BusinessTimeout => "kcp_business_timeout",
+                                ProxyPrepareFailureClass::AmbiguousTimeout => {
+                                    "kcp_ambiguous_timeout"
+                                }
                             },
                         });
                     }
@@ -744,8 +929,6 @@ impl DeferredProxySelector {
                 entry.updated_at = Instant::now();
                 continue;
             }
-            self.record_prepare_result(peer, transport, true).await;
-
             let key = PreparedKey {
                 flow,
                 initial_sequence: {
@@ -775,6 +958,7 @@ impl DeferredProxySelector {
                 entry.updated_at = Instant::now();
                 (entry.original_syn.clone(), entry.context)
             };
+            self.record_prepare_result(peer, transport, true).await;
             tracing::info!(
                 ?flow,
                 ?transport,
@@ -922,6 +1106,7 @@ impl DeferredProxySelector {
                         health.degraded,
                         health.consecutive_failures,
                         health.consecutive_successes,
+                        health.ambiguous_timeout_strikes,
                     ));
                 }
             }
@@ -934,13 +1119,20 @@ impl DeferredProxySelector {
                 .or_else(|| {
                     health_snapshots
                         .iter()
-                        .max_by_key(|(_, degraded, failures, _)| (*degraded, *failures))
+                        .max_by_key(|(_, degraded, failures, _, ambiguous)| {
+                            (*degraded, *failures, *ambiguous)
+                        })
                 });
-            let (degraded, failures, successes) = health
-                .map(|(_, degraded, failures, successes)| {
-                    (*degraded, u32::from(*failures), u32::from(*successes))
+            let (degraded, failures, successes, ambiguous_timeout_strikes) = health
+                .map(|(_, degraded, failures, successes, ambiguous)| {
+                    (
+                        *degraded,
+                        u32::from(*failures),
+                        u32::from(*successes),
+                        *ambiguous,
+                    )
                 })
-                .unwrap_or((false, 0, 0));
+                .unwrap_or((false, 0, 0, 0));
             statuses.push(TcpProxyEntry {
                 src: Some(flow.src.into()),
                 dst: Some(flow.dst.into()),
@@ -955,6 +1147,7 @@ impl DeferredProxySelector {
                 consecutive_failures: failures,
                 consecutive_successes: successes,
                 generation,
+                ambiguous_timeout_strikes,
             });
         }
         statuses
@@ -1089,6 +1282,117 @@ mod tests {
 
     use super::*;
 
+    fn ack_frame(status: ProxyPrepareAckStatus) -> Vec<u8> {
+        let payload = ProxyPrepareAck {
+            status: status.into(),
+        }
+        .encode_to_vec();
+        let mut frame = Vec::with_capacity(2 + payload.len());
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    #[test]
+    fn proxy_prepare_version_negotiates_v1_with_newer_remote() {
+        assert_eq!(requested_proxy_prepare_version(0), 0);
+        assert_eq!(requested_proxy_prepare_version(1), 1);
+        assert_eq!(requested_proxy_prepare_version(2), 1);
+    }
+
+    #[tokio::test]
+    async fn ready_ack_preserves_immediately_following_payload() {
+        let (client, mut server) = tokio::io::duplex(256);
+        let payload = b"server-first-payload";
+        let mut wire = ack_frame(ProxyPrepareAckStatus::Accepted);
+        wire.extend_from_slice(&ack_frame(ProxyPrepareAckStatus::Ready));
+        wire.extend_from_slice(payload);
+        tokio::spawn(async move {
+            server.write_all(&wire).await.unwrap();
+        });
+
+        let mut stream =
+            await_proxy_prepare_ready(Box::new(client), Instant::now() + Duration::from_secs(1))
+                .await
+                .unwrap();
+        let mut received = vec![0u8; payload.len()];
+        stream.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, payload);
+    }
+
+    #[tokio::test]
+    async fn timeout_after_accepted_is_ambiguous() {
+        let (client, mut server) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            server
+                .write_all(&ack_frame(ProxyPrepareAckStatus::Accepted))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+
+        let error = match await_proxy_prepare_ready(
+            Box::new(client),
+            Instant::now() + Duration::from_millis(20),
+        )
+        .await
+        {
+            Ok(_) => panic!("missing READY unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert_eq!(error.class, ProxyPrepareFailureClass::AmbiguousTimeout);
+    }
+
+    #[tokio::test]
+    async fn timeout_before_accepted_is_transport_failure() {
+        let (client, server) = tokio::io::duplex(64);
+        let _keep_open = server;
+        let error = match await_proxy_prepare_ready(
+            Box::new(client),
+            Instant::now() + Duration::from_millis(20),
+        )
+        .await
+        {
+            Ok(_) => panic!("missing ACCEPTED unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert_eq!(error.class, ProxyPrepareFailureClass::Transport);
+    }
+
+    #[test]
+    fn ambiguous_timeouts_are_scoped_soft_strikes() {
+        let now = Instant::now();
+        let mut health = TransportHealth::default();
+        assert_eq!(health.record_ambiguous_timeout(now), HealthTransition::None);
+        assert_eq!(health.consecutive_failures, 0);
+        assert_eq!(health.ambiguous_timeout_strikes, 1);
+        assert_eq!(health.record_ambiguous_timeout(now), HealthTransition::None);
+        assert_eq!(health.consecutive_failures, 1);
+        health.record_result(now, true);
+        assert_eq!(health.consecutive_failures, 0);
+        assert_eq!(health.ambiguous_timeout_strikes, 0);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_strikes_do_not_cross_peer_or_transport_health_keys() {
+        let selector = fake_selector(Arc::new(FakeRuntime::default()), Vec::new());
+        selector
+            .record_ambiguous_timeout(9, ProxyTransport::Quic)
+            .await;
+        selector
+            .record_ambiguous_timeout(9, ProxyTransport::Quic)
+            .await;
+
+        let quic = selector
+            .health
+            .get(&(9, ProxyTransport::Quic))
+            .unwrap()
+            .clone();
+        assert_eq!(quic.lock().await.consecutive_failures, 1);
+        assert!(!selector.health.contains_key(&(9, ProxyTransport::Kcp)));
+        assert!(!selector.health.contains_key(&(10, ProxyTransport::Quic)));
+    }
+
     #[derive(Default)]
     struct FakeRuntime {
         routes: DashMap<Ipv4Addr, (PeerId, CapabilitySnapshot)>,
@@ -1140,6 +1444,7 @@ mod tests {
         Success,
         Failure(ProxyPrepareFailureClass),
         WaitThenSuccess(Arc<Notify>),
+        WaitThenFailure(Arc<Notify>, ProxyPrepareFailureClass),
     }
 
     struct FakeTransport {
@@ -1188,6 +1493,8 @@ mod tests {
             &self,
             _flow: FlowKey,
             dst_peer_id: PeerId,
+            _prepare_ack_version: u32,
+            _deadline: Instant,
         ) -> Result<BoxProxyStream, ProxyPrepareError> {
             self.calls.lock().await.push(dst_peer_id);
             self.call_notify.notify_waiters();
@@ -1208,6 +1515,13 @@ mod tests {
                 }
                 FakePrepareResult::WaitThenSuccess(release) => {
                     release.notified().await;
+                }
+                FakePrepareResult::WaitThenFailure(release, class) => {
+                    release.notified().await;
+                    return Err(ProxyPrepareError::new(
+                        class,
+                        anyhow::anyhow!("delayed fake transport failure"),
+                    ));
                 }
                 FakePrepareResult::Success => {}
             }
@@ -1406,6 +1720,7 @@ mod tests {
             CapabilitySnapshot {
                 quic: true,
                 kcp: false,
+                prepare_ack_version: 0,
             },
         );
         let release = Arc::new(Notify::new());
@@ -1480,6 +1795,7 @@ mod tests {
             CapabilitySnapshot {
                 quic: true,
                 kcp: false,
+                prepare_ack_version: 0,
             },
         );
         let transport = Arc::new(FakeTransport::new(
@@ -1530,6 +1846,7 @@ mod tests {
             CapabilitySnapshot {
                 quic: true,
                 kcp: false,
+                prepare_ack_version: 0,
             },
         );
         let release = Arc::new(Notify::new());
@@ -1585,6 +1902,7 @@ mod tests {
             CapabilitySnapshot {
                 quic: true,
                 kcp: false,
+                prepare_ack_version: 0,
             },
         );
         let transport = Arc::new(FakeTransport::new(
@@ -1620,6 +1938,7 @@ mod tests {
             CapabilitySnapshot {
                 quic: true,
                 kcp: true,
+                prepare_ack_version: 0,
             },
         );
         let quic = Arc::new(FakeTransport::new(
@@ -1686,6 +2005,7 @@ mod tests {
             CapabilitySnapshot {
                 quic: true,
                 kcp: false,
+                prepare_ack_version: 0,
             },
         );
         let stale_release = Arc::new(Notify::new());
@@ -1738,6 +2058,7 @@ mod tests {
         let capabilities = CapabilitySnapshot {
             quic: true,
             kcp: false,
+            prepare_ack_version: 0,
         };
         runtime.set_route(dst, 9, capabilities);
         let release = Arc::new(Notify::new());
@@ -1775,12 +2096,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_change_wins_over_ambiguous_prepare_failure() {
+        let runtime = Arc::new(FakeRuntime::default());
+        let dst = "10.44.0.3".parse().unwrap();
+        let capabilities = CapabilitySnapshot {
+            quic: true,
+            kcp: false,
+            prepare_ack_version: 1,
+        };
+        runtime.set_route(dst, 9, capabilities);
+        let release = Arc::new(Notify::new());
+        let transport = Arc::new(FakeTransport::new(
+            ProxyTransport::Quic,
+            [
+                FakePrepareResult::WaitThenFailure(
+                    release.clone(),
+                    ProxyPrepareFailureClass::AmbiguousTimeout,
+                ),
+                FakePrepareResult::Success,
+            ],
+        ));
+        let selector = fake_selector(runtime.clone(), vec![transport.clone()]);
+        let context = NicPacketContext {
+            ip_addr: IpAddr::V4(dst),
+            not_send_to_self: false,
+        };
+        let (mut packet, _) = tcp_syn(106);
+
+        assert_eq!(
+            selector
+                .try_process_packet_from_nic(&mut packet, &context)
+                .await,
+            NicPacketFilterAction::Consume
+        );
+        transport.wait_for_calls(1).await;
+        runtime.set_route(dst, 10, capabilities);
+        release.notify_one();
+        transport.wait_for_calls(2).await;
+        runtime.wait_for_sent(1).await;
+
+        let stale_health = selector
+            .health
+            .get(&(9, ProxyTransport::Quic))
+            .unwrap()
+            .clone();
+        let stale_health = stale_health.lock().await;
+        assert_eq!(stale_health.consecutive_failures, 0);
+        assert_eq!(stale_health.ambiguous_timeout_strikes, 0);
+        drop(stale_health);
+        let statuses = selector.list_statuses().await;
+        assert_eq!(statuses[0].dst_peer_id, 10);
+        assert_eq!(statuses[0].selected_transport, "quic");
+    }
+
+    #[tokio::test]
     async fn third_route_change_falls_back_to_native_on_current_peer() {
         let runtime = Arc::new(FakeRuntime::default());
         let dst = "10.44.0.3".parse().unwrap();
         let capabilities = CapabilitySnapshot {
             quic: true,
             kcp: false,
+            prepare_ack_version: 0,
         };
         runtime.set_route(dst, 9, capabilities);
         let releases = [

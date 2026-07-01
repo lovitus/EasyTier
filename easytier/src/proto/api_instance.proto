@@ -281,6 +281,7 @@ message TcpProxyEntry {
   uint32 consecutive_failures = 11;
   uint32 consecutive_successes = 12;
   uint64 generation = 13;
+  uint32 ambiguous_timeout_strikes = 14;
 }
 
 message ListTcpProxyEntryRequest { InstanceIdentifier instance = 1; }

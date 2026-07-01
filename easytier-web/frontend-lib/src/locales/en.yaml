@@ -110,13 +110,13 @@ enable_kcp_proxy: Enable KCP Proxy
 enable_kcp_proxy_help: Convert TCP traffic to KCP traffic to reduce latency and boost transmission speed.
 
 disable_kcp_input: Disable KCP Input
-disable_kcp_input_help: Disable inbound KCP traffic, while nodes with KCP proxy enabled continue to connect using TCP.
+disable_kcp_input_help: Disable inbound KCP proxy capability without changing other underlay listeners.
 
 enable_quic_proxy: Enable QUIC Proxy
 enable_quic_proxy_help: Convert TCP traffic to QUIC traffic to reduce latency and boost transmission speed.
 
 disable_quic_input: Disable QUIC Input
-disable_quic_input_help: Disable inbound QUIC traffic, while nodes with QUIC proxy enabled continue to connect using TCP.
+disable_quic_input_help: Disable inbound QUIC proxy capability without closing quic:// underlay listeners.
 
 disable_p2p: Disable P2P
 disable_p2p_help: Disable ordinary automatic P2P. Nodes with need-p2p enabled can still establish P2P with this node.
@@ -159,11 +159,11 @@ disable_tcp_hole_punching_help: Disable tcp hole punching
 disable_udp_hole_punching: Disable UDP Hole Punching
 disable_udp_hole_punching_help: Disable udp hole punching
 
-stealth_mode: Enable UDP Stealth
-stealth_mode_help: Require authenticated and obfuscated UDP handshakes. Secure mode and a network secret are required.
+stealth_mode: Enable Stealth
+stealth_mode_help: Enable authenticated outer protection for selected transports. Secure mode and a non-empty network secret are required.
 
 stealth_window_secs: Stealth Gate Window
-stealth_window_secs_help: Rolling gate-key window in seconds. Set to 0 to use the 60-second default.
+stealth_window_secs_help: Network-wide rolling gate-key window in seconds. Set to 0 for 60 seconds; every stealth node in the network must match.
 stealth_protocols: Stealth Protocols
 stealth_protocols_help: Comma-separated transports protected by stealth. Empty keeps the rollout-compatible UDP-only behavior. Supported values are udp, tcp, faketcp, quic, wg, ws, and wss.
 stealth_protocols_placeholder: "udp,tcp,faketcp,quic,wg,ws,wss"
@@ -179,11 +179,12 @@ proxy_failover:
   generation: Generation
   healthy: Healthy
   degraded: Degraded
+  ambiguous: Ambiguous timeouts
 
 disable_legacy_udp_hole_punch: Reject Legacy UDP Hole Punch
 disable_legacy_udp_hole_punch_help: Reject old hole-punch requests that do not carry a stealth preference. Explicit plain requests from new peers remain allowed.
 transport_priority: Direct Transport Priority
-transport_priority_help: Applies only to direct-connect. Use semicolon-separated scope:protocol-list rules; IPv6 scopes require brackets.
+transport_priority_help: Applies only to direct-connect, not the fixed QUIC→KCP→Native proxy order. Use semicolon-separated scope:protocol-list rules; IPv6 scopes require brackets; IPv4 wins when a dual-stack peer matches both exact rules.
 transport_priority_placeholder: "global:tcp,udp;wan:quic,wss;lan:udp,faketcp"
 
 enable_udp_broadcast_relay: UDP Broadcast Relay

@@ -3,8 +3,10 @@ use crate::common::acl_processor::PacketInfo;
 use crate::common::global_ctx::{ArcGlobalCtx, GlobalCtx};
 use crate::gateway::CidrSet;
 use crate::gateway::proxy_failover::{
-    BoxProxyStream, FlowKey, PreparedProxyStore, PreparedProxyStream, ProxyPrepareTransport,
-    ProxyTransport,
+    BoxProxyStream, FlowKey, PROXY_PREPARE_ACK_VERSION, PROXY_TARGET_CONNECT_TIMEOUT,
+    PreparedProxyStore, PreparedProxyStream, ProxyPrepareError, ProxyPrepareTransport,
+    ProxyTransport, await_proxy_prepare_ready, requested_proxy_prepare_version,
+    write_proxy_prepare_ack,
 };
 use crate::gateway::tcp_proxy::{ClaimedNatDstStream, NatDstConnector, TcpProxy};
 use crate::gateway::wrapped_proxy::{ProxyAclHandler, TcpProxyForWrappedSrcTrait};
@@ -15,7 +17,7 @@ use crate::proto::api::instance::{
     ListTcpProxyEntryRequest, ListTcpProxyEntryResponse, TcpProxyEntry, TcpProxyEntryState,
     TcpProxyEntryTransportType, TcpProxyRpc,
 };
-use crate::proto::peer_rpc::KcpConnData as QuicConnData;
+use crate::proto::peer_rpc::{KcpConnData as QuicConnData, ProxyPrepareAckStatus};
 use crate::proto::rpc_types;
 use crate::proto::rpc_types::controller::BaseController;
 use crate::tunnel::packet_def::{
@@ -45,7 +47,7 @@ use std::pin::Pin;
 use std::ptr::copy_nonoverlapping;
 use std::sync::{Arc, Weak};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, Join, join};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
@@ -291,11 +293,12 @@ pub struct NatDstQuicConnector {
 }
 
 impl NatDstQuicConnector {
-    async fn connect_to_peer(
+    async fn connect_to_peer_stream(
         &self,
         src: SocketAddr,
         nat_dst: SocketAddr,
         dst_peer: PeerId,
+        proxy_prepare_version: u32,
     ) -> anyhow::Result<BoxProxyStream> {
         tracing::trace!(?nat_dst, ?dst_peer, "quic nat");
 
@@ -303,6 +306,7 @@ impl NatDstQuicConnector {
             let conn_data = QuicConnData {
                 src: Some(src.into()),
                 dst: Some(nat_dst.into()),
+                proxy_prepare_version,
             };
 
             let len = conn_data.encoded_len();
@@ -393,6 +397,15 @@ impl NatDstQuicConnector {
         };
         Ok(Box::new(stream))
     }
+
+    async fn connect_to_peer(
+        &self,
+        src: SocketAddr,
+        nat_dst: SocketAddr,
+        dst_peer: PeerId,
+    ) -> anyhow::Result<BoxProxyStream> {
+        self.connect_to_peer_stream(src, nat_dst, dst_peer, 0).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -473,11 +486,19 @@ impl ProxyPrepareTransport for NatDstQuicConnector {
         &self,
         flow: FlowKey,
         dst_peer_id: PeerId,
-    ) -> std::result::Result<BoxProxyStream, crate::gateway::proxy_failover::ProxyPrepareError>
-    {
-        self.connect_to_peer(flow.src, flow.dst, dst_peer_id)
+        prepare_ack_version: u32,
+        deadline: Instant,
+    ) -> std::result::Result<BoxProxyStream, ProxyPrepareError> {
+        let request_version = requested_proxy_prepare_version(prepare_ack_version);
+        let stream = self
+            .connect_to_peer_stream(flow.src, flow.dst, dst_peer_id, request_version)
             .await
-            .map_err(crate::gateway::proxy_failover::ProxyPrepareError::transport)
+            .map_err(ProxyPrepareError::transport)?;
+        if request_version != 0 {
+            await_proxy_prepare_ready(stream, deadline).await
+        } else {
+            Ok(stream)
+        }
     }
 }
 
@@ -746,6 +767,7 @@ impl QuicStreamReceiver {
         let conn_data = Self::read_stream_header(&mut stream).await?;
         let conn_data_parsed = QuicConnData::decode(conn_data.as_ref())
             .context("failed to decode quic stream header")?;
+        let ack_requested = conn_data_parsed.proxy_prepare_version >= PROXY_PREPARE_ACK_VERSION;
 
         let handle = stream.id();
         let proxy_entries = &ctx.proxy_entries;
@@ -794,6 +816,10 @@ impl QuicStreamReceiver {
 
         let global_ctx = ctx.global_ctx.clone();
         if global_ctx.should_deny_proxy(&dst_socket, false) {
+            if ack_requested {
+                write_proxy_prepare_ack(stream.writer_mut(), ProxyPrepareAckStatus::PolicyDenied)
+                    .await?;
+            }
             return Err(anyhow::anyhow!(
                 "dst socket {:?} is in running listeners, ignore it",
                 dst_socket
@@ -823,15 +849,48 @@ impl QuicStreamReceiver {
                 ChainType::Forward
             },
         };
-        acl_handler.handle_packet(&conn_data)?;
+        if let Err(error) = acl_handler.handle_packet(&conn_data) {
+            if ack_requested {
+                write_proxy_prepare_ack(stream.writer_mut(), ProxyPrepareAckStatus::PolicyDenied)
+                    .await?;
+            }
+            return Err(error.into());
+        }
 
         debug!("quic connect to dst socket: {:?}", dst_socket);
 
+        if ack_requested {
+            write_proxy_prepare_ack(stream.writer_mut(), ProxyPrepareAckStatus::Accepted).await?;
+        }
         let _g = global_ctx.net_ns.guard();
         let connector = crate::gateway::tcp_proxy::NatDstTcpConnector {};
-        let ret = connector
-            .connect("0.0.0.0:0".parse()?, dst_socket, None)
-            .await?;
+        let connect = connector.connect("0.0.0.0:0".parse()?, dst_socket, None);
+        let ret = if ack_requested {
+            match timeout(PROXY_TARGET_CONNECT_TIMEOUT, connect).await {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
+                    write_proxy_prepare_ack(
+                        stream.writer_mut(),
+                        ProxyPrepareAckStatus::DestinationFailed,
+                    )
+                    .await?;
+                    return Err(error);
+                }
+                Err(error) => {
+                    write_proxy_prepare_ack(
+                        stream.writer_mut(),
+                        ProxyPrepareAckStatus::BusinessTimeout,
+                    )
+                    .await?;
+                    return Err(error.into());
+                }
+            }
+        } else {
+            connect.await?
+        };
+        if ack_requested {
+            write_proxy_prepare_ack(stream.writer_mut(), ProxyPrepareAckStatus::Ready).await?;
+        }
 
         if let Some(mut e) = proxy_entries.get_mut(&handle) {
             e.state = TcpProxyEntryState::Connected.into();

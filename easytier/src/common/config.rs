@@ -719,6 +719,7 @@ impl TomlConfigLoader {
                 );
             }
         }
+        Self::warn_stealth_configuration(&config, &flags, &stealth_protocols);
         config.flags_struct = Some(flags);
         let has_network_identity = config.network_identity.is_some();
 
@@ -749,6 +750,60 @@ impl TomlConfigLoader {
         }
 
         Ok(config)
+    }
+
+    fn warn_stealth_configuration(
+        config: &Config,
+        flags: &Flags,
+        protocols: &crate::common::stealth_registry::StealthProtocolSet,
+    ) {
+        let secure_mode = config
+            .secure_mode
+            .as_ref()
+            .is_some_and(|secure| secure.enabled);
+        let has_secret = config
+            .network_identity
+            .as_ref()
+            .and_then(|identity| identity.network_secret.as_deref())
+            .is_some_and(|secret| !secret.is_empty());
+        let effective = flags.stealth_mode && secure_mode && has_secret;
+
+        if flags.stealth_mode && !secure_mode {
+            tracing::warn!(
+                "stealth_mode is enabled but secure_mode is disabled; stealth is inactive"
+            );
+        } else if flags.stealth_mode && !has_secret {
+            tracing::warn!(
+                "stealth_mode is enabled but network_secret is missing or empty; stealth is inactive"
+            );
+        } else if flags.stealth_mode && protocols.effective_protocols(true).is_empty() {
+            tracing::warn!(
+                "stealth_mode is enabled but no configured stealth protocol is compiled; stealth is inactive"
+            );
+        } else if !flags.stealth_mode
+            && (!flags.stealth_protocols.trim().is_empty() || flags.stealth_window_secs != 0)
+        {
+            tracing::warn!(
+                "stealth_protocols or stealth_window_secs is configured while stealth_mode is disabled"
+            );
+        }
+
+        if flags.stealth_window_secs != 0
+            && flags.stealth_window_secs != crate::tunnel::stealth::DEFAULT_GATE_WINDOW_SECS as u32
+        {
+            tracing::warn!(
+                stealth_window_secs = flags.stealth_window_secs,
+                "custom stealth gate window must match every stealth node in this network"
+            );
+        }
+
+        let udp_stealth = effective
+            && protocols.contains(true, crate::common::stealth_registry::StealthProtocol::Udp);
+        if flags.disable_legacy_udp_hole_punch && !udp_stealth {
+            tracing::warn!(
+                "disable_legacy_udp_hole_punch rejects legacy requests without a stealth preference even though UDP stealth is inactive; explicit plain requests from new peers remain allowed"
+            );
+        }
     }
 
     fn gen_flags(

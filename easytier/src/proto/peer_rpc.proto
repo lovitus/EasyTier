@@ -328,6 +328,21 @@ message HandshakeRequest {
 message KcpConnData {
   common.SocketAddr src = 1;
   common.SocketAddr dst = 4;
+  // Non-zero requests framed proxy prepare acknowledgements before payload.
+  uint32 proxy_prepare_version = 5;
+}
+
+enum ProxyPrepareAckStatus {
+  PROXY_PREPARE_ACK_STATUS_UNSPECIFIED = 0;
+  PROXY_PREPARE_ACK_STATUS_ACCEPTED = 1;
+  PROXY_PREPARE_ACK_STATUS_READY = 2;
+  PROXY_PREPARE_ACK_STATUS_DESTINATION_FAILED = 3;
+  PROXY_PREPARE_ACK_STATUS_POLICY_DENIED = 4;
+  PROXY_PREPARE_ACK_STATUS_BUSINESS_TIMEOUT = 5;
+}
+
+message ProxyPrepareAck {
+  ProxyPrepareAckStatus status = 1;
 }
 
 enum SecureAuthLevel {

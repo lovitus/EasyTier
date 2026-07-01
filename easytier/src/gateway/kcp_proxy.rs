@@ -1,7 +1,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Weak},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, anyhow, bail};
@@ -20,8 +20,10 @@ use tokio::task::JoinSet;
 use super::{
     CidrSet,
     proxy_failover::{
-        BoxProxyStream, FlowKey, PreparedProxyStore, PreparedProxyStream, ProxyPrepareTransport,
-        ProxyTransport,
+        BoxProxyStream, FlowKey, PROXY_PREPARE_ACK_VERSION, PROXY_TARGET_CONNECT_TIMEOUT,
+        PreparedProxyStore, PreparedProxyStream, ProxyPrepareError, ProxyPrepareTransport,
+        ProxyTransport, await_proxy_prepare_ready, requested_proxy_prepare_version,
+        write_proxy_prepare_ack,
     },
     tcp_proxy::{ClaimedNatDstStream, NatDstConnector, NatDstTcpConnector, TcpProxy},
 };
@@ -41,7 +43,7 @@ use crate::{
             ListTcpProxyEntryRequest, ListTcpProxyEntryResponse, TcpProxyEntry, TcpProxyEntryState,
             TcpProxyEntryTransportType, TcpProxyRpc,
         },
-        peer_rpc::KcpConnData,
+        peer_rpc::{KcpConnData, ProxyPrepareAckStatus},
         rpc_types::{self, controller::BaseController},
     },
     tunnel::packet_def::{PacketType, PeerManagerHeader, ZCPacket},
@@ -118,11 +120,12 @@ pub struct NatDstKcpConnector {
 }
 
 impl NatDstKcpConnector {
-    async fn connect_to_peer(
+    async fn connect_to_peer_stream(
         &self,
         src: SocketAddr,
         nat_dst: SocketAddr,
         dst_peer: PeerId,
+        proxy_prepare_version: u32,
     ) -> anyhow::Result<BoxProxyStream> {
         let peer_mgr = self
             .peer_mgr
@@ -131,6 +134,7 @@ impl NatDstKcpConnector {
         let conn_data = KcpConnData {
             src: Some(src.into()),
             dst: Some(nat_dst.into()),
+            proxy_prepare_version,
         };
         let encoded = Bytes::from(conn_data.encode_to_vec());
         let stream = (0..5)
@@ -149,6 +153,15 @@ impl NatDstKcpConnector {
             .await
             .context("failed to connect to peer")?;
         Ok(Box::new(stream))
+    }
+
+    async fn connect_to_peer(
+        &self,
+        src: SocketAddr,
+        nat_dst: SocketAddr,
+        dst_peer: PeerId,
+    ) -> anyhow::Result<BoxProxyStream> {
+        self.connect_to_peer_stream(src, nat_dst, dst_peer, 0).await
     }
 }
 
@@ -233,11 +246,19 @@ impl ProxyPrepareTransport for NatDstKcpConnector {
         &self,
         flow: FlowKey,
         dst_peer_id: PeerId,
-    ) -> std::result::Result<BoxProxyStream, crate::gateway::proxy_failover::ProxyPrepareError>
-    {
-        self.connect_to_peer(flow.src, flow.dst, dst_peer_id)
+        prepare_ack_version: u32,
+        deadline: Instant,
+    ) -> std::result::Result<BoxProxyStream, ProxyPrepareError> {
+        let request_version = requested_proxy_prepare_version(prepare_ack_version);
+        let stream = self
+            .connect_to_peer_stream(flow.src, flow.dst, dst_peer_id, request_version)
             .await
-            .map_err(crate::gateway::proxy_failover::ProxyPrepareError::transport)
+            .map_err(ProxyPrepareError::transport)?;
+        if request_version != 0 {
+            await_proxy_prepare_ready(stream, deadline).await
+        } else {
+            Ok(stream)
+        }
     }
 }
 
@@ -371,7 +392,7 @@ impl KcpProxyDst {
 
     #[tracing::instrument(ret, skip(route))]
     async fn handle_one_in_stream(
-        kcp_stream: KcpStream,
+        mut kcp_stream: KcpStream,
         global_ctx: ArcGlobalCtx,
         proxy_entries: Arc<DashMap<ConnId, TcpProxyEntry>>,
         cidr_set: Arc<CidrSet>,
@@ -380,6 +401,7 @@ impl KcpProxyDst {
         let mut conn_data = kcp_stream.conn_data().clone();
         let parsed_conn_data = KcpConnData::decode(&mut conn_data)
             .with_context(|| format!("failed to decode kcp conn data: {:?}", conn_data))?;
+        let ack_requested = parsed_conn_data.proxy_prepare_version >= PROXY_PREPARE_ACK_VERSION;
         let mut dst_socket: SocketAddr = parsed_conn_data
             .dst
             .ok_or(anyhow::anyhow!(
@@ -423,6 +445,10 @@ impl KcpProxyDst {
         );
 
         if global_ctx.should_deny_proxy(&dst_socket, false) {
+            if ack_requested {
+                write_proxy_prepare_ack(&mut kcp_stream, ProxyPrepareAckStatus::PolicyDenied)
+                    .await?;
+            }
             return Err(anyhow::anyhow!(
                 "dst socket {:?} is in running listeners, ignore it",
                 dst_socket
@@ -453,15 +479,48 @@ impl KcpProxyDst {
                 ChainType::Forward
             },
         };
-        acl_handler.handle_packet(&conn_data)?;
+        if let Err(error) = acl_handler.handle_packet(&conn_data) {
+            if ack_requested {
+                write_proxy_prepare_ack(&mut kcp_stream, ProxyPrepareAckStatus::PolicyDenied)
+                    .await?;
+            }
+            return Err(error.into());
+        }
 
         tracing::debug!("kcp connect to dst socket: {:?}", dst_socket);
 
+        if ack_requested {
+            write_proxy_prepare_ack(&mut kcp_stream, ProxyPrepareAckStatus::Accepted).await?;
+        }
         let _g = global_ctx.net_ns.guard();
         let connector = NatDstTcpConnector {};
-        let ret = connector
-            .connect("0.0.0.0:0".parse().unwrap(), dst_socket, None)
-            .await?;
+        let connect = connector.connect("0.0.0.0:0".parse().unwrap(), dst_socket, None);
+        let ret = if ack_requested {
+            match tokio::time::timeout(PROXY_TARGET_CONNECT_TIMEOUT, connect).await {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
+                    write_proxy_prepare_ack(
+                        &mut kcp_stream,
+                        ProxyPrepareAckStatus::DestinationFailed,
+                    )
+                    .await?;
+                    return Err(error.into());
+                }
+                Err(error) => {
+                    write_proxy_prepare_ack(
+                        &mut kcp_stream,
+                        ProxyPrepareAckStatus::BusinessTimeout,
+                    )
+                    .await?;
+                    return Err(error.into());
+                }
+            }
+        } else {
+            connect.await?
+        };
+        if ack_requested {
+            write_proxy_prepare_ack(&mut kcp_stream, ProxyPrepareAckStatus::Ready).await?;
+        }
 
         if let Some(mut e) = proxy_entries.get_mut(&kcp_stream.conn_id()) {
             e.state = TcpProxyEntryState::Connected.into();

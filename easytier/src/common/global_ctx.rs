@@ -316,11 +316,16 @@ impl GlobalCtx {
         mut feature_flags: PeerFeatureFlag,
         stealth_enabled: bool,
     ) -> PeerFeatureFlag {
-        feature_flags.kcp_input = !flags.disable_kcp_input;
+        feature_flags.kcp_input = cfg!(feature = "kcp") && !flags.disable_kcp_input;
         feature_flags.no_relay_kcp = flags.disable_relay_kcp;
         feature_flags.support_conn_list_sync = true;
-        feature_flags.quic_input = !flags.disable_quic_input;
+        feature_flags.quic_input = cfg!(feature = "quic") && !flags.disable_quic_input;
         feature_flags.no_relay_quic = flags.disable_relay_quic;
+        feature_flags.proxy_prepare_ack_version = if cfg!(any(feature = "kcp", feature = "quic")) {
+            crate::common::constants::PROXY_PREPARE_ACK_VERSION
+        } else {
+            0
+        };
         feature_flags.need_p2p = flags.need_p2p;
         feature_flags.disable_p2p = flags.disable_p2p;
         let protocols =
@@ -1095,6 +1100,23 @@ pub mod tests {
         assert!(feature_flags.avoid_relay_data);
         assert!(feature_flags.is_public_server);
         assert!(!feature_flags.ipv6_public_addr_provider);
+    }
+
+    #[tokio::test]
+    async fn proxy_capabilities_follow_compiled_features() {
+        let global_ctx = GlobalCtx::new(TomlConfigLoader::default());
+        let feature_flags = global_ctx.get_feature_flags();
+
+        assert_eq!(feature_flags.kcp_input, cfg!(feature = "kcp"));
+        assert_eq!(feature_flags.quic_input, cfg!(feature = "quic"));
+        assert_eq!(
+            feature_flags.proxy_prepare_ack_version,
+            if cfg!(any(feature = "kcp", feature = "quic")) {
+                crate::common::constants::PROXY_PREPARE_ACK_VERSION
+            } else {
+                0
+            }
+        );
     }
 
     #[tokio::test]
