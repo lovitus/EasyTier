@@ -23,10 +23,12 @@ pub mod netns;
 pub mod network;
 pub mod os_info;
 pub mod stats_manager;
+pub mod stealth_registry;
 pub mod stun;
 pub mod stun_codec_ext;
 pub mod token_bucket;
 pub mod tracing_rolling_appender;
+pub mod transport_priority;
 pub mod upnp;
 
 pub use machine_id::{MachineIdOptions, resolve_machine_id};

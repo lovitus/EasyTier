@@ -2,7 +2,11 @@ use crate::common::PeerId;
 use crate::common::acl_processor::PacketInfo;
 use crate::common::global_ctx::{ArcGlobalCtx, GlobalCtx};
 use crate::gateway::CidrSet;
-use crate::gateway::tcp_proxy::{NatDstConnector, TcpProxy};
+use crate::gateway::proxy_failover::{
+    BoxProxyStream, FlowKey, PreparedProxyStore, PreparedProxyStream, ProxyPrepareTransport,
+    ProxyTransport,
+};
+use crate::gateway::tcp_proxy::{ClaimedNatDstStream, NatDstConnector, TcpProxy};
 use crate::gateway::wrapped_proxy::{ProxyAclHandler, TcpProxyForWrappedSrcTrait};
 use crate::peers::PeerPacketFilter;
 use crate::peers::peer_manager::PeerManager;
@@ -283,33 +287,16 @@ pub struct NatDstQuicConnector {
     pub(crate) endpoint: Endpoint,
     pub(crate) peer_mgr: Weak<PeerManager>,
     pub(crate) conn_map: Cache<PeerId, Connection>,
+    pub(crate) prepared_store: Option<Arc<PreparedProxyStore>>,
 }
 
-#[async_trait::async_trait]
-impl NatDstConnector for NatDstQuicConnector {
-    type DstStream = QuicStreamInner;
-
-    async fn connect(
+impl NatDstQuicConnector {
+    async fn connect_to_peer(
         &self,
         src: SocketAddr,
         nat_dst: SocketAddr,
-    ) -> anyhow::Result<Self::DstStream> {
-        let peer_mgr = self
-            .peer_mgr
-            .upgrade()
-            .ok_or_else(|| anyhow!("peer manager is not available"))?;
-
-        let dst_peer = {
-            let SocketAddr::V4(addr) = nat_dst else {
-                bail!("ipv6 is not supported");
-            };
-            peer_mgr
-                .get_peer_map()
-                .get_peer_id_by_ipv4(addr.ip())
-                .await
-                .ok_or_else(|| anyhow!("no peer found for nat dst: {}", nat_dst))?
-        };
-
+        dst_peer: PeerId,
+    ) -> anyhow::Result<BoxProxyStream> {
         tracing::trace!(?nat_dst, ?dst_peer, "quic nat");
 
         let header = {
@@ -362,7 +349,7 @@ impl NatDstConnector for NatDstQuicConnector {
             reconnect().await?
         };
 
-        loop {
+        let stream = loop {
             let is_retryable = |error: &ConnectionError| {
                 matches!(
                     error,
@@ -374,7 +361,7 @@ impl NatDstConnector for NatDstQuicConnector {
             };
             let mut retry = !reconnected;
             let header = header.clone();
-            let result = async {
+            let result: anyhow::Result<QuicStreamInner> = async {
                 let mut stream: QuicStream = connection
                     .open_bi()
                     .await
@@ -402,8 +389,55 @@ impl NatDstConnector for NatDstQuicConnector {
                 }
             }
 
-            break result;
+            break result?;
+        };
+        Ok(Box::new(stream))
+    }
+}
+
+#[async_trait::async_trait]
+impl NatDstConnector for NatDstQuicConnector {
+    type DstStream = BoxProxyStream;
+
+    async fn connect(
+        &self,
+        src: SocketAddr,
+        nat_dst: SocketAddr,
+        claimed: Option<ClaimedNatDstStream>,
+    ) -> anyhow::Result<Self::DstStream> {
+        if let Some(claimed) = claimed {
+            let prepared = claimed
+                .0
+                .downcast::<PreparedProxyStream>()
+                .map_err(|_| anyhow!("invalid prepared QUIC proxy stream"))?;
+            return Ok((*prepared).0);
         }
+        let peer_mgr = self
+            .peer_mgr
+            .upgrade()
+            .ok_or_else(|| anyhow!("peer manager is not available"))?;
+        let SocketAddr::V4(addr) = nat_dst else {
+            bail!("ipv6 is not supported");
+        };
+        let dst_peer = peer_mgr
+            .get_peer_map()
+            .get_peer_id_by_ipv4(addr.ip())
+            .await
+            .ok_or_else(|| anyhow!("no peer found for nat dst: {}", nat_dst))?;
+        self.connect_to_peer(src, nat_dst, dst_peer).await
+    }
+
+    fn claim_deferred_stream(
+        &self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        initial_sequence: u32,
+    ) -> Option<ClaimedNatDstStream> {
+        self.prepared_store.as_ref()?.claim_for_syn(
+            FlowKey { src, dst },
+            ProxyTransport::Quic,
+            initial_sequence,
+        )
     }
 
     #[inline]
@@ -426,6 +460,24 @@ impl NatDstConnector for NatDstQuicConnector {
     #[inline]
     fn transport_type(&self) -> TcpProxyEntryTransportType {
         TcpProxyEntryTransportType::Quic
+    }
+}
+
+#[async_trait::async_trait]
+impl ProxyPrepareTransport for NatDstQuicConnector {
+    fn transport(&self) -> ProxyTransport {
+        ProxyTransport::Quic
+    }
+
+    async fn prepare(
+        &self,
+        flow: FlowKey,
+        dst_peer_id: PeerId,
+    ) -> std::result::Result<BoxProxyStream, crate::gateway::proxy_failover::ProxyPrepareError>
+    {
+        self.connect_to_peer(flow.src, flow.dst, dst_peer_id)
+            .await
+            .map_err(crate::gateway::proxy_failover::ProxyPrepareError::transport)
     }
 }
 
@@ -705,6 +757,7 @@ impl QuicStreamReceiver {
                 start_time: chrono::Local::now().timestamp() as u64,
                 state: TcpProxyEntryState::ConnectingDst.into(),
                 transport_type: TcpProxyEntryTransportType::Quic.into(),
+                ..Default::default()
             },
         );
         defer! {
@@ -776,7 +829,9 @@ impl QuicStreamReceiver {
 
         let _g = global_ctx.net_ns.guard();
         let connector = crate::gateway::tcp_proxy::NatDstTcpConnector {};
-        let ret = connector.connect("0.0.0.0:0".parse()?, dst_socket).await?;
+        let ret = connector
+            .connect("0.0.0.0:0".parse()?, dst_socket, None)
+            .await?;
 
         if let Some(mut e) = proxy_entries.get_mut(&handle) {
             e.state = TcpProxyEntryState::Connected.into();
@@ -792,6 +847,7 @@ impl QuicStreamReceiver {
 
 pub struct QuicProxy {
     peer_mgr: Arc<PeerManager>,
+    prepared_store: Option<Arc<PreparedProxyStore>>,
 
     endpoint: Option<Endpoint>,
 
@@ -814,9 +870,13 @@ impl QuicProxy {
 }
 
 impl QuicProxy {
-    pub fn new(peer_mgr: Arc<PeerManager>) -> Self {
+    pub fn new(
+        peer_mgr: Arc<PeerManager>,
+        prepared_store: Option<Arc<PreparedProxyStore>>,
+    ) -> Self {
         Self {
             peer_mgr,
+            prepared_store,
             endpoint: None,
             src: None,
             dst: None,
@@ -893,6 +953,7 @@ impl QuicProxy {
                         .max_capacity(u8::MAX.into()) // cf. quinn transport config (max_concurrent_bidi_streams)
                         .time_to_idle(Duration::from_secs(600)) // cf. quinn transport config (max_idle_timeout)
                         .build(),
+                    prepared_store: self.prepared_store.clone(),
                 },
             ));
 
@@ -946,6 +1007,10 @@ impl QuicProxySrc {
     #[inline]
     pub fn get_tcp_proxy(&self) -> Arc<TcpProxy<NatDstQuicConnector>> {
         self.tcp_proxy.get_tcp_proxy().clone()
+    }
+
+    pub fn get_connector(&self) -> NatDstQuicConnector {
+        self.tcp_proxy.get_tcp_proxy().get_connector()
     }
 }
 
@@ -1007,7 +1072,7 @@ impl TcpProxyRpc for QuicProxyDstRpcService {
         let mut reply = ListTcpProxyEntryResponse::default();
         if let Some(tcp_proxy) = self.0.upgrade() {
             for item in tcp_proxy.iter() {
-                reply.entries.push(*item.value());
+                reply.entries.push(item.value().clone());
             }
         }
         Ok(reply)

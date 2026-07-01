@@ -1,22 +1,27 @@
 // try connect peers directly, with either its public ip or lan ip
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    str::FromStr,
     sync::{
-        Arc,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
 use hotpath::instant::Instant;
+use pnet::ipnetwork::IpNetwork;
 
 use crate::{
     common::{
-        PeerId, dns::socket_addrs, error::Error, global_ctx::ArcGlobalCtx,
+        PeerId,
+        dns::socket_addrs,
+        error::Error,
+        global_ctx::ArcGlobalCtx,
+        network::IPCollector,
         stun::StunInfoCollectorTrait,
+        transport_priority::{TransportPriority, protocol_is_compiled},
     },
     connector::udp_hole_punch::handle_rpc_result,
     peers::{
@@ -38,8 +43,8 @@ use crate::{
 };
 
 use super::{
-    create_connector_by_url, should_background_p2p_with_peer, should_downgrade_udp_stealth,
-    should_try_p2p_with_peer, udp_hole_punch,
+    create_connector_by_url, should_background_p2p_with_peer, should_try_p2p_with_peer,
+    udp_hole_punch,
 };
 use crate::tunnel::{FromUrl, IpScheme, TunnelScheme, matches_scheme};
 use anyhow::Context;
@@ -53,6 +58,38 @@ pub const DIRECT_CONNECTOR_BLACKLIST_TIMEOUT_SEC: u64 = 300;
 const MAX_IPV6_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
 
 static TESTING: AtomicBool = AtomicBool::new(false);
+static DEFAULT_PROTOCOL_DEPRECATION_LOGGED: AtomicBool = AtomicBool::new(false);
+static UNCOMPILED_PRIORITY_WARNINGS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[derive(Debug, Clone)]
+struct DirectCandidate {
+    url: url::Url,
+    is_lan: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum DirectStealthMode {
+    #[default]
+    Disabled,
+    Required,
+    PreferLegacyFallback,
+}
+
+fn direct_stealth_mode(
+    protocol: crate::common::stealth_registry::StealthProtocol,
+    remote_feature: Option<&crate::proto::common::PeerFeatureFlag>,
+) -> DirectStealthMode {
+    match remote_feature {
+        Some(feature)
+            if crate::common::stealth_registry::peer_supports_protocol(feature, protocol) =>
+        {
+            DirectStealthMode::Required
+        }
+        Some(_) => DirectStealthMode::Disabled,
+        None => DirectStealthMode::PreferLegacyFallback,
+    }
+}
 
 fn mapped_listener_port(url: &url::Url) -> Option<u16> {
     url.port().or_else(|| {
@@ -200,19 +237,23 @@ impl DirectConnectorManagerData {
 
     fn build_udp_stealth_for_peer(
         &self,
-        disable_udp_stealth: bool,
+        mode: DirectStealthMode,
     ) -> std::sync::Arc<crate::tunnel::stealth::OuterSessionState> {
-        if disable_udp_stealth {
+        if matches!(mode, DirectStealthMode::Disabled) {
             std::sync::Arc::new(crate::tunnel::stealth::OuterSessionState::disabled())
         } else {
             let flags = self.global_ctx.get_flags();
             let secure_mode = self.global_ctx.is_secure_mode_enabled();
+            let udp_stealth = crate::common::stealth_registry::protocol_enabled(
+                &flags,
+                crate::common::stealth_registry::StealthProtocol::Udp,
+            );
             crate::tunnel::stealth::build_outer_session(
                 self.global_ctx
                     .get_network_identity()
                     .network_secret
                     .as_deref(),
-                flags.stealth_mode,
+                udp_stealth,
                 secure_mode,
                 flags.stealth_window_secs,
             )
@@ -283,7 +324,7 @@ impl DirectConnectorManagerData {
         &self,
         dst_peer_id: PeerId,
         remote_url: &url::Url,
-        disable_udp_stealth: bool,
+        stealth_mode: DirectStealthMode,
     ) -> Result<(PeerId, PeerConnId), Error> {
         let local_socket = Arc::new(
             UdpSocket::bind("[::]:0")
@@ -333,7 +374,15 @@ impl DirectConnectorManagerData {
         }
 
         let mut udp_connector = UdpTunnelConnector::new(remote_url.clone());
-        udp_connector.set_stealth(self.build_udp_stealth_for_peer(disable_udp_stealth));
+        let stealth = self.build_udp_stealth_for_peer(stealth_mode);
+        match stealth_mode {
+            DirectStealthMode::Disabled | DirectStealthMode::Required => {
+                udp_connector.set_stealth(stealth);
+            }
+            DirectStealthMode::PreferLegacyFallback => {
+                udp_connector.prefer_stealth_with_legacy_fallback(stealth);
+            }
+        }
         let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V6).await?;
         let ret = udp_connector
             .try_connect_with_socket(local_socket, remote_addr)
@@ -349,7 +398,7 @@ impl DirectConnectorManagerData {
         &self,
         dst_peer_id: PeerId,
         remote_url: &url::Url,
-        disable_udp_stealth: bool,
+        stealth_mode: DirectStealthMode,
     ) -> Result<(PeerId, PeerConnId), Error> {
         let local_socket = {
             let _g = self.global_ctx.net_ns.guard();
@@ -372,7 +421,15 @@ impl DirectConnectorManagerData {
             .await;
 
         let mut udp_connector = UdpTunnelConnector::new(remote_url.clone());
-        udp_connector.set_stealth(self.build_udp_stealth_for_peer(disable_udp_stealth));
+        let stealth = self.build_udp_stealth_for_peer(stealth_mode);
+        match stealth_mode {
+            DirectStealthMode::Disabled | DirectStealthMode::Required => {
+                udp_connector.set_stealth(stealth);
+            }
+            DirectStealthMode::PreferLegacyFallback => {
+                udp_connector.prefer_stealth_with_legacy_fallback(stealth);
+            }
+        }
         let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V4).await?;
         let ret = udp_connector
             .try_connect_with_socket(local_socket, remote_addr)
@@ -387,23 +444,25 @@ impl DirectConnectorManagerData {
         &self,
         dst_peer_id: PeerId,
         addr: String,
-        disable_udp_stealth: bool,
+        stealth_mode: DirectStealthMode,
     ) -> Result<(), Error> {
         let mut connector =
             create_connector_by_url(&addr, &self.global_ctx, IpVersion::Both).await?;
-        if disable_udp_stealth {
-            connector.disable_stealth();
+        match stealth_mode {
+            DirectStealthMode::Disabled => connector.disable_stealth(),
+            DirectStealthMode::Required => connector.require_stealth(),
+            DirectStealthMode::PreferLegacyFallback => {}
         }
         let remote_url = connector.remote_url();
         let (peer_id, conn_id) = if matches_scheme!(remote_url, TunnelScheme::Ip(IpScheme::Udp)) {
             match remote_url.host() {
                 Some(Host::Ipv6(_)) => {
-                    self.connect_to_public_ipv6(dst_peer_id, &remote_url, disable_udp_stealth)
+                    self.connect_to_public_ipv6(dst_peer_id, &remote_url, stealth_mode)
                         .await?
                 }
                 Some(Host::Ipv4(ip)) if is_public_ipv4(ip) => {
                     match self
-                        .connect_to_public_ipv4(dst_peer_id, &remote_url, disable_udp_stealth)
+                        .connect_to_public_ipv4(dst_peer_id, &remote_url, stealth_mode)
                         .await
                     {
                         Ok(ret) => ret,
@@ -461,7 +520,7 @@ impl DirectConnectorManagerData {
         self: Arc<DirectConnectorManagerData>,
         dst_peer_id: PeerId,
         addr: String,
-        disable_udp_stealth: bool,
+        stealth_mode: DirectStealthMode,
     ) -> Result<(), Error> {
         let mut rand_gen = rand::rngs::OsRng;
         let backoff_ms = [1000, 2000, 4000];
@@ -486,7 +545,7 @@ impl DirectConnectorManagerData {
 
             tracing::debug!(?dst_peer_id, ?addr, "try_connect_to_ip start one round");
             let ret = self
-                .do_try_connect_to_ip(dst_peer_id, addr.clone(), disable_udp_stealth)
+                .do_try_connect_to_ip(dst_peer_id, addr.clone(), stealth_mode)
                 .await;
             tracing::debug!(?ret, ?dst_peer_id, ?addr, "try_connect_to_ip return");
             if ret.is_ok() {
@@ -520,155 +579,165 @@ impl DirectConnectorManagerData {
         }
     }
 
-    async fn spawn_direct_connect_task(
-        self: &Arc<DirectConnectorManagerData>,
-        dst_peer_id: PeerId,
+    fn is_lan_candidate(ip: IpAddr, local_networks: &[IpNetwork]) -> bool {
+        match ip {
+            IpAddr::V4(ip) if ip.is_link_local() => true,
+            IpAddr::V6(ip) if ip.is_unicast_link_local() => true,
+            _ => local_networks.iter().any(|network| network.contains(ip)),
+        }
+    }
+
+    fn listener_url_for_addr(listener: &url::Url, addr: SocketAddr) -> Option<url::Url> {
+        let mut url = listener.clone();
+        let host = match addr.ip() {
+            IpAddr::V4(ip) => ip.to_string(),
+            IpAddr::V6(ip) => format!("[{ip}]"),
+        };
+        url.set_host(Some(&host)).ok()?;
+        url.set_port(Some(addr.port())).ok()?;
+        Some(url)
+    }
+
+    async fn expand_direct_candidates(
+        &self,
         ip_list: &GetIpListResponse,
-        disable_udp_stealth: bool,
-        listener: &url::Url,
-        tasks: &mut JoinSet<Result<(), Error>>,
-    ) {
-        let Ok(mut addrs) = resolve_mapped_listener_addrs(listener).await else {
-            tracing::error!(?listener, "failed to parse socket address from listener");
-            return;
-        };
-        let listener_host = addrs.pop();
-        tracing::info!(?listener_host, ?listener, "try direct connect to peer");
-
-        let is_udp = matches_protocol!(listener, Protocol::UDP);
-        // Snapshot running listeners once; used for cheap port pre-checks before the
-        // expensive should_deny_proxy call (which binds a socket per IP) in the
-        // unspecified-address expansion loops below.
+        listeners: &[url::Url],
+    ) -> Vec<DirectCandidate> {
+        let local_networks = IPCollector::collect_interfaces(self.global_ctx.net_ns.clone(), false)
+            .await
+            .into_iter()
+            .flat_map(|interface| interface.ips)
+            .collect::<Vec<_>>();
         let local_listeners = self.global_ctx.get_running_listeners();
-        let port_has_local_listener = |port: u16| -> bool {
-            local_listeners
-                .iter()
-                .any(|l| l.port() == Some(port) && matches_protocol!(l, Protocol::UDP) == is_udp)
-        };
+        let mut seen = HashSet::new();
+        let mut candidates = Vec::new();
 
-        match listener_host {
-            Some(SocketAddr::V4(s_addr)) => {
-                if s_addr.ip().is_unspecified() {
-                    // Only pay the should_deny_proxy cost (bind per IP) when a local
-                    // listener actually uses this port+protocol; otherwise the check
-                    // can never return true.
-                    let check_self = port_has_local_listener(s_addr.port());
-                    ip_list
-                        .interface_ipv4s
-                        .iter()
-                        .chain(ip_list.public_ipv4.iter())
-                        .for_each(|ip| {
-                            let sock_addr = SocketAddr::new(
-                                IpAddr::V4(std::net::Ipv4Addr::from(ip.addr)),
-                                s_addr.port(),
-                            );
-                            if check_self && self.global_ctx.should_deny_proxy(&sock_addr, is_udp) {
-                                tracing::debug!(
-                                    ?ip,
-                                    ?listener,
-                                    "skip self-connection (0.0.0.0 expansion)"
-                                );
-                                return;
-                            }
-                            let mut addr = (*listener).clone();
-                            if addr.set_host(Some(ip.to_string().as_str())).is_ok() {
-                                tasks.spawn(Self::try_connect_to_ip(
-                                    self.clone(),
-                                    dst_peer_id,
-                                    addr.to_string(),
-                                    disable_udp_stealth,
-                                ));
-                            } else {
-                                tracing::error!(
-                                    ?ip,
-                                    ?listener,
-                                    ?dst_peer_id,
-                                    "failed to set host for interface ipv4"
-                                );
-                            }
-                        });
-                } else if !s_addr.ip().is_loopback() || TESTING.load(Ordering::Relaxed) {
-                    if self
-                        .global_ctx
-                        .should_deny_proxy(&SocketAddr::from(s_addr), is_udp)
-                    {
-                        tracing::debug!(?listener, "skip self-connection (specific IPv4)");
-                    } else {
-                        tasks.spawn(Self::try_connect_to_ip(
-                            self.clone(),
-                            dst_peer_id,
-                            listener.to_string(),
-                            disable_udp_stealth,
-                        ));
+        for listener in listeners {
+            let Ok(resolved) = resolve_mapped_listener_addrs(listener).await else {
+                tracing::warn!(?listener, "failed to resolve direct listener");
+                continue;
+            };
+            let is_udp = matches_protocol!(listener, Protocol::UDP);
+            let mut expanded = Vec::new();
+            for addr in resolved {
+                if addr.ip().is_unspecified() {
+                    match addr {
+                        SocketAddr::V4(addr) => expanded.extend(
+                            ip_list
+                                .interface_ipv4s
+                                .iter()
+                                .chain(ip_list.public_ipv4.iter())
+                                .map(|ip| {
+                                    SocketAddr::new(
+                                        IpAddr::V4(Ipv4Addr::from(ip.addr)),
+                                        addr.port(),
+                                    )
+                                }),
+                        ),
+                        SocketAddr::V6(addr) => expanded.extend(
+                            ip_list
+                                .interface_ipv6s
+                                .iter()
+                                .chain(ip_list.public_ipv6.iter())
+                                .map(|ip| {
+                                    SocketAddr::new(IpAddr::V6(Ipv6Addr::from(*ip)), addr.port())
+                                }),
+                        ),
                     }
+                } else {
+                    expanded.push(addr);
                 }
             }
-            Some(SocketAddr::V6(s_addr)) => {
-                if s_addr.ip().is_unspecified() {
-                    // for ipv6, only try public ip
-                    // Same port pre-check as IPv4: avoid binding per IP when no local
-                    // listener uses this port+protocol.
-                    let check_self = port_has_local_listener(s_addr.port());
-                    ip_list
-                        .interface_ipv6s
-                        .iter()
-                        .chain(ip_list.public_ipv6.iter())
-                        .filter_map(|x| Ipv6Addr::from_str(&x.to_string()).ok())
-                        .filter(|x| is_usable_public_ipv6_candidate(x, &self.global_ctx))
-                        .collect::<HashSet<_>>()
-                        .iter()
-                        .for_each(|ip| {
-                            let sock_addr = SocketAddr::new(IpAddr::V6(*ip), s_addr.port());
-                            if check_self && self.global_ctx.should_deny_proxy(&sock_addr, is_udp) {
-                                tracing::debug!(
-                                    ?ip,
-                                    ?listener,
-                                    "skip self-connection (:: expansion)"
-                                );
-                                return;
-                            }
-                            let mut addr = (*listener).clone();
-                            if addr.set_host(Some(format!("[{}]", ip).as_str())).is_ok() {
-                                tasks.spawn(Self::try_connect_to_ip(
-                                    self.clone(),
-                                    dst_peer_id,
-                                    addr.to_string(),
-                                    disable_udp_stealth,
-                                ));
-                            } else {
-                                tracing::error!(
-                                    ?ip,
-                                    ?listener,
-                                    ?dst_peer_id,
-                                    "failed to set host for public ipv6"
-                                );
-                            }
-                        });
-                } else if self.global_ctx.is_ip_easytier_managed_ipv6(s_addr.ip()) {
-                    tracing::debug!(
-                        ?listener,
-                        "skip EasyTier-managed IPv6 as direct-connect target"
-                    );
-                } else if !s_addr.ip().is_loopback() || TESTING.load(Ordering::Relaxed) {
-                    if self
-                        .global_ctx
-                        .should_deny_proxy(&SocketAddr::from(s_addr), is_udp)
-                    {
-                        tracing::debug!(?listener, "skip self-connection (specific IPv6)");
-                    } else {
-                        tasks.spawn(Self::try_connect_to_ip(
-                            self.clone(),
-                            dst_peer_id,
-                            listener.to_string(),
-                            disable_udp_stealth,
-                        ));
-                    }
+
+            for addr in expanded {
+                if addr.ip().is_loopback() && !TESTING.load(Ordering::Relaxed) {
+                    continue;
                 }
-            }
-            p => {
-                tracing::error!(?p, ?listener, "failed to parse ip version from listener");
+                if let IpAddr::V6(ip) = addr.ip()
+                    && self.global_ctx.is_ip_easytier_managed_ipv6(&ip)
+                {
+                    tracing::debug!(?listener, ?addr, "skip EasyTier-managed IPv6 target");
+                    continue;
+                }
+                let check_self = local_listeners.iter().any(|local| {
+                    local.port() == Some(addr.port())
+                        && matches_protocol!(local, Protocol::UDP) == is_udp
+                });
+                if check_self && self.global_ctx.should_deny_proxy(&addr, is_udp) {
+                    tracing::debug!(?listener, ?addr, "skip self-connection candidate");
+                    continue;
+                }
+                let Some(url) = Self::listener_url_for_addr(listener, addr) else {
+                    tracing::warn!(?listener, ?addr, "failed to build direct candidate URL");
+                    continue;
+                };
+                if !seen.insert(url.to_string()) {
+                    continue;
+                }
+                candidates.push(DirectCandidate {
+                    url,
+                    is_lan: Self::is_lan_candidate(addr.ip(), &local_networks),
+                });
             }
         }
+        candidates
+    }
+
+    async fn try_direct_candidate_bucket(
+        self: &Arc<Self>,
+        dst_peer_id: PeerId,
+        candidates: &[DirectCandidate],
+        protocol_order: &[String],
+        stealth_modes: &HashMap<String, DirectStealthMode>,
+    ) -> bool {
+        let mut tasks = JoinSet::new();
+        let mut group_index = 0u32;
+        for protocol in protocol_order {
+            let group = candidates
+                .iter()
+                .filter(|candidate| candidate.url.scheme() == protocol)
+                .cloned()
+                .collect::<Vec<_>>();
+            if group.is_empty() {
+                continue;
+            }
+            let delay = Duration::from_millis(u64::from(group_index) * 300);
+            group_index += 1;
+            for candidate in group {
+                let this = self.clone();
+                let stealth_mode = stealth_modes
+                    .get(candidate.url.scheme())
+                    .copied()
+                    .unwrap_or_default();
+                tasks.spawn(async move {
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    Self::try_connect_to_ip(
+                        this,
+                        dst_peer_id,
+                        candidate.url.to_string(),
+                        stealth_mode,
+                    )
+                    .await
+                });
+            }
+        }
+
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok(Ok(())) => {
+                    tasks.abort_all();
+                    return true;
+                }
+                Ok(Err(error)) => tracing::debug!(?error, ?dst_peer_id, "direct candidate failed"),
+                Err(error) if !error.is_cancelled() => {
+                    tracing::warn!(?error, ?dst_peer_id, "direct candidate task failed")
+                }
+                Err(_) => {}
+            }
+        }
+        self.peer_manager.has_directly_connected_conn(dst_peer_id)
     }
 
     #[tracing::instrument(skip(self))]
@@ -678,20 +747,11 @@ impl DirectConnectorManagerData {
         ip_list: GetIpListResponse,
     ) -> Result<(), Error> {
         let route = self.peer_manager.get_route();
-        let remote_feature_flag = route
-            .get_peer_info(dst_peer_id)
-            .await
-            .and_then(|info| info.feature_flag);
-        let disable_udp_stealth = should_downgrade_udp_stealth(
-            self.global_ctx.get_flags().stealth_mode,
-            remote_feature_flag.as_ref(),
-        );
-        if disable_udp_stealth {
-            tracing::debug!(
-                ?dst_peer_id,
-                "downgrade UDP direct-connect stealth because peer advertises stealth unsupported"
-            );
-        }
+        let remote_peer_info = route.get_peer_info(dst_peer_id).await;
+        let remote_feature_flag = remote_peer_info
+            .as_ref()
+            .and_then(|info| info.feature_flag.clone());
+        let flags = self.global_ctx.get_flags();
         let enable_ipv6 = self.global_ctx.get_flags().enable_ipv6;
         let available_listeners = ip_list
             .listeners
@@ -709,72 +769,108 @@ impl DirectConnectorManagerData {
             return Err(anyhow::anyhow!("peer {} have no valid listener", dst_peer_id).into());
         }
 
-        let default_protocol = self.global_ctx.get_flags().default_protocol;
-        // sort available listeners, default protocol has the highest priority, udp is second, others just random
-        // highest priority is in the last
-        let mut available_listeners = available_listeners;
-        available_listeners.sort_by_key(|l| {
-            let scheme = l.scheme();
-            if scheme == default_protocol {
-                3
-            } else if scheme == "udp" {
-                2
-            } else {
-                1
+        let priority = TransportPriority::parse(&flags.transport_priority)
+            .expect("transport_priority is validated while loading configuration");
+        let configured_stealth =
+            crate::common::stealth_registry::StealthProtocolSet::parse(&flags.stealth_protocols)
+                .expect("stealth_protocols is validated while loading configuration");
+        let stealth_modes = configured_stealth
+            .effective_protocols(flags.stealth_mode)
+            .into_iter()
+            .map(|protocol| {
+                let mode = direct_stealth_mode(protocol, remote_feature_flag.as_ref());
+                (protocol.as_str().to_string(), mode)
+            })
+            .collect::<HashMap<_, _>>();
+        let virtual_ip = remote_peer_info.as_ref().and_then(|info| {
+            let ipv4 = info.ipv4_addr.map(|ip| IpAddr::V4(ip.into()));
+            if ipv4.is_some_and(|ip| priority.has_virtual_ip_rule(ip)) {
+                return ipv4;
             }
+            info.ipv6_addr
+                .as_ref()
+                .and_then(|inet| inet.address)
+                .map(|ip| IpAddr::V6(ip.into()))
         });
 
-        while !available_listeners.is_empty() {
-            let mut tasks = JoinSet::new();
-            let mut listener_list = vec![];
-
-            let cur_scheme = available_listeners.last().unwrap().scheme().to_owned();
-            while let Some(listener) = available_listeners.last() {
-                if listener.scheme() != cur_scheme {
-                    break;
-                }
-
-                tracing::debug!("try direct connect to peer with listener: {}", listener);
-                self.spawn_direct_connect_task(
-                    dst_peer_id,
-                    &ip_list,
-                    disable_udp_stealth,
-                    listener,
-                    &mut tasks,
-                )
-                .await;
-
-                listener_list.push(listener.clone().to_string());
-                available_listeners.pop();
+        let (lan_order, wan_order) = if priority.is_empty() {
+            let mut order = crate::common::transport_priority::BUILTIN_TRANSPORT_ORDER
+                .map(str::to_owned)
+                .to_vec();
+            let default_protocol = flags.default_protocol.to_ascii_lowercase();
+            order.retain(|protocol| protocol != &default_protocol && protocol != "udp");
+            let mut compatible = vec![default_protocol.clone()];
+            if default_protocol != "udp" {
+                compatible.push("udp".to_string());
             }
-
-            let mut ret = Vec::new();
-            while let Some(joined) = tasks.join_next().await {
-                match joined {
-                    Ok(item) => ret.push(item),
-                    Err(err) => tracing::warn!(
-                        ?err,
-                        ?dst_peer_id,
-                        ?cur_scheme,
-                        "direct connect task join failed"
-                    ),
-                }
-            }
-            tracing::debug!(
-                ?ret,
-                ?dst_peer_id,
-                ?cur_scheme,
-                ?listener_list,
-                "all tasks finished for current scheme"
-            );
-
-            if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
-                tracing::info!(
-                    "direct connect to peer {} success, has direct conn",
-                    dst_peer_id
+            compatible.extend(order);
+            (compatible.clone(), compatible)
+        } else {
+            if !flags.default_protocol.is_empty()
+                && !DEFAULT_PROTOCOL_DEPRECATION_LOGGED.swap(true, Ordering::Relaxed)
+            {
+                tracing::warn!(
+                    default_protocol = %flags.default_protocol,
+                    "transport_priority is set; default_protocol is ignored for direct-connect"
                 );
-                return Ok(());
             }
+            for protocol in priority.configured_protocols() {
+                if !protocol_is_compiled(protocol) {
+                    let mut warned = UNCOMPILED_PRIORITY_WARNINGS.lock().unwrap();
+                    if warned.insert(protocol.to_string()) {
+                        tracing::warn!(?protocol, "configured transport is not compiled; skipping");
+                    }
+                }
+            }
+            (
+                priority.order_for(true, virtual_ip),
+                priority.order_for(false, virtual_ip),
+            )
+        };
+
+        let candidates = self
+            .expand_direct_candidates(&ip_list, &available_listeners)
+            .await;
+        let lan_candidates = candidates
+            .iter()
+            .filter(|candidate| candidate.is_lan)
+            .cloned()
+            .collect::<Vec<_>>();
+        let wan_candidates = candidates
+            .iter()
+            .filter(|candidate| !candidate.is_lan)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        tracing::debug!(
+            ?dst_peer_id,
+            ?lan_candidates,
+            ?wan_candidates,
+            ?lan_order,
+            ?wan_order,
+            "scheduled direct-connect candidates"
+        );
+
+        if !lan_candidates.is_empty()
+            && self
+                .try_direct_candidate_bucket(
+                    dst_peer_id,
+                    &lan_candidates,
+                    &lan_order,
+                    &stealth_modes,
+                )
+                .await
+        {
+            return Ok(());
+        }
+        if !wan_candidates.is_empty() {
+            self.try_direct_candidate_bucket(
+                dst_peer_id,
+                &wan_candidates,
+                &wan_order,
+                &stealth_modes,
+            )
+            .await;
         }
 
         Ok(())
@@ -964,6 +1060,7 @@ mod tests {
         connector::direct::{
             DirectConnectorManager, DirectConnectorManagerData, DstListenerUrlBlackListItem,
         },
+        connector::should_downgrade_udp_stealth,
         instance::listeners::ListenerManager,
         peers::tests::{
             connect_peer_manager, create_mock_peer_manager, wait_route_appear,
@@ -976,9 +1073,7 @@ mod tests {
 
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-    use super::{
-        TESTING, mapped_listener_port, resolve_mapped_listener_addrs, should_downgrade_udp_stealth,
-    };
+    use super::{TESTING, mapped_listener_port, resolve_mapped_listener_addrs};
 
     #[tokio::test]
     async fn public_ipv6_candidate_rejects_easytier_managed_addr_even_in_tests() {
@@ -1222,6 +1317,64 @@ mod tests {
                 stealth_supported: false,
                 ..Default::default()
             }),
+        ));
+    }
+
+    #[test]
+    fn direct_transport_stealth_preserves_unknown_capability_fallback() {
+        use crate::{
+            common::stealth_registry::{STEALTH_LEVEL_AUTHENTICATED, StealthProtocol},
+            proto::common::{StealthTransportProtocol, TransportStealthCapability},
+        };
+
+        assert_eq!(
+            super::direct_stealth_mode(StealthProtocol::Tcp, None),
+            super::DirectStealthMode::PreferLegacyFallback
+        );
+        assert_eq!(
+            super::direct_stealth_mode(StealthProtocol::Tcp, Some(&PeerFeatureFlag::default())),
+            super::DirectStealthMode::Disabled
+        );
+        let feature = PeerFeatureFlag {
+            stealth_capabilities: vec![TransportStealthCapability {
+                protocol: StealthTransportProtocol::Tcp.into(),
+                wire_version: 1,
+                level_mask: STEALTH_LEVEL_AUTHENTICATED,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            super::direct_stealth_mode(StealthProtocol::Tcp, Some(&feature)),
+            super::DirectStealthMode::Required
+        );
+    }
+
+    #[test]
+    fn direct_candidates_are_classified_after_address_resolution() {
+        let local_networks = [
+            "192.168.50.10/24".parse().unwrap(),
+            "fd00:50::10/64".parse().unwrap(),
+        ];
+
+        assert!(DirectConnectorManagerData::is_lan_candidate(
+            "192.168.50.99".parse().unwrap(),
+            &local_networks
+        ));
+        assert!(DirectConnectorManagerData::is_lan_candidate(
+            "fd00:50::99".parse().unwrap(),
+            &local_networks
+        ));
+        assert!(DirectConnectorManagerData::is_lan_candidate(
+            "169.254.10.2".parse().unwrap(),
+            &local_networks
+        ));
+        assert!(DirectConnectorManagerData::is_lan_candidate(
+            "fe80::2".parse().unwrap(),
+            &local_networks
+        ));
+        assert!(!DirectConnectorManagerData::is_lan_candidate(
+            "198.51.100.7".parse().unwrap(),
+            &local_networks
         ));
     }
 }

@@ -3,7 +3,7 @@ mod packet;
 mod stack;
 
 use bytes::BytesMut;
-use futures::{Sink, Stream};
+use futures::{Sink, Stream, StreamExt as _, stream::FuturesUnordered};
 use network_interface::NetworkInterfaceConfig;
 use pnet::util::MacAddr;
 use std::{
@@ -17,7 +17,7 @@ use tokio::{io::AsyncReadExt, net::TcpStream};
 use crate::tunnel::{
     FromUrl, IpVersion, SinkError, SinkItem, StreamItem, Tunnel, TunnelConnector, TunnelError,
     TunnelInfo, TunnelListener,
-    common::TunnelWrapper,
+    common::{StealthFramedReader, StealthTcpZCPacketToBytes, TunnelWrapper, ZCPacketToBytes},
     fake_tcp::netfilter::create_tun,
     packet_def::{PEER_MANAGER_HEADER_SIZE, TCP_TUNNEL_HEADER_SIZE, ZCPacket, ZCPacketType},
 };
@@ -88,6 +88,8 @@ pub struct FakeTcpTunnelListener {
     stack_map: DashMap<String, Arc<stack::Stack>>,
     // a cache from ip addr to interface name
     ip_to_ifname: IpToIfNameCache,
+    stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    replay_guard: Arc<crate::tunnel::stealth::GateReplayGuard>,
 }
 
 impl FakeTcpTunnelListener {
@@ -104,12 +106,18 @@ impl FakeTcpTunnelListener {
             os_listener: None,
             stack_map: DashMap::new(),
             ip_to_ifname: IpToIfNameCache::new(),
+            stealth: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
+            replay_guard: Arc::new(crate::tunnel::stealth::GateReplayGuard::default()),
         }
     }
 
-    async fn do_accept(&mut self) -> Result<AcceptResult, TunnelError> {
+    pub fn set_stealth(&mut self, stealth: Arc<crate::tunnel::stealth::OuterSessionState>) {
+        self.stealth = stealth;
+    }
+
+    async fn do_accept(&self) -> Result<AcceptResult, TunnelError> {
         loop {
-            match self.os_listener.as_mut().unwrap().accept().await {
+            match self.os_listener.as_ref().unwrap().accept().await {
                 Ok((s, remote_addr)) => {
                     let Ok(local_addr) = s.local_addr() else {
                         tracing::warn!("accept fail with local_addr error");
@@ -191,6 +199,117 @@ impl FakeTcpTunnelListener {
 
         Ok(stack)
     }
+
+    async fn prepare_raw_accept(
+        &self,
+    ) -> Result<(AcceptResult, Arc<stack::Stack>, stack::Socket), TunnelError> {
+        loop {
+            let res = self.do_accept().await?;
+            let stack = self.get_stack(&res).await?;
+            let socket = stack.try_alloc_established_socket(
+                res.local_addr,
+                res.remote_addr,
+                stack::State::Established,
+            );
+            let Some(socket) = socket else {
+                tracing::warn!(
+                    interface_name = res.interface_name,
+                    "fake_tcp stack closed while accepting connection, dropping accepted socket"
+                );
+                self.stack_map.remove(&res.interface_name);
+                continue;
+            };
+            return Ok((res, stack, socket));
+        }
+    }
+
+    async fn finish_accept(
+        res: AcceptResult,
+        stack: Arc<stack::Stack>,
+        socket: stack::Socket,
+        local_url: url::Url,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+        replay_guard: Arc<crate::tunnel::stealth::GateReplayGuard>,
+    ) -> Option<Box<dyn Tunnel>> {
+        let socket = Arc::new(socket);
+        let mut initial = BytesMut::new();
+        let mut handshake_duplicate = None;
+        let connection_stealth = stealth.fork_for_connection();
+        if connection_stealth.is_enabled() {
+            let authenticated = match tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                socket.recv(&mut initial),
+            )
+            .await
+            {
+                Ok(Some(_)) if initial.len() >= crate::tunnel::stealth::STREAM_GATE_PREFACE_LEN => {
+                    let preface = initial.split_to(crate::tunnel::stealth::STREAM_GATE_PREFACE_LEN);
+                    let verified = crate::tunnel::stealth::verify_stream_gate_preface(
+                        connection_stealth.as_ref(),
+                        replay_guard.as_ref(),
+                        &preface,
+                    );
+                    verified.map(|verified| {
+                        let raw = preface.as_ref().try_into().unwrap();
+                        (verified, raw)
+                    })
+                }
+                _ => None,
+            };
+            let Some((verified_preface, preface)) = authenticated else {
+                tracing::trace!(?res, "rejected FakeTCP stealth connection");
+                socket.close();
+                return None;
+            };
+            let ack = crate::tunnel::stealth::build_stream_gate_ack(
+                connection_stealth.as_ref(),
+                &verified_preface,
+            );
+            socket.try_send(&ack)?;
+            handshake_duplicate = Some((preface, Some(ack)));
+        }
+
+        tracing::info!(
+            ?res,
+            remote = socket.remote_addr().to_string(),
+            "FakeTcpTunnelListener accepted connection"
+        );
+        let info = TunnelInfo {
+            tunnel_type: get_faketcp_tunnel_type_str(stack.driver_type()),
+            local_addr: Some(local_url.into()),
+            remote_addr: Some(
+                crate::tunnel::build_url_from_socket_addr(
+                    &socket.remote_addr().to_string(),
+                    "faketcp",
+                )
+                .into(),
+            ),
+            resolved_remote_addr: Some(
+                crate::tunnel::build_url_from_socket_addr(
+                    &socket.remote_addr().to_string(),
+                    "faketcp",
+                )
+                .into(),
+            ),
+        };
+        let reader = FakeTcpStream::new(
+            socket.clone(),
+            connection_stealth.clone(),
+            initial,
+            Some(Box::new(build_os_socket_reader_task(res.socket))),
+            handshake_duplicate,
+        );
+        let writer = FakeTcpSink::new(socket, connection_stealth.clone());
+        let associate_data = connection_stealth
+            .is_enabled()
+            .then(|| Box::new(connection_stealth) as Box<dyn std::any::Any + Send>);
+        Some(Box::new(TunnelWrapper::new_with_associate_data(
+            reader,
+            writer,
+            Some(info),
+            associate_data,
+        )))
+    }
 }
 
 fn build_os_socket_reader_task(mut socket: TcpStream) -> AbortOnDropHandle<()> {
@@ -229,67 +348,52 @@ impl TunnelListener for FakeTcpTunnelListener {
 
     async fn accept(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
         tracing::debug!("FakeTcpTunnelListener waiting for accept");
-        let (res, stack, socket) = loop {
-            let res = self.do_accept().await?;
-            let stack = self.get_stack(&res).await?;
-            let socket = stack.try_alloc_established_socket(
-                res.local_addr,
-                res.remote_addr,
-                stack::State::Established,
-            );
-            let Some(socket) = socket else {
-                tracing::warn!(
-                    interface_name = res.interface_name,
-                    "fake_tcp stack closed while accepting connection, dropping accepted socket"
-                );
-                self.stack_map.remove(&res.interface_name);
+        if !self.stealth.is_enabled() {
+            loop {
+                let (res, stack, socket) = self.prepare_raw_accept().await?;
+                if let Some(tunnel) = Self::finish_accept(
+                    res,
+                    stack,
+                    socket,
+                    self.local_url(),
+                    self.stealth.clone(),
+                    self.replay_guard.clone(),
+                )
+                .await
+                {
+                    return Ok(tunnel);
+                }
+            }
+        }
+
+        const MAX_PENDING_ACCEPTS: usize = 256;
+        let mut pending = FuturesUnordered::new();
+        loop {
+            if pending.len() >= MAX_PENDING_ACCEPTS {
+                if let Some(Some(tunnel)) = pending.next().await {
+                    return Ok(tunnel);
+                }
                 continue;
-            };
-            break (res, stack, socket);
-        };
-
-        tracing::info!(
-            ?res,
-            remote = socket.remote_addr().to_string(),
-            "FakeTcpTunnelListener accepted connection"
-        );
-
-        let info = TunnelInfo {
-            tunnel_type: get_faketcp_tunnel_type_str(stack.driver_type()),
-            local_addr: Some(self.local_url().into()),
-            remote_addr: Some(
-                crate::tunnel::build_url_from_socket_addr(
-                    &socket.remote_addr().to_string(),
-                    "faketcp",
-                )
-                .into(),
-            ),
-            resolved_remote_addr: Some(
-                crate::tunnel::build_url_from_socket_addr(
-                    &socket.remote_addr().to_string(),
-                    "faketcp",
-                )
-                .into(),
-            ),
-        };
-
-        // We treat the fake tcp socket as a datagram tunnel directly
-        // The reader/writer will interface with the socket using recv_bytes/send
-        // We need to adapt the socket to ZCPacketStream and ZCPacketSink
-
-        // Since FakeTcpTunnel is a datagram tunnel, we don't need FramedReader/Writer (which are for stream based tunnels like TCP)
-        // We should wrap the socket into something that produces/consumes ZCPacket directly.
-
-        let socket = Arc::new(socket);
-        let reader = FakeTcpStream::new(socket.clone());
-        let writer = FakeTcpSink::new(socket);
-
-        Ok(Box::new(TunnelWrapper::new_with_associate_data(
-            reader,
-            writer,
-            Some(info),
-            Some(Box::new(build_os_socket_reader_task(res.socket))),
-        )))
+            }
+            tokio::select! {
+                accepted = self.prepare_raw_accept() => {
+                    let (res, stack, socket) = accepted?;
+                    pending.push(Self::finish_accept(
+                        res,
+                        stack,
+                        socket,
+                        self.local_url(),
+                        self.stealth.clone(),
+                        self.replay_guard.clone(),
+                    ));
+                }
+                result = pending.next(), if !pending.is_empty() => {
+                    if let Some(Some(tunnel)) = result {
+                        return Ok(tunnel);
+                    }
+                }
+            }
+        }
     }
 
     fn local_url(&self) -> url::Url {
@@ -302,6 +406,16 @@ pub struct FakeTcpTunnelConnector {
     ip_to_if_name: IpToIfNameCache,
     resolved_addr: Option<SocketAddr>,
     socket_mark: Option<u32>,
+    stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    stealth_candidate: Arc<crate::tunnel::stealth::OuterSessionState>,
+    stealth_mode: FakeTcpStealthMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FakeTcpStealthMode {
+    Disabled,
+    Required,
+    PreferLegacyFallback,
 }
 
 impl FakeTcpTunnelConnector {
@@ -311,7 +425,22 @@ impl FakeTcpTunnelConnector {
             ip_to_if_name: IpToIfNameCache::new(),
             resolved_addr: None,
             socket_mark: None,
+            stealth: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
+            stealth_candidate: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
+            stealth_mode: FakeTcpStealthMode::Disabled,
         }
+    }
+
+    pub fn set_stealth_candidate(
+        &mut self,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    ) {
+        self.stealth_mode = if stealth.is_enabled() {
+            FakeTcpStealthMode::PreferLegacyFallback
+        } else {
+            FakeTcpStealthMode::Disabled
+        };
+        self.stealth_candidate = stealth;
     }
 }
 
@@ -341,87 +470,199 @@ impl TunnelConnector for FakeTcpTunnelConnector {
             Some(addr) => addr,
             None => SocketAddr::from_url(self.addr.clone(), IpVersion::Both).await?,
         };
-        let local_ip = get_local_ip_for_destination(remote_addr.ip())
-            .ok_or(TunnelError::InternalError("Failed to get local ip".into()))?;
+        let connector_addr = self.addr.clone();
+        let socket_mark = self.socket_mark;
+        let ip_to_if_name = &self.ip_to_if_name;
+        let stealth_mode = self.stealth_mode;
+        let required_stealth = self.stealth.clone();
+        let preferred_stealth = self.stealth_candidate.clone();
+        let connect_once = |connection_stealth: Arc<crate::tunnel::stealth::OuterSessionState>| {
+            let connector_addr = connector_addr.clone();
+            async move {
+                let connection_stealth = connection_stealth.fork_for_connection();
+                let local_ip = get_local_ip_for_destination(remote_addr.ip())
+                    .ok_or(TunnelError::InternalError("Failed to get local ip".into()))?;
 
-        let os_socket = tokio::net::TcpSocket::new_v4()?;
-        // SO_MARK applies only to the kernel-visible "decoy" socket below.
-        // The actual FakeTCP payload travels via crafted segments written
-        // straight to the TUN device, which the kernel doesn't tag with
-        // SO_MARK. Operators relying on fwmark for FakeTCP must mark the
-        // TUN device's traffic with a separate nftables/iptables rule.
-        crate::tunnel::common::apply_socket_mark(
-            &socket2::SockRef::from(&os_socket),
-            self.socket_mark,
-        )?;
-        os_socket.bind("0.0.0.0:0".parse().unwrap())?;
-        let local_port = os_socket.local_addr()?.port();
-        let local_addr = SocketAddr::new(local_ip, local_port);
+                let os_socket = tokio::net::TcpSocket::new_v4()?;
+                // SO_MARK applies only to the kernel-visible "decoy" socket below.
+                // The actual FakeTCP payload travels via crafted segments written
+                // straight to the TUN device, which the kernel doesn't tag with
+                // SO_MARK. Operators relying on fwmark for FakeTCP must mark the
+                // TUN device's traffic with a separate nftables/iptables rule.
+                crate::tunnel::common::apply_socket_mark(
+                    &socket2::SockRef::from(&os_socket),
+                    socket_mark,
+                )?;
+                os_socket.bind("0.0.0.0:0".parse().unwrap())?;
+                let local_port = os_socket.local_addr()?.port();
+                let local_addr = SocketAddr::new(local_ip, local_port);
 
-        let (interface_name, mac) =
-            self.ip_to_if_name
-                .get_ifname(&local_ip)
-                .ok_or(TunnelError::InternalError(
-                    "Failed to get interface name".into(),
-                ))?;
+                let (interface_name, mac) =
+                    ip_to_if_name
+                        .get_ifname(&local_ip)
+                        .ok_or(TunnelError::InternalError(
+                            "Failed to get interface name".into(),
+                        ))?;
 
-        let (local_ip, local_ip6) = match local_ip {
-            IpAddr::V4(ip) => (Some(ip), None),
-            IpAddr::V6(ip) => (None, Some(ip)),
+                let (local_ip, local_ip6) = match local_ip {
+                    IpAddr::V4(ip) => (Some(ip), None),
+                    IpAddr::V6(ip) => (None, Some(ip)),
+                };
+
+                let tun =
+                    create_tun_off_runtime(interface_name.clone(), Some(remote_addr), local_addr)
+                        .await?;
+                let local_ip = local_ip.unwrap_or("0.0.0.0".parse().unwrap());
+                let stack = stack::Stack::new(tun, local_ip, local_ip6, mac);
+                let driver_type = stack.driver_type();
+
+                let socket = Arc::new(
+                    stack
+                        .try_alloc_established_socket(
+                            local_addr,
+                            remote_addr,
+                            stack::State::SynSent,
+                        )
+                        .ok_or(TunnelError::InternalError(
+                            "FakeTCP stack closed while allocating socket".into(),
+                        ))?,
+                );
+
+                let os_stream = os_socket.connect(remote_addr).await?;
+
+                tracing::info!(?remote_addr, "FakeTcpTunnelConnector connecting");
+
+                let mut buf = BytesMut::new();
+                socket
+                    .recv(&mut buf)
+                    .await
+                    .ok_or(TunnelError::InternalError(
+                        "Failed to recv bytes to establish connection".into(),
+                    ))?;
+                let mut handshake_duplicate = None;
+                if connection_stealth.is_enabled() {
+                    let preface = crate::tunnel::stealth::build_stream_gate_preface(
+                        connection_stealth.as_ref(),
+                    );
+                    let send_preface = async {
+                        let mut interval =
+                            tokio::time::interval(std::time::Duration::from_millis(100));
+                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        loop {
+                            interval.tick().await;
+                            socket.try_send(&preface).ok_or_else(|| {
+                                TunnelError::InternalError(
+                                    "failed to send FakeTCP stealth preface".to_string(),
+                                )
+                            })?;
+                        }
+                    };
+                    let wait_for_ack = async {
+                        loop {
+                            let mut ack = BytesMut::new();
+                            socket.recv(&mut ack).await.ok_or_else(|| {
+                                TunnelError::InternalError(
+                                    "FakeTCP stealth listener closed".to_string(),
+                                )
+                            })?;
+                            if crate::tunnel::stealth::verify_stream_gate_ack(
+                                connection_stealth.as_ref(),
+                                &preface,
+                                &ack,
+                            ) {
+                                return Ok::<
+                                    [u8; crate::tunnel::stealth::STREAM_GATE_PREFACE_LEN],
+                                    TunnelError,
+                                >(
+                                    ack.as_ref().try_into().unwrap()
+                                );
+                            }
+                        }
+                    };
+                    let ack = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                        tokio::select! {
+                            result = send_preface => result,
+                            result = wait_for_ack => result,
+                        }
+                    })
+                    .await
+                    .map_err(|_| {
+                        TunnelError::InternalError(
+                            "FakeTCP stealth preface exchange timed out".to_string(),
+                        )
+                    })??;
+                    handshake_duplicate = Some((ack, None));
+                }
+
+                tracing::info!(local_addr = ?socket.local_addr(), "FakeTcpTunnelConnector connected");
+
+                let info = TunnelInfo {
+                    tunnel_type: get_faketcp_tunnel_type_str(driver_type),
+                    local_addr: Some(
+                        crate::tunnel::build_url_from_socket_addr(
+                            &socket.local_addr().to_string(),
+                            "faketcp",
+                        )
+                        .into(),
+                    ),
+                    remote_addr: Some(connector_addr.into()),
+                    resolved_remote_addr: Some(
+                        crate::tunnel::build_url_from_socket_addr(
+                            &remote_addr.to_string(),
+                            "faketcp",
+                        )
+                        .into(),
+                    ),
+                };
+
+                let reader = FakeTcpStream::new(
+                    socket.clone(),
+                    connection_stealth.clone(),
+                    BytesMut::new(),
+                    Some(Box::new((build_os_socket_reader_task(os_stream), stack))),
+                    handshake_duplicate,
+                );
+                let writer = FakeTcpSink::new(socket, connection_stealth.clone());
+                let associate_data = connection_stealth
+                    .is_enabled()
+                    .then(|| Box::new(connection_stealth) as Box<dyn std::any::Any + Send>);
+
+                Ok::<Box<dyn Tunnel>, TunnelError>(Box::new(
+                    TunnelWrapper::new_with_associate_data(
+                        reader,
+                        writer,
+                        Some(info),
+                        associate_data,
+                    ),
+                ))
+            }
         };
 
-        let tun =
-            create_tun_off_runtime(interface_name.clone(), Some(remote_addr), local_addr).await?;
-        let local_ip = local_ip.unwrap_or("0.0.0.0".parse().unwrap());
-        let stack = stack::Stack::new(tun, local_ip, local_ip6, mac);
-        let driver_type = stack.driver_type();
-
-        let socket = stack
-            .try_alloc_established_socket(local_addr, remote_addr, stack::State::SynSent)
-            .ok_or(TunnelError::InternalError(
-                "FakeTCP stack closed while allocating socket".into(),
-            ))?;
-
-        let os_stream = os_socket.connect(remote_addr).await?;
-
-        tracing::info!(?remote_addr, "FakeTcpTunnelConnector connecting");
-
-        let mut buf = BytesMut::new();
-        socket
-            .recv(&mut buf)
-            .await
-            .ok_or(TunnelError::InternalError(
-                "Failed to recv bytes to establish connection".into(),
-            ))?;
-
-        tracing::info!(local_addr = ?socket.local_addr(), "FakeTcpTunnelConnector connected");
-
-        let info = TunnelInfo {
-            tunnel_type: get_faketcp_tunnel_type_str(driver_type),
-            local_addr: Some(
-                crate::tunnel::build_url_from_socket_addr(
-                    &socket.local_addr().to_string(),
-                    "faketcp",
-                )
-                .into(),
-            ),
-            remote_addr: Some(self.addr.clone().into()),
-            resolved_remote_addr: Some(
-                crate::tunnel::build_url_from_socket_addr(&remote_addr.to_string(), "faketcp")
-                    .into(),
-            ),
-        };
-
-        let socket = Arc::new(socket);
-        let reader = FakeTcpStream::new(socket.clone());
-        let writer = FakeTcpSink::new(socket);
-
-        Ok(Box::new(TunnelWrapper::new_with_associate_data(
-            reader,
-            writer,
-            Some(info),
-            Some(Box::new((build_os_socket_reader_task(os_stream), stack))),
-        )))
+        match stealth_mode {
+            FakeTcpStealthMode::Disabled => {
+                connect_once(Arc::new(
+                    crate::tunnel::stealth::OuterSessionState::disabled(),
+                ))
+                .await
+            }
+            FakeTcpStealthMode::Required => connect_once(required_stealth).await,
+            FakeTcpStealthMode::PreferLegacyFallback => {
+                match connect_once(preferred_stealth).await {
+                    Ok(tunnel) => Ok(tunnel),
+                    Err(error) => {
+                        tracing::info!(
+                            ?error,
+                            ?remote_addr,
+                            "FakeTCP stealth preface failed, retrying legacy wire format"
+                        );
+                        connect_once(Arc::new(
+                            crate::tunnel::stealth::OuterSessionState::disabled(),
+                        ))
+                        .await
+                    }
+                }
+            }
+        }
     }
 
     fn remote_url(&self) -> url::Url {
@@ -434,6 +675,18 @@ impl TunnelConnector for FakeTcpTunnelConnector {
 
     fn set_socket_mark(&mut self, socket_mark: Option<u32>) {
         self.socket_mark = socket_mark;
+    }
+
+    fn disable_stealth(&mut self) {
+        self.stealth = Arc::new(crate::tunnel::stealth::OuterSessionState::disabled());
+        self.stealth_mode = FakeTcpStealthMode::Disabled;
+    }
+
+    fn require_stealth(&mut self) {
+        if self.stealth_candidate.is_enabled() {
+            self.stealth = self.stealth_candidate.clone();
+            self.stealth_mode = FakeTcpStealthMode::Required;
+        }
     }
 }
 
@@ -448,13 +701,31 @@ enum FakeTcpStreamState {
 struct FakeTcpStream {
     socket: Arc<stack::Socket>,
     state: FakeTcpStreamState,
+    stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    _transport_keepalive: Option<Box<dyn std::any::Any + Send>>,
+    handshake_duplicate: Option<(
+        [u8; crate::tunnel::stealth::STREAM_GATE_PREFACE_LEN],
+        Option<[u8; crate::tunnel::stealth::STREAM_GATE_PREFACE_LEN]>,
+    )>,
 }
 
 impl FakeTcpStream {
-    fn new(socket: Arc<stack::Socket>) -> Self {
+    fn new(
+        socket: Arc<stack::Socket>,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+        initial: BytesMut,
+        transport_keepalive: Option<Box<dyn std::any::Any + Send>>,
+        handshake_duplicate: Option<(
+            [u8; crate::tunnel::stealth::STREAM_GATE_PREFACE_LEN],
+            Option<[u8; crate::tunnel::stealth::STREAM_GATE_PREFACE_LEN]>,
+        )>,
+    ) -> Self {
         Self {
             socket,
-            state: FakeTcpStreamState::ConsumingBuf(BytesMut::new()),
+            state: FakeTcpStreamState::ConsumingBuf(initial),
+            stealth,
+            _transport_keepalive: transport_keepalive,
+            handshake_duplicate,
         }
     }
 }
@@ -467,6 +738,36 @@ impl Stream for FakeTcpStream {
         loop {
             let state = std::mem::replace(&mut s.state, FakeTcpStreamState::Closed);
             match state {
+                FakeTcpStreamState::ConsumingBuf(mut buf) if s.stealth.is_enabled() => {
+                    if let Some((control, response)) = s.handshake_duplicate.as_ref() {
+                        // Raw FakeTCP control frames can be retransmitted or reordered around data.
+                        while buf.starts_with(control) {
+                            let _ = buf.split_to(control.len());
+                            if let Some(response) = response
+                                && s.socket.try_send(response).is_none()
+                            {
+                                s.state = FakeTcpStreamState::Closed;
+                                return Poll::Ready(None);
+                            }
+                        }
+                    }
+                    if let Some(packet) =
+                        StealthFramedReader::<tokio::io::Empty>::extract_one_packet(
+                            &mut buf,
+                            2000,
+                            s.stealth.as_ref(),
+                        )
+                    {
+                        s.state = FakeTcpStreamState::ConsumingBuf(buf);
+                        return Poll::Ready(Some(packet));
+                    }
+
+                    let socket = s.socket.clone();
+                    s.state = FakeTcpStreamState::PollFuture(Box::pin(async move {
+                        let ret = socket.recv(&mut buf).await;
+                        ret.map(|size| (buf, size))
+                    }));
+                }
                 FakeTcpStreamState::ConsumingBuf(buf) => {
                     let buf_len = buf.len();
                     // check peer manager header and split buf out
@@ -526,11 +827,15 @@ impl Stream for FakeTcpStream {
 
 struct FakeTcpSink {
     socket: Arc<stack::Socket>,
+    stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
 }
 
 impl FakeTcpSink {
-    fn new(socket: Arc<stack::Socket>) -> Self {
-        Self { socket }
+    fn new(
+        socket: Arc<stack::Socket>,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    ) -> Self {
+        Self { socket, stealth }
     }
 }
 
@@ -545,12 +850,15 @@ impl Sink<SinkItem> for FakeTcpSink {
     }
 
     fn start_send(self: Pin<&mut Self>, item: SinkItem) -> Result<(), Self::Error> {
-        // We need to send the packet as bytes
-        // The item is ZCPacket, which has into_bytes() method
-        let mut packet = item.convert_type(ZCPacketType::TCP);
-        let len = packet.buf_len();
-        packet.mut_tcp_tunnel_header().unwrap().len.set(len as u32);
-        self.socket.try_send(&packet.into_bytes());
+        let bytes = if self.stealth.is_enabled() {
+            StealthTcpZCPacketToBytes::new(self.stealth.clone()).zcpacket_into_bytes(item)?
+        } else {
+            let mut packet = item.convert_type(ZCPacketType::TCP);
+            let len = packet.buf_len();
+            packet.mut_tcp_tunnel_header().unwrap().len.set(len as u32);
+            packet.into_bytes()
+        };
+        self.socket.try_send(&bytes);
 
         Ok(())
     }
@@ -590,5 +898,71 @@ mod tests {
         let connector = FakeTcpTunnelConnector::new("faketcp://127.0.0.1:31011".parse().unwrap());
 
         _tunnel_pingpong(listener, connector).await
+    }
+
+    #[tokio::test]
+    async fn faketcp_stealth_pingpong() {
+        #[cfg(target_family = "unix")]
+        {
+            if unsafe { nix::libc::geteuid() } != 0 {
+                return;
+            }
+        }
+
+        let mut listener = FakeTcpTunnelListener::new("faketcp://0.0.0.0:31012".parse().unwrap());
+        listener.set_stealth(crate::tunnel::stealth::build_outer_session(
+            Some("faketcp-secret"),
+            true,
+            true,
+            0,
+        ));
+        let mut connector =
+            FakeTcpTunnelConnector::new("faketcp://127.0.0.1:31012".parse().unwrap());
+        connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+            Some("faketcp-secret"),
+            true,
+            true,
+            0,
+        ));
+        TunnelConnector::require_stealth(&mut connector);
+
+        _tunnel_pingpong(listener, connector).await
+    }
+
+    #[tokio::test]
+    async fn faketcp_stealth_wrong_secret_is_rejected() {
+        #[cfg(target_family = "unix")]
+        {
+            if unsafe { nix::libc::geteuid() } != 0 {
+                return;
+            }
+        }
+
+        let mut listener = FakeTcpTunnelListener::new("faketcp://0.0.0.0:31013".parse().unwrap());
+        listener.set_stealth(crate::tunnel::stealth::build_outer_session(
+            Some("listener-secret"),
+            true,
+            true,
+            0,
+        ));
+        listener.listen().await.unwrap();
+        let accept_task = tokio::spawn(async move { listener.accept().await });
+
+        let mut connector =
+            FakeTcpTunnelConnector::new("faketcp://127.0.0.1:31013".parse().unwrap());
+        connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+            Some("wrong-secret"),
+            true,
+            true,
+            0,
+        ));
+        TunnelConnector::require_stealth(&mut connector);
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), connector.connect()).await;
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "wrong-secret FakeTCP connection was not rejected: {result:?}"
+        );
+        accept_task.abort();
     }
 }

@@ -12,11 +12,15 @@ use forwarded_header_value::ForwardedHeaderValue;
 use futures::{SinkExt, StreamExt, stream::FuturesUnordered};
 use pnet::ipnetwork::IpNetwork;
 use std::{
+    io,
     net::SocketAddr,
+    pin::Pin,
     sync::{Arc, LazyLock},
+    task::{Context as TaskContext, Poll},
     time::Duration,
 };
 use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf},
     net::{TcpListener, TcpSocket, TcpStream},
     time::timeout,
 };
@@ -24,6 +28,129 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::either::Either;
 use tokio_websockets::{ClientBuilder, Limits, MaybeTlsStream, Message, ServerBuilder};
 use zerocopy::AsBytes;
+
+const WS_STEALTH_FALLBACK_TIMEOUT: Duration = Duration::from_secs(1);
+const WS_MAX_UPGRADE_REQUEST: usize = 16 * 1024;
+const WS_STEALTH_AUTHORIZATION: &str = "authorization";
+const WS_STEALTH_ACK: &str = "x-request-id";
+
+struct PrefixedIo<S> {
+    prefix: Vec<u8>,
+    offset: usize,
+    inner: S,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PrefixedIo<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.offset < self.prefix.len() {
+            let remaining = &self.prefix[self.offset..];
+            let count = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..count]);
+            self.offset += count;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+async fn buffer_upgrade_request<S: AsyncRead + Unpin>(
+    mut stream: S,
+) -> Result<(PrefixedIo<S>, Vec<u8>), TunnelError> {
+    let mut request = Vec::with_capacity(1024);
+    loop {
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok((
+                PrefixedIo {
+                    prefix: request.clone(),
+                    offset: 0,
+                    inner: stream,
+                },
+                request,
+            ));
+        }
+        if request.len() >= WS_MAX_UPGRADE_REQUEST {
+            return Err(TunnelError::InvalidPacket(
+                "websocket upgrade request exceeds 16 KiB".to_string(),
+            ));
+        }
+        let mut chunk = [0u8; 1024];
+        let count = stream.read(&mut chunk).await?;
+        if count == 0 {
+            return Err(TunnelError::IOError(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "websocket upgrade request ended early",
+            )));
+        }
+        request.extend_from_slice(&chunk[..count]);
+        if request.len() > WS_MAX_UPGRADE_REQUEST {
+            return Err(TunnelError::InvalidPacket(
+                "websocket upgrade request exceeds 16 KiB".to_string(),
+            ));
+        }
+    }
+}
+
+fn request_header<'a>(request: &'a [u8], name: &str) -> Option<&'a str> {
+    let request = std::str::from_utf8(request).ok()?;
+    request.split("\r\n").skip(1).find_map(|line| {
+        let (header_name, value) = line.split_once(':')?;
+        header_name.eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        return None;
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)?;
+            let low = (pair[1] as char).to_digit(16)?;
+            Some(((high << 4) | low) as u8)
+        })
+        .collect()
+}
+
+fn stealth_request_preface(request: &[u8]) -> Option<Vec<u8>> {
+    let value = request_header(request, WS_STEALTH_AUTHORIZATION)?;
+    let token = value.strip_prefix("Bearer ")?;
+    let decoded = decode_hex(token)?;
+    (decoded.len() == crate::tunnel::stealth::STREAM_GATE_PREFACE_LEN).then_some(decoded)
+}
 
 fn is_wss(addr: &url::Url) -> Result<bool, TunnelError> {
     match addr.scheme() {
@@ -33,12 +160,25 @@ fn is_wss(addr: &url::Url) -> Result<bool, TunnelError> {
     }
 }
 
-async fn sink_from_zc_packet<E>(msg: ZCPacket) -> Result<Message, E> {
-    Ok(Message::binary(msg.tunnel_payload_bytes().freeze()))
+async fn sink_from_zc_packet<E>(
+    msg: ZCPacket,
+    stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+) -> Result<Message, E> {
+    let payload = msg.tunnel_payload_bytes().freeze();
+    if stealth.is_enabled() {
+        Ok(Message::binary(
+            stealth
+                .seal_datagram(&payload)
+                .expect("enabled WS stealth state must seal"),
+        ))
+    } else {
+        Ok(Message::binary(payload))
+    }
 }
 
 async fn map_from_ws_message(
     msg: Result<Message, tokio_websockets::Error>,
+    stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
 ) -> Option<Result<ZCPacket, TunnelError>> {
     if let Err(e) = msg {
         tracing::error!(?e, "recv from websocket error");
@@ -57,8 +197,21 @@ async fn map_from_ws_message(
         return Some(Err(TunnelError::InvalidPacket(msg)));
     }
 
+    let payload = msg.into_payload();
+    let plaintext = if stealth.is_enabled() {
+        match stealth.open_datagram(payload.as_bytes()) {
+            Some(plaintext) => plaintext,
+            None => {
+                return Some(Err(TunnelError::InvalidPacket(
+                    "invalid WS stealth record".into(),
+                )));
+            }
+        }
+    } else {
+        payload.as_bytes().to_vec()
+    };
     Some(Ok(ZCPacket::new_from_buf(
-        BytesMut::from(msg.into_payload().as_bytes()),
+        BytesMut::from(plaintext.as_slice()),
         ZCPacketType::DummyTunnel,
     )))
 }
@@ -82,6 +235,8 @@ pub struct WsTunnelListener {
     addr: url::Url,
     listener: Option<TcpListener>,
     socket_mark: Option<u32>,
+    stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    stealth_replay: Arc<crate::tunnel::stealth::GateReplayGuard>,
 }
 
 impl WsTunnelListener {
@@ -90,11 +245,17 @@ impl WsTunnelListener {
             addr,
             listener: None,
             socket_mark: None,
+            stealth: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
+            stealth_replay: Arc::new(crate::tunnel::stealth::GateReplayGuard::default()),
         }
     }
 
     pub fn set_socket_mark(&mut self, socket_mark: Option<u32>) {
         self.socket_mark = socket_mark;
+    }
+
+    pub fn set_stealth(&mut self, stealth: Arc<crate::tunnel::stealth::OuterSessionState>) {
+        self.stealth = stealth;
     }
 
     async fn try_accept(&self, stream: TcpStream) -> Result<Box<dyn Tunnel>, TunnelError> {
@@ -116,11 +277,43 @@ impl WsTunnelListener {
             Either::Right(stream)
         };
 
-        let (request, stream) = ServerBuilder::new()
+        let (stream, raw_request) = buffer_upgrade_request(stream).await?;
+        let request_preface = stealth_request_preface(&raw_request);
+        let (connection_stealth, response_ack) = if self.stealth.is_enabled() {
+            let preface = request_preface.ok_or_else(|| {
+                TunnelError::InvalidPacket("missing WS stealth authorization".into())
+            })?;
+            let verified = crate::tunnel::stealth::verify_stream_gate_preface(
+                &self.stealth,
+                &self.stealth_replay,
+                &preface,
+            )
+            .ok_or_else(|| TunnelError::InvalidPacket("invalid WS stealth authorization".into()))?;
+            let ack = crate::tunnel::stealth::build_stream_gate_ack(&self.stealth, &verified);
+            (self.stealth.fork_for_connection(), Some(encode_hex(&ack)))
+        } else {
+            if request_preface.is_some() {
+                return Err(TunnelError::InvalidPacket(
+                    "stealth WS attempt sent to plain listener".into(),
+                ));
+            }
+            (
+                Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
+                None,
+            )
+        };
+
+        let mut server = ServerBuilder::new()
             .limits(Limits::unlimited())
-            .max_headers(128)
-            .accept(stream)
-            .await?;
+            .max_headers(128);
+        if let Some(ack) = response_ack {
+            server = server.add_header(
+                http::header::HeaderName::from_static(WS_STEALTH_ACK),
+                http::HeaderValue::from_str(&ack)
+                    .map_err(|error| TunnelError::InvalidPacket(error.to_string()))?,
+            )?;
+        }
+        let (request, stream) = server.accept(stream).await?;
 
         if TRUSTED_PROXIES
             .iter()
@@ -157,10 +350,15 @@ impl WsTunnelListener {
             resolved_remote_addr: Some(remote_addr),
         };
 
-        Ok(Box::new(TunnelWrapper::new(
-            read.filter_map(map_from_ws_message),
-            write.with(sink_from_zc_packet),
+        let read_stealth = connection_stealth.clone();
+        let write_stealth = connection_stealth.clone();
+        Ok(Box::new(TunnelWrapper::new_with_associate_data(
+            read.filter_map(move |message| map_from_ws_message(message, read_stealth.clone())),
+            write.with(move |packet| sink_from_zc_packet(packet, write_stealth.clone())),
             Some(info),
+            connection_stealth
+                .is_enabled()
+                .then(|| Box::new(connection_stealth) as Box<dyn std::any::Any + Send>),
         )))
     }
 }
@@ -213,6 +411,15 @@ pub struct WsTunnelConnector {
 
     bind_addrs: Vec<SocketAddr>,
     socket_mark: Option<u32>,
+    stealth_candidate: Arc<crate::tunnel::stealth::OuterSessionState>,
+    stealth_mode: WsStealthMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WsStealthMode {
+    Disabled,
+    Required,
+    PreferLegacyFallback,
 }
 
 impl WsTunnelConnector {
@@ -224,13 +431,28 @@ impl WsTunnelConnector {
 
             bind_addrs: vec![],
             socket_mark: None,
+            stealth_candidate: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
+            stealth_mode: WsStealthMode::Disabled,
         }
+    }
+
+    pub fn set_stealth_candidate(
+        &mut self,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    ) {
+        self.stealth_mode = if stealth.is_enabled() {
+            WsStealthMode::PreferLegacyFallback
+        } else {
+            WsStealthMode::Disabled
+        };
+        self.stealth_candidate = stealth;
     }
 
     async fn connect_with(
         addr: url::Url,
         socket_addr: SocketAddr,
         tcp_socket: TcpSocket,
+        stealth: Option<Arc<crate::tunnel::stealth::OuterSessionState>>,
     ) -> Result<Box<dyn Tunnel>, TunnelError> {
         let is_wss = is_wss(&addr)?;
         let stream = tcp_socket.connect(socket_addr).await?;
@@ -253,8 +475,19 @@ impl WsTunnelConnector {
             ),
         };
 
-        let c = ClientBuilder::from_uri(http::Uri::try_from(addr.to_string()).unwrap())
+        let connection_stealth = stealth.map(|template| template.fork_for_connection());
+        let request_preface = connection_stealth
+            .as_ref()
+            .map(|state| crate::tunnel::stealth::build_stream_gate_preface(state));
+        let mut client = ClientBuilder::from_uri(http::Uri::try_from(addr.to_string()).unwrap())
             .max_headers(128);
+        if let Some(preface) = request_preface {
+            client = client.add_header(
+                http::header::AUTHORIZATION,
+                http::HeaderValue::from_str(&format!("Bearer {}", encode_hex(&preface)))
+                    .map_err(|error| TunnelError::InvalidPacket(error.to_string()))?,
+            )?;
+        }
         let stream: MaybeTlsStream<TcpStream> = if is_wss {
             init_crypto_provider();
             let tls_conn =
@@ -272,16 +505,68 @@ impl WsTunnelConnector {
             MaybeTlsStream::Plain(stream)
         };
 
-        let (client, _) = c.connect_on(stream).await?;
-        let (write, read) = client.split();
-        let read = read.filter_map(map_from_ws_message);
-        let write = write.with(sink_from_zc_packet);
-        Ok(Box::new(TunnelWrapper::new(read, write, Some(info))))
+        let (client_stream, response) = client.connect_on(stream).await?;
+        if let (Some(state), Some(request)) = (&connection_stealth, request_preface) {
+            let ack = response
+                .headers()
+                .get(WS_STEALTH_ACK)
+                .and_then(|value| value.to_str().ok())
+                .and_then(decode_hex)
+                .ok_or_else(|| TunnelError::InvalidPacket("missing WS stealth ack".into()))?;
+            if !crate::tunnel::stealth::verify_stream_gate_ack(state, &request, &ack) {
+                return Err(TunnelError::InvalidPacket("invalid WS stealth ack".into()));
+            }
+        }
+        let (write, read) = client_stream.split();
+        let connection_stealth = connection_stealth
+            .unwrap_or_else(|| Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()));
+        let read_stealth = connection_stealth.clone();
+        let write_stealth = connection_stealth.clone();
+        Ok(Box::new(TunnelWrapper::new_with_associate_data(
+            read.filter_map(move |message| map_from_ws_message(message, read_stealth.clone())),
+            write.with(move |packet| sink_from_zc_packet(packet, write_stealth.clone())),
+            Some(info),
+            connection_stealth
+                .is_enabled()
+                .then(|| Box::new(connection_stealth) as Box<dyn std::any::Any + Send>),
+        )))
     }
 
     async fn connect_with_default_bind(
         &self,
         addr: SocketAddr,
+    ) -> Result<Box<dyn Tunnel>, super::TunnelError> {
+        match self.stealth_mode {
+            WsStealthMode::Disabled => self.connect_default_attempt(addr, None).await,
+            WsStealthMode::Required => {
+                self.connect_default_attempt(addr, Some(self.stealth_candidate.clone()))
+                    .await
+            }
+            WsStealthMode::PreferLegacyFallback => {
+                let first = timeout(
+                    WS_STEALTH_FALLBACK_TIMEOUT,
+                    self.connect_default_attempt(addr, Some(self.stealth_candidate.clone())),
+                )
+                .await;
+                match first {
+                    Ok(Ok(tunnel)) => Ok(tunnel),
+                    result => {
+                        tracing::info!(
+                            ?addr,
+                            ?result,
+                            "WS stealth attempt failed, retrying legacy wire format"
+                        );
+                        self.connect_default_attempt(addr, None).await
+                    }
+                }
+            }
+        }
+    }
+
+    async fn connect_default_attempt(
+        &self,
+        addr: SocketAddr,
+        stealth: Option<Arc<crate::tunnel::stealth::OuterSessionState>>,
     ) -> Result<Box<dyn Tunnel>, super::TunnelError> {
         let socket = if addr.is_ipv4() {
             TcpSocket::new_v4()?
@@ -292,7 +577,7 @@ impl WsTunnelConnector {
             &socket2::SockRef::from(&socket),
             self.socket_mark,
         )?;
-        Self::connect_with(self.addr.clone(), addr, socket).await
+        Self::connect_with(self.addr.clone(), addr, socket, stealth).await
     }
 
     async fn connect_with_custom_bind(
@@ -303,13 +588,16 @@ impl WsTunnelConnector {
 
         for bind_addr in self.bind_addrs.iter() {
             tracing::info!(?bind_addr, ?addr, "bind addr");
-            match bind()
-                .addr(*bind_addr)
-                .only_v6(true)
-                .maybe_socket_mark(self.socket_mark)
-                .call()
-            {
-                Ok(socket) => futures.push(Self::connect_with(self.addr.clone(), addr, socket)),
+            match self.bind_socket(*bind_addr) {
+                Ok(socket) => futures.push(Self::connect_with_mode(
+                    self.addr.clone(),
+                    addr,
+                    *bind_addr,
+                    socket,
+                    self.socket_mark,
+                    self.stealth_mode,
+                    self.stealth_candidate.clone(),
+                )),
                 Err(error) => {
                     tracing::error!(?bind_addr, ?addr, ?error, "bind addr fail");
                     continue;
@@ -318,6 +606,52 @@ impl WsTunnelConnector {
         }
 
         wait_for_connect_futures(futures).await
+    }
+
+    fn bind_socket(&self, bind_addr: SocketAddr) -> Result<TcpSocket, TunnelError> {
+        Ok(bind()
+            .addr(bind_addr)
+            .only_v6(true)
+            .maybe_socket_mark(self.socket_mark)
+            .call()?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn connect_with_mode(
+        addr_url: url::Url,
+        addr: SocketAddr,
+        bind_addr: SocketAddr,
+        socket: TcpSocket,
+        socket_mark: Option<u32>,
+        mode: WsStealthMode,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    ) -> Result<Box<dyn Tunnel>, TunnelError> {
+        match mode {
+            WsStealthMode::Disabled => Self::connect_with(addr_url, addr, socket, None).await,
+            WsStealthMode::Required => {
+                Self::connect_with(addr_url, addr, socket, Some(stealth)).await
+            }
+            WsStealthMode::PreferLegacyFallback => {
+                let first = timeout(
+                    WS_STEALTH_FALLBACK_TIMEOUT,
+                    Self::connect_with(addr_url.clone(), addr, socket, Some(stealth)),
+                )
+                .await;
+                if let Ok(Ok(tunnel)) = first {
+                    return Ok(tunnel);
+                }
+                tracing::info!(
+                    ?addr,
+                    "WS stealth attempt failed, retrying legacy wire format"
+                );
+                let socket = bind()
+                    .addr(bind_addr)
+                    .only_v6(true)
+                    .maybe_socket_mark(socket_mark)
+                    .call()?;
+                Self::connect_with(addr_url, addr, socket, None).await
+            }
+        }
     }
 }
 
@@ -354,6 +688,16 @@ impl TunnelConnector for WsTunnelConnector {
     fn set_socket_mark(&mut self, socket_mark: Option<u32>) {
         self.socket_mark = socket_mark;
     }
+
+    fn disable_stealth(&mut self) {
+        self.stealth_mode = WsStealthMode::Disabled;
+    }
+
+    fn require_stealth(&mut self) {
+        if self.stealth_candidate.is_enabled() {
+            self.stealth_mode = WsStealthMode::Required;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -361,6 +705,10 @@ pub mod tests {
     use super::*;
     use crate::tunnel::common::tests::_tunnel_pingpong;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn stealth(secret: &str) -> Arc<crate::tunnel::stealth::OuterSessionState> {
+        crate::tunnel::stealth::build_outer_session(Some(secret), true, true, 60)
+    }
 
     #[rstest::rstest]
     #[tokio::test]
@@ -381,6 +729,72 @@ pub mod tests {
             WsTunnelConnector::new(format!("{}://127.0.0.1:25557", proto).parse().unwrap());
         connector.set_bind_addrs(vec!["127.0.0.1:0".parse().unwrap()]);
         _tunnel_pingpong(listener, connector).await
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ws_stealth_pingpong(#[values("ws", "wss")] proto: &str) {
+        let mut listener =
+            WsTunnelListener::new(format!("{}://127.0.0.1:25561", proto).parse().unwrap());
+        listener.set_stealth(stealth("ws-secret"));
+        let mut connector =
+            WsTunnelConnector::new(format!("{}://127.0.0.1:25561", proto).parse().unwrap());
+        connector.set_stealth_candidate(stealth("ws-secret"));
+        TunnelConnector::require_stealth(&mut connector);
+        _tunnel_pingpong(listener, connector).await
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ws_unknown_capability_falls_back_to_plain(#[values("ws", "wss")] proto: &str) {
+        let listener =
+            WsTunnelListener::new(format!("{}://127.0.0.1:25562", proto).parse().unwrap());
+        let mut connector =
+            WsTunnelConnector::new(format!("{}://127.0.0.1:25562", proto).parse().unwrap());
+        connector.set_stealth_candidate(stealth("ws-secret"));
+        _tunnel_pingpong(listener, connector).await
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ws_stealth_listener_rejects_plain_and_wrong_secret(
+        #[values("ws", "wss")] proto: &str,
+    ) {
+        for connector_secret in [None, Some("wrong-secret")] {
+            let mut listener =
+                WsTunnelListener::new(format!("{}://127.0.0.1:0", proto).parse().unwrap());
+            listener.set_stealth(stealth("listener-secret"));
+            listener.listen().await.unwrap();
+
+            let mut connector = WsTunnelConnector::new(listener.local_url());
+            if let Some(secret) = connector_secret {
+                connector.set_stealth_candidate(stealth(secret));
+                TunnelConnector::require_stealth(&mut connector);
+            }
+            let accept_task = tokio::spawn(async move { listener.accept().await });
+            let _ = timeout(Duration::from_millis(300), connector.connect()).await;
+            assert!(
+                !accept_task.is_finished(),
+                "strict WS stealth listener exposed an unauthenticated connection"
+            );
+            accept_task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_upgrade_prefilter_is_bounded() {
+        let (mut client, server) = tokio::io::duplex(WS_MAX_UPGRADE_REQUEST * 2);
+        let writer = tokio::spawn(async move {
+            client
+                .write_all(&vec![b'a'; WS_MAX_UPGRADE_REQUEST + 1])
+                .await
+                .unwrap();
+        });
+        assert!(buffer_upgrade_request(server).await.is_err());
+        writer.await.unwrap();
     }
 
     // TODO: tokio-websockets cannot correctly handle close, benchmark case is disabled

@@ -41,11 +41,32 @@ use super::CidrSet;
 #[cfg(feature = "smoltcp")]
 use super::tokio_smoltcp::{self, Net, NetConfig, channel_device};
 
+pub(crate) struct ClaimedNatDstStream(pub Box<dyn std::any::Any + Send>);
+
+impl std::fmt::Debug for ClaimedNatDstStream {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ClaimedNatDstStream(..)")
+    }
+}
+
 #[async_trait::async_trait]
 pub(crate) trait NatDstConnector: Send + Sync + Clone + 'static {
     type DstStream: AsyncRead + AsyncWrite + Unpin + Send;
 
-    async fn connect(&self, src: SocketAddr, dst: SocketAddr) -> anyhow::Result<Self::DstStream>;
+    async fn connect(
+        &self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        claimed: Option<ClaimedNatDstStream>,
+    ) -> anyhow::Result<Self::DstStream>;
+    fn claim_deferred_stream(
+        &self,
+        _src: SocketAddr,
+        _dst: SocketAddr,
+        _initial_sequence: u32,
+    ) -> Option<ClaimedNatDstStream> {
+        None
+    }
     fn check_packet_from_peer_fast(&self, cidr_set: &CidrSet, global_ctx: &GlobalCtx) -> bool;
     fn check_packet_from_peer(
         &self,
@@ -68,7 +89,9 @@ impl NatDstConnector for NatDstTcpConnector {
         &self,
         _src: SocketAddr,
         nat_dst: SocketAddr,
+        claimed: Option<ClaimedNatDstStream>,
     ) -> anyhow::Result<Self::DstStream> {
+        debug_assert!(claimed.is_none());
         let socket = TcpSocket::new_v4()
             .inspect_err(|error| log::error!(?error, "create v4 socket failed"))?;
 
@@ -123,10 +146,18 @@ pub struct NatDstEntry {
     start_time_local: chrono::DateTime<chrono::Local>,
     tasks: Mutex<JoinSet<()>>,
     state: AtomicCell<NatDstEntryState>,
+    initial_sequence: Option<u32>,
+    claimed_stream: Mutex<Option<ClaimedNatDstStream>>,
 }
 
 impl NatDstEntry {
-    pub fn new(src: SocketAddr, real_dst: SocketAddr, mapped_dst: SocketAddr) -> Self {
+    pub fn new(
+        src: SocketAddr,
+        real_dst: SocketAddr,
+        mapped_dst: SocketAddr,
+        initial_sequence: Option<u32>,
+        claimed_stream: Option<ClaimedNatDstStream>,
+    ) -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
             src,
@@ -136,6 +167,8 @@ impl NatDstEntry {
             start_time_local: chrono::Local::now(),
             tasks: Mutex::new(JoinSet::new()),
             state: AtomicCell::new(NatDstEntryState::SynReceived),
+            initial_sequence,
+            claimed_stream: Mutex::new(claimed_stream),
         }
     }
 
@@ -146,6 +179,7 @@ impl NatDstEntry {
             start_time: self.start_time_local.timestamp() as u64,
             state: self.state.load().into(),
             transport_type: transport_type.into(),
+            ..Default::default()
         }
     }
 }
@@ -341,29 +375,35 @@ pub struct TcpProxy<C: NatDstConnector> {
 #[async_trait::async_trait]
 impl<C: NatDstConnector> PeerPacketFilter for TcpProxy<C> {
     async fn try_process_packet_from_peer(&self, mut packet: ZCPacket) -> Option<ZCPacket> {
-        if self.try_handle_peer_packet(&mut packet).await.is_some() {
-            if self.is_smoltcp_enabled() {
-                let smoltcp_stack_sender = self.smoltcp_stack_sender.as_ref().unwrap();
-                if let Err(e) = smoltcp_stack_sender.try_send(packet) {
-                    tracing::error!("send to smoltcp stack failed: {:?}", e);
+        match self.try_handle_peer_packet(&mut packet).await {
+            Some(true) => {
+                if self.is_smoltcp_enabled() {
+                    let smoltcp_stack_sender = self.smoltcp_stack_sender.as_ref().unwrap();
+                    if let Err(e) = smoltcp_stack_sender.try_send(packet) {
+                        tracing::error!("send to smoltcp stack failed: {:?}", e);
+                    }
+                } else if let Some(peer_manager) = self.get_peer_manager()
+                    && let Err(e) = peer_manager.get_nic_channel().send(packet).await
+                {
+                    tracing::error!("send to nic failed: {:?}", e);
                 }
-            } else if let Some(peer_manager) = self.get_peer_manager()
-                && let Err(e) = peer_manager.get_nic_channel().send(packet).await
-            {
-                tracing::error!("send to nic failed: {:?}", e);
+                None
             }
-            return None;
-        } else {
-            Some(packet)
+            Some(false) => None,
+            None => Some(packet),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl<C: NatDstConnector> NicPacketFilter for TcpProxy<C> {
-    async fn try_process_packet_from_nic(&self, zc_packet: &mut ZCPacket) -> bool {
+    async fn try_process_packet_from_nic(
+        &self,
+        zc_packet: &mut ZCPacket,
+        _context: &crate::peers::NicPacketContext,
+    ) -> crate::peers::NicPacketFilterAction {
         let Some(my_ipv4_inet) = self.get_local_inet() else {
-            return false;
+            return crate::peers::NicPacketFilterAction::Continue;
         };
         let my_ipv4 = my_ipv4_inet.address();
 
@@ -373,12 +413,12 @@ impl<C: NatDstConnector> NicPacketFilter for TcpProxy<C> {
             || ip_packet.get_source() != my_ipv4
             || ip_packet.get_next_level_protocol() != IpNextHeaderProtocols::Tcp
         {
-            return false;
+            return crate::peers::NicPacketFilterAction::Continue;
         }
 
         let tcp_packet = TcpPacket::new(ip_packet.payload()).unwrap();
         if tcp_packet.get_source() != self.get_local_port() {
-            return false;
+            return crate::peers::NicPacketFilterAction::Continue;
         }
 
         let mut dst_addr = SocketAddr::V4(SocketAddrV4::new(
@@ -399,7 +439,7 @@ impl<C: NatDstConnector> NicPacketFilter for TcpProxy<C> {
             entry
         } else {
             let Some(syn_entry) = self.syn_map.get(&dst_addr) else {
-                return false;
+                return crate::peers::NicPacketFilterAction::Continue;
             };
             syn_entry
         };
@@ -435,7 +475,7 @@ impl<C: NatDstConnector> NicPacketFilter for TcpProxy<C> {
 
         tracing::trace!(dst_addr = ?dst_addr, nat_entry = ?nat_entry, packet = ?ip_packet, "tcp packet after modified");
 
-        true
+        crate::peers::NicPacketFilterAction::StopAndSend
     }
 }
 
@@ -786,8 +826,12 @@ impl<C: NatDstConnector> TcpProxy<C> {
             )
             .inc();
 
+        let claimed_stream = nat_entry.claimed_stream.lock().await.take();
         let _guard = global_ctx.net_ns.guard();
-        let Ok(dst_tcp_stream) = connector.connect(nat_entry.src, nat_dst).await else {
+        let Ok(dst_tcp_stream) = connector
+            .connect(nat_entry.src, nat_dst, claimed_stream)
+            .await
+        else {
             tracing::error!("connect to dst failed: {:?}", nat_entry);
             nat_entry.state.store(NatDstEntryState::Closed);
             Self::remove_entry_from_all_conn_map(conn_map, addr_conn_map, nat_entry);
@@ -893,7 +937,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
         }
     }
 
-    async fn try_handle_peer_packet(&self, packet: &mut ZCPacket) -> Option<()> {
+    async fn try_handle_peer_packet(&self, packet: &mut ZCPacket) -> Option<bool> {
         if !self
             .connector
             .check_packet_from_peer_fast(&self.cidr_set, &self.global_ctx)
@@ -903,6 +947,9 @@ impl<C: NatDstConnector> TcpProxy<C> {
 
         let ipv4_inet = self.get_local_inet()?;
         let ipv4_addr = ipv4_inet.address();
+        let deferred_proxy = packet
+            .peer_manager_header()
+            .is_some_and(PeerManagerHeader::is_deferred_proxy);
         {
             let hdr = packet.peer_manager_header().unwrap();
             if (hdr.packet_type != PacketType::Data as u8
@@ -938,9 +985,6 @@ impl<C: NatDstConnector> TcpProxy<C> {
             return None;
         }
 
-        // restore to data packet
-        hdr.packet_type = PacketType::Data as u8;
-
         tracing::trace!(ipv4 = ?origin_ip, cidr_set = ?self.cidr_set, "proxy tcp packet received");
 
         let payload_bytes = packet.mut_payload();
@@ -954,15 +998,48 @@ impl<C: NatDstConnector> TcpProxy<C> {
         let is_tcp_syn = tcp_packet.get_flags() & pnet::packet::tcp::TcpFlags::SYN != 0;
         let is_tcp_ack = tcp_packet.get_flags() & pnet::packet::tcp::TcpFlags::ACK != 0;
         if is_tcp_syn && !is_tcp_ack {
+            let initial_sequence = tcp_packet.get_sequence();
             let dest_ip = ip_packet.get_destination();
             let dest_port = tcp_packet.get_destination();
             let mapped_dst = SocketAddr::V4(SocketAddrV4::new(dest_ip, dest_port));
             let real_dst = SocketAddr::V4(SocketAddrV4::new(real_dst_ip, dest_port));
 
-            let old_val = self
-                .syn_map
-                .insert(src, Arc::new(NatDstEntry::new(src, real_dst, mapped_dst)));
-            tracing::info!(src = ?src, ?real_dst, ?mapped_dst, old_entry = ?old_val, "tcp syn received");
+            let is_existing_deferred_flow = deferred_proxy
+                && (self.addr_conn_map.contains_key(&src)
+                    || self.syn_map.get(&src).is_some_and(|entry| {
+                        entry.initial_sequence == Some(initial_sequence)
+                            && entry.mapped_dst == mapped_dst
+                    }));
+            if !is_existing_deferred_flow {
+                let claimed_stream = if deferred_proxy {
+                    let Some(claimed) =
+                        self.connector
+                            .claim_deferred_stream(src, mapped_dst, initial_sequence)
+                    else {
+                        tracing::warn!(
+                            ?src,
+                            ?mapped_dst,
+                            initial_sequence,
+                            "drop stale deferred proxy SYN"
+                        );
+                        return Some(false);
+                    };
+                    Some(claimed)
+                } else {
+                    None
+                };
+                let old_val = self.syn_map.insert(
+                    src,
+                    Arc::new(NatDstEntry::new(
+                        src,
+                        real_dst,
+                        mapped_dst,
+                        deferred_proxy.then_some(initial_sequence),
+                        claimed_stream,
+                    )),
+                );
+                tracing::info!(src = ?src, ?real_dst, ?mapped_dst, old_entry = ?old_val, "tcp syn received");
+            }
 
             // if smoltcp is enabled, add the listener to the net
             #[cfg(feature = "smoltcp")]
@@ -981,6 +1058,14 @@ impl<C: NatDstConnector> TcpProxy<C> {
             return None;
         }
 
+        drop(tcp_packet);
+        drop(ip_packet);
+        let _ = payload_bytes;
+        let hdr = packet.mut_peer_manager_header().unwrap();
+        hdr.packet_type = PacketType::Data as u8;
+        hdr.set_deferred_proxy(false);
+
+        let payload_bytes = packet.mut_payload();
         let mut ip_packet = MutableIpv4Packet::new(payload_bytes).unwrap();
         if !self.is_smoltcp_enabled() && source_ip == ipv4_addr {
             // modify the source so the response packet can be handled by tun device
@@ -998,7 +1083,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
 
         tracing::trace!(?source, ?ipv4_addr, ?packet, "tcp packet after modified");
 
-        Some(())
+        Some(true)
     }
 
     pub fn is_tcp_proxy_connection(&self, src: SocketAddr) -> bool {
@@ -1019,6 +1104,10 @@ impl<C: NatDstConnector> TcpProxy<C> {
 
     pub fn get_transport_type(&self) -> TcpProxyEntryTransportType {
         self.connector.transport_type()
+    }
+
+    pub(crate) fn get_connector(&self) -> C {
+        self.connector.clone()
     }
 }
 

@@ -39,6 +39,7 @@ pub const GATE_NONCE_LEN: usize = 16;
 pub const GATE_TAG_LEN: usize = 16;
 /// Total wire size of a gate token (replaces the legacy 8-byte SYN magic body).
 pub const GATE_TOKEN_LEN: usize = GATE_NONCE_LEN + GATE_TAG_LEN;
+pub const STREAM_GATE_PREFACE_LEN: usize = 4 + GATE_TOKEN_LEN;
 
 /// HKDF-Extract+Expand (RFC 5869) restricted to a single 32-byte output block,
 /// implemented with HMAC-SHA256 only (no extra crate dependency). Mirrors the
@@ -250,6 +251,135 @@ impl Default for GateReplayGuard {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct VerifiedStreamGatePreface {
+    conn_id: u32,
+    nonce: [u8; GATE_NONCE_LEN],
+    window: u64,
+}
+
+#[derive(Clone, Copy)]
+enum StreamGateRole {
+    Initiator,
+    Responder,
+}
+
+fn stream_gate_tag(
+    gate_key: &[u8; 32],
+    nonce: &[u8; GATE_NONCE_LEN],
+    conn_id: u32,
+    role: StreamGateRole,
+) -> [u8; GATE_TAG_LEN] {
+    let mut mac = HmacSha256::new_from_slice(gate_key).expect("hmac accepts any key length");
+    mac.update(b"et-stream-gate-v1");
+    mac.update(match role {
+        StreamGateRole::Initiator => b"initiator",
+        StreamGateRole::Responder => b"responder",
+    });
+    mac.update(nonce);
+    mac.update(&conn_id.to_be_bytes());
+    let full = mac.finalize().into_bytes();
+    let mut tag = [0u8; GATE_TAG_LEN];
+    tag.copy_from_slice(&full[..GATE_TAG_LEN]);
+    tag
+}
+
+fn encode_stream_gate_preface(
+    state: &OuterSessionState,
+    conn_id: u32,
+    nonce: [u8; GATE_NONCE_LEN],
+    window: u64,
+    role: StreamGateRole,
+) -> [u8; STREAM_GATE_PREFACE_LEN] {
+    let key = derive_gate_key(state.network_secret(), window);
+    let token = GateToken {
+        nonce,
+        tag: stream_gate_tag(&key, &nonce, conn_id, role),
+    };
+    let mut preface = [0u8; STREAM_GATE_PREFACE_LEN];
+    preface[..4].copy_from_slice(&conn_id.to_be_bytes());
+    preface[4..].copy_from_slice(&token.to_bytes());
+    preface
+}
+
+pub fn build_stream_gate_preface(state: &OuterSessionState) -> [u8; STREAM_GATE_PREFACE_LEN] {
+    let conn_id = rand::random::<u32>();
+    let mut nonce = [0u8; GATE_NONCE_LEN];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let window = window_for(now_secs(), state.window_secs());
+    encode_stream_gate_preface(state, conn_id, nonce, window, StreamGateRole::Initiator)
+}
+
+pub fn verify_stream_gate_preface(
+    state: &OuterSessionState,
+    replay_guard: &GateReplayGuard,
+    preface: &[u8],
+) -> Option<VerifiedStreamGatePreface> {
+    if preface.len() != STREAM_GATE_PREFACE_LEN {
+        return None;
+    }
+    let conn_id = u32::from_be_bytes(preface[..4].try_into().unwrap());
+    let Some(token) = GateToken::from_bytes(&preface[4..]) else {
+        return None;
+    };
+    let current = window_for(now_secs(), state.window_secs());
+    for window in [current, current.wrapping_sub(1)] {
+        let key = derive_gate_key(state.network_secret(), window);
+        let expected = stream_gate_tag(&key, &token.nonce, conn_id, StreamGateRole::Initiator);
+        if ct_eq(&expected, &token.tag) && replay_guard.accept(window, &token.nonce) {
+            return Some(VerifiedStreamGatePreface {
+                conn_id,
+                nonce: token.nonce,
+                window,
+            });
+        }
+    }
+    None
+}
+
+pub fn build_stream_gate_ack(
+    state: &OuterSessionState,
+    request: &VerifiedStreamGatePreface,
+) -> [u8; STREAM_GATE_PREFACE_LEN] {
+    encode_stream_gate_preface(
+        state,
+        request.conn_id,
+        request.nonce,
+        request.window,
+        StreamGateRole::Responder,
+    )
+}
+
+pub fn verify_stream_gate_ack(state: &OuterSessionState, request: &[u8], ack: &[u8]) -> bool {
+    if request.len() != STREAM_GATE_PREFACE_LEN || ack.len() != STREAM_GATE_PREFACE_LEN {
+        return false;
+    }
+    let request_conn_id = u32::from_be_bytes(request[..4].try_into().unwrap());
+    let ack_conn_id = u32::from_be_bytes(ack[..4].try_into().unwrap());
+    let (Some(request_token), Some(ack_token)) = (
+        GateToken::from_bytes(&request[4..]),
+        GateToken::from_bytes(&ack[4..]),
+    ) else {
+        return false;
+    };
+    if request_conn_id != ack_conn_id || request_token.nonce != ack_token.nonce {
+        return false;
+    }
+    let current = window_for(now_secs(), state.window_secs());
+    [current, current.wrapping_sub(1)]
+        .into_iter()
+        .any(|window| {
+            let key = derive_gate_key(state.network_secret(), window);
+            let expected = stream_gate_tag(
+                &key,
+                &ack_token.nonce,
+                ack_conn_id,
+                StreamGateRole::Responder,
+            );
+            ct_eq(&expected, &ack_token.tag)
+        })
+}
+
 /// Shared state handed to BOTH the running tunnel and `PeerConn`, used to switch
 /// from the phase-1 gate key to the phase-2 connection-level outer key without a
 /// dedicated downward control API. `PeerConn` writes the outer key once Noise
@@ -259,7 +389,35 @@ pub struct OuterSessionState {
     enabled: bool,
     window_secs: u64,
     network_secret: Vec<u8>,
+    transition_mode: OuterTransitionMode,
     key_phase: RwLock<OuterKeyPhase>,
+}
+
+pub struct OuterSessionAssociation {
+    state: Arc<OuterSessionState>,
+    _transport_keepalive: Option<Box<dyn std::any::Any + Send>>,
+}
+
+impl OuterSessionAssociation {
+    pub fn new(
+        state: Arc<OuterSessionState>,
+        transport_keepalive: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Self {
+        Self {
+            state,
+            _transport_keepalive: transport_keepalive,
+        }
+    }
+
+    pub fn state(&self) -> Arc<OuterSessionState> {
+        self.state.clone()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OuterTransitionMode {
+    NextSeal,
+    TransportDelayed,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -276,6 +434,7 @@ impl OuterSessionState {
             enabled: true,
             window_secs: window_secs.max(1),
             network_secret,
+            transition_mode: OuterTransitionMode::NextSeal,
             key_phase: RwLock::new(OuterKeyPhase::Gate),
         }
     }
@@ -287,6 +446,7 @@ impl OuterSessionState {
             enabled: false,
             window_secs: DEFAULT_GATE_WINDOW_SECS,
             network_secret: Vec::new(),
+            transition_mode: OuterTransitionMode::NextSeal,
             key_phase: RwLock::new(OuterKeyPhase::Gate),
         }
     }
@@ -328,7 +488,10 @@ impl OuterSessionState {
             return;
         }
         let key = derive_outer_key(handshake_hash);
-        *self.key_phase.write().unwrap() = OuterKeyPhase::PromoteAfterNextSeal(key);
+        *self.key_phase.write().unwrap() = match self.transition_mode {
+            OuterTransitionMode::NextSeal => OuterKeyPhase::PromoteAfterNextSeal(key),
+            OuterTransitionMode::TransportDelayed => OuterKeyPhase::Outer(key),
+        };
     }
 
     /// The current phase-2 outer key, if Noise has completed.
@@ -347,6 +510,23 @@ impl OuterSessionState {
             Arc::new(Self::disabled())
         } else {
             Arc::new(Self::new(self.network_secret.clone(), self.window_secs))
+        }
+    }
+
+    /// Create state for a datagram transport whose scheduler can emit control
+    /// packets independently of the peer packet sink. The transport provides
+    /// its own bounded gate-to-outer delay.
+    pub fn fork_for_transport_delayed_transition(&self) -> Arc<Self> {
+        if !self.enabled {
+            Arc::new(Self::disabled())
+        } else {
+            Arc::new(Self {
+                enabled: true,
+                window_secs: self.window_secs,
+                network_secret: self.network_secret.clone(),
+                transition_mode: OuterTransitionMode::TransportDelayed,
+                key_phase: RwLock::new(OuterKeyPhase::Gate),
+            })
         }
     }
 }
@@ -390,6 +570,35 @@ mod tests {
                 .verify(b"other-secret", 7, DEFAULT_GATE_WINDOW_SECS)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn stream_gate_ack_is_direction_and_challenge_bound() {
+        let state = OuterSessionState::new(b"stream-secret".to_vec(), DEFAULT_GATE_WINDOW_SECS);
+        let request = build_stream_gate_preface(&state);
+        let verified =
+            verify_stream_gate_preface(&state, &GateReplayGuard::default(), &request).unwrap();
+        let ack = build_stream_gate_ack(&state, &verified);
+
+        assert!(verify_stream_gate_ack(&state, &request, &ack));
+        assert!(!verify_stream_gate_ack(&state, &request, &request));
+
+        let other_request = build_stream_gate_preface(&state);
+        assert!(!verify_stream_gate_ack(&state, &other_request, &ack));
+
+        let wrong_state =
+            OuterSessionState::new(b"other-secret".to_vec(), DEFAULT_GATE_WINDOW_SECS);
+        assert!(!verify_stream_gate_ack(&wrong_state, &request, &ack));
+    }
+
+    #[test]
+    fn stream_gate_request_replay_is_rejected() {
+        let state = OuterSessionState::new(b"stream-secret".to_vec(), DEFAULT_GATE_WINDOW_SECS);
+        let guard = GateReplayGuard::default();
+        let request = build_stream_gate_preface(&state);
+
+        assert!(verify_stream_gate_preface(&state, &guard, &request).is_some());
+        assert!(verify_stream_gate_preface(&state, &guard, &request).is_none());
     }
 
     #[test]
@@ -485,6 +694,17 @@ mod tests {
     }
 
     #[test]
+    fn transport_delayed_transition_records_outer_key_without_sealing() {
+        let template = OuterSessionState::new(b"secret".to_vec(), DEFAULT_GATE_WINDOW_SECS);
+        let state = template.fork_for_transport_delayed_transition();
+
+        state.promote_outer_key_after_next_seal(b"handshake");
+
+        assert!(state.outer_key().is_some());
+        assert!(template.outer_key().is_none());
+    }
+
+    #[test]
     fn disabled_state_is_noop() {
         let state = OuterSessionState::disabled();
         assert!(!state.is_enabled());
@@ -492,7 +712,7 @@ mod tests {
     }
 }
 
-const OUTER_NONCE_LEN: usize = 12;
+pub(crate) const OUTER_NONCE_LEN: usize = 12;
 const OUTER_TAG_LEN: usize = 16;
 /// Per-datagram overhead added by [`seal`].
 pub const OUTER_OVERHEAD: usize = OUTER_NONCE_LEN + OUTER_TAG_LEN;
@@ -578,6 +798,21 @@ pub fn open(key: &[u8; 32], buf: &[u8]) -> Option<Vec<u8>> {
 }
 
 impl OuterSessionState {
+    /// Seal with the current phase-1 gate key without changing the phase
+    /// transition state. Datagram transports whose wire scheduler is outside
+    /// the peer packet sink (notably QUIC) use this during their bounded
+    /// phase-2 transition window.
+    pub fn seal_gate_datagram(&self, plaintext: &[u8]) -> Option<Vec<u8>> {
+        if !self.enabled {
+            return None;
+        }
+        let key = derive_gate_key(
+            &self.network_secret,
+            window_for(now_secs(), self.window_secs),
+        );
+        Some(seal(&key, plaintext))
+    }
+
     /// Seal an outbound datagram with the phase-2 outer key if available, else
     /// the current phase-1 gate key (used while the Noise handshake is still in
     /// flight). Returns `None` when stealth is disabled.
@@ -619,6 +854,23 @@ impl OuterSessionState {
             let key = derive_gate_key(&self.network_secret, window);
             if let Some(pt) = open(&key, buf) {
                 return Some(pt);
+            }
+        }
+        None
+    }
+
+    /// Narrow listener-side fallback for a new transport SYN that arrives from
+    /// an address with an existing phase-2 session. Callers must validate that
+    /// the opened packet is a SYN; this helper must never reopen gate-key data.
+    pub fn open_gate_datagram(&self, buf: &[u8]) -> Option<Vec<u8>> {
+        if !self.enabled {
+            return None;
+        }
+        let cur = window_for(now_secs(), self.window_secs);
+        for window in [cur, cur.wrapping_sub(1)] {
+            let key = derive_gate_key(&self.network_secret, window);
+            if let Some(plaintext) = open(&key, buf) {
+                return Some(plaintext);
             }
         }
         None
@@ -681,6 +933,16 @@ mod aead_tests {
 
         let outer_sealed = state.seal_datagram(b"world").unwrap();
         assert_eq!(state.open_datagram(&outer_sealed).unwrap(), b"world");
+    }
+
+    #[test]
+    fn explicit_gate_open_remains_available_after_phase2_install() {
+        let state = OuterSessionState::new(b"secret".to_vec(), DEFAULT_GATE_WINDOW_SECS);
+        let gate_sealed = state.seal_datagram(b"syn").unwrap();
+        state.set_outer_key_from_handshake_hash(b"hh");
+
+        assert!(state.open_datagram(&gate_sealed).is_none());
+        assert_eq!(state.open_gate_datagram(&gate_sealed).unwrap(), b"syn");
     }
 
     #[test]

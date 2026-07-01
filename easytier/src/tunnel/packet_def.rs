@@ -103,6 +103,9 @@ bitflags::bitflags! {
         const EXIT_NODE = 0b0000_0100;
         const NO_PROXY = 0b0000_1000;
         const COMPRESSED = 0b0001_0000;
+        // Local-only marker for a SYN whose proxy stream was prepared by the
+        // deferred selector. The packet is always self-delivered.
+        const DEFERRED_PROXY = 0b0010_0000;
         // deprecated flags, can be reused.
         // const KCP_SRC_MODIFIED = 0b0010_0000;
         // const QUIC_SRC_MODIFIED = 0b1000_0000;
@@ -208,6 +211,23 @@ impl PeerManagerHeader {
         }
         self.flags = flags.bits();
         self
+    }
+
+    pub fn set_deferred_proxy(&mut self, deferred: bool) -> &mut Self {
+        let mut flags = PeerManagerHeaderFlags::from_bits(self.flags).unwrap();
+        if deferred {
+            flags.insert(PeerManagerHeaderFlags::DEFERRED_PROXY);
+        } else {
+            flags.remove(PeerManagerHeaderFlags::DEFERRED_PROXY);
+        }
+        self.flags = flags.bits();
+        self
+    }
+
+    pub fn is_deferred_proxy(&self) -> bool {
+        PeerManagerHeaderFlags::from_bits(self.flags)
+            .unwrap()
+            .contains(PeerManagerHeaderFlags::DEFERRED_PROXY)
     }
 
     pub fn mark_kcp_src_modified(&mut self) -> &mut Self {

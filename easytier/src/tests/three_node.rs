@@ -27,6 +27,7 @@ use crate::{
         common::{CompressionAlgoPb, SecureModeConfig},
     },
     tunnel::{
+        TunnelConnector,
         common::tests::{
             _tunnel_bench_netns, _tunnel_pingpong_netns_with_timeout, wait_for_condition,
         },
@@ -166,6 +167,71 @@ async fn init_three_node_ex_with_inst3<F: Fn(TomlConfigLoader) -> TomlConfigLoad
             .add_connector(crate::tunnel::websocket::WsTunnelConnector::new(
                 "wss://10.1.1.2:11012".parse().unwrap(),
             ));
+    } else if proto == "ws-stealth" || proto == "wss-stealth" {
+        #[cfg(feature = "websocket")]
+        {
+            let (scheme, port) = if proto == "wss-stealth" {
+                ("wss", 11016)
+            } else {
+                ("ws", 11015)
+            };
+            let mut connector = crate::tunnel::websocket::WsTunnelConnector::new(
+                format!("{scheme}://10.1.1.2:{port}").parse().unwrap(),
+            );
+            connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+                inst1
+                    .get_global_ctx()
+                    .get_network_identity()
+                    .network_secret
+                    .as_deref(),
+                true,
+                true,
+                inst1.get_global_ctx().get_flags().stealth_window_secs,
+            ));
+            TunnelConnector::require_stealth(&mut connector);
+            inst1.get_conn_manager().add_connector(connector);
+        }
+    } else if proto == "quic" {
+        #[cfg(feature = "quic")]
+        {
+            let mut connector = crate::tunnel::quic::QuicTunnelConnector::new(
+                "quic://10.1.1.2:11013".parse().unwrap(),
+                inst1.get_global_ctx(),
+            );
+            connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+                inst1
+                    .get_global_ctx()
+                    .get_network_identity()
+                    .network_secret
+                    .as_deref(),
+                true,
+                true,
+                inst1.get_global_ctx().get_flags().stealth_window_secs,
+            ));
+            TunnelConnector::require_stealth(&mut connector);
+            inst1.get_conn_manager().add_connector(connector);
+        }
+    } else if proto == "wg-stealth" {
+        #[cfg(feature = "wireguard")]
+        {
+            let identity = inst1.get_global_ctx().get_network_identity();
+            let config = crate::tunnel::wireguard::WgConfig::new_from_network_identity(
+                &identity.network_name,
+                identity.network_secret.as_deref().unwrap_or_default(),
+            );
+            let mut connector = crate::tunnel::wireguard::WgTunnelConnector::new(
+                "wg://10.1.1.2:11014".parse().unwrap(),
+                config,
+            );
+            connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+                identity.network_secret.as_deref(),
+                true,
+                true,
+                inst1.get_global_ctx().get_flags().stealth_window_secs,
+            ));
+            TunnelConnector::require_stealth(&mut connector);
+            inst1.get_conn_manager().add_connector(connector);
+        }
     }
 
     inst3
@@ -995,6 +1061,157 @@ pub async fn basic_three_node_test(
     .await;
 
     drop_insts(insts).await;
+}
+
+#[cfg(feature = "quic")]
+#[tokio::test]
+#[serial_test::serial]
+pub async fn quic_stealth_three_node_carries_phase2_tcp() {
+    let insts = init_three_node_ex(
+        "quic",
+        |cfg| {
+            let mut listeners = cfg.get_listeners().unwrap_or_default();
+            listeners.push("quic://0.0.0.0:11013".parse().unwrap());
+            cfg.set_listeners(listeners);
+            cfg.set_network_identity(NetworkIdentity::new(
+                "quic-stealth-test".to_string(),
+                "quic-stealth-secret".to_string(),
+            ));
+            cfg.set_secure_mode(Some(generate_secure_mode_config()));
+            let mut flags = cfg.get_flags();
+            flags.stealth_mode = true;
+            flags.stealth_protocols = "quic".to_string();
+            cfg.set_flags(flags);
+            cfg
+        },
+        false,
+    )
+    .await;
+
+    for inst in &insts {
+        assert!(
+            crate::common::stealth_registry::peer_supports_protocol(
+                &inst.get_global_ctx().get_feature_flags(),
+                crate::common::stealth_registry::StealthProtocol::Quic,
+            ),
+            "instance did not advertise QUIC stealth"
+        );
+    }
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_condition(
+        || async { ping_test("net_a", "10.144.144.3", None).await },
+        Duration::from_secs(5),
+    )
+    .await;
+    subnet_proxy_test_tcp("0.0.0.0", "10.144.144.3", Duration::from_secs(5)).await;
+
+    drop_insts(insts).await;
+}
+
+#[cfg(feature = "wireguard")]
+#[tokio::test]
+#[serial_test::serial]
+pub async fn wg_stealth_three_node_carries_phase2_tcp() {
+    let insts = init_three_node_ex(
+        "wg-stealth",
+        |cfg| {
+            let mut listeners = cfg.get_listeners().unwrap_or_default();
+            listeners.push("wg://0.0.0.0:11014".parse().unwrap());
+            cfg.set_listeners(listeners);
+            cfg.set_network_identity(NetworkIdentity::new(
+                "wg-stealth-test".to_string(),
+                "wg-stealth-secret".to_string(),
+            ));
+            cfg.set_secure_mode(Some(generate_secure_mode_config()));
+            let mut flags = cfg.get_flags();
+            flags.stealth_mode = true;
+            flags.stealth_protocols = "wg".to_string();
+            cfg.set_flags(flags);
+            cfg
+        },
+        false,
+    )
+    .await;
+
+    for inst in &insts {
+        assert!(
+            crate::common::stealth_registry::peer_supports_protocol(
+                &inst.get_global_ctx().get_feature_flags(),
+                crate::common::stealth_registry::StealthProtocol::Wg,
+            ),
+            "instance did not advertise WG stealth"
+        );
+    }
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_condition(
+        || async { ping_test("net_a", "10.144.144.3", None).await },
+        Duration::from_secs(5),
+    )
+    .await;
+    subnet_proxy_test_tcp("0.0.0.0", "10.144.144.3", Duration::from_secs(5)).await;
+
+    drop_insts(insts).await;
+}
+
+#[cfg(feature = "websocket")]
+#[tokio::test]
+#[serial_test::serial]
+pub async fn ws_and_wss_stealth_three_node_carry_phase2_tcp() {
+    for (test_proto, scheme, port, capability) in [
+        (
+            "ws-stealth",
+            "ws",
+            11015,
+            crate::common::stealth_registry::StealthProtocol::Ws,
+        ),
+        (
+            "wss-stealth",
+            "wss",
+            11016,
+            crate::common::stealth_registry::StealthProtocol::Wss,
+        ),
+    ] {
+        let insts = init_three_node_ex(
+            test_proto,
+            |cfg| {
+                let mut listeners = cfg.get_listeners().unwrap_or_default();
+                listeners.push(format!("{scheme}://0.0.0.0:{port}").parse().unwrap());
+                cfg.set_listeners(listeners);
+                cfg.set_network_identity(NetworkIdentity::new(
+                    format!("{test_proto}-test"),
+                    "ws-stealth-secret".to_string(),
+                ));
+                cfg.set_secure_mode(Some(generate_secure_mode_config()));
+                let mut flags = cfg.get_flags();
+                flags.stealth_mode = true;
+                flags.stealth_protocols = scheme.to_string();
+                cfg.set_flags(flags);
+                cfg
+            },
+            false,
+        )
+        .await;
+
+        for inst in &insts {
+            assert!(
+                crate::common::stealth_registry::peer_supports_protocol(
+                    &inst.get_global_ctx().get_feature_flags(),
+                    capability,
+                ),
+                "instance did not advertise {scheme} stealth"
+            );
+        }
+
+        wait_for_condition(
+            || async { ping_test("net_a", "10.144.144.3", None).await },
+            Duration::from_secs(5),
+        )
+        .await;
+        subnet_proxy_test_tcp("0.0.0.0", "10.144.144.3", Duration::from_secs(5)).await;
+        drop_insts(insts).await;
+    }
 }
 
 #[tokio::test]

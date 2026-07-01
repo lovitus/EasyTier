@@ -90,6 +90,15 @@ impl UdpHolePunchRpc for UdpHolePunchServer {
         _ctrl: Self::Controller,
         input: SelectPunchListenerRequest,
     ) -> rpc_types::error::Result<SelectPunchListenerResponse> {
+        if common::legacy_udp_hole_punch_is_rejected(
+            input.use_stealth,
+            self.common
+                .get_global_ctx()
+                .get_flags()
+                .disable_legacy_udp_hole_punch,
+        ) {
+            return Err(anyhow::anyhow!("legacy UDP hole punch is disabled").into());
+        }
         let stealth_enabled = common::negotiate_udp_listener_stealth(
             input.use_stealth,
             self.common
@@ -587,7 +596,10 @@ impl PeerTaskLauncher for UdpHolePunchPeerTaskLauncher {
                 dst_nat_type: peer_nat_type,
                 my_nat_type,
                 disable_udp_stealth: should_downgrade_udp_stealth(
-                    flags.stealth_mode,
+                    crate::common::stealth_registry::protocol_enabled(
+                        &flags,
+                        crate::common::stealth_registry::StealthProtocol::Udp,
+                    ),
                     route.feature_flag.as_ref(),
                 ),
             });

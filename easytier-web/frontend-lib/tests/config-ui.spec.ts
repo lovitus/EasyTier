@@ -30,6 +30,8 @@ const CONFIG_FLAG_FIELDS = [
   'disable_encryption',
   'disable_tcp_hole_punching',
   'disable_udp_hole_punching',
+  'stealth_mode',
+  'disable_legacy_udp_hole_punch',
   'enable_udp_broadcast_relay',
   'disable_upnp',
   'disable_sym_hole_punching',

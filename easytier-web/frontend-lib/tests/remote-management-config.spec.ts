@@ -28,6 +28,8 @@ const BOOLEAN_CONFIG_FIELDS = [
   'disable_encryption',
   'enable_socks5',
   'disable_udp_hole_punching',
+  'stealth_mode',
+  'disable_legacy_udp_hole_punch',
   'enable_magic_dns',
   'enable_private_mode',
   'enable_quic_proxy',

@@ -356,10 +356,14 @@ impl PeerConn {
         peer_session_store: Arc<PeerSessionStore>,
     ) -> Self {
         let flags = global_ctx.get_flags();
-        let outer_session_state = tunnel
-            .data()
-            .and_then(|data| data.downcast_ref::<Arc<OuterSessionState>>())
-            .cloned();
+        let outer_session_state = tunnel.data().and_then(|data| {
+            data.downcast_ref::<Arc<OuterSessionState>>()
+                .cloned()
+                .or_else(|| {
+                    data.downcast_ref::<crate::tunnel::stealth::OuterSessionAssociation>()
+                        .map(|association| association.state())
+                })
+        });
         let tunnel_info = tunnel.info();
         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
 

@@ -11,7 +11,7 @@ use std::{
 use crossbeam::atomic::AtomicCell;
 use hotpath::instant::Instant;
 #[cfg(feature = "kcp")]
-use kcp_sys::{endpoint::KcpEndpoint, stream::KcpStream};
+use kcp_sys::endpoint::KcpEndpoint;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::AbortOnDropHandle;
 
@@ -84,7 +84,7 @@ enum SocksTcpStream {
     Tcp(tokio::net::TcpStream),
     SmolTcp(super::tokio_smoltcp::TcpStream),
     #[cfg(feature = "kcp")]
-    Kcp(KcpStream),
+    Kcp(crate::gateway::proxy_failover::BoxProxyStream),
 }
 
 impl AsyncRead for SocksTcpStream {
@@ -349,9 +349,10 @@ impl AsyncTcpConnector for Socks5KcpConnector {
         let c = NatDstKcpConnector {
             kcp_endpoint,
             peer_mgr: self.peer_mgr.clone(),
+            prepared_store: None,
         };
         let ret = c
-            .connect(self.src_addr, addr)
+            .connect(self.src_addr, addr, None)
             .await
             .map_err(super::fast_socks5::SocksError::Other)?;
         Ok(SocksTcpStream::Kcp(ret))

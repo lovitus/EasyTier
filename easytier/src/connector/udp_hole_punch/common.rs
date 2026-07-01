@@ -45,6 +45,13 @@ pub(crate) fn negotiate_udp_listener_stealth(
     requested.unwrap_or(false) && local_stealth_enabled
 }
 
+pub(crate) fn legacy_udp_hole_punch_is_rejected(
+    requested: Option<bool>,
+    disable_legacy_udp_hole_punch: bool,
+) -> bool {
+    requested.is_none() && disable_legacy_udp_hole_punch
+}
+
 pub(crate) fn disable_udp_stealth_for_selected_listener(stealth_enabled: Option<bool>) -> bool {
     !stealth_enabled.unwrap_or(false)
 }
@@ -425,9 +432,13 @@ impl UdpHolePunchListener {
             let global_ctx = peer_mgr.get_global_ctx();
             let flags = global_ctx.get_flags();
             let secure_mode = global_ctx.is_secure_mode_enabled();
+            let udp_stealth = crate::common::stealth_registry::protocol_enabled(
+                &flags,
+                crate::common::stealth_registry::StealthProtocol::Udp,
+            );
             let stealth = crate::tunnel::stealth::build_outer_session(
                 global_ctx.get_network_identity().network_secret.as_deref(),
-                flags.stealth_mode,
+                udp_stealth,
                 secure_mode,
                 flags.stealth_window_secs,
             );
@@ -849,9 +860,13 @@ pub(crate) async fn try_connect_with_socket(
         if disable_udp_stealth {
             connector.disable_stealth();
         } else {
+            let udp_stealth = crate::common::stealth_registry::protocol_enabled(
+                &flags,
+                crate::common::stealth_registry::StealthProtocol::Udp,
+            );
             connector.set_stealth(crate::tunnel::stealth::build_outer_session(
                 global_ctx.get_network_identity().network_secret.as_deref(),
-                flags.stealth_mode,
+                udp_stealth,
                 secure_mode,
                 flags.stealth_window_secs,
             ));
@@ -887,8 +902,8 @@ mod tests {
     use super::{
         MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS, UdpHolePunchListener,
         disable_udp_stealth_for_selected_listener, easytier_managed_local_addr_error,
-        negotiate_udp_listener_stealth, should_create_public_listener,
-        should_retry_public_listener_selection,
+        legacy_udp_hole_punch_is_rejected, negotiate_udp_listener_stealth,
+        should_create_public_listener, should_retry_public_listener_selection,
     };
 
     #[tokio::test]
@@ -1021,6 +1036,11 @@ mod tests {
         assert!(!disable_udp_stealth_for_selected_listener(Some(true)));
         assert!(disable_udp_stealth_for_selected_listener(Some(false)));
         assert!(disable_udp_stealth_for_selected_listener(None));
+
+        assert!(!legacy_udp_hole_punch_is_rejected(None, false));
+        assert!(legacy_udp_hole_punch_is_rejected(None, true));
+        assert!(!legacy_udp_hole_punch_is_rejected(Some(false), true));
+        assert!(!legacy_udp_hole_punch_is_rejected(Some(true), true));
     }
 
     #[test]

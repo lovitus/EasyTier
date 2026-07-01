@@ -251,22 +251,55 @@ pub async fn create_connector_by_url(
             let resolved_addr = resolve_connector_socket_addr(&url, global_ctx, ip_version).await?;
             effective_connector_ip_version = resolved_addr.ip_version;
             let mut connector: Box<dyn TunnelConnector> = match scheme {
-                IpScheme::Tcp => TcpTunnelConnector::new(url).boxed(),
+                IpScheme::Tcp => {
+                    let mut connector = TcpTunnelConnector::new(url);
+                    let flags = global_ctx.get_flags();
+                    let tcp_stealth = crate::common::stealth_registry::protocol_enabled(
+                        &flags,
+                        crate::common::stealth_registry::StealthProtocol::Tcp,
+                    );
+                    connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+                        global_ctx.get_network_identity().network_secret.as_deref(),
+                        tcp_stealth,
+                        global_ctx.is_secure_mode_enabled(),
+                        flags.stealth_window_secs,
+                    ));
+                    connector.boxed()
+                }
                 IpScheme::Udp => {
                     let mut c = UdpTunnelConnector::new(url);
                     let flags = global_ctx.get_flags();
                     let secure_mode = global_ctx.is_secure_mode_enabled();
-                    c.set_stealth(crate::tunnel::stealth::build_outer_session(
-                        global_ctx.get_network_identity().network_secret.as_deref(),
-                        flags.stealth_mode,
-                        secure_mode,
-                        flags.stealth_window_secs,
-                    ));
+                    let udp_stealth = crate::common::stealth_registry::protocol_enabled(
+                        &flags,
+                        crate::common::stealth_registry::StealthProtocol::Udp,
+                    );
+                    c.prefer_stealth_with_legacy_fallback(
+                        crate::tunnel::stealth::build_outer_session(
+                            global_ctx.get_network_identity().network_secret.as_deref(),
+                            udp_stealth,
+                            secure_mode,
+                            flags.stealth_window_secs,
+                        ),
+                    );
                     c.boxed()
                 }
                 #[cfg(feature = "quic")]
                 IpScheme::Quic => {
-                    tunnel::quic::QuicTunnelConnector::new(url, global_ctx.clone()).boxed()
+                    let mut connector =
+                        tunnel::quic::QuicTunnelConnector::new(url, global_ctx.clone());
+                    let flags = global_ctx.get_flags();
+                    let enabled = crate::common::stealth_registry::protocol_enabled(
+                        &flags,
+                        crate::common::stealth_registry::StealthProtocol::Quic,
+                    );
+                    connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+                        global_ctx.get_network_identity().network_secret.as_deref(),
+                        enabled,
+                        global_ctx.is_secure_mode_enabled(),
+                        flags.stealth_window_secs,
+                    ));
+                    connector.boxed()
                 }
                 #[cfg(feature = "wireguard")]
                 IpScheme::Wg => {
@@ -276,14 +309,55 @@ pub async fn create_connector_by_url(
                         &nid.network_name,
                         &nid.network_secret.unwrap_or_default(),
                     );
-                    WgTunnelConnector::new(url, wg_config).boxed()
+                    let mut connector = WgTunnelConnector::new(url, wg_config);
+                    let flags = global_ctx.get_flags();
+                    let enabled = crate::common::stealth_registry::protocol_enabled(
+                        &flags,
+                        crate::common::stealth_registry::StealthProtocol::Wg,
+                    );
+                    connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+                        global_ctx.get_network_identity().network_secret.as_deref(),
+                        enabled,
+                        global_ctx.is_secure_mode_enabled(),
+                        flags.stealth_window_secs,
+                    ));
+                    connector.boxed()
                 }
                 #[cfg(feature = "websocket")]
                 IpScheme::Ws | IpScheme::Wss => {
-                    tunnel::websocket::WsTunnelConnector::new(url).boxed()
+                    let mut connector = tunnel::websocket::WsTunnelConnector::new(url);
+                    let flags = global_ctx.get_flags();
+                    let protocol = if matches!(scheme, IpScheme::Wss) {
+                        crate::common::stealth_registry::StealthProtocol::Wss
+                    } else {
+                        crate::common::stealth_registry::StealthProtocol::Ws
+                    };
+                    let enabled =
+                        crate::common::stealth_registry::protocol_enabled(&flags, protocol);
+                    connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+                        global_ctx.get_network_identity().network_secret.as_deref(),
+                        enabled,
+                        global_ctx.is_secure_mode_enabled(),
+                        flags.stealth_window_secs,
+                    ));
+                    connector.boxed()
                 }
                 #[cfg(feature = "faketcp")]
-                IpScheme::FakeTcp => tunnel::fake_tcp::FakeTcpTunnelConnector::new(url).boxed(),
+                IpScheme::FakeTcp => {
+                    let mut connector = tunnel::fake_tcp::FakeTcpTunnelConnector::new(url);
+                    let flags = global_ctx.get_flags();
+                    let enabled = crate::common::stealth_registry::protocol_enabled(
+                        &flags,
+                        crate::common::stealth_registry::StealthProtocol::FakeTcp,
+                    );
+                    connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+                        global_ctx.get_network_identity().network_secret.as_deref(),
+                        enabled,
+                        global_ctx.is_secure_mode_enabled(),
+                        flags.stealth_window_secs,
+                    ));
+                    connector.boxed()
+                }
             };
             connector.set_resolved_addr(resolved_addr.addr);
             connector.set_socket_mark(global_ctx.config.get_flags().socket_mark);

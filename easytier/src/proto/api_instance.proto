@@ -273,6 +273,14 @@ message TcpProxyEntry {
   uint64 start_time = 3;
   TcpProxyEntryState state = 4;
   TcpProxyEntryTransportType transport_type = 5;
+  string requested_transport = 6;
+  string selected_transport = 7;
+  string fallback_reason = 8;
+  uint32 dst_peer_id = 9;
+  bool transport_degraded = 10;
+  uint32 consecutive_failures = 11;
+  uint32 consecutive_successes = 12;
+  uint64 generation = 13;
 }
 
 message ListTcpProxyEntryRequest { InstanceIdentifier instance = 1; }

@@ -295,6 +295,23 @@ const peerCount = computed(() => {
   return peerRouteInfos.value.length
 })
 
+const proxyFailoverEntries = computed(() => props.curNetworkInst?.detail?.proxy_failover_entries ?? [])
+
+function proxySocketAddr(addr: any): string {
+  if (!addr)
+    return ''
+  if (addr.ip?.oneofKind === 'ipv4')
+    return `${ipv4ToString(addr.ip.ipv4)}:${addr.port}`
+  if (addr.ip?.oneofKind === 'ipv6')
+    return `[${ipv6ToString(addr.ip.ipv6)}]:${addr.port}`
+  return ''
+}
+
+function proxyHealth(entry: any): string {
+  const state = entry.transport_degraded ? t('proxy_failover.degraded') : t('proxy_failover.healthy')
+  return `${state} (${entry.consecutive_failures}/${entry.consecutive_successes})`
+}
+
 // calculate tx/rx rate every 2 seconds
 let rateIntervalId = 0
 const rateInterval = 2000
@@ -464,6 +481,27 @@ function showEventLogs() {
           </DataTable>
         </template>
       </Card>
+
+      <template v-if="proxyFailoverEntries.length">
+        <Divider />
+        <Card>
+          <template #title>
+            {{ t('proxy_failover.title') }}
+          </template>
+          <template #content>
+            <DataTable :value="proxyFailoverEntries" column-resize-mode="fit" table-class="w-full">
+              <Column :field="(entry: any) => proxySocketAddr(entry.src)" :header="t('proxy_failover.source')" />
+              <Column :field="(entry: any) => proxySocketAddr(entry.dst)" :header="t('proxy_failover.destination')" />
+              <Column field="requested_transport" :header="t('proxy_failover.requested')" />
+              <Column field="selected_transport" :header="t('proxy_failover.selected')" />
+              <Column field="fallback_reason" :header="t('proxy_failover.reason')" />
+              <Column field="dst_peer_id" :header="t('proxy_failover.peer')" />
+              <Column :field="proxyHealth" :header="t('proxy_failover.health')" />
+              <Column field="generation" :header="t('proxy_failover.generation')" />
+            </DataTable>
+          </template>
+        </Card>
+      </template>
     </template>
   </div>
 </template>

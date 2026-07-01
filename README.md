@@ -157,6 +157,12 @@ After startup, this node will listen on the following ports by default:
 sudo easytier-core -i 10.144.144.2 -p udp://FIRST_NODE_PUBLIC_IP:11010
 ```
 
+Note: when `--stealth-mode` is enabled, a fixed `udp://` listener no longer accepts
+plain SYN probes. A new node dialing a legacy endpoint can retry plain on a fresh
+attempt, but a legacy node dialing a strict stealth listener is still silently
+dropped. Empty `--stealth-protocols` protects UDP only; explicitly list additional
+transports when the rollout supports them. See [stealth compatibility notes](easytier/docs/udp_stealth_compatibility.md).
+
 3. Verify Connection:
 
 ```bash

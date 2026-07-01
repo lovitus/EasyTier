@@ -159,6 +159,33 @@ disable_tcp_hole_punching_help: Disable tcp hole punching
 disable_udp_hole_punching: Disable UDP Hole Punching
 disable_udp_hole_punching_help: Disable udp hole punching
 
+stealth_mode: Enable UDP Stealth
+stealth_mode_help: Require authenticated and obfuscated UDP handshakes. Secure mode and a network secret are required.
+
+stealth_window_secs: Stealth Gate Window
+stealth_window_secs_help: Rolling gate-key window in seconds. Set to 0 to use the 60-second default.
+stealth_protocols: Stealth Protocols
+stealth_protocols_help: Comma-separated transports protected by stealth. Empty keeps the rollout-compatible UDP-only behavior. Supported values are udp, tcp, faketcp, quic, wg, ws, and wss.
+stealth_protocols_placeholder: "udp,tcp,faketcp,quic,wg,ws,wss"
+proxy_failover:
+  title: Proxy Failover
+  source: Source
+  destination: Destination
+  requested: Requested
+  selected: Selected
+  reason: Fallback Reason
+  peer: Target Peer
+  health: Transport Health
+  generation: Generation
+  healthy: Healthy
+  degraded: Degraded
+
+disable_legacy_udp_hole_punch: Reject Legacy UDP Hole Punch
+disable_legacy_udp_hole_punch_help: Reject old hole-punch requests that do not carry a stealth preference. Explicit plain requests from new peers remain allowed.
+transport_priority: Direct Transport Priority
+transport_priority_help: Applies only to direct-connect. Use semicolon-separated scope:protocol-list rules; IPv6 scopes require brackets.
+transport_priority_placeholder: "global:tcp,udp;wan:quic,wss;lan:udp,faketcp"
+
 enable_udp_broadcast_relay: UDP Broadcast Relay
 enable_udp_broadcast_relay_help: "Windows only: capture local UDP broadcast packets from physical interfaces and forward them to EasyTier peers. Helps games to find rooms in local network. Requires administrator privileges."
 

@@ -437,8 +437,16 @@ impl MagicDnsServerInstanceData {
 
 #[async_trait::async_trait]
 impl NicPacketFilter for MagicDnsServerInstanceData {
-    async fn try_process_packet_from_nic(&self, zc_packet: &mut ZCPacket) -> bool {
-        self.handle_ip_packet(zc_packet).await.is_some()
+    async fn try_process_packet_from_nic(
+        &self,
+        zc_packet: &mut ZCPacket,
+        _context: &crate::peers::NicPacketContext,
+    ) -> crate::peers::NicPacketFilterAction {
+        if self.handle_ip_packet(zc_packet).await.is_some() {
+            crate::peers::NicPacketFilterAction::StopAndSend
+        } else {
+            crate::peers::NicPacketFilterAction::Continue
+        }
     }
 
     fn id(&self) -> String {

@@ -16,6 +16,7 @@ import {
   type GroupInfo,
   type Rule as AclRule,
 } from '../generated/proto/acl'
+import type { TcpProxyEntry } from '../generated/proto/api_instance'
 import { CompressionAlgoPb, NatType, type SecureModeConfig } from '../generated/proto/common'
 import { prepareNetworkConfigForProtoJson } from './networkCompat'
 
@@ -94,6 +95,11 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     disable_encryption: false,
     disable_tcp_hole_punching: false,
     disable_udp_hole_punching: false,
+    stealth_mode: false,
+    stealth_window_secs: 0,
+    stealth_protocols: '',
+    disable_legacy_udp_hole_punch: false,
+    transport_priority: '',
     disable_upnp: false,
     enable_udp_broadcast_relay: false,
     disable_sym_hole_punching: false,
@@ -222,6 +228,7 @@ export interface NetworkInstanceRunningInfo {
   peer_route_pairs: PeerRoutePair[]
   running: boolean
   error_msg?: string
+  proxy_failover_entries?: TcpProxyEntry[]
 }
 
 export interface Ipv4Addr {

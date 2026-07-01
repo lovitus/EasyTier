@@ -291,6 +291,13 @@ struct NetworkOptions {
 
     #[arg(
         long,
+        env = "ET_TRANSPORT_PRIORITY",
+        help = "direct-connect transport order, e.g. global:tcp,udp;wan:quic,wss"
+    )]
+    transport_priority: Option<String>,
+
+    #[arg(
+        long,
         env = "ET_STEALTH_MODE",
         help = "enable stealth outer-protection underlay (opt-in, requires secure mode)",
         num_args = 0..=1,
@@ -304,6 +311,22 @@ struct NetworkOptions {
         help = "rolling window seconds for stealth pre-auth gate key (0 = default 60)"
     )]
     stealth_window_secs: Option<u32>,
+
+    #[arg(
+        long,
+        env = "ET_STEALTH_PROTOCOLS",
+        help = "comma-separated stealth transports (empty = udp): udp,tcp,faketcp,quic,wg,ws,wss"
+    )]
+    stealth_protocols: Option<String>,
+
+    #[arg(
+        long,
+        env = "ET_DISABLE_LEGACY_UDP_HOLE_PUNCH",
+        help = "reject UDP hole-punch requests from legacy peers without stealth negotiation",
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    disable_legacy_udp_hole_punch: Option<bool>,
 
     #[arg(
         short = 'u',
@@ -1107,6 +1130,11 @@ impl NetworkOptions {
         if let Some(default_protocol) = &self.default_protocol {
             f.default_protocol = default_protocol.clone()
         };
+        if let Some(transport_priority) = &self.transport_priority {
+            crate::common::transport_priority::TransportPriority::parse(transport_priority)
+                .context("failed to parse --transport-priority")?;
+            f.transport_priority = transport_priority.clone();
+        }
         if let Some(v) = self.disable_encryption {
             f.enable_encryption = !v;
         }
@@ -1117,6 +1145,14 @@ impl NetworkOptions {
         if let Some(w) = self.stealth_window_secs {
             f.stealth_window_secs = w;
         }
+        if let Some(stealth_protocols) = &self.stealth_protocols {
+            crate::common::stealth_registry::StealthProtocolSet::parse(stealth_protocols)
+                .context("failed to parse --stealth-protocols")?;
+            f.stealth_protocols = stealth_protocols.clone();
+        }
+        f.disable_legacy_udp_hole_punch = self
+            .disable_legacy_udp_hole_punch
+            .unwrap_or(f.disable_legacy_udp_hole_punch);
         if let Some(v) = self.disable_ipv6 {
             f.enable_ipv6 = !v;
         }

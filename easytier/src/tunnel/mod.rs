@@ -156,6 +156,9 @@ pub trait TunnelConnector: Send {
     /// Used by the direct connector to downgrade UDP dials when the target
     /// explicitly advertises no stealth support.
     fn disable_stealth(&mut self) {}
+    /// Require stealth for this dial; failure must not fall back to the legacy
+    /// wire format.
+    fn require_stealth(&mut self) {}
 }
 
 pub fn build_url_from_socket_addr(addr: &String, scheme: &str) -> url::Url {

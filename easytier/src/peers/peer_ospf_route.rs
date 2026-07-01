@@ -489,7 +489,7 @@ impl SyncedRouteInfo {
     }
 
     fn mark_credential_peer(info: &mut RoutePeerInfo, is_credential_peer: bool) {
-        let mut feature_flag = info.feature_flag.unwrap_or_default();
+        let mut feature_flag = info.feature_flag.clone().unwrap_or_default();
         feature_flag.is_credential_peer = is_credential_peer;
         info.feature_flag = Some(feature_flag);
     }
@@ -827,7 +827,7 @@ impl SyncedRouteInfo {
         self.peer_infos
             .read()
             .get(&peer_id)
-            .and_then(|x| x.feature_flag)
+            .and_then(|x| x.feature_flag.clone())
             .map(|x| x.avoid_relay_data)
             .unwrap_or_default()
     }
@@ -2922,7 +2922,7 @@ impl PeerRouteServiceImpl {
             .peer_infos
             .read()
             .get(&dst_peer_id)
-            .and_then(|p| p.feature_flag)
+            .and_then(|p| p.feature_flag.clone())
             .map(|x| x.support_conn_list_sync)
             .unwrap_or(false)
             || FORCE_USE_CONN_LIST.load(Ordering::Relaxed);
@@ -4024,7 +4024,7 @@ impl Route for PeerRoute {
             route.cost_latency_first = next_hop_peer_latency_first.map(|x| x.path_len as i32);
             route.path_latency_latency_first = next_hop_peer_latency_first.map(|x| x.path_latency);
 
-            route.feature_flag = item.feature_flag;
+            route.feature_flag = item.feature_flag.clone();
 
             routes.push(route);
         }

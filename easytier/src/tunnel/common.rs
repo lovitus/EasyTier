@@ -23,7 +23,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::net::{TcpListener, TcpSocket, UdpSocket};
 use tokio_stream::StreamExt;
 use tokio_util::io::poll_write_buf;
-use zerocopy::FromBytes as _;
+use zerocopy::{AsBytes as _, FromBytes as _};
 
 pub struct TunnelWrapper<R, W> {
     reader: Arc<Mutex<Option<R>>>,
@@ -193,6 +193,108 @@ where
     }
 }
 
+pin_project! {
+    pub struct StealthFramedReader<R> {
+        #[pin]
+        reader: R,
+        buf: BytesMut,
+        max_packet_size: usize,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+        failed: bool,
+    }
+}
+
+impl<R> StealthFramedReader<R> {
+    pub fn new(
+        reader: R,
+        max_packet_size: usize,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    ) -> Self {
+        Self {
+            reader,
+            buf: BytesMut::with_capacity(max_packet_size * 2),
+            max_packet_size,
+            stealth,
+            failed: false,
+        }
+    }
+
+    pub(crate) fn extract_one_packet(
+        buf: &mut BytesMut,
+        max_packet_size: usize,
+        stealth: &crate::tunnel::stealth::OuterSessionState,
+    ) -> Option<Result<ZCPacket, TunnelError>> {
+        if buf.len() < TCP_TUNNEL_HEADER_SIZE {
+            return None;
+        }
+        let header = TCPTunnelHeader::ref_from_prefix(&buf[..]).unwrap();
+        let sealed_len = header.len.get() as usize;
+        if sealed_len > max_packet_size + crate::tunnel::stealth::OUTER_OVERHEAD {
+            return Some(Err(TunnelError::InvalidPacket(
+                "sealed TCP record is too long".to_string(),
+            )));
+        }
+        if buf.len() < TCP_TUNNEL_HEADER_SIZE + sealed_len {
+            return None;
+        }
+        let record = buf.split_to(TCP_TUNNEL_HEADER_SIZE + sealed_len);
+        let Some(plaintext) = stealth.open_datagram(&record[TCP_TUNNEL_HEADER_SIZE..]) else {
+            return Some(Err(TunnelError::InvalidPacket(
+                "TCP stealth authentication failed".to_string(),
+            )));
+        };
+        if plaintext.len() < TCP_TUNNEL_HEADER_SIZE + PEER_MANAGER_HEADER_SIZE {
+            return Some(Err(TunnelError::InvalidPacket(
+                "opened TCP record is too short".to_string(),
+            )));
+        }
+        Some(Ok(ZCPacket::new_from_buf(
+            BytesMut::from(plaintext.as_slice()),
+            ZCPacketType::TCP,
+        )))
+    }
+}
+
+impl<R> Stream for StealthFramedReader<R>
+where
+    R: AsyncRead + Send + 'static + Unpin,
+{
+    type Item = StreamItem;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+        if *this.failed {
+            return Poll::Ready(None);
+        }
+        loop {
+            if let Some(packet) =
+                Self::extract_one_packet(this.buf, *this.max_packet_size, this.stealth.as_ref())
+            {
+                if packet.is_err() {
+                    *this.failed = true;
+                }
+                return Poll::Ready(Some(packet));
+            }
+            reserve_buf(this.buf, *this.max_packet_size, *this.max_packet_size * 2);
+            let cap = this.buf.capacity() - this.buf.len();
+            let ptr = this.buf.chunk_mut().as_mut_ptr();
+            let slice = unsafe { std::slice::from_raw_parts_mut(ptr, cap) };
+            let mut read_buf = ReadBuf::new(slice);
+            let result = ready!(this.reader.as_mut().poll_read(cx, &mut read_buf));
+            let len = read_buf.filled().len();
+            unsafe { this.buf.advance_mut(len) };
+            match result {
+                Ok(()) if len == 0 => return Poll::Ready(None),
+                Ok(()) => {}
+                Err(error) => return Poll::Ready(Some(Err(TunnelError::IOError(error)))),
+            }
+        }
+    }
+}
+
 pub trait ZCPacketToBytes {
     fn zcpacket_into_bytes(&self, zc_packet: ZCPacket) -> Result<Bytes, TunnelError>;
 }
@@ -209,6 +311,37 @@ impl ZCPacketToBytes for TcpZCPacketToBytes {
         header.len.set(tcp_len.try_into().unwrap());
 
         Ok(item.into_bytes())
+    }
+}
+
+pub struct StealthTcpZCPacketToBytes {
+    stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+}
+
+impl StealthTcpZCPacketToBytes {
+    pub fn new(stealth: Arc<crate::tunnel::stealth::OuterSessionState>) -> Self {
+        Self { stealth }
+    }
+}
+
+impl ZCPacketToBytes for StealthTcpZCPacketToBytes {
+    fn zcpacket_into_bytes(&self, item: ZCPacket) -> Result<Bytes, TunnelError> {
+        let plaintext = TcpZCPacketToBytes.zcpacket_into_bytes(item)?;
+        let sealed = self
+            .stealth
+            .seal_datagram(&plaintext)
+            .ok_or_else(|| TunnelError::InternalError("TCP stealth is disabled".to_string()))?;
+        let mut header = TCPTunnelHeader::default();
+        header.len.set(
+            sealed
+                .len()
+                .try_into()
+                .map_err(|_| TunnelError::ExceedMaxPacketSize(u32::MAX as usize, sealed.len()))?,
+        );
+        let mut record = BytesMut::with_capacity(TCP_TUNNEL_HEADER_SIZE + sealed.len());
+        record.extend_from_slice(header.as_bytes());
+        record.extend_from_slice(&sealed);
+        Ok(record.freeze())
     }
 }
 
@@ -669,6 +802,96 @@ pub mod tests {
             ret,
             Some(Err(TunnelError::InvalidPacket(msg))) if msg == "body too short"
         ));
+    }
+
+    #[test]
+    fn stealth_tcp_record_rejects_wrong_secret() {
+        use super::{StealthFramedReader, StealthTcpZCPacketToBytes, ZCPacketToBytes};
+
+        let sender = Arc::new(crate::tunnel::stealth::OuterSessionState::new(
+            b"secret-a".to_vec(),
+            60,
+        ));
+        let receiver = Arc::new(crate::tunnel::stealth::OuterSessionState::new(
+            b"secret-b".to_vec(),
+            60,
+        ));
+        let encoded = StealthTcpZCPacketToBytes::new(sender)
+            .zcpacket_into_bytes(ZCPacket::new_with_payload(b"payload"))
+            .unwrap();
+        let mut buf = BytesMut::from(encoded.as_ref());
+
+        assert!(matches!(
+            StealthFramedReader::<tokio::io::Empty>::extract_one_packet(
+                &mut buf,
+                2000,
+                receiver.as_ref()
+            ),
+            Some(Err(TunnelError::InvalidPacket(message)))
+                if message == "TCP stealth authentication failed"
+        ));
+    }
+
+    #[test]
+    fn stealth_tcp_record_switches_to_outer_key_and_rejects_gate_data() {
+        use super::{StealthFramedReader, StealthTcpZCPacketToBytes, ZCPacketToBytes};
+
+        let sender = Arc::new(crate::tunnel::stealth::OuterSessionState::new(
+            b"secret".to_vec(),
+            60,
+        ));
+        let receiver = Arc::new(crate::tunnel::stealth::OuterSessionState::new(
+            b"secret".to_vec(),
+            60,
+        ));
+        let stale_gate_sender = Arc::new(crate::tunnel::stealth::OuterSessionState::new(
+            b"secret".to_vec(),
+            60,
+        ));
+
+        let gate_record = StealthTcpZCPacketToBytes::new(sender.clone())
+            .zcpacket_into_bytes(ZCPacket::new_with_payload(b"gate"))
+            .unwrap();
+        let mut gate_buf = BytesMut::from(gate_record.as_ref());
+        assert!(
+            StealthFramedReader::<tokio::io::Empty>::extract_one_packet(
+                &mut gate_buf,
+                2000,
+                receiver.as_ref()
+            )
+            .unwrap()
+            .is_ok()
+        );
+
+        sender.set_outer_key_from_handshake_hash(b"handshake");
+        receiver.set_outer_key_from_handshake_hash(b"handshake");
+        let outer_record = StealthTcpZCPacketToBytes::new(sender)
+            .zcpacket_into_bytes(ZCPacket::new_with_payload(b"outer"))
+            .unwrap();
+        let mut outer_buf = BytesMut::from(outer_record.as_ref());
+        assert!(
+            StealthFramedReader::<tokio::io::Empty>::extract_one_packet(
+                &mut outer_buf,
+                2000,
+                receiver.as_ref()
+            )
+            .unwrap()
+            .is_ok()
+        );
+
+        let stale_gate_record = StealthTcpZCPacketToBytes::new(stale_gate_sender)
+            .zcpacket_into_bytes(ZCPacket::new_with_payload(b"stale-gate"))
+            .unwrap();
+        let mut stale_gate_buf = BytesMut::from(stale_gate_record.as_ref());
+        assert!(
+            StealthFramedReader::<tokio::io::Empty>::extract_one_packet(
+                &mut stale_gate_buf,
+                2000,
+                receiver.as_ref()
+            )
+            .unwrap()
+            .is_err()
+        );
     }
 
     pub async fn _tunnel_echo_server(tunnel: Box<dyn super::Tunnel>, once: bool) {

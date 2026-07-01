@@ -102,6 +102,11 @@ message NetworkConfig {
   optional bool disable_relay_data = 65;
   optional bool enable_udp_broadcast_relay = 66;
   optional uint32 socket_mark = 67;
+  optional bool stealth_mode = 68;
+  optional uint32 stealth_window_secs = 69;
+  optional bool disable_legacy_udp_hole_punch = 70;
+  optional string transport_priority = 71;
+  optional string stealth_protocols = 72;
 }
 
 message PortForwardConfig {
@@ -133,6 +138,7 @@ message NetworkInstanceRunningInfo {
   bool running = 7;
   optional string error_msg = 8;
   peer_rpc.RouteForeignNetworkSummary foreign_network_summary = 9;
+  repeated api.instance.TcpProxyEntry proxy_failover_entries = 10;
 }
 
 message NetworkInstanceRunningInfoMap {

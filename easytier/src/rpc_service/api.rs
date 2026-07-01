@@ -124,7 +124,9 @@ pub fn register_api_rpc_service(
         "",
     );
 
-    for client_type in ["tcp", "kcp_src", "kcp_dst", "quic_src", "quic_dst"] {
+    for client_type in [
+        "tcp", "kcp_src", "kcp_dst", "quic_src", "quic_dst", "failover",
+    ] {
         registry.register(
             TcpProxyRpcServer::new(TcpProxyRpcService::new(
                 instance_manager.clone(),

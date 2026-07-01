@@ -78,10 +78,12 @@ impl PeerCenterBase {
         }
         // find peer with alphabetical smallest id.
         let mut min_peer = peer_mgr.my_peer_id();
-        for peer in peers
-            .iter()
-            .filter(|r| r.feature_flag.map(|r| !r.is_public_server).unwrap_or(true))
-        {
+        for peer in peers.iter().filter(|r| {
+            r.feature_flag
+                .as_ref()
+                .map(|r| !r.is_public_server)
+                .unwrap_or(true)
+        }) {
             let peer_id = peer.peer_id;
             if peer_id < min_peer {
                 min_peer = peer_id;

@@ -160,6 +160,33 @@ disable_tcp_hole_punching_help: 禁用TCP打洞功能
 disable_udp_hole_punching: 禁用UDP打洞
 disable_udp_hole_punching_help: 禁用UDP打洞功能
 
+stealth_mode: 启用 UDP Stealth
+stealth_mode_help: 要求 UDP 握手通过认证并隐藏固定特征，需要同时启用安全模式并配置网络密钥。
+
+stealth_window_secs: Stealth Gate 时间窗口
+stealth_window_secs_help: Gate 密钥滚动窗口秒数，设为 0 时使用默认 60 秒。
+stealth_protocols: Stealth 传输协议
+stealth_protocols_help: 使用逗号分隔需要 stealth 保护的传输协议；留空保持仅 UDP 的兼容发布行为。当前支持 udp、tcp、faketcp、quic、wg、ws、wss。
+stealth_protocols_placeholder: "udp,tcp,faketcp,quic,wg,ws,wss"
+proxy_failover:
+  title: Proxy 故障转移
+  source: 源地址
+  destination: 目标地址
+  requested: 请求顺序
+  selected: 实际选择
+  reason: 回退原因
+  peer: 目标 Peer
+  health: 传输健康
+  generation: 连接代次
+  healthy: 正常
+  degraded: 已降级
+
+disable_legacy_udp_hole_punch: 拒绝旧版 UDP 打洞
+disable_legacy_udp_hole_punch_help: 拒绝未携带 stealth 偏好的旧版打洞请求；新节点显式请求 plain 时仍允许。
+transport_priority: 直连传输协议优先级
+transport_priority_help: 仅影响 direct-connect。使用分号分隔 scope:协议列表；IPv6 scope 必须使用方括号。
+transport_priority_placeholder: "global:tcp,udp;wan:quic,wss;lan:udp,faketcp"
+
 enable_udp_broadcast_relay: UDP 广播中继
 enable_udp_broadcast_relay_help: "仅 Windows：捕获物理网卡上的本机 UDP 广播包并转发给 EasyTier 对等节点，帮助局域网游戏发现房间。需要管理员权限。"
 

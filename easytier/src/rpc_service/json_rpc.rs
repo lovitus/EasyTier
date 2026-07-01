@@ -45,6 +45,7 @@ fn tcp_proxy_domain(domain_name: Option<&str>) -> Result<&'static str> {
         Some("kcp_dst") => Ok("kcp_dst"),
         Some("quic_src") => Ok("quic_src"),
         Some("quic_dst") => Ok("quic_dst"),
+        Some("failover") => Ok("failover"),
         Some(domain) => {
             Err(anyhow::anyhow!("invalid TcpProxyRpcService domain_name: {}", domain).into())
         }
@@ -228,5 +229,10 @@ mod tests {
             err.to_string()
                 .contains("invalid TcpProxyRpcService domain_name")
         );
+    }
+
+    #[test]
+    fn json_rpc_accepts_failover_tcp_proxy_domain() {
+        assert_eq!(tcp_proxy_domain(Some("failover")).unwrap(), "failover");
     }
 }

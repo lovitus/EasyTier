@@ -61,8 +61,8 @@ use crate::{
 };
 
 use super::{
-    BoxNicPacketFilter, BoxPeerPacketFilter, PacketRecvChan, PacketRecvChanReceiver,
-    create_packet_recv_chan,
+    BoxNicPacketFilter, BoxPeerPacketFilter, NicPacketContext, NicPacketFilterAction,
+    PacketRecvChan, PacketRecvChanReceiver, create_packet_recv_chan,
     encrypt::{Encryptor, NullCipher},
     foreign_network_client::ForeignNetworkClient,
     foreign_network_manager::{ForeignNetworkManager, GlobalForeignNetworkAccessor},
@@ -1314,11 +1314,11 @@ impl PeerManager {
     }
 
     pub async fn add_nic_packet_process_pipeline(&self, pipeline: BoxNicPacketFilter) {
-        // newest pipeline will be executed first
-        self.nic_packet_process_pipeline
-            .write()
-            .await
-            .push(pipeline);
+        // The reverse traversal below makes higher priority run first while a
+        // stable sort preserves newest-first behavior for equal priorities.
+        let mut pipelines = self.nic_packet_process_pipeline.write().await;
+        pipelines.push(pipeline);
+        pipelines.sort_by_key(|pipeline| pipeline.priority());
     }
 
     async fn init_packet_process_pipeline(&self) {
@@ -1553,7 +1553,11 @@ impl PeerManager {
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "PeerManager"))]
-    async fn run_nic_packet_process_pipeline(&self, data: &mut ZCPacket) -> bool {
+    async fn run_nic_packet_process_pipeline(
+        &self,
+        data: &mut ZCPacket,
+        context: &NicPacketContext,
+    ) -> NicPacketFilterAction {
         // Enforce ACL for outbound (NIC-originated) packets. If ACL denies, stop processing.
         if !self.global_ctx.get_acl_filter().process_packet_with_acl(
             data,
@@ -1562,14 +1566,17 @@ impl PeerManager {
             |_| false,
             &self.get_route(),
         ) {
-            return false;
+            return NicPacketFilterAction::Consume;
         }
 
         for pipeline in self.nic_packet_process_pipeline.read().await.iter().rev() {
-            let _ = pipeline.try_process_packet_from_nic(data).await;
+            match pipeline.try_process_packet_from_nic(data, context).await {
+                NicPacketFilterAction::Continue => {}
+                action => return action,
+            }
         }
 
-        true
+        NicPacketFilterAction::Continue
     }
 
     pub async fn remove_nic_packet_process_pipeline(&self, id: String) -> Result<(), Error> {
@@ -1839,9 +1846,25 @@ impl PeerManager {
             0,
             tunnel::packet_def::PacketType::Data as u8,
         );
-        if !self.run_nic_packet_process_pipeline(&mut msg).await {
-            return Ok(());
+        let context = NicPacketContext {
+            ip_addr,
+            not_send_to_self,
+        };
+        match self
+            .run_nic_packet_process_pipeline(&mut msg, &context)
+            .await
+        {
+            NicPacketFilterAction::Consume => return Ok(()),
+            NicPacketFilterAction::Continue | NicPacketFilterAction::StopAndSend => {}
         }
+        self.send_msg_after_nic_pipeline(msg, context).await
+    }
+
+    pub async fn send_msg_after_nic_pipeline(
+        &self,
+        mut msg: ZCPacket,
+        context: NicPacketContext,
+    ) -> Result<(), Error> {
         let cur_to_peer_id = msg.peer_manager_header().unwrap().to_peer_id.into();
         if cur_to_peer_id != 0 {
             self.mark_recent_traffic(cur_to_peer_id);
@@ -1856,13 +1879,13 @@ impl PeerManager {
             .await;
         }
 
-        let (dst_peers, is_exit_node) = match ip_addr {
+        let (dst_peers, is_exit_node) = match context.ip_addr {
             IpAddr::V4(ipv4_addr) => self.get_msg_dst_peer_ipv4(&ipv4_addr).await,
             IpAddr::V6(ipv6_addr) => self.get_msg_dst_peer_ipv6(&ipv6_addr).await,
         };
 
         if dst_peers.is_empty() {
-            tracing::info!("no peer id for ip: {}", ip_addr);
+            tracing::info!("no peer id for ip: {}", context.ip_addr);
             return Ok(());
         }
 
@@ -1913,9 +1936,9 @@ impl PeerManager {
 
             #[cfg(not(target_env = "ohos"))]
             {
-                if not_send_to_self
+                if context.not_send_to_self
                     && *peer_id == self.my_peer_id
-                    && !self.global_ctx.is_ip_local_virtual_ip(&ip_addr)
+                    && !self.global_ctx.is_ip_local_virtual_ip(&context.ip_addr)
                 {
                     // Keep the loop-prevention flags for proxy-induced self-delivery where
                     // the destination is not this node's own EasyTier-managed IP.
@@ -2313,7 +2336,12 @@ impl PeerManager {
 #[cfg(test)]
 mod tests {
     use base64::Engine;
-    use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
+    use std::{
+        collections::HashMap,
+        fmt::Debug,
+        sync::{Arc, Mutex as StdMutex},
+        time::Duration,
+    };
 
     use hotpath::instant::Instant;
 
@@ -2330,7 +2358,7 @@ mod tests {
         },
         instance::listeners::create_listener_by_url,
         peers::{
-            create_packet_recv_chan,
+            NicPacketContext, NicPacketFilter, NicPacketFilterAction, create_packet_recv_chan,
             peer_conn::tests::set_secure_mode_cfg,
             peer_manager::RouteAlgoType,
             peer_rpc::tests::register_service,
@@ -2354,6 +2382,32 @@ mod tests {
     };
 
     use super::PeerManager;
+
+    struct RecordingNicFilter {
+        name: &'static str,
+        priority: i16,
+        action: NicPacketFilterAction,
+        calls: Arc<StdMutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl NicPacketFilter for RecordingNicFilter {
+        async fn try_process_packet_from_nic(
+            &self,
+            _data: &mut ZCPacket,
+            context: &NicPacketContext,
+        ) -> NicPacketFilterAction {
+            self.calls.lock().unwrap().push(format!(
+                "{}:{}:{}",
+                self.name, context.ip_addr, context.not_send_to_self
+            ));
+            self.action
+        }
+
+        fn priority(&self) -> i16 {
+            self.priority
+        }
+    }
 
     async fn create_lazy_peer_manager() -> Arc<PeerManager> {
         let peer_mgr = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
@@ -2393,6 +2447,85 @@ mod tests {
         assert!(PeerManager::should_mark_recent_traffic_for_fanout(0));
         assert!(PeerManager::should_mark_recent_traffic_for_fanout(1));
         assert!(!PeerManager::should_mark_recent_traffic_for_fanout(2));
+    }
+
+    #[tokio::test]
+    async fn nic_pipeline_orders_filters_and_preserves_context() {
+        let peer_mgr = create_mock_peer_manager_with_name("nic-pipeline-order".to_string()).await;
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        for (name, priority) in [("low", 0), ("high-old", 10), ("high-new", 10)] {
+            peer_mgr
+                .add_nic_packet_process_pipeline(Box::new(RecordingNicFilter {
+                    name,
+                    priority,
+                    action: NicPacketFilterAction::Continue,
+                    calls: calls.clone(),
+                }))
+                .await;
+        }
+        let context = NicPacketContext {
+            ip_addr: "10.44.0.3".parse().unwrap(),
+            not_send_to_self: true,
+        };
+        let mut packet = ZCPacket::new_with_payload(b"pipeline");
+        packet.fill_peer_manager_hdr(peer_mgr.my_peer_id(), 0, PacketType::Data as u8);
+
+        assert_eq!(
+            peer_mgr
+                .run_nic_packet_process_pipeline(&mut packet, &context)
+                .await,
+            NicPacketFilterAction::Continue
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "high-new:10.44.0.3:true",
+                "high-old:10.44.0.3:true",
+                "low:10.44.0.3:true"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn nic_pipeline_stop_actions_prevent_lower_filters() {
+        for action in [
+            NicPacketFilterAction::StopAndSend,
+            NicPacketFilterAction::Consume,
+        ] {
+            let peer_mgr =
+                create_mock_peer_manager_with_name(format!("nic-pipeline-stop-{action:?}")).await;
+            let calls = Arc::new(StdMutex::new(Vec::new()));
+            peer_mgr
+                .add_nic_packet_process_pipeline(Box::new(RecordingNicFilter {
+                    name: "low",
+                    priority: 0,
+                    action: NicPacketFilterAction::Continue,
+                    calls: calls.clone(),
+                }))
+                .await;
+            peer_mgr
+                .add_nic_packet_process_pipeline(Box::new(RecordingNicFilter {
+                    name: "stop",
+                    priority: 100,
+                    action,
+                    calls: calls.clone(),
+                }))
+                .await;
+            let context = NicPacketContext {
+                ip_addr: "10.44.0.4".parse().unwrap(),
+                not_send_to_self: false,
+            };
+            let mut packet = ZCPacket::new_with_payload(b"pipeline");
+            packet.fill_peer_manager_hdr(peer_mgr.my_peer_id(), 0, PacketType::Data as u8);
+
+            assert_eq!(
+                peer_mgr
+                    .run_nic_packet_process_pipeline(&mut packet, &context)
+                    .await,
+                action
+            );
+            assert_eq!(*calls.lock().unwrap(), ["stop:10.44.0.4:false"]);
+        }
     }
 
     fn route_with_ipv4(

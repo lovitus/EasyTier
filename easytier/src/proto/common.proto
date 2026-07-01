@@ -91,6 +91,15 @@ message FlagsInConfig {
   bool stealth_mode = 44;
   // Rolling window (seconds) for the stealth pre-auth gate key. 0 = default (60).
   uint32 stealth_window_secs = 45;
+  // Reject UDP hole-punch RPCs from legacy peers that do not advertise a
+  // stealth preference. Explicit plain requests from new peers remain valid.
+  bool disable_legacy_udp_hole_punch = 46;
+  // Direct-connect transport ordering rules. Manual/bootstrap URL order is not
+  // affected.
+  string transport_priority = 47;
+  // Comma-separated stealth transports. Empty keeps the rollout-compatible
+  // UDP-only behavior when stealth_mode is enabled.
+  string stealth_protocols = 48;
 }
 
 message RpcDescriptor {
@@ -244,6 +253,24 @@ message PeerFeatureFlag {
   bool ipv6_public_addr_provider = 11;
   // peer advertises support for stealth outer-protection underlay
   bool stealth_supported = 12;
+  repeated TransportStealthCapability stealth_capabilities = 13;
+}
+
+enum StealthTransportProtocol {
+  STEALTH_TRANSPORT_PROTOCOL_UNSPECIFIED = 0;
+  STEALTH_TRANSPORT_PROTOCOL_UDP = 1;
+  STEALTH_TRANSPORT_PROTOCOL_TCP = 2;
+  STEALTH_TRANSPORT_PROTOCOL_FAKE_TCP = 3;
+  STEALTH_TRANSPORT_PROTOCOL_QUIC = 4;
+  STEALTH_TRANSPORT_PROTOCOL_WG = 5;
+  STEALTH_TRANSPORT_PROTOCOL_WS = 6;
+  STEALTH_TRANSPORT_PROTOCOL_WSS = 7;
+}
+
+message TransportStealthCapability {
+  StealthTransportProtocol protocol = 1;
+  uint32 wire_version = 2;
+  uint32 level_mask = 3;
 }
 
 enum SocketType {

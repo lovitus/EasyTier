@@ -78,6 +78,9 @@ pub fn gen_default_flags() -> Flags {
         socket_mark: None,
         stealth_mode: false,
         stealth_window_secs: 0,
+        disable_legacy_udp_hole_punch: false,
+        transport_priority: String::new(),
+        stealth_protocols: String::new(),
     }
 }
 
@@ -701,10 +704,22 @@ impl TomlConfigLoader {
     }
 
     fn new_from_config(mut config: Config) -> Result<Self, anyhow::Error> {
-        config.flags_struct = Some(
-            Self::gen_flags(config.flags.clone().unwrap_or_default())
-                .context("failed to parse flags")?,
-        );
+        let flags = Self::gen_flags(config.flags.clone().unwrap_or_default())
+            .context("failed to parse flags")?;
+        crate::common::transport_priority::TransportPriority::parse(&flags.transport_priority)
+            .context("failed to parse transport_priority")?;
+        let stealth_protocols =
+            crate::common::stealth_registry::StealthProtocolSet::parse(&flags.stealth_protocols)
+                .context("failed to parse stealth_protocols")?;
+        for protocol in stealth_protocols.configured_protocols() {
+            if !protocol.is_implemented() {
+                tracing::warn!(
+                    protocol = protocol.as_str(),
+                    "configured stealth protocol is not implemented; skipping"
+                );
+            }
+        }
+        config.flags_struct = Some(flags);
         let has_network_identity = config.network_identity.is_some();
 
         let config = TomlConfigLoader {

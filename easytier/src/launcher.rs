@@ -418,6 +418,24 @@ impl NetworkInstance {
             .ok_or_else(|| anyhow::anyhow!("failed to get config"))?
             .dev_name
             .unwrap_or_else(|| "".to_string());
+        let proxy_failover_entries =
+            if let Some(service) = api_service.get_proxy_service("failover") {
+                match service
+                    .list_tcp_proxy_entry(
+                        ctrl.clone(),
+                        api::instance::ListTcpProxyEntryRequest::default(),
+                    )
+                    .await
+                {
+                    Ok(response) => response.entries,
+                    Err(error) => {
+                        tracing::warn!(?error, "failed to collect proxy failover status");
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
 
         Ok(NetworkInstanceRunningInfo {
             dev_name,
@@ -450,6 +468,7 @@ impl NetworkInstance {
             running: launcher.running(),
             error_msg: launcher.error_msg(),
             foreign_network_summary,
+            proxy_failover_entries,
         })
     }
 
@@ -952,6 +971,30 @@ impl NetworkConfig {
             flags.disable_udp_hole_punching = disable_udp_hole_punching;
         }
 
+        if let Some(stealth_mode) = self.stealth_mode {
+            flags.stealth_mode = stealth_mode;
+        }
+
+        if let Some(stealth_window_secs) = self.stealth_window_secs {
+            flags.stealth_window_secs = stealth_window_secs;
+        }
+
+        if let Some(stealth_protocols) = &self.stealth_protocols {
+            crate::common::stealth_registry::StealthProtocolSet::parse(stealth_protocols)
+                .context("failed to parse stealth_protocols")?;
+            flags.stealth_protocols = stealth_protocols.clone();
+        }
+
+        if let Some(disable_legacy_udp_hole_punch) = self.disable_legacy_udp_hole_punch {
+            flags.disable_legacy_udp_hole_punch = disable_legacy_udp_hole_punch;
+        }
+
+        if let Some(transport_priority) = &self.transport_priority {
+            crate::common::transport_priority::TransportPriority::parse(transport_priority)
+                .context("failed to parse transport_priority")?;
+            flags.transport_priority = transport_priority.clone();
+        }
+
         if let Some(disable_upnp) = self.disable_upnp {
             flags.disable_upnp = disable_upnp;
         }
@@ -1139,6 +1182,11 @@ impl NetworkConfig {
         result.disable_encryption = Some(!flags.enable_encryption);
         result.disable_tcp_hole_punching = Some(flags.disable_tcp_hole_punching);
         result.disable_udp_hole_punching = Some(flags.disable_udp_hole_punching);
+        result.stealth_mode = Some(flags.stealth_mode);
+        result.stealth_window_secs = Some(flags.stealth_window_secs);
+        result.stealth_protocols = Some(flags.stealth_protocols.clone());
+        result.disable_legacy_udp_hole_punch = Some(flags.disable_legacy_udp_hole_punch);
+        result.transport_priority = Some(flags.transport_priority.clone());
         result.disable_upnp = Some(flags.disable_upnp);
         result.disable_relay_data = Some(flags.disable_relay_data);
         result.enable_udp_broadcast_relay = Some(flags.enable_udp_broadcast_relay);
@@ -1440,6 +1488,19 @@ mod tests {
                 flags.enable_encryption = rng.gen_bool(0.8);
                 flags.disable_tcp_hole_punching = rng.gen_bool(0.2);
                 flags.disable_udp_hole_punching = rng.gen_bool(0.2);
+                flags.stealth_mode = rng.gen_bool(0.2);
+                flags.stealth_window_secs = if rng.gen_bool(0.5) { 0 } else { 30 };
+                flags.stealth_protocols = if rng.gen_bool(0.5) {
+                    String::new()
+                } else {
+                    "udp,tcp,wss".to_string()
+                };
+                flags.disable_legacy_udp_hole_punch = rng.gen_bool(0.2);
+                flags.transport_priority = if rng.gen_bool(0.5) {
+                    String::new()
+                } else {
+                    "global:udp,tcp;wan:quic,wss".to_string()
+                };
                 flags.disable_upnp = rng.gen_bool(0.2);
                 flags.enable_udp_broadcast_relay = rng.gen_bool(0.2);
                 flags.accept_dns = rng.gen_bool(0.6);

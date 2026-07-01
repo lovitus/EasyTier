@@ -29,6 +29,10 @@ use crate::connector::udp_hole_punch::UdpHolePunchConnector;
 use crate::gateway::icmp_proxy::IcmpProxy;
 #[cfg(feature = "kcp")]
 use crate::gateway::kcp_proxy::{KcpProxyDst, KcpProxyDstRpcService, KcpProxySrc};
+#[cfg(any(feature = "kcp", feature = "quic"))]
+use crate::gateway::proxy_failover::{
+    DeferredProxySelector, PreparedProxyStore, ProxyFailoverRpcService, ProxyPrepareTransport,
+};
 #[cfg(feature = "quic")]
 use crate::gateway::quic_proxy::{QuicProxy, QuicProxyDstRpcService};
 use crate::gateway::tcp_proxy::{NatDstTcpConnector, TcpProxy, TcpProxyRpcService};
@@ -639,6 +643,9 @@ pub struct Instance {
     #[cfg(feature = "quic")]
     quic_proxy: Option<QuicProxy>,
 
+    #[cfg(any(feature = "kcp", feature = "quic"))]
+    proxy_failover_selector: Option<DeferredProxySelector>,
+
     peer_center: Arc<PeerCenterInstance>,
 
     vpn_portal: Arc<Mutex<Box<dyn VpnPortal>>>,
@@ -725,6 +732,8 @@ impl Instance {
 
             #[cfg(feature = "quic")]
             quic_proxy: None,
+            #[cfg(any(feature = "kcp", feature = "quic"))]
+            proxy_failover_selector: None,
 
             peer_center,
 
@@ -1052,9 +1061,13 @@ impl Instance {
             self.check_dhcp_ip_conflict();
         }
 
+        #[cfg(any(feature = "kcp", feature = "quic"))]
+        let proxy_prepared_store = Arc::new(PreparedProxyStore::default());
+
         #[cfg(feature = "kcp")]
         if self.global_ctx.get_flags().enable_kcp_proxy {
-            let src_proxy = KcpProxySrc::new(self.get_peer_manager()).await;
+            let src_proxy =
+                KcpProxySrc::new(self.get_peer_manager(), Some(proxy_prepared_store.clone())).await;
             src_proxy.start().await;
             self.kcp_proxy_src = Some(src_proxy);
         }
@@ -1071,9 +1084,39 @@ impl Instance {
             let quic_src = self.global_ctx.get_flags().enable_quic_proxy;
             let quic_dst = !self.global_ctx.get_flags().disable_quic_input;
             if quic_src || quic_dst {
-                let mut quic_proxy = QuicProxy::new(self.get_peer_manager());
+                let mut quic_proxy =
+                    QuicProxy::new(self.get_peer_manager(), Some(proxy_prepared_store.clone()));
                 quic_proxy.run(quic_src, quic_dst).await;
                 self.quic_proxy = Some(quic_proxy);
+            }
+        }
+
+        #[cfg(any(feature = "kcp", feature = "quic"))]
+        {
+            let mut transports: Vec<Arc<dyn ProxyPrepareTransport>> = Vec::new();
+            #[cfg(feature = "quic")]
+            if let Some(connector) = self
+                .quic_proxy
+                .as_ref()
+                .and_then(QuicProxy::src)
+                .map(|src| src.get_connector())
+            {
+                transports.push(Arc::new(connector));
+            }
+            #[cfg(feature = "kcp")]
+            if let Some(src) = self.kcp_proxy_src.as_ref() {
+                transports.push(Arc::new(src.get_connector()));
+            }
+            if !transports.is_empty() {
+                let selector = DeferredProxySelector::new(
+                    self.get_peer_manager(),
+                    transports,
+                    proxy_prepared_store,
+                );
+                self.peer_manager
+                    .add_nic_packet_process_pipeline(Box::new(selector.clone()))
+                    .await;
+                self.proxy_failover_selector = Some(selector);
             }
         }
 
@@ -1537,6 +1580,14 @@ impl Instance {
                             Arc::new(QuicProxyDstRpcService::new(quic_dst)),
                         );
                     }
+                }
+
+                #[cfg(any(feature = "kcp", feature = "quic"))]
+                if let Some(selector) = self.proxy_failover_selector.as_ref() {
+                    tcp_proxy_rpc_services.insert(
+                        "failover".to_string(),
+                        Arc::new(ProxyFailoverRpcService::new(selector.clone())),
+                    );
                 }
 
                 tcp_proxy_rpc_services

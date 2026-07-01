@@ -13,14 +13,26 @@ use anyhow::Context;
 use derivative::Derivative;
 use derive_more::{Deref, DerefMut};
 use parking_lot::RwLock;
+use quinn::udp::{RecvMeta, Transmit};
 use quinn::{
-    ClientConfig, ConnectError, Connection, Endpoint, EndpointConfig, ServerConfig,
-    TransportConfig, congestion::BbrConfig, default_runtime,
+    AsyncUdpSocket, ClientConfig, ConnectError, Connection, Endpoint, EndpointConfig, ServerConfig,
+    TransportConfig, UdpPoller, congestion::BbrConfig, default_runtime,
 };
+use std::collections::HashMap;
+use std::io::{self, IoSliceMut};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::OnceLock;
+use std::pin::Pin;
+use std::sync::{Mutex, OnceLock};
+use std::task::{Context as TaskContext, Poll};
+use std::time::Instant;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::UdpSocket;
+
+const QUIC_STEALTH_FALLBACK_TIMEOUT: Duration = Duration::from_secs(1);
+const QUIC_STEALTH_OUTER_SEND_DELAY: Duration = Duration::from_secs(1);
+const QUIC_STEALTH_GATE_RECV_GRACE: Duration = Duration::from_secs(5);
+const QUIC_STEALTH_SESSION_TTL: Duration = Duration::from_secs(600);
+const QUIC_STEALTH_MAX_SESSIONS: usize = 4096;
 
 // region config
 mod crypto {
@@ -288,6 +300,15 @@ pub fn server_config() -> ServerConfig {
     config
 }
 
+fn stealth_server_config() -> ServerConfig {
+    let mut config = server_config();
+    // The outer session is keyed by the authenticated source address. QUIC
+    // migration would move packets to an address that cannot yet authenticate
+    // with the connection-level key.
+    config.migration(false);
+    config
+}
+
 pub fn client_config() -> ClientConfig {
     let mut config = ClientConfig::new(Arc::new(crypto::CryptoConfig));
     config.transport_config(transport_config());
@@ -299,7 +320,328 @@ pub fn endpoint_config() -> EndpointConfig {
     config.max_udp_payload_size(1200).unwrap();
     config
 }
+
+fn stealth_endpoint_config() -> EndpointConfig {
+    let mut config = EndpointConfig::default();
+    // A stealth socket receives the outer nonce/tag before opening the packet.
+    // The QUIC transport itself still uses a 1200-byte initial MTU.
+    config
+        .max_udp_payload_size(1200 + crate::tunnel::stealth::OUTER_OVERHEAD as u16)
+        .unwrap();
+    config
+}
 //endregion
+
+// region stealth socket
+#[derive(Debug)]
+struct QuicStealthSession {
+    state: Arc<crate::tunnel::stealth::OuterSessionState>,
+    outer_seen_at: Mutex<Option<Instant>>,
+}
+
+impl QuicStealthSession {
+    fn new(state: Arc<crate::tunnel::stealth::OuterSessionState>) -> Self {
+        Self {
+            state,
+            outer_seen_at: Mutex::new(None),
+        }
+    }
+
+    fn outer_elapsed(&self, now: Instant) -> Option<Duration> {
+        self.state.outer_key()?;
+        let mut seen = self.outer_seen_at.lock().unwrap();
+        let first_seen = *seen.get_or_insert(now);
+        Some(now.saturating_duration_since(first_seen))
+    }
+
+    fn seal(&self, plaintext: &[u8]) -> Option<Vec<u8>> {
+        let now = Instant::now();
+        match self.outer_elapsed(now) {
+            Some(elapsed) if elapsed >= QUIC_STEALTH_OUTER_SEND_DELAY => {
+                self.state.seal_datagram(plaintext)
+            }
+            _ => self.state.seal_gate_datagram(plaintext),
+        }
+    }
+
+    fn open(&self, sealed: &[u8]) -> Option<Vec<u8>> {
+        let now = Instant::now();
+        match self.outer_elapsed(now) {
+            Some(elapsed) => self.state.open_datagram(sealed).or_else(|| {
+                (elapsed <= QUIC_STEALTH_GATE_RECV_GRACE)
+                    .then(|| self.state.open_gate_datagram(sealed))
+                    .flatten()
+            }),
+            None => self.state.open_gate_datagram(sealed),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct QuicStealthSessionEntry {
+    session: Arc<QuicStealthSession>,
+    last_seen: Instant,
+}
+
+#[derive(Debug)]
+struct QuicStealthSocket {
+    inner: Arc<dyn AsyncUdpSocket>,
+    template: Arc<crate::tunnel::stealth::OuterSessionState>,
+    sessions: Mutex<HashMap<SocketAddr, QuicStealthSessionEntry>>,
+    initial_nonces: Mutex<HashMap<[u8; crate::tunnel::stealth::OUTER_NONCE_LEN], Instant>>,
+}
+
+impl QuicStealthSocket {
+    fn new(
+        inner: Arc<dyn AsyncUdpSocket>,
+        template: Arc<crate::tunnel::stealth::OuterSessionState>,
+    ) -> Self {
+        debug_assert!(template.is_enabled());
+        Self {
+            inner,
+            template,
+            sessions: Mutex::new(HashMap::new()),
+            initial_nonces: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn is_quic_initial(plaintext: &[u8]) -> bool {
+        plaintext.len() >= 5
+            && plaintext[0] & 0xc0 == 0xc0
+            && plaintext[0] & 0x30 == 0
+            && plaintext[1..5] != [0, 0, 0, 0]
+    }
+
+    fn accept_initial_nonce(&self, sealed: &[u8]) -> bool {
+        let Ok(nonce) = sealed
+            .get(..crate::tunnel::stealth::OUTER_NONCE_LEN)
+            .unwrap_or_default()
+            .try_into()
+        else {
+            return false;
+        };
+        let now = Instant::now();
+        let ttl = Duration::from_secs(self.template.window_secs().saturating_mul(2).max(1));
+        let mut nonces = self.initial_nonces.lock().unwrap();
+        nonces.retain(|_, seen| now.saturating_duration_since(*seen) <= ttl);
+        if nonces.contains_key(&nonce) {
+            return false;
+        }
+        while nonces.len() >= QUIC_STEALTH_MAX_SESSIONS {
+            let Some(oldest) = nonces
+                .iter()
+                .min_by_key(|(_, seen)| **seen)
+                .map(|(nonce, _)| *nonce)
+            else {
+                break;
+            };
+            nonces.remove(&oldest);
+        }
+        nonces.insert(nonce, now);
+        true
+    }
+
+    fn cleanup_locked(sessions: &mut HashMap<SocketAddr, QuicStealthSessionEntry>, now: Instant) {
+        sessions.retain(|_, entry| {
+            now.saturating_duration_since(entry.last_seen) <= QUIC_STEALTH_SESSION_TTL
+        });
+    }
+
+    fn make_room_locked(sessions: &mut HashMap<SocketAddr, QuicStealthSessionEntry>) {
+        while sessions.len() >= QUIC_STEALTH_MAX_SESSIONS {
+            let Some(oldest) = sessions
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_seen)
+                .map(|(addr, _)| *addr)
+            else {
+                break;
+            };
+            sessions.remove(&oldest);
+        }
+    }
+
+    fn register_outbound(&self, addr: SocketAddr) -> Arc<QuicStealthSession> {
+        let now = Instant::now();
+        let mut sessions = self.sessions.lock().unwrap();
+        Self::cleanup_locked(&mut sessions, now);
+        if !sessions.contains_key(&addr) {
+            Self::make_room_locked(&mut sessions);
+        }
+        let entry = sessions
+            .entry(addr)
+            .or_insert_with(|| QuicStealthSessionEntry {
+                session: Arc::new(QuicStealthSession::new(
+                    self.template.fork_for_transport_delayed_transition(),
+                )),
+                last_seen: now,
+            });
+        entry.last_seen = now;
+        entry.session.clone()
+    }
+
+    fn session(&self, addr: SocketAddr) -> Option<Arc<QuicStealthSession>> {
+        let now = Instant::now();
+        let mut sessions = self.sessions.lock().unwrap();
+        Self::cleanup_locked(&mut sessions, now);
+        let entry = sessions.get_mut(&addr)?;
+        entry.last_seen = now;
+        Some(entry.session.clone())
+    }
+
+    fn open_from(
+        &self,
+        addr: SocketAddr,
+        sealed: &[u8],
+    ) -> Option<(Vec<u8>, Arc<QuicStealthSession>)> {
+        if let Some(session) = self.session(addr) {
+            if session.state.outer_key().is_some() {
+                let candidate = Arc::new(QuicStealthSession::new(
+                    self.template.fork_for_transport_delayed_transition(),
+                ));
+                if let Some(plaintext) = candidate.open(sealed)
+                    && Self::is_quic_initial(&plaintext)
+                {
+                    if !self.accept_initial_nonce(sealed) {
+                        return None;
+                    }
+                    self.sessions.lock().unwrap().insert(
+                        addr,
+                        QuicStealthSessionEntry {
+                            session: candidate.clone(),
+                            last_seen: Instant::now(),
+                        },
+                    );
+                    return Some((plaintext, candidate));
+                }
+            }
+            return session.open(sealed).map(|plaintext| (plaintext, session));
+        }
+
+        let candidate = Arc::new(QuicStealthSession::new(
+            self.template.fork_for_transport_delayed_transition(),
+        ));
+        let plaintext = candidate.open(sealed)?;
+        if !Self::is_quic_initial(&plaintext) || !self.accept_initial_nonce(sealed) {
+            return None;
+        }
+
+        let now = Instant::now();
+        let mut sessions = self.sessions.lock().unwrap();
+        Self::cleanup_locked(&mut sessions, now);
+        if !sessions.contains_key(&addr) {
+            Self::make_room_locked(&mut sessions);
+        }
+        let entry = sessions
+            .entry(addr)
+            .or_insert_with(|| QuicStealthSessionEntry {
+                session: candidate,
+                last_seen: now,
+            });
+        entry.last_seen = now;
+        Some((plaintext, entry.session.clone()))
+    }
+}
+
+impl AsyncUdpSocket for QuicStealthSocket {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        self.inner.clone().create_io_poller()
+    }
+
+    fn try_send(&self, transmit: &Transmit) -> io::Result<()> {
+        if transmit.segment_size.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "QUIC stealth socket does not support segmented transmits",
+            ));
+        }
+        let session = self.session(transmit.destination).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "missing QUIC stealth session for destination",
+            )
+        })?;
+        let sealed = session.seal(transmit.contents).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "QUIC stealth sealing failed")
+        })?;
+        self.inner.try_send(&Transmit {
+            destination: transmit.destination,
+            ecn: transmit.ecn,
+            contents: &sealed,
+            segment_size: None,
+            src_ip: transmit.src_ip,
+        })
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut TaskContext<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        if bufs.is_empty() || meta.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        for _ in 0..4 {
+            let count = match self.inner.poll_recv(cx, bufs, meta) {
+                Poll::Ready(Ok(count)) => count,
+                other => return other,
+            };
+            let mut opened = Vec::with_capacity(count);
+            for index in 0..count {
+                let received = meta[index];
+                let stride = received.stride.max(1);
+                let mut offset = 0;
+                while offset < received.len && opened.len() < bufs.len().min(meta.len()) {
+                    let end = (offset + stride).min(received.len);
+                    let sealed = &bufs[index][offset..end];
+                    if let Some((plaintext, _)) = self.open_from(received.addr, sealed) {
+                        opened.push((plaintext, received));
+                    }
+                    offset = end;
+                }
+            }
+
+            if opened.is_empty() {
+                continue;
+            }
+            let opened_count = opened.len();
+            for (index, (plaintext, mut received)) in opened.into_iter().enumerate() {
+                if plaintext.len() > bufs[index].len() {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "opened QUIC datagram exceeds receive buffer",
+                    )));
+                }
+                bufs[index][..plaintext.len()].copy_from_slice(&plaintext);
+                received.len = plaintext.len();
+                received.stride = plaintext.len();
+                meta[index] = received;
+            }
+            return Poll::Ready(Ok(opened_count));
+        }
+
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    fn max_transmit_segments(&self) -> usize {
+        1
+    }
+
+    fn max_receive_segments(&self) -> usize {
+        1
+    }
+
+    fn may_fragment(&self) -> bool {
+        self.inner.may_fragment()
+    }
+}
+// endregion
 
 //region rw pool
 #[derive(Derivative)]
@@ -474,11 +816,22 @@ pub struct QuicEndpointManager {
 static QUIC_ENDPOINT_MANAGER: OnceLock<QuicEndpointManager> = OnceLock::new();
 
 impl QuicEndpointManager {
-    fn try_create(
+    fn try_create_with_stealth(
         addr: SocketAddr,
         dual_stack: bool,
         socket_mark: Option<u32>,
-    ) -> Result<Endpoint, TunnelError> {
+        stealth: Option<(
+            Arc<crate::tunnel::stealth::OuterSessionState>,
+            Option<SocketAddr>,
+        )>,
+    ) -> Result<
+        (
+            Endpoint,
+            Option<Arc<QuicStealthSocket>>,
+            Option<Arc<QuicStealthSession>>,
+        ),
+        TunnelError,
+    > {
         let socket = bind::<UdpSocket>()
             .addr(addr)
             .only_v6(addr.is_ipv6() && !dual_stack)
@@ -487,14 +840,35 @@ impl QuicEndpointManager {
         let runtime = default_runtime().ok_or(TunnelError::InternalError(
             "no async runtime found".to_owned(),
         ))?;
-        let mut endpoint = Endpoint::new_with_abstract_socket(
-            endpoint_config(),
-            None,
-            runtime.wrap_udp_socket(socket.into_std()?)?,
-            runtime,
-        )?;
+        let socket = runtime.wrap_udp_socket(socket.into_std()?)?;
+        let endpoint_config = if stealth.is_some() {
+            stealth_endpoint_config()
+        } else {
+            endpoint_config()
+        };
+        let (socket, stealth_socket, connection_session) = if let Some((template, remote_addr)) =
+            stealth
+        {
+            let stealth_socket = Arc::new(QuicStealthSocket::new(socket, template));
+            let connection_session = remote_addr.map(|addr| stealth_socket.register_outbound(addr));
+            let socket: Arc<dyn AsyncUdpSocket> = stealth_socket.clone();
+            (socket, Some(stealth_socket), connection_session)
+        } else {
+            (socket, None, None)
+        };
+        let mut endpoint =
+            Endpoint::new_with_abstract_socket(endpoint_config, None, socket, runtime)?;
         endpoint.set_default_client_config(client_config());
-        Ok(endpoint)
+        Ok((endpoint, stealth_socket, connection_session))
+    }
+
+    fn try_create(
+        addr: SocketAddr,
+        dual_stack: bool,
+        socket_mark: Option<u32>,
+    ) -> Result<Endpoint, TunnelError> {
+        Self::try_create_with_stealth(addr, dual_stack, socket_mark, None)
+            .map(|(endpoint, _, _)| endpoint)
     }
 
     fn create<F>(
@@ -579,9 +953,26 @@ impl QuicEndpointManager {
     ///
     /// # Arguments
     /// * `addr`: listen address
-    fn server(global_ctx: &ArcGlobalCtx, addr: SocketAddr) -> Result<Endpoint, TunnelError> {
+    fn server(
+        global_ctx: &ArcGlobalCtx,
+        addr: SocketAddr,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    ) -> Result<(Endpoint, Option<Arc<QuicStealthSocket>>), TunnelError> {
         let mgr = Self::load(global_ctx);
         let socket_mark = global_ctx.config.get_flags().socket_mark;
+
+        let dual_stack = addr.ip() == Ipv6Addr::UNSPECIFIED && mgr.both.is_enabled();
+
+        if stealth.is_enabled() {
+            let (endpoint, stealth_socket, _) = Self::try_create_with_stealth(
+                addr,
+                dual_stack,
+                socket_mark,
+                Some((stealth, None)),
+            )?;
+            endpoint.set_server_config(Some(stealth_server_config()));
+            return Ok((endpoint, stealth_socket));
+        }
 
         let (pool, endpoint) = mgr.create(socket_mark, |mgr| {
             let dual_stack = addr.ip() == Ipv6Addr::UNSPECIFIED && mgr.both.is_enabled();
@@ -599,7 +990,7 @@ impl QuicEndpointManager {
         endpoint.set_server_config(Some(server_config()));
         pool.push(endpoint.clone());
 
-        Ok(endpoint)
+        Ok((endpoint, None))
     }
 
     fn client_endpoint(
@@ -665,6 +1056,37 @@ impl QuicEndpointManager {
             .await
     }
 
+    async fn connect_stealth(
+        global_ctx: &ArcGlobalCtx,
+        addr: SocketAddr,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    ) -> Result<(Endpoint, Connection, Arc<QuicStealthSession>), TunnelError> {
+        let bind_addr = if addr.is_ipv4() {
+            SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+        } else {
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+        };
+        let socket_mark = global_ctx.config.get_flags().socket_mark;
+        let (endpoint, _, session) = Self::try_create_with_stealth(
+            bind_addr,
+            false,
+            socket_mark,
+            Some((stealth, Some(addr))),
+        )?;
+        let connection = endpoint
+            .connect(addr, "localhost")
+            .map_err(|error| {
+                anyhow::Error::new(error).context(format!("failed to connect to {}", addr))
+            })?
+            .await
+            .with_context(|| format!("failed to connect to {}", addr))?;
+        Ok((
+            endpoint,
+            connection,
+            session.expect("stealth client endpoint must have a remote session"),
+        ))
+    }
+
     async fn connect_with_ip_version(
         &self,
         addr: SocketAddr,
@@ -725,6 +1147,8 @@ pub struct QuicTunnelListener {
     addr: url::Url,
     global_ctx: ArcGlobalCtx,
     endpoint: Option<Endpoint>,
+    stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    stealth_socket: Option<Arc<QuicStealthSocket>>,
 }
 
 impl QuicTunnelListener {
@@ -733,7 +1157,13 @@ impl QuicTunnelListener {
             addr,
             global_ctx,
             endpoint: None,
+            stealth: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
+            stealth_socket: None,
         }
+    }
+
+    pub fn set_stealth(&mut self, stealth: Arc<crate::tunnel::stealth::OuterSessionState>) {
+        self.stealth = stealth;
     }
 
     async fn do_accept(&self) -> Result<Box<dyn Tunnel>, super::TunnelError> {
@@ -748,6 +1178,16 @@ impl QuicTunnelListener {
         let conn = conn.await.with_context(|| "accept connection failed")?;
         let remote_addr = conn.remote_address();
         let (w, r) = conn.accept_bi().await.with_context(|| "accept_bi failed")?;
+        let connection_stealth = match &self.stealth_socket {
+            Some(socket) => Some(
+                socket
+                    .session(remote_addr)
+                    .ok_or_else(|| anyhow::anyhow!("missing accepted QUIC stealth session"))?
+                    .state
+                    .clone(),
+            ),
+            None => None,
+        };
 
         let arc_conn = Arc::new(ConnWrapper { conn });
 
@@ -762,10 +1202,11 @@ impl QuicTunnelListener {
             ),
         };
 
-        Ok(Box::new(TunnelWrapper::new(
+        Ok(Box::new(TunnelWrapper::new_with_associate_data(
             FramedReader::new_with_associate_data(r, 2000, Some(Box::new(arc_conn.clone()))),
             FramedWriter::new_with_associate_data(w, Some(Box::new(arc_conn))),
             Some(info),
+            connection_stealth.map(|state| Box::new(state) as Box<dyn std::any::Any + Send>),
         )))
     }
 }
@@ -786,11 +1227,13 @@ impl Drop for QuicTunnelListener {
 impl TunnelListener for QuicTunnelListener {
     async fn listen(&mut self) -> Result<(), TunnelError> {
         let addr = SocketAddr::from_url(self.addr.clone(), IpVersion::Both).await?;
-        let endpoint = QuicEndpointManager::server(&self.global_ctx, addr)?;
+        let (endpoint, stealth_socket) =
+            QuicEndpointManager::server(&self.global_ctx, addr, self.stealth.clone())?;
         self.addr
             .set_port(Some(endpoint.local_addr()?.port()))
             .unwrap();
         self.endpoint = Some(endpoint);
+        self.stealth_socket = stealth_socket;
 
         Ok(())
     }
@@ -817,6 +1260,15 @@ pub struct QuicTunnelConnector {
     global_ctx: ArcGlobalCtx,
     ip_version: IpVersion,
     resolved_addr: Option<SocketAddr>,
+    stealth_candidate: Arc<crate::tunnel::stealth::OuterSessionState>,
+    stealth_mode: QuicStealthMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuicStealthMode {
+    Disabled,
+    Required,
+    PreferLegacyFallback,
 }
 
 impl QuicTunnelConnector {
@@ -826,7 +1278,21 @@ impl QuicTunnelConnector {
             global_ctx,
             ip_version: IpVersion::Both,
             resolved_addr: None,
+            stealth_candidate: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
+            stealth_mode: QuicStealthMode::Disabled,
         }
+    }
+
+    pub fn set_stealth_candidate(
+        &mut self,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    ) {
+        self.stealth_mode = if stealth.is_enabled() {
+            QuicStealthMode::PreferLegacyFallback
+        } else {
+            QuicStealthMode::Disabled
+        };
+        self.stealth_candidate = stealth;
     }
 }
 
@@ -837,7 +1303,48 @@ impl TunnelConnector for QuicTunnelConnector {
             Some(addr) => addr,
             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
         };
-        let (endpoint, connection) = QuicEndpointManager::connect(&self.global_ctx, addr).await?;
+        let (endpoint, connection, connection_stealth) = match self.stealth_mode {
+            QuicStealthMode::Disabled => {
+                let (endpoint, connection) =
+                    QuicEndpointManager::connect(&self.global_ctx, addr).await?;
+                (endpoint, connection, None)
+            }
+            QuicStealthMode::Required => {
+                let (endpoint, connection, session) = QuicEndpointManager::connect_stealth(
+                    &self.global_ctx,
+                    addr,
+                    self.stealth_candidate.clone(),
+                )
+                .await?;
+                (endpoint, connection, Some(session.state.clone()))
+            }
+            QuicStealthMode::PreferLegacyFallback => {
+                match tokio::time::timeout(
+                    QUIC_STEALTH_FALLBACK_TIMEOUT,
+                    QuicEndpointManager::connect_stealth(
+                        &self.global_ctx,
+                        addr,
+                        self.stealth_candidate.clone(),
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok((endpoint, connection, session))) => {
+                        (endpoint, connection, Some(session.state.clone()))
+                    }
+                    result => {
+                        tracing::info!(
+                            ?addr,
+                            ?result,
+                            "QUIC stealth attempt failed, retrying legacy wire format"
+                        );
+                        let (endpoint, connection) =
+                            QuicEndpointManager::connect(&self.global_ctx, addr).await?;
+                        (endpoint, connection, None)
+                    }
+                }
+            }
+        };
 
         let local_addr = endpoint.local_addr()?;
 
@@ -859,10 +1366,11 @@ impl TunnelConnector for QuicTunnelConnector {
         };
 
         let arc_conn = Arc::new(ConnWrapper { conn: connection });
-        Ok(Box::new(TunnelWrapper::new(
+        Ok(Box::new(TunnelWrapper::new_with_associate_data(
             FramedReader::new_with_associate_data(r, 4500, Some(Box::new(arc_conn.clone()))),
             FramedWriter::new_with_associate_data(w, Some(Box::new(arc_conn))),
             Some(info),
+            connection_stealth.map(|state| Box::new(state) as Box<dyn std::any::Any + Send>),
         )))
     }
 
@@ -876,6 +1384,16 @@ impl TunnelConnector for QuicTunnelConnector {
 
     fn set_resolved_addr(&mut self, addr: SocketAddr) {
         self.resolved_addr = Some(addr);
+    }
+
+    fn disable_stealth(&mut self) {
+        self.stealth_mode = QuicStealthMode::Disabled;
+    }
+
+    fn require_stealth(&mut self) {
+        if self.stealth_candidate.is_enabled() {
+            self.stealth_mode = QuicStealthMode::Required;
+        }
     }
 }
 
@@ -898,6 +1416,10 @@ mod tests {
     fn global_ctx() -> ArcGlobalCtx {
         let identity = crate::common::config::NetworkIdentity::default();
         get_mock_global_ctx_with_network(Some(identity))
+    }
+
+    fn stealth(secret: &str) -> Arc<crate::tunnel::stealth::OuterSessionState> {
+        crate::tunnel::stealth::build_outer_session(Some(secret), true, true, 60)
     }
 
     fn stopped_client_endpoint() -> (Endpoint, SocketAddr) {
@@ -923,6 +1445,136 @@ mod tests {
         let connector =
             QuicTunnelConnector::new("quic://127.0.0.1:21011".parse().unwrap(), global_ctx());
         _tunnel_pingpong(listener, connector).await
+    }
+
+    #[test]
+    fn quic_stealth_pingpong() {
+        RUNTIME.block_on(async {
+            let mut listener =
+                QuicTunnelListener::new("quic://127.0.0.1:21013".parse().unwrap(), global_ctx());
+            listener.set_stealth(stealth("quic-secret"));
+            let mut connector =
+                QuicTunnelConnector::new("quic://127.0.0.1:21013".parse().unwrap(), global_ctx());
+            connector.set_stealth_candidate(stealth("quic-secret"));
+            TunnelConnector::require_stealth(&mut connector);
+            _tunnel_pingpong(listener, connector).await;
+        })
+    }
+
+    #[test]
+    fn quic_unknown_capability_falls_back_to_plain() {
+        RUNTIME.block_on(async {
+            let listener =
+                QuicTunnelListener::new("quic://127.0.0.1:21014".parse().unwrap(), global_ctx());
+            let mut connector =
+                QuicTunnelConnector::new("quic://127.0.0.1:21014".parse().unwrap(), global_ctx());
+            connector.set_stealth_candidate(stealth("quic-secret"));
+            _tunnel_pingpong(listener, connector).await;
+        })
+    }
+
+    async fn assert_strict_stealth_listener_rejects(mut connector: QuicTunnelConnector) {
+        let mut listener =
+            QuicTunnelListener::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx());
+        listener.set_stealth(stealth("listener-secret"));
+        listener.listen().await.unwrap();
+        connector.addr = listener.local_url();
+        let accept_task = tokio::spawn(async move { listener.accept().await });
+
+        let _ = tokio::time::timeout(Duration::from_millis(300), connector.connect()).await;
+        assert!(
+            !accept_task.is_finished(),
+            "strict QUIC stealth listener exposed an unauthenticated connection"
+        );
+        accept_task.abort();
+    }
+
+    #[test]
+    fn quic_stealth_listener_rejects_plain_and_wrong_secret() {
+        RUNTIME.block_on(async {
+            assert_strict_stealth_listener_rejects(QuicTunnelConnector::new(
+                "quic://127.0.0.1:0".parse().unwrap(),
+                global_ctx(),
+            ))
+            .await;
+
+            let mut wrong_secret =
+                QuicTunnelConnector::new("quic://127.0.0.1:0".parse().unwrap(), global_ctx());
+            wrong_secret.set_stealth_candidate(stealth("connector-secret"));
+            TunnelConnector::require_stealth(&mut wrong_secret);
+            assert_strict_stealth_listener_rejects(wrong_secret).await;
+        })
+    }
+
+    #[test]
+    fn quic_stealth_session_transitions_from_gate_to_outer_key() {
+        let sender = QuicStealthSession::new(stealth("quic-secret"));
+        let receiver = QuicStealthSession::new(stealth("quic-secret"));
+
+        let gate_packet = sender.seal(b"gate").unwrap();
+        assert_eq!(receiver.open(&gate_packet).unwrap(), b"gate");
+
+        sender
+            .state
+            .set_outer_key_from_handshake_hash(b"quic-handshake");
+        receiver
+            .state
+            .set_outer_key_from_handshake_hash(b"quic-handshake");
+        let transition_packet = sender.seal(b"transition").unwrap();
+        assert_eq!(receiver.open(&transition_packet).unwrap(), b"transition");
+
+        *sender.outer_seen_at.lock().unwrap() =
+            Some(Instant::now() - QUIC_STEALTH_OUTER_SEND_DELAY);
+        *receiver.outer_seen_at.lock().unwrap() =
+            Some(Instant::now() - QUIC_STEALTH_OUTER_SEND_DELAY);
+        let outer_packet = sender.seal(b"outer").unwrap();
+        assert_eq!(receiver.open(&outer_packet).unwrap(), b"outer");
+
+        *receiver.outer_seen_at.lock().unwrap() =
+            Some(Instant::now() - QUIC_STEALTH_GATE_RECV_GRACE - Duration::from_millis(1));
+        let stale_gate = sender.state.seal_gate_datagram(b"stale").unwrap();
+        assert!(receiver.open(&stale_gate).is_none());
+    }
+
+    #[test]
+    fn quic_stealth_socket_only_reopens_gate_for_new_initial() {
+        RUNTIME.block_on(async {
+            let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            udp.set_nonblocking(true).unwrap();
+            let runtime = default_runtime().unwrap();
+            let inner = runtime.wrap_udp_socket(udp).unwrap();
+            let socket = QuicStealthSocket::new(inner, stealth("quic-secret"));
+            let remote = SocketAddr::from((Ipv4Addr::LOCALHOST, 12345));
+            let sender = stealth("quic-secret");
+            let initial = [0xc0, 0, 0, 0, 1, 8, 0, 0];
+
+            let first = sender.seal_gate_datagram(&initial).unwrap();
+            let (_, old_session) = socket.open_from(remote, &first).unwrap();
+            old_session.state.set_outer_key_from_handshake_hash(b"old");
+            *old_session.outer_seen_at.lock().unwrap() =
+                Some(Instant::now() - QUIC_STEALTH_GATE_RECV_GRACE - Duration::from_millis(1));
+
+            let gate_data = sender
+                .seal_gate_datagram(&[0x40, 0, 0, 0, 1, 8, 0, 0])
+                .unwrap();
+            assert!(
+                socket.open_from(remote, &gate_data).is_none(),
+                "gate-key non-Initial data reopened a phase-2 QUIC session"
+            );
+
+            let reconnect = sender.seal_gate_datagram(&initial).unwrap();
+            let (_, new_session) = socket.open_from(remote, &reconnect).unwrap();
+            assert!(!Arc::ptr_eq(&old_session, &new_session));
+
+            new_session.state.set_outer_key_from_handshake_hash(b"new");
+            *new_session.outer_seen_at.lock().unwrap() =
+                Some(Instant::now() - QUIC_STEALTH_GATE_RECV_GRACE - Duration::from_millis(1));
+            assert!(
+                socket.open_from(remote, &reconnect).is_none(),
+                "replayed QUIC Initial replaced the live session twice"
+            );
+            assert!(Arc::ptr_eq(&socket.session(remote).unwrap(), &new_session));
+        })
     }
 
     #[test]

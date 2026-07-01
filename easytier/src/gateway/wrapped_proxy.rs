@@ -75,19 +75,23 @@ pub(crate) trait TcpProxyForWrappedSrcTrait: Send + Sync + 'static {
 
 #[async_trait::async_trait]
 impl<C: NatDstConnector, T: TcpProxyForWrappedSrcTrait<Connector = C>> NicPacketFilter for T {
-    async fn try_process_packet_from_nic(&self, zc_packet: &mut ZCPacket) -> bool {
+    async fn try_process_packet_from_nic(
+        &self,
+        zc_packet: &mut ZCPacket,
+        context: &crate::peers::NicPacketContext,
+    ) -> crate::peers::NicPacketFilterAction {
         let ret = self
             .get_tcp_proxy()
-            .try_process_packet_from_nic(zc_packet)
+            .try_process_packet_from_nic(zc_packet, context)
             .await;
-        if ret {
-            return true;
+        if ret != crate::peers::NicPacketFilterAction::Continue {
+            return ret;
         }
 
         let hdr = zc_packet.mut_peer_manager_header().unwrap();
         if hdr.packet_type != PacketType::Data as u8 {
             // already handled by other proxy
-            return false;
+            return crate::peers::NicPacketFilterAction::StopAndSend;
         }
 
         let data = zc_packet.payload();
@@ -95,7 +99,7 @@ impl<C: NatDstConnector, T: TcpProxyForWrappedSrcTrait<Connector = C>> NicPacket
         if ip_packet.get_version() != 4
             || ip_packet.get_next_level_protocol() != IpNextHeaderProtocols::Tcp
         {
-            return false;
+            return crate::peers::NicPacketFilterAction::Continue;
         }
 
         // if no connection is established, only allow SYN packet
@@ -113,7 +117,7 @@ impl<C: NatDstConnector, T: TcpProxyForWrappedSrcTrait<Connector = C>> NicPacket
                     self.get_tcp_proxy().get_transport_type(),
                     ip_packet.get_destination()
                 );
-                return false;
+                return crate::peers::NicPacketFilterAction::Continue;
             }
         } else {
             // if not syn packet, only allow established connection
@@ -124,7 +128,7 @@ impl<C: NatDstConnector, T: TcpProxyForWrappedSrcTrait<Connector = C>> NicPacket
                     tcp_packet.get_source(),
                 ))
             {
-                return false;
+                return crate::peers::NicPacketFilterAction::Continue;
             }
         }
 
@@ -141,13 +145,13 @@ impl<C: NatDstConnector, T: TcpProxyForWrappedSrcTrait<Connector = C>> NicPacket
                     ip_packet.get_source(),
                     ip_packet.get_destination()
                 );
-                return false;
+                return crate::peers::NicPacketFilterAction::Continue;
             }
         };
 
         let hdr = zc_packet.mut_peer_manager_header().unwrap();
         hdr.to_peer_id = self.get_tcp_proxy().get_my_peer_id().into();
         Self::mark_src_modified(hdr);
-        true
+        crate::peers::NicPacketFilterAction::StopAndSend
     }
 }

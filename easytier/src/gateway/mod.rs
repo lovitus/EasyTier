@@ -6,6 +6,8 @@ use crate::common::global_ctx::ArcGlobalCtx;
 
 pub mod icmp_proxy;
 pub mod ip_reassembler;
+#[cfg(any(feature = "kcp", feature = "quic"))]
+pub mod proxy_failover;
 pub mod tcp_proxy;
 #[cfg(feature = "smoltcp")]
 pub mod tokio_smoltcp;

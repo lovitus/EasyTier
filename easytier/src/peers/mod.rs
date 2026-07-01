@@ -28,6 +28,8 @@ pub mod peer_task;
 #[cfg(test)]
 pub mod tests;
 
+use std::net::IpAddr;
+
 use crate::tunnel::packet_def::ZCPacket;
 
 #[async_trait::async_trait]
@@ -41,11 +43,32 @@ pub trait PeerPacketFilter {
 #[async_trait::async_trait]
 #[auto_impl::auto_impl(Arc)]
 pub trait NicPacketFilter {
-    async fn try_process_packet_from_nic(&self, data: &mut ZCPacket) -> bool;
+    async fn try_process_packet_from_nic(
+        &self,
+        data: &mut ZCPacket,
+        context: &NicPacketContext,
+    ) -> NicPacketFilterAction;
 
     fn id(&self) -> String {
         format!("{:p}", self)
     }
+
+    fn priority(&self) -> i16 {
+        0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NicPacketFilterAction {
+    Continue,
+    StopAndSend,
+    Consume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NicPacketContext {
+    pub ip_addr: IpAddr,
+    pub not_send_to_self: bool,
 }
 
 type BoxPeerPacketFilter = Box<dyn PeerPacketFilter + Send + Sync>;

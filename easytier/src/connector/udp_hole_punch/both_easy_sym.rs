@@ -66,6 +66,12 @@ impl PunchBothEasySymHoleServer {
         }
 
         let global_ctx = self.common.get_global_ctx();
+        if super::common::legacy_udp_hole_punch_is_rejected(
+            request.use_stealth,
+            global_ctx.get_flags().disable_legacy_udp_hole_punch,
+        ) {
+            return Err(anyhow::anyhow!("legacy UDP hole punch is disabled").into());
+        }
         let stealth_enabled = negotiate_udp_listener_stealth(
             request.use_stealth,
             global_ctx.get_feature_flags().stealth_supported,

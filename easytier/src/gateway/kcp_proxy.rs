@@ -19,11 +19,16 @@ use tokio::task::JoinSet;
 
 use super::{
     CidrSet,
-    tcp_proxy::{NatDstConnector, NatDstTcpConnector, TcpProxy},
+    proxy_failover::{
+        BoxProxyStream, FlowKey, PreparedProxyStore, PreparedProxyStream, ProxyPrepareTransport,
+        ProxyTransport,
+    },
+    tcp_proxy::{ClaimedNatDstStream, NatDstConnector, NatDstTcpConnector, TcpProxy},
 };
 use crate::utils::task::HedgeExt;
 use crate::{
     common::{
+        PeerId,
         acl_processor::PacketInfo,
         error::Result,
         global_ctx::{ArcGlobalCtx, GlobalCtx},
@@ -109,17 +114,61 @@ async fn handle_kcp_output(
 pub struct NatDstKcpConnector {
     pub(crate) kcp_endpoint: Arc<KcpEndpoint>,
     pub(crate) peer_mgr: Weak<PeerManager>,
+    pub(crate) prepared_store: Option<Arc<PreparedProxyStore>>,
+}
+
+impl NatDstKcpConnector {
+    async fn connect_to_peer(
+        &self,
+        src: SocketAddr,
+        nat_dst: SocketAddr,
+        dst_peer: PeerId,
+    ) -> anyhow::Result<BoxProxyStream> {
+        let peer_mgr = self
+            .peer_mgr
+            .upgrade()
+            .ok_or_else(|| anyhow!("peer manager is not available"))?;
+        let conn_data = KcpConnData {
+            src: Some(src.into()),
+            dst: Some(nat_dst.into()),
+        };
+        let encoded = Bytes::from(conn_data.encode_to_vec());
+        let stream = (0..5)
+            .map(|_| {
+                let kcp_endpoint = self.kcp_endpoint.clone();
+                let conn_data = encoded.clone();
+                let my_peer_id = peer_mgr.my_peer_id();
+                async move {
+                    let conn_id = kcp_endpoint
+                        .connect(Duration::from_secs(10), my_peer_id, dst_peer, conn_data)
+                        .await?;
+                    KcpStream::new(&kcp_endpoint, conn_id).context("failed to create kcp stream")
+                }
+            })
+            .hedge(Duration::from_millis(200))
+            .await
+            .context("failed to connect to peer")?;
+        Ok(Box::new(stream))
+    }
 }
 
 #[async_trait::async_trait]
 impl NatDstConnector for NatDstKcpConnector {
-    type DstStream = KcpStream;
+    type DstStream = BoxProxyStream;
 
     async fn connect(
         &self,
         src: SocketAddr,
         nat_dst: SocketAddr,
+        claimed: Option<ClaimedNatDstStream>,
     ) -> anyhow::Result<Self::DstStream> {
+        if let Some(claimed) = claimed {
+            let prepared = claimed
+                .0
+                .downcast::<PreparedProxyStream>()
+                .map_err(|_| anyhow!("invalid prepared KCP proxy stream"))?;
+            return Ok((*prepared).0);
+        }
         let peer_mgr = self
             .peer_mgr
             .upgrade()
@@ -138,34 +187,20 @@ impl NatDstConnector for NatDstKcpConnector {
 
         tracing::trace!(?nat_dst, ?dst_peer, "kcp nat");
 
-        let conn_data = KcpConnData {
-            src: Some(src.into()),
-            dst: Some(nat_dst.into()),
-        };
+        self.connect_to_peer(src, nat_dst, dst_peer).await
+    }
 
-        let stream = (0..5)
-            .map(|_| {
-                let kcp_endpoint = self.kcp_endpoint.clone();
-                let my_peer_id = peer_mgr.my_peer_id();
-
-                async move {
-                    let conn_id = kcp_endpoint
-                        .connect(
-                            Duration::from_secs(10),
-                            my_peer_id,
-                            dst_peer,
-                            Bytes::from(conn_data.encode_to_vec()),
-                        )
-                        .await?;
-
-                    KcpStream::new(&kcp_endpoint, conn_id).context("failed to create kcp stream")
-                }
-            })
-            .hedge(Duration::from_millis(200))
-            .await
-            .context("failed to connect to peer")?;
-
-        Ok(stream)
+    fn claim_deferred_stream(
+        &self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        initial_sequence: u32,
+    ) -> Option<ClaimedNatDstStream> {
+        self.prepared_store.as_ref()?.claim_for_syn(
+            FlowKey { src, dst },
+            ProxyTransport::Kcp,
+            initial_sequence,
+        )
     }
 
     fn check_packet_from_peer_fast(&self, _cidr_set: &CidrSet, _global_ctx: &GlobalCtx) -> bool {
@@ -185,6 +220,24 @@ impl NatDstConnector for NatDstKcpConnector {
 
     fn transport_type(&self) -> TcpProxyEntryTransportType {
         TcpProxyEntryTransportType::Kcp
+    }
+}
+
+#[async_trait::async_trait]
+impl ProxyPrepareTransport for NatDstKcpConnector {
+    fn transport(&self) -> ProxyTransport {
+        ProxyTransport::Kcp
+    }
+
+    async fn prepare(
+        &self,
+        flow: FlowKey,
+        dst_peer_id: PeerId,
+    ) -> std::result::Result<BoxProxyStream, crate::gateway::proxy_failover::ProxyPrepareError>
+    {
+        self.connect_to_peer(flow.src, flow.dst, dst_peer_id)
+            .await
+            .map_err(crate::gateway::proxy_failover::ProxyPrepareError::transport)
     }
 }
 
@@ -222,7 +275,10 @@ pub struct KcpProxySrc {
 }
 
 impl KcpProxySrc {
-    pub async fn new(peer_manager: Arc<PeerManager>) -> Self {
+    pub async fn new(
+        peer_manager: Arc<PeerManager>,
+        prepared_store: Option<Arc<PreparedProxyStore>>,
+    ) -> Self {
         let mut kcp_endpoint = create_kcp_endpoint();
         kcp_endpoint.run().await;
 
@@ -242,6 +298,7 @@ impl KcpProxySrc {
             NatDstKcpConnector {
                 kcp_endpoint: kcp_endpoint.clone(),
                 peer_mgr: Arc::downgrade(&peer_manager),
+                prepared_store,
             },
         );
 
@@ -275,6 +332,10 @@ impl KcpProxySrc {
 
     pub fn get_kcp_endpoint(&self) -> Arc<KcpEndpoint> {
         self.kcp_endpoint.clone()
+    }
+
+    pub fn get_connector(&self) -> NatDstKcpConnector {
+        self.tcp_proxy.0.get_connector()
     }
 }
 
@@ -344,6 +405,7 @@ impl KcpProxyDst {
                 start_time: chrono::Local::now().timestamp() as u64,
                 state: TcpProxyEntryState::ConnectingDst.into(),
                 transport_type: TcpProxyEntryTransportType::Kcp.into(),
+                ..Default::default()
             },
         );
         defer! {
@@ -398,7 +460,7 @@ impl KcpProxyDst {
         let _g = global_ctx.net_ns.guard();
         let connector = NatDstTcpConnector {};
         let ret = connector
-            .connect("0.0.0.0:0".parse().unwrap(), dst_socket)
+            .connect("0.0.0.0:0".parse().unwrap(), dst_socket, None)
             .await?;
 
         if let Some(mut e) = proxy_entries.get_mut(&kcp_stream.conn_id()) {
@@ -473,7 +535,7 @@ impl TcpProxyRpc for KcpProxyDstRpcService {
         let mut reply = ListTcpProxyEntryResponse::default();
         if let Some(tcp_proxy) = self.0.upgrade() {
             for item in tcp_proxy.iter() {
-                reply.entries.push(*item.value());
+                reply.entries.push(item.value().clone());
             }
         }
         Ok(reply)

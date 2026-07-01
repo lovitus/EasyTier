@@ -253,9 +253,9 @@ pub struct GlobalCtx {
     // overlaid by set_flags. Keep this separate so config patches do not erase
     // runtime state such as public-server role, IPv6 provider status, or the
     // non-whitelist avoid-relay preference.
-    base_feature_flags: AtomicCell<PeerFeatureFlag>,
+    base_feature_flags: ArcSwap<PeerFeatureFlag>,
 
-    feature_flags: AtomicCell<PeerFeatureFlag>,
+    feature_flags: ArcSwap<PeerFeatureFlag>,
 
     token_bucket_manager: TokenBucketManager,
 
@@ -289,7 +289,7 @@ impl GlobalCtx {
     const PROTOCOL_LOOP_STRIKE_WINDOW_SECS: u64 = 30;
     const PROTOCOL_LOOP_SUPPRESS_SECS: u64 = 300;
 
-    fn stealth_supported_for_config(
+    fn stealth_enabled_for_config(
         flags: &Flags,
         secure_mode: bool,
         network_secret: Option<&str>,
@@ -314,7 +314,7 @@ impl GlobalCtx {
     fn derive_feature_flags(
         flags: &Flags,
         mut feature_flags: PeerFeatureFlag,
-        stealth_supported: bool,
+        stealth_enabled: bool,
     ) -> PeerFeatureFlag {
         feature_flags.kcp_input = !flags.disable_kcp_input;
         feature_flags.no_relay_kcp = flags.disable_relay_kcp;
@@ -323,7 +323,19 @@ impl GlobalCtx {
         feature_flags.no_relay_quic = flags.disable_relay_quic;
         feature_flags.need_p2p = flags.need_p2p;
         feature_flags.disable_p2p = flags.disable_p2p;
-        feature_flags.stealth_supported = stealth_supported;
+        let protocols =
+            crate::common::stealth_registry::StealthProtocolSet::parse(&flags.stealth_protocols)
+                .expect("stealth_protocols is validated while loading configuration");
+        feature_flags.stealth_supported = stealth_enabled
+            && protocols.contains(
+                flags.stealth_mode,
+                crate::common::stealth_registry::StealthProtocol::Udp,
+            );
+        feature_flags.stealth_capabilities = if stealth_enabled {
+            protocols.capabilities(flags.stealth_mode)
+        } else {
+            Vec::new()
+        };
         Self::apply_disable_relay_data_flag(flags, feature_flags)
     }
 
@@ -356,8 +368,8 @@ impl GlobalCtx {
         let base_feature_flags = PeerFeatureFlag::default();
         let feature_flags = Self::derive_feature_flags(
             &flags,
-            base_feature_flags,
-            Self::stealth_supported_for_config(
+            base_feature_flags.clone(),
+            Self::stealth_enabled_for_config(
                 &flags,
                 config_fs
                     .get_secure_mode()
@@ -401,9 +413,9 @@ impl GlobalCtx {
                 [ProtocolLoopSuppressionSlot::default(); PROTOCOL_LOOP_STATE_SLOTS],
             ),
 
-            base_feature_flags: AtomicCell::new(base_feature_flags),
+            base_feature_flags: ArcSwap::new(Arc::new(base_feature_flags)),
 
-            feature_flags: AtomicCell::new(feature_flags),
+            feature_flags: ArcSwap::new(Arc::new(feature_flags)),
 
             token_bucket_manager: TokenBucketManager::new(),
 
@@ -603,15 +615,16 @@ impl GlobalCtx {
 
     pub fn set_flags(&self, flags: Flags) {
         self.config.set_flags(flags.clone());
-        self.feature_flags.store(Self::derive_feature_flags(
-            &flags,
-            self.base_feature_flags.load(),
-            Self::stealth_supported_for_config(
+        self.feature_flags
+            .store(Arc::new(Self::derive_feature_flags(
                 &flags,
-                self.is_secure_mode_enabled(),
-                self.get_network_identity().network_secret.as_deref(),
-            ),
-        ));
+                self.base_feature_flags.load().as_ref().clone(),
+                Self::stealth_enabled_for_config(
+                    &flags,
+                    self.is_secure_mode_enabled(),
+                    self.get_network_identity().network_secret.as_deref(),
+                ),
+            )));
         self.flags.store(Arc::new(flags));
     }
 
@@ -769,12 +782,26 @@ impl GlobalCtx {
     }
 
     pub fn get_feature_flags(&self) -> PeerFeatureFlag {
-        let mut feature_flags = self.feature_flags.load();
-        feature_flags.stealth_supported = Self::stealth_supported_for_config(
-            self.flags.load().as_ref(),
+        let mut feature_flags = self.feature_flags.load().as_ref().clone();
+        let flags = self.flags.load();
+        let stealth_enabled = Self::stealth_enabled_for_config(
+            flags.as_ref(),
             self.is_secure_mode_enabled(),
             self.get_network_identity().network_secret.as_deref(),
         );
+        let protocols =
+            crate::common::stealth_registry::StealthProtocolSet::parse(&flags.stealth_protocols)
+                .expect("stealth_protocols is validated while loading configuration");
+        feature_flags.stealth_supported = stealth_enabled
+            && protocols.contains(
+                flags.stealth_mode,
+                crate::common::stealth_registry::StealthProtocol::Udp,
+            );
+        feature_flags.stealth_capabilities = if stealth_enabled {
+            protocols.capabilities(flags.stealth_mode)
+        } else {
+            Vec::new()
+        };
         feature_flags
     }
 
@@ -785,13 +812,14 @@ impl GlobalCtx {
     /// a narrower setter so they do not accidentally overwrite unrelated runtime
     /// state.
     pub fn set_base_advertised_feature_flags(&self, feature_flags: PeerFeatureFlag) {
-        self.base_feature_flags.store(feature_flags);
+        self.base_feature_flags
+            .store(Arc::new(feature_flags.clone()));
         let flags = self.flags.load();
         self.feature_flags
-            .store(Self::apply_disable_relay_data_flag(
+            .store(Arc::new(Self::apply_disable_relay_data_flag(
                 flags.as_ref(),
                 feature_flags,
-            ));
+            )));
     }
 
     /// Set the avoid-relay preference that is independent of disable_relay_data.
@@ -799,31 +827,31 @@ impl GlobalCtx {
     /// disable_relay_data still forces the effective advertised flag to true,
     /// but this base preference is preserved when that config flag is toggled.
     pub fn set_avoid_relay_data_preference(&self, avoid_relay_data: bool) -> bool {
-        let mut base_feature_flags = self.base_feature_flags.load();
+        let mut base_feature_flags = self.base_feature_flags.load().as_ref().clone();
         base_feature_flags.avoid_relay_data = avoid_relay_data;
-        self.base_feature_flags.store(base_feature_flags);
+        self.base_feature_flags.store(Arc::new(base_feature_flags));
 
-        let mut feature_flags = self.feature_flags.load();
+        let mut feature_flags = self.feature_flags.load().as_ref().clone();
         let previous = feature_flags.avoid_relay_data;
         feature_flags.avoid_relay_data = avoid_relay_data || self.flags.load().disable_relay_data;
-        self.feature_flags.store(feature_flags);
+        self.feature_flags.store(Arc::new(feature_flags.clone()));
         previous != feature_flags.avoid_relay_data
     }
 
     /// Set the runtime IPv6-provider advertised bit without touching
     /// config-derived feature flags.
     pub fn set_ipv6_public_addr_provider_feature_flag(&self, enabled: bool) -> bool {
-        let mut base_feature_flags = self.base_feature_flags.load();
+        let mut base_feature_flags = self.base_feature_flags.load().as_ref().clone();
         base_feature_flags.ipv6_public_addr_provider = enabled;
-        self.base_feature_flags.store(base_feature_flags);
+        self.base_feature_flags.store(Arc::new(base_feature_flags));
 
-        let mut feature_flags = self.feature_flags.load();
+        let mut feature_flags = self.feature_flags.load().as_ref().clone();
         if feature_flags.ipv6_public_addr_provider == enabled {
             return false;
         }
 
         feature_flags.ipv6_public_addr_provider = enabled;
-        self.feature_flags.store(feature_flags);
+        self.feature_flags.store(Arc::new(feature_flags));
         true
     }
 
@@ -1045,7 +1073,7 @@ pub mod tests {
         let mut feature_flags = global_ctx.get_feature_flags();
         feature_flags.avoid_relay_data = true;
         feature_flags.is_public_server = true;
-        global_ctx.set_base_advertised_feature_flags(feature_flags);
+        global_ctx.set_base_advertised_feature_flags(feature_flags.clone());
 
         let mut flags = global_ctx.get_flags().clone();
         flags.disable_kcp_input = true;
@@ -1082,7 +1110,7 @@ pub mod tests {
             is_public_server: true,
             ..Default::default()
         };
-        global_ctx.set_base_advertised_feature_flags(feature_flags);
+        global_ctx.set_base_advertised_feature_flags(feature_flags.clone());
 
         assert_eq!(global_ctx.get_feature_flags(), feature_flags);
     }

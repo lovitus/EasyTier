@@ -672,9 +672,8 @@ impl UdpTunnelListenerData {
 
     /// Open a stealth-sealed data datagram from an already-established
     /// connection and route it. Returns `true` only when the datagram was
-    /// opened and handled here. On any miss the caller falls back to cleartext
-    /// parsing, which still lets cleartext SYN retransmits from an established
-    /// address reach the duplicate-SYN / SACK-resend handling.
+    /// opened and handled here. A gate-key fallback is accepted only for SYN,
+    /// allowing same-address reconnect without reopening the phase-2 data path.
     fn try_forward_sealed_data(&self, raw: &BytesMut, addr: SocketAddr) -> bool {
         if !self.stealth.is_enabled() {
             return false;
@@ -685,18 +684,42 @@ impl UdpTunnelListenerData {
             .sock_map
             .get(&addr)
             .and_then(|conn| conn.stealth.open_datagram(raw));
-        let Some(plaintext) = opened else {
-            return false;
-        };
-        match get_zcpacket_from_buf(BytesMut::from(&plaintext[..]), false) {
-            Ok(zc) => {
-                if let Some(mut conn) = self.sock_map.get_mut(&addr) {
-                    if let Err(e) = conn.handle_packet_from_remote(zc) {
+        if let Some(plaintext) = opened {
+            match get_zcpacket_from_buf(BytesMut::from(&plaintext[..]), false) {
+                Ok(zc)
+                    if zc
+                        .udp_tunnel_header()
+                        .is_some_and(|header| header.msg_type == UdpPacketType::Syn as u8) =>
+                {
+                    self.do_forward_one_packet_to_conn(zc, addr);
+                }
+                Ok(zc) => {
+                    if let Some(mut conn) = self.sock_map.get_mut(&addr)
+                        && let Err(e) = conn.handle_packet_from_remote(zc)
+                    {
                         tracing::trace!(?e, "udp forward sealed packet error");
                     }
                 }
+                Err(e) => tracing::trace!(?e, "udp sealed data parse error"),
             }
-            Err(e) => tracing::trace!(?e, "udp sealed data parse error"),
+            return true;
+        }
+
+        let Some(plaintext) = self.stealth.open_gate_datagram(raw) else {
+            return false;
+        };
+        match get_zcpacket_from_buf(BytesMut::from(&plaintext[..]), false) {
+            Ok(zc)
+                if zc
+                    .udp_tunnel_header()
+                    .is_some_and(|header| header.msg_type == UdpPacketType::Syn as u8) =>
+            {
+                self.do_forward_one_packet_to_conn(zc, addr);
+            }
+            Ok(zc) => {
+                tracing::trace!(?addr, ?zc, "udp drop gate-key non-SYN after phase2");
+            }
+            Err(e) => tracing::trace!(?e, "udp gate fallback parse error"),
         }
         true
     }
@@ -896,8 +919,88 @@ pub struct UdpTunnelConnector {
     bind_addrs: Vec<SocketAddr>,
     ip_version: IpVersion,
     stealth: std::sync::Arc<crate::tunnel::stealth::OuterSessionState>,
+    stealth_mode: UdpStealthMode,
     resolved_addr: Option<SocketAddr>,
     socket_mark: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpStealthMode {
+    Disabled,
+    Required,
+    PreferLegacyFallback,
+}
+
+struct UdpConnectAttempt {
+    conn_id: u32,
+    magic: u64,
+    timeout: Duration,
+    stealth: std::sync::Arc<crate::tunnel::stealth::OuterSessionState>,
+}
+
+impl UdpConnectAttempt {
+    fn new(
+        stealth: std::sync::Arc<crate::tunnel::stealth::OuterSessionState>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            conn_id: rand::random(),
+            magic: rand::random(),
+            timeout,
+            stealth,
+        }
+    }
+
+    async fn run(
+        &self,
+        socket: &Arc<UdpSocket>,
+        addr: SocketAddr,
+    ) -> Result<SocketAddr, super::TunnelError> {
+        let udp_packet = if self.stealth.is_enabled() {
+            let token = self.stealth.build_gate_token(self.conn_id).to_bytes();
+            new_syn_packet_token(self.conn_id, &token).into_bytes()
+        } else {
+            new_syn_packet(self.conn_id, self.magic).into_bytes()
+        };
+        let ret = socket.send_to(&udp_packet, &addr).await?;
+        tracing::warn!(conn_id = self.conn_id, ?ret, ?addr, "udp send syn");
+
+        let resend_task = AbortOnDropHandle::new(tokio::spawn({
+            let socket = socket.clone();
+            let udp_packet = udp_packet.clone();
+            let stealth = self.stealth.clone();
+            let conn_id = self.conn_id;
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    let packet = if stealth.is_enabled() {
+                        let token = stealth.build_gate_token(conn_id).to_bytes();
+                        new_syn_packet_token(conn_id, &token).into_bytes()
+                    } else {
+                        udp_packet.clone()
+                    };
+                    if let Err(error) = socket.send_to(&packet, addr).await {
+                        tracing::debug!(?error, ?addr, "udp resend syn failed");
+                        break;
+                    }
+                }
+            }
+        }));
+
+        let recv_addr = tokio::time::timeout(
+            self.timeout,
+            UdpTunnelConnector::wait_sack_loop(
+                socket,
+                addr,
+                self.conn_id,
+                self.magic,
+                &self.stealth,
+            ),
+        )
+        .await??;
+        drop(resend_task);
+        Ok(recv_addr)
+    }
 }
 
 impl UdpTunnelConnector {
@@ -909,15 +1012,40 @@ impl UdpTunnelConnector {
             resolved_addr: None,
             socket_mark: None,
             stealth: std::sync::Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
+            stealth_mode: UdpStealthMode::Disabled,
         }
     }
 
     pub fn set_stealth(&mut self, s: std::sync::Arc<crate::tunnel::stealth::OuterSessionState>) {
+        self.stealth_mode = if s.is_enabled() {
+            UdpStealthMode::Required
+        } else {
+            UdpStealthMode::Disabled
+        };
         self.stealth = s;
+    }
+
+    pub fn prefer_stealth_with_legacy_fallback(
+        &mut self,
+        s: std::sync::Arc<crate::tunnel::stealth::OuterSessionState>,
+    ) {
+        self.stealth_mode = if s.is_enabled() {
+            UdpStealthMode::PreferLegacyFallback
+        } else {
+            UdpStealthMode::Disabled
+        };
+        self.stealth = s;
+    }
+
+    pub fn require_stealth(&mut self) {
+        if self.stealth.is_enabled() {
+            self.stealth_mode = UdpStealthMode::Required;
+        }
     }
 
     pub fn disable_stealth(&mut self) {
         self.stealth = std::sync::Arc::new(crate::tunnel::stealth::OuterSessionState::disabled());
+        self.stealth_mode = UdpStealthMode::Disabled;
     }
 
     fn should_resend_syn_to_hole_punch_source(
@@ -1040,6 +1168,7 @@ impl UdpTunnelConnector {
         socket: Arc<UdpSocket>,
         dst_addr: SocketAddr,
         conn_id: u32,
+        stealth: std::sync::Arc<crate::tunnel::stealth::OuterSessionState>,
     ) -> Result<Box<dyn super::Tunnel>, super::TunnelError> {
         let ring_for_send_udp = Arc::new(RingTunnel::new(128));
         let ring_for_recv_udp = Arc::new(RingTunnel::new(128));
@@ -1052,7 +1181,7 @@ impl UdpTunnelConnector {
         let (close_event_sender, mut close_event_recv) =
             hotpath::channel!(tokio::sync::mpsc::unbounded_channel());
 
-        let conn_stealth = self.stealth.fork_for_connection();
+        let conn_stealth = stealth.fork_for_connection();
         let ring_recv = RingStream::new(ring_for_send_udp.clone());
         let ring_sender = RingSink::new(ring_for_recv_udp.clone());
         let mut udp_conn = UdpConnection::new(
@@ -1149,58 +1278,47 @@ impl UdpTunnelConnector {
         #[cfg(target_os = "windows")]
         crate::arch::windows::disable_connection_reset(socket.as_ref())?;
 
-        // send syn
-        let conn_id = rand::random();
-        let magic = rand::random();
-        let udp_packet = if self.stealth.is_enabled() {
-            let token = self.stealth.build_gate_token(conn_id).to_bytes();
-            new_syn_packet_token(conn_id, &token).into_bytes()
-        } else {
-            new_syn_packet(conn_id, magic).into_bytes()
-        };
-        let ret = socket.send_to(&udp_packet, &addr).await?;
-        tracing::warn!(?udp_packet, ?ret, "udp send syn");
-        let resend_task = AbortOnDropHandle::new(tokio::spawn({
-            let socket = socket.clone();
-            let udp_packet = udp_packet.clone();
-            let resend_addr = addr;
-            let stealth = self.stealth.clone();
-            async move {
-                loop {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    // Under stealth, each resend carries a fresh gate token (new
-                    // nonce) so legitimate retransmission is never rejected by the
-                    // listener replay guard, while captured tokens stay one-shot.
-                    let pkt = if stealth.is_enabled() {
-                        let token = stealth.build_gate_token(conn_id).to_bytes();
-                        new_syn_packet_token(conn_id, &token).into_bytes()
-                    } else {
-                        udp_packet.clone()
-                    };
-                    match socket.send_to(&pkt, &resend_addr).await {
-                        Ok(ret) => tracing::trace!(?ret, ?resend_addr, "udp resend syn"),
-                        Err(e) => {
-                            tracing::debug!(?e, ?resend_addr, "udp resend syn failed");
-                            break;
-                        }
+        let (attempt, recv_addr) = match self.stealth_mode {
+            UdpStealthMode::PreferLegacyFallback => {
+                let stealth_attempt = UdpConnectAttempt::new(
+                    self.stealth.fork_for_connection(),
+                    Duration::from_secs(1),
+                );
+                match stealth_attempt.run(&socket, addr).await {
+                    Ok(recv_addr) => (stealth_attempt, recv_addr),
+                    Err(error) => {
+                        tracing::info!(
+                            ?addr,
+                            ?error,
+                            "UDP stealth bootstrap failed, retrying legacy wire format"
+                        );
+                        let plain_attempt = UdpConnectAttempt::new(
+                            std::sync::Arc::new(
+                                crate::tunnel::stealth::OuterSessionState::disabled(),
+                            ),
+                            Duration::from_secs(3),
+                        );
+                        let recv_addr = plain_attempt.run(&socket, addr).await?;
+                        (plain_attempt, recv_addr)
                     }
                 }
             }
-        }));
-
-        // wait sack
-        let recv_addr = tokio::time::timeout(
-            tokio::time::Duration::from_secs(3),
-            Self::wait_sack_loop(&socket, addr, conn_id, magic, &self.stealth),
-        )
-        .await??;
-        drop(resend_task);
+            UdpStealthMode::Required | UdpStealthMode::Disabled => {
+                let attempt = UdpConnectAttempt::new(
+                    self.stealth.fork_for_connection(),
+                    Duration::from_secs(3),
+                );
+                let recv_addr = attempt.run(&socket, addr).await?;
+                (attempt, recv_addr)
+            }
+        };
 
         if recv_addr != addr {
             tracing::debug!(?recv_addr, ?addr, "udp connect addr not match");
         }
 
-        self.build_tunnel(socket, recv_addr, conn_id).await
+        self.build_tunnel(socket, recv_addr, attempt.conn_id, attempt.stealth)
+            .await
     }
 
     async fn connect_with_default_bind(
@@ -1285,6 +1403,10 @@ impl super::TunnelConnector for UdpTunnelConnector {
     fn disable_stealth(&mut self) {
         Self::disable_stealth(self);
     }
+
+    fn require_stealth(&mut self) {
+        Self::require_stealth(self);
+    }
 }
 
 #[cfg(test)]
@@ -1348,6 +1470,93 @@ mod tests {
         let listener = UdpTunnelListener::new("udp://0.0.0.0:5556".parse().unwrap());
         let connector = UdpTunnelConnector::new("udp://127.0.0.1:5556".parse().unwrap());
         _tunnel_pingpong(listener, connector).await;
+    }
+
+    #[tokio::test]
+    async fn udp_preferred_stealth_falls_back_with_fresh_plain_attempt() {
+        let mut listener = UdpTunnelListener::new("udp://127.0.0.1:0".parse().unwrap());
+        listener.listen().await.unwrap();
+
+        let mut connector = UdpTunnelConnector::new(listener.local_url());
+        connector.prefer_stealth_with_legacy_fallback(stealth_state("net-secret"));
+
+        let (client, server) = timeout(Duration::from_secs(6), async {
+            tokio::join!(connector.connect(), listener.accept())
+        })
+        .await
+        .expect("legacy fallback timed out");
+        let client = client.unwrap();
+        let server = server.unwrap();
+
+        assert!(!tunnel_stealth_state(client.as_ref()).is_enabled());
+        assert!(!tunnel_stealth_state(server.as_ref()).is_enabled());
+    }
+
+    #[tokio::test]
+    async fn udp_plain_fallback_ignores_late_stealth_sack() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let server_state = stealth_state("net-secret");
+        let server_task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, client_addr) = server.recv_from(&mut buf).await.unwrap();
+            let first = get_zcpacket_from_buf(BytesMut::from(&buf[..len]), false).unwrap();
+            let first_conn_id = first.udp_tunnel_header().unwrap().conn_id.get();
+            assert_eq!(
+                first.udp_tunnel_header().unwrap().msg_type,
+                UdpPacketType::Syn as u8
+            );
+            assert_eq!(
+                first.udp_payload().len(),
+                crate::tunnel::stealth::GATE_TOKEN_LEN
+            );
+            let started = tokio::time::Instant::now();
+
+            let (plain_conn_id, plain_magic) = loop {
+                let (len, addr) = server.recv_from(&mut buf).await.unwrap();
+                assert_eq!(addr, client_addr);
+                let packet = get_zcpacket_from_buf(BytesMut::from(&buf[..len]), false).unwrap();
+                let conn_id = packet.udp_tunnel_header().unwrap().conn_id.get();
+                if packet.udp_payload().len() == 8 && conn_id != first_conn_id {
+                    break (
+                        conn_id,
+                        u64::from_le_bytes(packet.udp_payload().try_into().unwrap()),
+                    );
+                }
+            };
+            assert_ne!(first_conn_id, plain_conn_id);
+
+            tokio::time::sleep_until(started + Duration::from_millis(1200)).await;
+            let late_token = server_state.build_gate_token(first_conn_id).to_bytes();
+            server
+                .send_to(
+                    &new_sack_packet_token(first_conn_id, &late_token).into_bytes(),
+                    client_addr,
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            server
+                .send_to(
+                    &new_sack_packet(plain_conn_id, plain_magic).into_bytes(),
+                    client_addr,
+                )
+                .await
+                .unwrap();
+            (first_conn_id, plain_conn_id)
+        });
+
+        let mut connector =
+            UdpTunnelConnector::new(format!("udp://{server_addr}").parse().unwrap());
+        connector.prefer_stealth_with_legacy_fallback(stealth_state("net-secret"));
+        let tunnel = timeout(Duration::from_secs(5), connector.connect())
+            .await
+            .expect("fallback timed out after late SACK")
+            .expect("plain fallback did not accept its own SACK");
+        let (first_conn_id, plain_conn_id) = server_task.await.unwrap();
+
+        assert_ne!(first_conn_id, plain_conn_id);
+        assert!(!tunnel_stealth_state(tunnel.as_ref()).is_enabled());
     }
 
     fn stealth_state(secret: &str) -> std::sync::Arc<crate::tunnel::stealth::OuterSessionState> {
@@ -1509,6 +1718,132 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(&echoed.payload()[..], payload);
+    }
+
+    #[tokio::test]
+    async fn udp_stealth_duplicate_syn_resends_sack_without_second_accept() {
+        let mut listener = UdpTunnelListener::new("udp://127.0.0.1:0".parse().unwrap());
+        listener.set_stealth(stealth_state("net-secret"));
+        listener.listen().await.unwrap();
+        let listener_addr = SocketAddr::from_url(listener.local_url(), IpVersion::V4)
+            .await
+            .unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client_state = stealth_state("net-secret");
+        let conn_id = 71;
+
+        let first_token = client_state.build_gate_token(conn_id).to_bytes();
+        socket
+            .send_to(
+                &new_syn_packet_token(conn_id, &first_token).into_bytes(),
+                listener_addr,
+            )
+            .await
+            .unwrap();
+        let mut sack = [0u8; 512];
+        timeout(Duration::from_secs(1), socket.recv_from(&mut sack))
+            .await
+            .expect("initial SYN did not receive SACK")
+            .unwrap();
+        let accepted = timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .expect("initial SYN was not accepted")
+            .unwrap();
+
+        let retry_token = client_state.build_gate_token(conn_id).to_bytes();
+        assert_ne!(first_token, retry_token);
+        socket
+            .send_to(
+                &new_syn_packet_token(conn_id, &retry_token).into_bytes(),
+                listener_addr,
+            )
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), socket.recv_from(&mut sack))
+            .await
+            .expect("duplicate SYN did not trigger SACK retransmission")
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "duplicate SYN created a second accepted tunnel"
+        );
+        drop(accepted);
+    }
+
+    #[tokio::test]
+    async fn udp_phase2_accepts_gate_syn_but_rejects_gate_data() {
+        use futures::StreamExt as _;
+
+        let mut listener = UdpTunnelListener::new("udp://127.0.0.1:0".parse().unwrap());
+        listener.set_stealth(stealth_state("net-secret"));
+        listener.listen().await.unwrap();
+        let listener_addr = SocketAddr::from_url(listener.local_url(), IpVersion::V4)
+            .await
+            .unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let first_conn_id = 41;
+        let first_gate = stealth_state("net-secret");
+        let first_token = first_gate.build_gate_token(first_conn_id).to_bytes();
+        socket
+            .send_to(
+                &new_syn_packet_token(first_conn_id, &first_token).into_bytes(),
+                listener_addr,
+            )
+            .await
+            .unwrap();
+        let mut sack = [0u8; 512];
+        timeout(Duration::from_secs(2), socket.recv_from(&mut sack))
+            .await
+            .unwrap()
+            .unwrap();
+        let first = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let first_listener_state = tunnel_stealth_state(first.as_ref());
+        first_listener_state.set_outer_key_from_handshake_hash(b"phase2");
+        first_gate.set_outer_key_from_handshake_hash(b"phase2");
+        let (mut first_recv, _first_send) = first.split();
+
+        let outer_data = first_gate
+            .seal_datagram(&new_udp_data_packet(first_conn_id, PacketType::Data).into_bytes())
+            .unwrap();
+        socket.send_to(&outer_data, listener_addr).await.unwrap();
+        timeout(Duration::from_secs(2), first_recv.next())
+            .await
+            .expect("outer-key data was not delivered")
+            .expect("listener stream closed")
+            .expect("outer-key data was rejected");
+
+        let gate_only = stealth_state("net-secret");
+        let gate_data = gate_only
+            .seal_datagram(&new_udp_data_packet(first_conn_id, PacketType::Data).into_bytes())
+            .unwrap();
+        socket.send_to(&gate_data, listener_addr).await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(300), first_recv.next())
+                .await
+                .is_err(),
+            "gate-key data must not re-enter the phase-2 data path"
+        );
+
+        let second_conn_id = 42;
+        let second_token = gate_only.build_gate_token(second_conn_id).to_bytes();
+        let sealed_syn = gate_only
+            .seal_datagram(&new_syn_packet_token(second_conn_id, &second_token).into_bytes())
+            .unwrap();
+        socket.send_to(&sealed_syn, listener_addr).await.unwrap();
+        timeout(Duration::from_secs(2), socket.recv_from(&mut sack))
+            .await
+            .expect("gate-key reconnect SYN did not receive SACK")
+            .unwrap();
+        timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("gate-key reconnect SYN did not replace the old connection")
+            .unwrap();
     }
 
     #[test]

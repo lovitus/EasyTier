@@ -1,9 +1,10 @@
 use std::{
+    collections::HashMap,
     fmt::{Debug, Formatter},
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, atomic::AtomicBool},
-    time::Duration,
+    sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
+    time::{Duration, Instant as StdInstant},
 };
 
 use hotpath::instant::Instant;
@@ -40,6 +41,93 @@ use rand::RngCore;
 use tokio::{net::UdpSocket, sync::Mutex, task::JoinSet};
 
 const MAX_PACKET: usize = 2048;
+const WG_STEALTH_FALLBACK_TIMEOUT: Duration = Duration::from_secs(1);
+const WG_STEALTH_OUTER_SEND_DELAY: Duration = Duration::from_secs(1);
+const WG_STEALTH_GATE_RECV_GRACE: Duration = Duration::from_secs(5);
+const WG_STEALTH_MAX_REPLAY_NONCES: usize = 4096;
+const WG_STEALTH_MAX_SESSIONS: usize = 4096;
+
+#[derive(Debug)]
+struct WgStealthSession {
+    state: Arc<crate::tunnel::stealth::OuterSessionState>,
+    outer_seen_at: StdMutex<Option<StdInstant>>,
+}
+
+impl WgStealthSession {
+    fn new(state: Arc<crate::tunnel::stealth::OuterSessionState>) -> Self {
+        Self {
+            state,
+            outer_seen_at: StdMutex::new(None),
+        }
+    }
+
+    fn outer_elapsed(&self, now: StdInstant) -> Option<Duration> {
+        self.state.outer_key()?;
+        let mut seen = self.outer_seen_at.lock().unwrap();
+        let first_seen = *seen.get_or_insert(now);
+        Some(now.saturating_duration_since(first_seen))
+    }
+
+    fn seal(&self, plaintext: &[u8]) -> Option<Vec<u8>> {
+        match self.outer_elapsed(StdInstant::now()) {
+            Some(elapsed) if elapsed >= WG_STEALTH_OUTER_SEND_DELAY => {
+                self.state.seal_datagram(plaintext)
+            }
+            _ => self.state.seal_gate_datagram(plaintext),
+        }
+    }
+
+    fn open(&self, sealed: &[u8]) -> Option<Vec<u8>> {
+        match self.outer_elapsed(StdInstant::now()) {
+            Some(elapsed) => self.state.open_datagram(sealed).or_else(|| {
+                (elapsed <= WG_STEALTH_GATE_RECV_GRACE)
+                    .then(|| self.state.open_gate_datagram(sealed))
+                    .flatten()
+            }),
+            None => self.state.open_gate_datagram(sealed),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct WgStealthReplayGuard {
+    seen: StdMutex<HashMap<[u8; crate::tunnel::stealth::OUTER_NONCE_LEN], StdInstant>>,
+}
+
+impl WgStealthReplayGuard {
+    fn accept(&self, state: &crate::tunnel::stealth::OuterSessionState, sealed: &[u8]) -> bool {
+        let Ok(nonce) = sealed
+            .get(..crate::tunnel::stealth::OUTER_NONCE_LEN)
+            .unwrap_or_default()
+            .try_into()
+        else {
+            return false;
+        };
+        let now = StdInstant::now();
+        let ttl = Duration::from_secs(state.window_secs().saturating_mul(2).max(1));
+        let mut seen = self.seen.lock().unwrap();
+        seen.retain(|_, at| now.saturating_duration_since(*at) <= ttl);
+        if seen.contains_key(&nonce) {
+            return false;
+        }
+        while seen.len() >= WG_STEALTH_MAX_REPLAY_NONCES {
+            let Some(oldest) = seen
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(nonce, _)| *nonce)
+            else {
+                break;
+            };
+            seen.remove(&oldest);
+        }
+        seen.insert(nonce, now);
+        true
+    }
+}
+
+fn is_wg_handshake_initiation(packet: &[u8]) -> bool {
+    packet.len() >= 148 && packet[..4] == [1, 0, 0, 0]
+}
 
 #[derive(Debug, Clone)]
 enum WgType {
@@ -117,6 +205,7 @@ struct WgPeerData {
     tunn: Arc<Mutex<Tunn>>,
     wg_type: WgType,
     stopped: Arc<AtomicBool>,
+    stealth: Option<Arc<WgStealthSession>>,
 }
 
 impl Debug for WgPeerData {
@@ -129,6 +218,18 @@ impl Debug for WgPeerData {
 }
 
 impl WgPeerData {
+    async fn send_network_packet(&self, packet: &[u8]) -> Result<(), std::io::Error> {
+        if let Some(stealth) = &self.stealth {
+            let sealed = stealth.seal(packet).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "WG stealth sealing failed")
+            })?;
+            self.udp.send_to(&sealed, self.endpoint).await?;
+        } else {
+            self.udp.send_to(packet, self.endpoint).await?;
+        }
+        Ok(())
+    }
+
     #[tracing::instrument]
     async fn handle_one_packet_from_me(&self, zc_packet: ZCPacket) -> Result<(), anyhow::Error> {
         let mut send_buf = vec![0u8; MAX_PACKET];
@@ -155,8 +256,7 @@ impl WgPeerData {
 
         match encapsulate_result {
             TunnResult::WriteToNetwork(packet) => {
-                self.udp
-                    .send_to(packet, self.endpoint)
+                self.send_network_packet(packet)
                     .await
                     .context("Failed to send encrypted IP packet to WireGuard endpoint.")?;
                 tracing::debug!(
@@ -187,7 +287,7 @@ impl WgPeerData {
         &self,
         mut sink: S,
         recv_buf: &[u8],
-    ) {
+    ) -> bool {
         let mut send_buf = vec![0u8; MAX_PACKET];
         let data = recv_buf;
         let decapsulate_result = {
@@ -199,14 +299,14 @@ impl WgPeerData {
 
         match decapsulate_result {
             TunnResult::WriteToNetwork(packet) => {
-                match self.udp.send_to(packet, self.endpoint).await {
+                match self.send_network_packet(packet).await {
                     Ok(_) => {}
                     Err(e) => {
                         tracing::error!(
                             "Failed to send decapsulation-instructed packet to WireGuard endpoint: {:?}",
                             e
                         );
-                        return;
+                        return false;
                     }
                 };
                 let mut peer = self.tunn.lock().await;
@@ -214,7 +314,7 @@ impl WgPeerData {
                     let mut send_buf = vec![0u8; MAX_PACKET];
                     match peer.decapsulate(None, &[], &mut send_buf) {
                         TunnResult::WriteToNetwork(packet) => {
-                            match self.udp.send_to(packet, self.endpoint).await {
+                            match self.send_network_packet(packet).await {
                                 Ok(_) => {}
                                 Err(e) => {
                                     tracing::error!(
@@ -230,6 +330,7 @@ impl WgPeerData {
                         }
                     }
                 }
+                true
             }
             TunnResult::WriteToTunnelV4(packet, _) | TunnResult::WriteToTunnelV6(packet, _) => {
                 tracing::debug!(
@@ -250,12 +351,14 @@ impl WgPeerData {
                 if ret.is_err() {
                     tracing::error!("Failed to send packet to tunnel: {:?}", ret);
                 }
+                ret.is_ok()
             }
-            _ => {
+            TunnResult::Done | TunnResult::Err(_) => {
                 tracing::debug!(
                     "Unexpected WireGuard state during decapsulation: {:?}",
                     decapsulate_result
                 );
+                false
             }
         }
     }
@@ -269,7 +372,7 @@ impl WgPeerData {
                     "Sending routine packet of {} bytes to WireGuard endpoint",
                     packet.len()
                 );
-                match self.udp.send_to(packet, self.endpoint).await {
+                match self.send_network_packet(packet).await {
                     Ok(_) => {}
                     Err(e) => {
                         tracing::error!(
@@ -342,6 +445,7 @@ struct WgPeer {
     udp: Arc<UdpSocket>, // only for send
     config: WgConfig,
     endpoint: SocketAddr,
+    stealth: Option<Arc<WgStealthSession>>,
 
     sink: std::sync::Mutex<Option<Pin<Box<dyn ZCPacketSink>>>>,
 
@@ -352,7 +456,12 @@ struct WgPeer {
 }
 
 impl WgPeer {
-    fn new(udp: Arc<UdpSocket>, config: WgConfig, endpoint: SocketAddr) -> Self {
+    fn new(
+        udp: Arc<UdpSocket>,
+        config: WgConfig,
+        endpoint: SocketAddr,
+        stealth: Option<Arc<WgStealthSession>>,
+    ) -> Self {
         WgPeer {
             tunn: Some(Mutex::new(Tunn::new(
                 config.my_secret_key.clone(),
@@ -366,6 +475,7 @@ impl WgPeer {
             udp,
             config,
             endpoint,
+            stealth,
             sink: std::sync::Mutex::new(None),
 
             data: None,
@@ -386,14 +496,15 @@ impl WgPeer {
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
-    async fn handle_packet_from_peer(&self, packet: &[u8]) {
+    async fn handle_packet_from_peer(&self, packet: &[u8]) -> bool {
         self.access_time.store(Instant::now());
         tracing::trace!("Received {} bytes from peer", packet.len());
         let data = self.data.as_ref().unwrap();
         // TODO: improve this
         let mut sink = self.sink.lock().unwrap().take().unwrap();
-        data.handle_one_packet_from_peer(&mut sink, packet).await;
+        let accepted = data.handle_one_packet_from_peer(&mut sink, packet).await;
         self.sink.lock().unwrap().replace(sink);
+        accepted
     }
 
     fn start_and_get_tunnel(&mut self) -> Box<dyn Tunnel> {
@@ -407,6 +518,7 @@ impl WgPeer {
             tunn: Arc::new(self.tunn.take().unwrap()),
             wg_type: self.config.wg_type.clone(),
             stopped: Arc::new(AtomicBool::new(false)),
+            stealth: self.stealth.clone(),
         };
 
         self.data = Some(data.clone());
@@ -449,6 +561,25 @@ impl WgPeer {
     fn udp_socket(&self) -> Arc<UdpSocket> {
         self.udp.clone()
     }
+
+    fn open_network_packet(&self, packet: &[u8]) -> Option<Vec<u8>> {
+        match &self.stealth {
+            Some(stealth) => stealth.open(packet),
+            None => Some(packet.to_vec()),
+        }
+    }
+
+    async fn send_network_packet(&self, packet: &[u8]) -> Result<(), std::io::Error> {
+        if let Some(stealth) = &self.stealth {
+            let sealed = stealth.seal(packet).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "WG stealth sealing failed")
+            })?;
+            self.udp.send_to(&sealed, self.endpoint).await?;
+        } else {
+            self.udp.send_to(packet, self.endpoint).await?;
+        }
+        Ok(())
+    }
 }
 
 type ConnSender = tokio::sync::mpsc::UnboundedSender<Box<dyn Tunnel>>;
@@ -463,6 +594,8 @@ pub struct WgTunnelListener {
     conn_send: Option<ConnSender>,
 
     wg_peer_map: Arc<DashMap<SocketAddr, Arc<WgPeer>>>,
+    stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    stealth_replay: Arc<WgStealthReplayGuard>,
 
     tasks: JoinSet<()>,
     socket_mark: Option<u32>,
@@ -480,6 +613,8 @@ impl WgTunnelListener {
             conn_send: Some(conn_send),
 
             wg_peer_map: Arc::new(DashMap::new()),
+            stealth: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
+            stealth_replay: Arc::new(WgStealthReplayGuard::default()),
 
             tasks: JoinSet::new(),
             socket_mark: None,
@@ -488,6 +623,10 @@ impl WgTunnelListener {
 
     pub fn set_socket_mark(&mut self, socket_mark: Option<u32>) {
         self.socket_mark = socket_mark;
+    }
+
+    pub fn set_stealth(&mut self, stealth: Arc<crate::tunnel::stealth::OuterSessionState>) {
+        self.stealth = stealth;
     }
 
     fn get_udp_socket(&self) -> Arc<UdpSocket> {
@@ -499,6 +638,8 @@ impl WgTunnelListener {
         config: WgConfig,
         conn_sender: ConnSender,
         peer_map: Arc<DashMap<SocketAddr, Arc<WgPeer>>>,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+        stealth_replay: Arc<WgStealthReplayGuard>,
     ) {
         let mut tasks = JoinSet::new();
 
@@ -513,21 +654,82 @@ impl WgTunnelListener {
             }
         });
 
-        let mut buf = vec![0u8; MAX_PACKET];
+        let mut buf = vec![0u8; MAX_PACKET + crate::tunnel::stealth::OUTER_OVERHEAD];
         loop {
             let Ok((n, addr)) = socket.recv_from(&mut buf).await else {
                 tracing::error!("Failed to receive from UDP socket");
                 break;
             };
 
-            let data = &buf[..n];
+            let wire_packet = &buf[..n];
             tracing::trace!(?n, ?addr, "Received bytes from peer");
 
-            if !peer_map.contains_key(&addr) {
+            let existing = peer_map.get(&addr).map(|peer| peer.clone());
+            let mut connection_stealth = None;
+            let mut replace_existing = false;
+            let plaintext = if let Some(peer) = &existing {
+                if peer
+                    .stealth
+                    .as_ref()
+                    .is_some_and(|session| session.state.outer_key().is_some())
+                {
+                    let candidate = Arc::new(WgStealthSession::new(
+                        stealth.fork_for_transport_delayed_transition(),
+                    ));
+                    if let Some(plaintext) = candidate.open(wire_packet)
+                        && is_wg_handshake_initiation(&plaintext)
+                        && stealth_replay.accept(&stealth, wire_packet)
+                    {
+                        connection_stealth = Some(candidate);
+                        replace_existing = true;
+                        Some(plaintext)
+                    } else {
+                        peer.open_network_packet(wire_packet)
+                    }
+                } else {
+                    peer.open_network_packet(wire_packet)
+                }
+            } else if stealth.is_enabled() {
+                let candidate = Arc::new(WgStealthSession::new(
+                    stealth.fork_for_transport_delayed_transition(),
+                ));
+                let Some(plaintext) = candidate.open(wire_packet) else {
+                    continue;
+                };
+                if !is_wg_handshake_initiation(&plaintext)
+                    || !stealth_replay.accept(&stealth, wire_packet)
+                {
+                    continue;
+                }
+                connection_stealth = Some(candidate);
+                Some(plaintext)
+            } else {
+                Some(wire_packet.to_vec())
+            };
+            let Some(plaintext) = plaintext else {
+                continue;
+            };
+
+            if existing.is_none() || replace_existing {
+                if stealth.is_enabled()
+                    && existing.is_none()
+                    && peer_map.len() >= WG_STEALTH_MAX_SESSIONS
+                {
+                    tracing::warn!(
+                        max_sessions = WG_STEALTH_MAX_SESSIONS,
+                        "drop new WG stealth session because the bounded table is full"
+                    );
+                    continue;
+                }
                 tracing::info!("New peer: {}", addr);
-                let mut wg = WgPeer::new(socket.clone(), config.clone(), addr);
+                let mut wg = WgPeer::new(
+                    socket.clone(),
+                    config.clone(),
+                    addr,
+                    connection_stealth.clone(),
+                );
                 let (stream, sink) = wg.start_and_get_tunnel().split();
-                let tunnel = Box::new(TunnelWrapper::new(
+                let tunnel = Box::new(TunnelWrapper::new_with_associate_data(
                     stream,
                     sink,
                     Some(TunnelInfo {
@@ -546,15 +748,25 @@ impl WgTunnelListener {
                             build_url_from_socket_addr(&addr.to_string(), "wg").into(),
                         ),
                     }),
+                    connection_stealth.map(|session| {
+                        Box::new(crate::tunnel::stealth::OuterSessionAssociation::new(
+                            session.state.clone(),
+                            None,
+                        )) as Box<dyn std::any::Any + Send>
+                    }),
                 ));
+                if !wg.handle_packet_from_peer(&plaintext).await {
+                    continue;
+                }
                 if let Err(e) = conn_sender.send(tunnel) {
                     tracing::error!("Failed to send tunnel to conn_sender: {}", e);
                 }
                 peer_map.insert(addr, Arc::new(wg));
+                continue;
             }
 
             let peer = peer_map.get(&addr).unwrap().clone();
-            peer.handle_packet_from_peer(data).await;
+            let _ = peer.handle_packet_from_peer(&plaintext).await;
         }
     }
 }
@@ -581,6 +793,8 @@ impl TunnelListener for WgTunnelListener {
             self.config.clone(),
             self.conn_send.take().unwrap(),
             self.wg_peer_map.clone(),
+            self.stealth.clone(),
+            self.stealth_replay.clone(),
         ));
 
         Ok(())
@@ -609,6 +823,15 @@ pub struct WgTunnelConnector {
     ip_version: IpVersion,
     resolved_addr: Option<SocketAddr>,
     socket_mark: Option<u32>,
+    stealth_candidate: Arc<crate::tunnel::stealth::OuterSessionState>,
+    stealth_mode: WgStealthMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WgStealthMode {
+    Disabled,
+    Required,
+    PreferLegacyFallback,
 }
 
 impl Debug for WgTunnelConnector {
@@ -630,7 +853,21 @@ impl WgTunnelConnector {
             ip_version: IpVersion::Both,
             resolved_addr: None,
             socket_mark: None,
+            stealth_candidate: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
+            stealth_mode: WgStealthMode::Disabled,
         }
+    }
+
+    pub fn set_stealth_candidate(
+        &mut self,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    ) {
+        self.stealth_mode = if stealth.is_enabled() {
+            WgStealthMode::PreferLegacyFallback
+        } else {
+            WgStealthMode::Disabled
+        };
+        self.stealth_candidate = stealth;
     }
 
     #[tracing::instrument(skip(config))]
@@ -639,6 +876,7 @@ impl WgTunnelConnector {
         config: WgConfig,
         udp: UdpSocket,
         addr: SocketAddr,
+        stealth: Option<Arc<crate::tunnel::stealth::OuterSessionState>>,
     ) -> Result<Box<dyn super::Tunnel>, super::TunnelError> {
         tracing::warn!("wg connect: {:?}", addr);
         let local_addr = udp
@@ -646,13 +884,23 @@ impl WgTunnelConnector {
             .with_context(|| "Failed to get local addr")?
             .to_string();
 
-        let mut wg_peer = WgPeer::new(Arc::new(udp), config.clone(), addr);
+        let connection_stealth = stealth.map(|template| {
+            Arc::new(WgStealthSession::new(
+                template.fork_for_transport_delayed_transition(),
+            ))
+        });
+        let mut wg_peer = WgPeer::new(
+            Arc::new(udp),
+            config.clone(),
+            addr,
+            connection_stealth.clone(),
+        );
         let udp = wg_peer.udp_socket();
 
         // do handshake here so we will return after receive first packet
         let handshake = wg_peer.create_handshake_init().await;
-        udp.send_to(&handshake, addr).await?;
-        let mut buf = [0u8; MAX_PACKET];
+        wg_peer.send_network_packet(&handshake).await?;
+        let mut buf = [0u8; MAX_PACKET + crate::tunnel::stealth::OUTER_OVERHEAD];
         let (n, recv_addr) = match udp.recv_from(&mut buf).await {
             Ok(ret) => ret,
             Err(e) => {
@@ -664,14 +912,17 @@ impl WgTunnelConnector {
         if recv_addr != addr {
             tracing::warn!(?recv_addr, "Received packet from changed address");
         }
+        let response = wg_peer
+            .open_network_packet(&buf[..n])
+            .ok_or_else(|| anyhow::anyhow!("failed to open WG stealth handshake response"))?;
 
         let tunnel = wg_peer.start_and_get_tunnel();
         let data = wg_peer.data.as_ref().unwrap().clone();
         let mut sink = wg_peer.sink.lock().unwrap().take().unwrap();
         wg_peer.tasks.spawn(async move {
-            data.handle_one_packet_from_peer(&mut sink, &buf[..n]).await;
+            let _ = data.handle_one_packet_from_peer(&mut sink, &response).await;
             loop {
-                let mut buf = vec![0u8; MAX_PACKET];
+                let mut buf = vec![0u8; MAX_PACKET + crate::tunnel::stealth::OUTER_OVERHEAD];
                 let (n, _) = match udp.recv_from(&mut buf).await {
                     Ok(ret) => ret,
                     Err(e) => {
@@ -679,11 +930,26 @@ impl WgTunnelConnector {
                         break;
                     }
                 };
-                data.handle_one_packet_from_peer(&mut sink, &buf[..n]).await;
+                let Some(packet) = data.stealth.as_ref().map_or_else(
+                    || Some(buf[..n].to_vec()),
+                    |stealth| stealth.open(&buf[..n]),
+                ) else {
+                    continue;
+                };
+                let _ = data.handle_one_packet_from_peer(&mut sink, &packet).await;
             }
         });
 
         let (stream, sink) = tunnel.split();
+        let associate_data: Box<dyn std::any::Any + Send> =
+            if let Some(session) = connection_stealth {
+                Box::new(crate::tunnel::stealth::OuterSessionAssociation::new(
+                    session.state.clone(),
+                    Some(Box::new(wg_peer)),
+                ))
+            } else {
+                Box::new(wg_peer)
+            };
         let ret = Box::new(TunnelWrapper::new_with_associate_data(
             stream,
             sink,
@@ -695,20 +961,88 @@ impl WgTunnelConnector {
                     super::build_url_from_socket_addr(&addr.to_string(), "wg").into(),
                 ),
             }),
-            Some(Box::new(wg_peer)),
+            Some(associate_data),
         ));
 
         Ok(ret)
     }
 
     async fn connect_with_ipv6(&self, addr: SocketAddr) -> Result<Box<dyn Tunnel>, TunnelError> {
-        let socket = bind()
-            .addr("[::]:0".parse().unwrap())
-            .dev(BindDev::Disabled)
+        let bind_addr = "[::]:0".parse().unwrap();
+        let socket = Self::bind_connector_socket(bind_addr, self.socket_mark, true)?;
+        Self::connect_with_mode(
+            self.addr.clone(),
+            self.config.clone(),
+            socket,
+            bind_addr,
+            addr,
+            self.socket_mark,
+            true,
+            self.stealth_mode,
+            self.stealth_candidate.clone(),
+        )
+        .await
+    }
+
+    fn bind_connector_socket(
+        bind_addr: SocketAddr,
+        socket_mark: Option<u32>,
+        disable_bind_dev: bool,
+    ) -> Result<UdpSocket, TunnelError> {
+        let builder = bind()
+            .addr(bind_addr)
             .only_v6(true)
-            .maybe_socket_mark(self.socket_mark)
-            .call()?;
-        Self::connect_with_socket(self.addr.clone(), self.config.clone(), socket, addr).await
+            .maybe_socket_mark(socket_mark);
+        if disable_bind_dev {
+            Ok(builder.dev(BindDev::Disabled).call()?)
+        } else {
+            Ok(builder.call()?)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn connect_with_mode(
+        addr_url: url::Url,
+        config: WgConfig,
+        socket: UdpSocket,
+        bind_addr: SocketAddr,
+        addr: SocketAddr,
+        socket_mark: Option<u32>,
+        disable_bind_dev: bool,
+        mode: WgStealthMode,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+    ) -> Result<Box<dyn Tunnel>, TunnelError> {
+        match mode {
+            WgStealthMode::Disabled => {
+                Self::connect_with_socket(addr_url, config, socket, addr, None).await
+            }
+            WgStealthMode::Required => {
+                Self::connect_with_socket(addr_url, config, socket, addr, Some(stealth)).await
+            }
+            WgStealthMode::PreferLegacyFallback => {
+                let first = tokio::time::timeout(
+                    WG_STEALTH_FALLBACK_TIMEOUT,
+                    Self::connect_with_socket(
+                        addr_url.clone(),
+                        config.clone(),
+                        socket,
+                        addr,
+                        Some(stealth),
+                    ),
+                )
+                .await;
+                match first {
+                    Ok(Ok(tunnel)) => return Ok(tunnel),
+                    result => tracing::info!(
+                        ?addr,
+                        ?result,
+                        "WG stealth attempt failed, retrying legacy wire format"
+                    ),
+                }
+                let socket = Self::bind_connector_socket(bind_addr, socket_mark, disable_bind_dev)?;
+                Self::connect_with_socket(addr_url, config, socket, addr, None).await
+            }
+        }
     }
 }
 
@@ -733,17 +1067,17 @@ impl super::TunnelConnector for WgTunnelConnector {
         let futures = FuturesUnordered::new();
         for bind_addr in bind_addrs.into_iter() {
             tracing::info!(?bind_addr, ?addr, "bind addr");
-            match bind()
-                .addr(bind_addr)
-                .only_v6(true)
-                .maybe_socket_mark(self.socket_mark)
-                .call()
-            {
-                Ok(socket) => futures.push(Self::connect_with_socket(
+            match Self::bind_connector_socket(bind_addr, self.socket_mark, false) {
+                Ok(socket) => futures.push(Self::connect_with_mode(
                     self.addr.clone(),
                     self.config.clone(),
                     socket,
+                    bind_addr,
                     addr,
+                    self.socket_mark,
+                    false,
+                    self.stealth_mode,
+                    self.stealth_candidate.clone(),
                 )),
                 Err(error) => {
                     tracing::error!(?error, ?bind_addr, ?addr, "bind addr fail");
@@ -773,6 +1107,16 @@ impl super::TunnelConnector for WgTunnelConnector {
 
     fn set_socket_mark(&mut self, socket_mark: Option<u32>) {
         self.socket_mark = socket_mark;
+    }
+
+    fn disable_stealth(&mut self) {
+        self.stealth_mode = WgStealthMode::Disabled;
+    }
+
+    fn require_stealth(&mut self) {
+        if self.stealth_candidate.is_enabled() {
+            self.stealth_mode = WgStealthMode::Required;
+        }
     }
 }
 
@@ -811,12 +1155,91 @@ pub mod tests {
         (server_cfg, client_cfg)
     }
 
+    fn stealth(secret: &str) -> Arc<crate::tunnel::stealth::OuterSessionState> {
+        crate::tunnel::stealth::build_outer_session(Some(secret), true, true, 60)
+    }
+
     #[tokio::test]
     async fn wg_pingpong() {
         let (server_cfg, client_cfg) = create_wg_config();
         let listener = WgTunnelListener::new("wg://0.0.0.0:5599".parse().unwrap(), server_cfg);
         let connector = WgTunnelConnector::new("wg://127.0.0.1:5599".parse().unwrap(), client_cfg);
         _tunnel_pingpong(listener, connector).await
+    }
+
+    #[tokio::test]
+    async fn wg_stealth_pingpong() {
+        let (server_cfg, client_cfg) = create_wg_config();
+        let mut listener =
+            WgTunnelListener::new("wg://127.0.0.1:5594".parse().unwrap(), server_cfg);
+        listener.set_stealth(stealth("wg-secret"));
+        let mut connector =
+            WgTunnelConnector::new("wg://127.0.0.1:5594".parse().unwrap(), client_cfg);
+        connector.set_stealth_candidate(stealth("wg-secret"));
+        TunnelConnector::require_stealth(&mut connector);
+        _tunnel_pingpong(listener, connector).await
+    }
+
+    #[tokio::test]
+    async fn wg_unknown_capability_falls_back_to_plain() {
+        let (server_cfg, client_cfg) = create_wg_config();
+        let listener = WgTunnelListener::new("wg://127.0.0.1:5593".parse().unwrap(), server_cfg);
+        let mut connector =
+            WgTunnelConnector::new("wg://127.0.0.1:5593".parse().unwrap(), client_cfg);
+        connector.set_stealth_candidate(stealth("wg-secret"));
+        _tunnel_pingpong(listener, connector).await
+    }
+
+    #[tokio::test]
+    async fn wg_stealth_listener_rejects_plain_and_wrong_secret() {
+        for connector_secret in [None, Some("wrong-secret")] {
+            let (server_cfg, client_cfg) = create_wg_config();
+            let mut listener =
+                WgTunnelListener::new("wg://127.0.0.1:0".parse().unwrap(), server_cfg);
+            listener.set_stealth(stealth("listener-secret"));
+            listener.listen().await.unwrap();
+
+            let mut connector = WgTunnelConnector::new(listener.local_url(), client_cfg);
+            if let Some(secret) = connector_secret {
+                connector.set_stealth_candidate(stealth(secret));
+                TunnelConnector::require_stealth(&mut connector);
+            }
+            let accept_task = tokio::spawn(async move { listener.accept().await });
+            let _ = tokio::time::timeout(Duration::from_millis(300), connector.connect()).await;
+            assert!(
+                !accept_task.is_finished(),
+                "strict WG stealth listener exposed an unauthenticated connection"
+            );
+            accept_task.abort();
+        }
+    }
+
+    #[test]
+    fn wg_stealth_session_transitions_from_gate_to_outer_key() {
+        let sender =
+            WgStealthSession::new(stealth("wg-secret").fork_for_transport_delayed_transition());
+        let receiver =
+            WgStealthSession::new(stealth("wg-secret").fork_for_transport_delayed_transition());
+
+        let gate = sender.seal(b"gate").unwrap();
+        assert_eq!(receiver.open(&gate).unwrap(), b"gate");
+        sender
+            .state
+            .set_outer_key_from_handshake_hash(b"wg-handshake");
+        receiver
+            .state
+            .set_outer_key_from_handshake_hash(b"wg-handshake");
+        *sender.outer_seen_at.lock().unwrap() =
+            Some(StdInstant::now() - WG_STEALTH_OUTER_SEND_DELAY);
+        *receiver.outer_seen_at.lock().unwrap() =
+            Some(StdInstant::now() - WG_STEALTH_OUTER_SEND_DELAY);
+
+        let outer = sender.seal(b"outer").unwrap();
+        assert_eq!(receiver.open(&outer).unwrap(), b"outer");
+        *receiver.outer_seen_at.lock().unwrap() =
+            Some(StdInstant::now() - WG_STEALTH_GATE_RECV_GRACE - Duration::from_millis(1));
+        let stale_gate = sender.state.seal_gate_datagram(b"stale").unwrap();
+        assert!(receiver.open(&stale_gate).is_none());
     }
 
     #[tokio::test]

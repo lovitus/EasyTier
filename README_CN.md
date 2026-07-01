@@ -155,6 +155,11 @@ sudo easytier-core -i 10.144.144.1
 sudo easytier-core -i 10.144.144.2 -p udp://第一个节点的公网IP:11010
 ```
 
+注意：开启 `--stealth-mode` 后，固定 `udp://` listener 不再接受 plain SYN 探测。
+新节点主动连接 legacy 端点时可用独立尝试回退 plain，但 legacy 节点主动连接 strict
+stealth listener 仍会被静默丢弃。`--stealth-protocols` 留空时仅保护 UDP；混合部署
+完成后再显式列出其他传输。详见[stealth 兼容性说明](easytier/docs/udp_stealth_compatibility.md)。
+
 3. 验证连接：
 
 ```bash

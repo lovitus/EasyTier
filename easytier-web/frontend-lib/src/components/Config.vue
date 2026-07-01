@@ -99,6 +99,8 @@ const bool_flags: BoolFlag[] = [
   { field: 'disable_encryption', help: 'disable_encryption_help' },
   { field: 'disable_tcp_hole_punching', help: 'disable_tcp_hole_punching_help' },
   { field: 'disable_udp_hole_punching', help: 'disable_udp_hole_punching_help' },
+  { field: 'stealth_mode', help: 'stealth_mode_help' },
+  { field: 'disable_legacy_udp_hole_punch', help: 'disable_legacy_udp_hole_punch_help' },
   { field: 'enable_udp_broadcast_relay', help: 'enable_udp_broadcast_relay_help' },
   { field: 'disable_upnp', help: 'disable_upnp_help' },
   { field: 'disable_sym_hole_punching', help: 'disable_sym_hole_punching_help' },
@@ -336,11 +338,47 @@ const instanceRecvBpsLimitInput = computed<string>({
               <div class="flex flex-row gap-x-9 flex-wrap">
                 <div class="flex flex-col gap-2 basis-5/12 grow">
                   <div class="flex">
+                    <label for="transport_priority">{{ t('transport_priority') }}</label>
+                    <span class="pi pi-question-circle ml-2 self-center"
+                      v-tooltip="t('transport_priority_help')"></span>
+                  </div>
+                  <InputText id="transport_priority" v-model="curNetwork.transport_priority"
+                    :placeholder="t('transport_priority_placeholder')" />
+                </div>
+              </div>
+
+              <div class="flex flex-row gap-x-9 flex-wrap">
+                <div class="flex flex-col gap-2 basis-5/12 grow">
+                  <div class="flex">
                     <label for="mtu">{{ t('mtu') }}</label>
                     <span class="pi pi-question-circle ml-2 self-center" v-tooltip="t('mtu_help')"></span>
                   </div>
                   <InputNumber id="mtu" v-model="curNetwork.mtu" aria-describedby="mtu-help" :format="false"
                     :placeholder="t('mtu_placeholder')" :min="400" :max="1380" fluid />
+                </div>
+              </div>
+
+              <div class="flex flex-row gap-x-9 flex-wrap">
+                <div class="flex flex-col gap-2 basis-5/12 grow">
+                  <div class="flex">
+                    <label for="stealth_window_secs">{{ t('stealth_window_secs') }}</label>
+                    <span class="pi pi-question-circle ml-2 self-center"
+                      v-tooltip="t('stealth_window_secs_help')"></span>
+                  </div>
+                  <InputNumber id="stealth_window_secs" v-model="curNetwork.stealth_window_secs"
+                    :allow-empty="false" :format="false" :min="0" fluid />
+                </div>
+              </div>
+
+              <div class="flex flex-row gap-x-9 flex-wrap">
+                <div class="flex flex-col gap-2 basis-5/12 grow">
+                  <div class="flex">
+                    <label for="stealth_protocols">{{ t('stealth_protocols') }}</label>
+                    <span class="pi pi-question-circle ml-2 self-center"
+                      v-tooltip="t('stealth_protocols_help')"></span>
+                  </div>
+                  <InputText id="stealth_protocols" v-model="curNetwork.stealth_protocols"
+                    :placeholder="t('stealth_protocols_placeholder')" />
                 </div>
               </div>
 
