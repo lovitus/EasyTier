@@ -104,6 +104,9 @@ UDP v1 继续通过 `PeerFeatureFlag.stealth_supported` 兼容旧版本；其他
 - `generic/manual/bootstrap udp://`：能力未知时先尝试 1 秒 stealth，再以新 `conn_id`、
   独立状态和同一 bound socket 执行 plain fallback。QUIC/WG/WS/WSS 同样使用独立连接
   尝试，避免迟到响应污染 fallback。
+- manual connector 在有效 UDP stealth 开启时为整次连接保留 6 秒预算，覆盖 1 秒
+  stealth attempt、最多 3 秒 plain attempt、地址处理和 PeerConn 握手；普通 plain UDP
+  仍保持原 2 秒外层预算，避免无条件放慢失败检测。
 
 因此，若某节点开启 `stealth_mode=true` 且使用固定 UDP listener：
 

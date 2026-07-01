@@ -86,13 +86,23 @@ impl ManualConnectorManager {
         ret
     }
 
-    fn reconnect_timeout(dead_url: &url::Url) -> Duration {
+    fn reconnect_timeout(dead_url: &url::Url, udp_stealth_enabled: bool) -> Duration {
         let use_long_timeout = matches_scheme!(
             dead_url,
             TunnelScheme::Http | TunnelScheme::Https | TunnelScheme::Txt | TunnelScheme::Srv
         ) || matches!(dead_url.scheme(), "ws" | "wss");
 
-        Duration::from_secs(if use_long_timeout { 20 } else { 2 })
+        let timeout_secs = if use_long_timeout {
+            20
+        } else if dead_url.scheme() == "udp" && udp_stealth_enabled {
+            // Generic UDP compatibility uses a 1s stealth attempt followed by
+            // a fresh 3s plain attempt. Leave time for resolve and PeerConn
+            // handshake without slowing ordinary plain reconnects.
+            6
+        } else {
+            2
+        };
+        Duration::from_secs(timeout_secs)
     }
 
     fn remaining_budget(started_at: Instant, total_timeout: Duration) -> Option<Duration> {
@@ -345,6 +355,10 @@ impl ManualConnectorManager {
         dead_url: url::Url,
     ) -> Result<ReconnResult, Error> {
         tracing::info!("reconnect: {}", dead_url);
+        let reconnect_timeout = Self::reconnect_timeout(
+            &dead_url,
+            data.global_ctx.get_feature_flags().stealth_supported,
+        );
 
         let mut ip_versions = vec![];
         if matches_scheme!(
@@ -365,7 +379,7 @@ impl ManualConnectorManager {
             let addrs = match Self::with_reconnect_timeout(
                 "resolve",
                 Instant::now(),
-                Self::reconnect_timeout(&dead_url),
+                reconnect_timeout,
                 socket_addrs(&converted_dead_url, || Some(1000)),
             )
             .await
@@ -404,7 +418,7 @@ impl ManualConnectorManager {
                 dead_url.clone(),
                 ip_version,
                 started_at,
-                Self::reconnect_timeout(&dead_url),
+                reconnect_timeout,
             )
             .await;
             tracing::info!("reconnect: {} done, ret: {:?}", dead_url, ret);
@@ -450,6 +464,25 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn reconnect_timeout_reserves_udp_stealth_fallback_budget() {
+        let udp = url::Url::parse("udp://127.0.0.1:11010").unwrap();
+        let tcp = url::Url::parse("tcp://127.0.0.1:11010").unwrap();
+
+        assert_eq!(
+            ManualConnectorManager::reconnect_timeout(&udp, true),
+            Duration::from_secs(6)
+        );
+        assert_eq!(
+            ManualConnectorManager::reconnect_timeout(&udp, false),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            ManualConnectorManager::reconnect_timeout(&tcp, true),
+            Duration::from_secs(2)
+        );
+    }
 
     #[tokio::test]
     async fn reconnect_timeout_reports_exhausted_budget_for_stage() {
