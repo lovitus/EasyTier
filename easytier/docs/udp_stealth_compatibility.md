@@ -175,6 +175,10 @@ Linux 三节点测试已分别验证：
 
 - QUIC proxy 的 proxy CIDR、虚拟 IP、TCP 和 UDP 数据路径。
 - KCP-only proxy 的 proxy CIDR、虚拟 IP、TCP 和 UDP 数据路径。
+- QUIC-only、KCP-only 和 `QUIC -> KCP` 两候选在目标拒绝时均回退 Native，且
+  `DESTINATION_FAILED` 不降低 transport health。
+- QUIC/KCP prepare 被远端 ACL 拒绝时均回退 Native，且 `POLICY_DENIED` 不降低
+  transport health。
 
 Deferred-SYN selector 在改写前冻结目标 peer、原始 SYN 和发送 context，按
 `QUIC -> KCP -> Native` prepare。prepared stream 绑定 flow generation 和目标 peer；

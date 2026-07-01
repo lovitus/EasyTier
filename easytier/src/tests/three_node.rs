@@ -1451,9 +1451,17 @@ pub async fn quic_proxy() {
 }
 
 #[cfg(all(feature = "quic", feature = "kcp"))]
+#[rstest::rstest]
+#[case(true, false, "quic_destination_failed")]
+#[case(false, true, "kcp_destination_failed")]
+#[case(true, true, "quic_destination_failed,kcp_destination_failed")]
 #[tokio::test]
 #[serial_test::serial]
-pub async fn proxy_destination_refused_falls_back_to_native_without_health_penalty() {
+pub async fn proxy_destination_refused_falls_back_to_native_without_health_penalty(
+    #[case] enable_quic_proxy: bool,
+    #[case] enable_kcp_proxy: bool,
+    #[case] expected_fallback_reason: &str,
+) {
     let insts = init_three_node_ex(
         "udp",
         |cfg| {
@@ -1462,8 +1470,8 @@ pub async fn proxy_destination_refused_falls_back_to_native_without_health_penal
                     .unwrap();
             } else if cfg.get_inst_name() == "inst1" {
                 let mut flags = cfg.get_flags();
-                flags.enable_quic_proxy = true;
-                flags.enable_kcp_proxy = true;
+                flags.enable_quic_proxy = enable_quic_proxy;
+                flags.enable_kcp_proxy = enable_kcp_proxy;
                 cfg.set_flags(flags);
             }
             cfg
@@ -1510,9 +1518,117 @@ pub async fn proxy_destination_refused_falls_back_to_native_without_health_penal
     .await
     .expect("native fallback status was not recorded");
 
+    assert_eq!(status.fallback_reason, expected_fallback_reason);
+    assert_eq!(status.consecutive_failures, 0);
+    assert_eq!(status.ambiguous_timeout_strikes, 0);
+
+    drop(selector);
+    drop_insts(insts).await;
+}
+
+#[cfg(all(feature = "quic", feature = "kcp"))]
+#[tokio::test]
+#[serial_test::serial]
+pub async fn proxy_policy_denied_falls_back_to_native_without_health_penalty() {
+    use crate::proto::acl::{Acl, AclV1, Action, Chain, ChainType, Protocol, Rule};
+
+    let insts = init_three_node_ex(
+        "udp",
+        |cfg| {
+            if cfg.get_inst_name() == "inst3" {
+                cfg.add_proxy_cidr("10.1.2.0/24".parse().unwrap(), None)
+                    .unwrap();
+            } else if cfg.get_inst_name() == "inst1" {
+                let mut flags = cfg.get_flags();
+                flags.enable_quic_proxy = true;
+                flags.enable_kcp_proxy = true;
+                cfg.set_flags(flags);
+            }
+            cfg
+        },
+        false,
+    )
+    .await;
+
+    wait_proxy_route_appear(
+        &insts[0].get_peer_manager(),
+        "10.144.144.3/24",
+        insts[2].peer_id(),
+        "10.1.2.0/24",
+    )
+    .await;
+
+    let denied_port = 22998;
+    let acl = Acl {
+        acl_v1: Some(AclV1 {
+            chains: vec![Chain {
+                name: "deny_proxy_prepare_target".to_string(),
+                chain_type: ChainType::Inbound.into(),
+                enabled: true,
+                rules: vec![
+                    Rule {
+                        name: "deny_proxy_prepare_target".to_string(),
+                        priority: 200,
+                        enabled: true,
+                        protocol: Protocol::Tcp.into(),
+                        ports: vec![denied_port.to_string()],
+                        action: Action::Drop.into(),
+                        ..Default::default()
+                    },
+                    Rule {
+                        name: "allow_other_inbound".to_string(),
+                        priority: 100,
+                        enabled: true,
+                        protocol: Protocol::Any.into(),
+                        action: Action::Allow.into(),
+                        stateful: true,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+    };
+    insts[2]
+        .get_global_ctx()
+        .get_acl_filter()
+        .reload_rules(Some(&acl));
+
+    let mut connector =
+        TcpTunnelConnector::new(format!("tcp://10.144.144.3:{denied_port}").parse().unwrap());
+    let net_ns = NetNS::new(Some("net_a".into()));
+    let _guard = net_ns.guard();
+    let result = tokio::time::timeout(Duration::from_secs(5), connector.connect()).await;
+    assert!(
+        !matches!(result, Ok(Ok(_))),
+        "ACL-denied destination unexpectedly connected"
+    );
+    drop(_guard);
+
+    let selector = insts[0]
+        .get_proxy_failover_selector()
+        .expect("proxy failover selector was not started");
+    let status = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(status) = selector.list_statuses().await.into_iter().find(|entry| {
+                entry
+                    .dst
+                    .as_ref()
+                    .is_some_and(|dst| dst.port == denied_port)
+            }) && status.selected_transport == "native"
+            {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("native fallback status was not recorded");
+
     assert_eq!(
         status.fallback_reason,
-        "quic_destination_failed,kcp_destination_failed"
+        "quic_policy_denied,kcp_policy_denied"
     );
     assert_eq!(status.consecutive_failures, 0);
     assert_eq!(status.ambiguous_timeout_strikes, 0);
