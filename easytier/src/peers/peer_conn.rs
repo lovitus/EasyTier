@@ -1662,7 +1662,7 @@ pub mod tests {
     use crate::tunnel::filter::PacketRecorderTunnelFilter;
     use crate::tunnel::filter::tests::DropSendTunnelFilter;
     use crate::tunnel::{
-        TunnelConnector, TunnelListener,
+        Tunnel, TunnelConnector, TunnelListener,
         ring::{RingSink, RingStream, RingTunnel, create_ring_tunnel_pair},
         udp::{UdpTunnelConnector, UdpTunnelListener},
     };
@@ -1718,8 +1718,10 @@ pub mod tests {
         assert!(Arc::ptr_eq(&cached, &state));
     }
 
-    #[tokio::test]
-    async fn peer_conn_secure_udp_stealth_handshake_switches_after_msg3() {
+    async fn assert_secure_stealth_handshake_installs_outer_key(
+        client_tunnel: Box<dyn Tunnel>,
+        server_tunnel: Box<dyn Tunnel>,
+    ) {
         let c_ctx = get_mock_global_ctx();
         let s_ctx = get_mock_global_ctx();
         for ctx in [&c_ctx, &s_ctx] {
@@ -1727,25 +1729,6 @@ pub mod tests {
                 .set_network_identity(NetworkIdentity::new("net1".to_owned(), "sec1".to_owned()));
             set_secure_mode_cfg(ctx, true);
         }
-
-        let mut listener = UdpTunnelListener::new("udp://127.0.0.1:0".parse().unwrap());
-        listener.set_stealth(crate::tunnel::stealth::build_outer_session(
-            Some("sec1"),
-            true,
-            true,
-            0,
-        ));
-        listener.listen().await.unwrap();
-
-        let mut connector = UdpTunnelConnector::new(listener.local_url());
-        connector.set_stealth(crate::tunnel::stealth::build_outer_session(
-            Some("sec1"),
-            true,
-            true,
-            0,
-        ));
-        let client_tunnel = connector.connect().await.unwrap();
-        let server_tunnel = listener.accept().await.unwrap();
 
         let mut client = PeerConn::new(
             new_peer_id(),
@@ -1775,6 +1758,97 @@ pub mod tests {
         let server_outer_key = server.outer_session_state().unwrap().outer_key();
         assert!(client_outer_key.is_some());
         assert_eq!(client_outer_key, server_outer_key);
+    }
+
+    #[tokio::test]
+    async fn peer_conn_secure_udp_stealth_handshake_switches_after_msg3() {
+        let mut listener = UdpTunnelListener::new("udp://127.0.0.1:0".parse().unwrap());
+        listener.set_stealth(crate::tunnel::stealth::build_outer_session(
+            Some("sec1"),
+            true,
+            true,
+            0,
+        ));
+        listener.listen().await.unwrap();
+
+        let mut connector = UdpTunnelConnector::new(listener.local_url());
+        connector.set_stealth(crate::tunnel::stealth::build_outer_session(
+            Some("sec1"),
+            true,
+            true,
+            0,
+        ));
+        let client_tunnel = connector.connect().await.unwrap();
+        let server_tunnel = listener.accept().await.unwrap();
+
+        assert_secure_stealth_handshake_installs_outer_key(client_tunnel, server_tunnel).await;
+    }
+
+    #[tokio::test]
+    async fn peer_conn_secure_tcp_stealth_handshake_installs_phase2_key() {
+        let mut listener =
+            crate::tunnel::tcp::TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
+        listener.set_stealth(crate::tunnel::stealth::build_outer_session(
+            Some("sec1"),
+            true,
+            true,
+            0,
+        ));
+        listener.listen().await.unwrap();
+
+        let mut connector = crate::tunnel::tcp::TcpTunnelConnector::new(listener.local_url());
+        connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+            Some("sec1"),
+            true,
+            true,
+            0,
+        ));
+        TunnelConnector::require_stealth(&mut connector);
+        let (client_tunnel, server_tunnel) = tokio::join!(connector.connect(), listener.accept());
+
+        assert_secure_stealth_handshake_installs_outer_key(
+            client_tunnel.unwrap(),
+            server_tunnel.unwrap(),
+        )
+        .await;
+    }
+
+    #[cfg(feature = "faketcp")]
+    #[tokio::test]
+    async fn peer_conn_secure_faketcp_stealth_handshake_installs_phase2_key() {
+        #[cfg(target_family = "unix")]
+        if unsafe { nix::libc::geteuid() } != 0 {
+            return;
+        }
+
+        let mut listener = crate::tunnel::fake_tcp::FakeTcpTunnelListener::new(
+            "faketcp://127.0.0.1:31030".parse().unwrap(),
+        );
+        listener.set_stealth(crate::tunnel::stealth::build_outer_session(
+            Some("sec1"),
+            true,
+            true,
+            0,
+        ));
+        listener.listen().await.unwrap();
+
+        let mut connector = crate::tunnel::fake_tcp::FakeTcpTunnelConnector::new(
+            "faketcp://127.0.0.1:31030".parse().unwrap(),
+        );
+        connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+            Some("sec1"),
+            true,
+            true,
+            0,
+        ));
+        TunnelConnector::require_stealth(&mut connector);
+        let (client_tunnel, server_tunnel) = tokio::join!(connector.connect(), listener.accept());
+
+        assert_secure_stealth_handshake_installs_outer_key(
+            client_tunnel.unwrap(),
+            server_tunnel.unwrap(),
+        )
+        .await;
     }
 
     #[tokio::test]
