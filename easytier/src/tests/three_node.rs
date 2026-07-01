@@ -1406,6 +1406,7 @@ async fn subnet_proxy_test_icmp(target_ip: &str, timeout: Duration) {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 pub async fn quic_proxy() {
     let insts = init_three_node_ex(
         "udp",
