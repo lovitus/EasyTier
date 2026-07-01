@@ -27,7 +27,6 @@ use crate::{
         common::{CompressionAlgoPb, SecureModeConfig},
     },
     tunnel::{
-        TunnelConnector,
         common::tests::{
             _tunnel_bench_netns, _tunnel_pingpong_netns_with_timeout, wait_for_condition,
         },
@@ -36,6 +35,9 @@ use crate::{
         udp::UdpTunnelConnector,
     },
 };
+
+#[cfg(any(feature = "quic", feature = "websocket", feature = "wireguard"))]
+use crate::tunnel::TunnelConnector;
 
 #[cfg(feature = "wireguard")]
 use crate::{

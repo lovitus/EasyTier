@@ -1190,7 +1190,7 @@ impl Instance {
         self.peer_manager.clone()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "kcp", feature = "quic")))]
     pub(crate) fn get_proxy_failover_selector(&self) -> Option<DeferredProxySelector> {
         self.proxy_failover_selector.clone()
     }
