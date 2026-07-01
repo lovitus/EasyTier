@@ -79,6 +79,15 @@ Additional steps:
 
 [One-Click Register Service](https://easytier.cn/en/guide/network/oneclick-install-as-service.html) (Automatically start when the system boots and run in the background)
 
+### Stealth and Transport Policy
+
+Stealth is opt-in and can protect \`udp\`, \`tcp\`, \`faketcp\`, \`quic\`, \`wg\`, \`ws\`, and \`wss\`.
+It requires secure mode and a non-empty network secret. The effective
+\`stealth_window_secs\` value is network-wide and must match on every stealth node.
+\`transport_priority\` only reorders direct-connect underlays; QUIC/KCP proxy failover keeps
+the fixed \`QUIC -> KCP -> Native\` order. See
+[the compatibility notes](easytier/docs/udp_stealth_compatibility.md) for rollout details.
+
 ### 🚀 Basic Usage
 
 #### Quick Networking with Shared Nodes

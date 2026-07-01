@@ -79,6 +79,14 @@ cargo install --git https://github.com/EasyTier/EasyTier.git easytier
 
 [一键注册系统服务](https://easytier.cn/guide/network/oneclick-install-as-service.html)（系统启动时自动后台运行）
 
+### Stealth 与传输策略
+
+Stealth 默认关闭，可保护 \`udp\`、\`tcp\`、\`faketcp\`、\`quic\`、\`wg\`、\`ws\` 和 \`wss\`，
+需要启用安全模式并配置非空网络密钥。\`stealth_window_secs\` 的有效值是网络级参数，
+所有 Stealth 节点必须一致。\`transport_priority\` 只重排 direct-connect 底层协议；
+QUIC/KCP Proxy 故障转移固定采用 \`QUIC -> KCP -> Native\`。混合部署细节见
+[兼容性说明](easytier/docs/udp_stealth_compatibility.md)。
+
 ### 🚀 基本用法
 
 #### 使用共享节点快速组网
