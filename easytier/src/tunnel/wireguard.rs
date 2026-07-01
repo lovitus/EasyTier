@@ -50,26 +50,19 @@ const WG_STEALTH_MAX_SESSIONS: usize = 4096;
 #[derive(Debug)]
 struct WgStealthSession {
     state: Arc<crate::tunnel::stealth::OuterSessionState>,
-    outer_seen_at: StdMutex<Option<StdInstant>>,
 }
 
 impl WgStealthSession {
     fn new(state: Arc<crate::tunnel::stealth::OuterSessionState>) -> Self {
-        Self {
-            state,
-            outer_seen_at: StdMutex::new(None),
-        }
+        Self { state }
     }
 
-    fn outer_elapsed(&self, now: StdInstant) -> Option<Duration> {
-        self.state.outer_key()?;
-        let mut seen = self.outer_seen_at.lock().unwrap();
-        let first_seen = *seen.get_or_insert(now);
-        Some(now.saturating_duration_since(first_seen))
+    fn outer_elapsed(&self) -> Option<Duration> {
+        self.state.outer_key_elapsed()
     }
 
     fn seal(&self, plaintext: &[u8]) -> Option<Vec<u8>> {
-        match self.outer_elapsed(StdInstant::now()) {
+        match self.outer_elapsed() {
             Some(elapsed) if elapsed >= WG_STEALTH_OUTER_SEND_DELAY => {
                 self.state.seal_datagram(plaintext)
             }
@@ -78,7 +71,7 @@ impl WgStealthSession {
     }
 
     fn open(&self, sealed: &[u8]) -> Option<Vec<u8>> {
-        match self.outer_elapsed(StdInstant::now()) {
+        match self.outer_elapsed() {
             Some(elapsed) => self.state.open_datagram(sealed).or_else(|| {
                 (elapsed <= WG_STEALTH_GATE_RECV_GRACE)
                     .then(|| self.state.open_gate_datagram(sealed))
@@ -1229,15 +1222,18 @@ pub mod tests {
         receiver
             .state
             .set_outer_key_from_handshake_hash(b"wg-handshake");
-        *sender.outer_seen_at.lock().unwrap() =
-            Some(StdInstant::now() - WG_STEALTH_OUTER_SEND_DELAY);
-        *receiver.outer_seen_at.lock().unwrap() =
-            Some(StdInstant::now() - WG_STEALTH_OUTER_SEND_DELAY);
+        sender
+            .state
+            .set_outer_key_age_for_test(WG_STEALTH_OUTER_SEND_DELAY);
+        receiver
+            .state
+            .set_outer_key_age_for_test(WG_STEALTH_OUTER_SEND_DELAY);
 
         let outer = sender.seal(b"outer").unwrap();
         assert_eq!(receiver.open(&outer).unwrap(), b"outer");
-        *receiver.outer_seen_at.lock().unwrap() =
-            Some(StdInstant::now() - WG_STEALTH_GATE_RECV_GRACE - Duration::from_millis(1));
+        receiver
+            .state
+            .set_outer_key_age_for_test(WG_STEALTH_GATE_RECV_GRACE + Duration::from_millis(1));
         let stale_gate = sender.state.seal_gate_datagram(b"stale").unwrap();
         assert!(receiver.open(&stale_gate).is_none());
     }

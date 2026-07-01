@@ -336,27 +336,19 @@ fn stealth_endpoint_config() -> EndpointConfig {
 #[derive(Debug)]
 struct QuicStealthSession {
     state: Arc<crate::tunnel::stealth::OuterSessionState>,
-    outer_seen_at: Mutex<Option<Instant>>,
 }
 
 impl QuicStealthSession {
     fn new(state: Arc<crate::tunnel::stealth::OuterSessionState>) -> Self {
-        Self {
-            state,
-            outer_seen_at: Mutex::new(None),
-        }
+        Self { state }
     }
 
-    fn outer_elapsed(&self, now: Instant) -> Option<Duration> {
-        self.state.outer_key()?;
-        let mut seen = self.outer_seen_at.lock().unwrap();
-        let first_seen = *seen.get_or_insert(now);
-        Some(now.saturating_duration_since(first_seen))
+    fn outer_elapsed(&self) -> Option<Duration> {
+        self.state.outer_key_elapsed()
     }
 
     fn seal(&self, plaintext: &[u8]) -> Option<Vec<u8>> {
-        let now = Instant::now();
-        match self.outer_elapsed(now) {
+        match self.outer_elapsed() {
             Some(elapsed) if elapsed >= QUIC_STEALTH_OUTER_SEND_DELAY => {
                 self.state.seal_datagram(plaintext)
             }
@@ -365,8 +357,7 @@ impl QuicStealthSession {
     }
 
     fn open(&self, sealed: &[u8]) -> Option<Vec<u8>> {
-        let now = Instant::now();
-        match self.outer_elapsed(now) {
+        match self.outer_elapsed() {
             Some(elapsed) => self.state.open_datagram(sealed).or_else(|| {
                 (elapsed <= QUIC_STEALTH_GATE_RECV_GRACE)
                     .then(|| self.state.open_gate_datagram(sealed))
@@ -1523,15 +1514,18 @@ mod tests {
         let transition_packet = sender.seal(b"transition").unwrap();
         assert_eq!(receiver.open(&transition_packet).unwrap(), b"transition");
 
-        *sender.outer_seen_at.lock().unwrap() =
-            Some(Instant::now() - QUIC_STEALTH_OUTER_SEND_DELAY);
-        *receiver.outer_seen_at.lock().unwrap() =
-            Some(Instant::now() - QUIC_STEALTH_OUTER_SEND_DELAY);
+        sender
+            .state
+            .set_outer_key_age_for_test(QUIC_STEALTH_OUTER_SEND_DELAY);
+        receiver
+            .state
+            .set_outer_key_age_for_test(QUIC_STEALTH_OUTER_SEND_DELAY);
         let outer_packet = sender.seal(b"outer").unwrap();
         assert_eq!(receiver.open(&outer_packet).unwrap(), b"outer");
 
-        *receiver.outer_seen_at.lock().unwrap() =
-            Some(Instant::now() - QUIC_STEALTH_GATE_RECV_GRACE - Duration::from_millis(1));
+        receiver
+            .state
+            .set_outer_key_age_for_test(QUIC_STEALTH_GATE_RECV_GRACE + Duration::from_millis(1));
         let stale_gate = sender.state.seal_gate_datagram(b"stale").unwrap();
         assert!(receiver.open(&stale_gate).is_none());
     }
@@ -1551,8 +1545,9 @@ mod tests {
             let first = sender.seal_gate_datagram(&initial).unwrap();
             let (_, old_session) = socket.open_from(remote, &first).unwrap();
             old_session.state.set_outer_key_from_handshake_hash(b"old");
-            *old_session.outer_seen_at.lock().unwrap() =
-                Some(Instant::now() - QUIC_STEALTH_GATE_RECV_GRACE - Duration::from_millis(1));
+            old_session.state.set_outer_key_age_for_test(
+                QUIC_STEALTH_GATE_RECV_GRACE + Duration::from_millis(1),
+            );
 
             let gate_data = sender
                 .seal_gate_datagram(&[0x40, 0, 0, 0, 1, 8, 0, 0])
@@ -1567,8 +1562,9 @@ mod tests {
             assert!(!Arc::ptr_eq(&old_session, &new_session));
 
             new_session.state.set_outer_key_from_handshake_hash(b"new");
-            *new_session.outer_seen_at.lock().unwrap() =
-                Some(Instant::now() - QUIC_STEALTH_GATE_RECV_GRACE - Duration::from_millis(1));
+            new_session.state.set_outer_key_age_for_test(
+                QUIC_STEALTH_GATE_RECV_GRACE + Duration::from_millis(1),
+            );
             assert!(
                 socket.open_from(remote, &reconnect).is_none(),
                 "replayed QUIC Initial replaced the live session twice"

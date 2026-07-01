@@ -20,7 +20,7 @@
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex, RwLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use hmac::{Hmac, Mac as _};
@@ -424,7 +424,7 @@ enum OuterTransitionMode {
 enum OuterKeyPhase {
     Gate,
     PromoteAfterNextSeal([u8; 32]),
-    Outer([u8; 32]),
+    Outer([u8; 32], Instant),
 }
 
 impl OuterSessionState {
@@ -477,7 +477,11 @@ impl OuterSessionState {
     /// handshake hash. Idempotent and safe to call from `PeerConn`.
     pub fn set_outer_key_from_handshake_hash(&self, handshake_hash: &[u8]) {
         let key = derive_outer_key(handshake_hash);
-        *self.key_phase.write().unwrap() = OuterKeyPhase::Outer(key);
+        let mut phase = self.key_phase.write().unwrap();
+        if matches!(*phase, OuterKeyPhase::Outer(current, _) if current == key) {
+            return;
+        }
+        *phase = OuterKeyPhase::Outer(key, Instant::now());
     }
 
     /// Keep the next outbound datagram on the gate key, then atomically promote
@@ -488,17 +492,40 @@ impl OuterSessionState {
             return;
         }
         let key = derive_outer_key(handshake_hash);
-        *self.key_phase.write().unwrap() = match self.transition_mode {
+        let mut phase = self.key_phase.write().unwrap();
+        if matches!(
+            *phase,
+            OuterKeyPhase::PromoteAfterNextSeal(current) | OuterKeyPhase::Outer(current, _)
+                if current == key
+        ) {
+            return;
+        }
+        *phase = match self.transition_mode {
             OuterTransitionMode::NextSeal => OuterKeyPhase::PromoteAfterNextSeal(key),
-            OuterTransitionMode::TransportDelayed => OuterKeyPhase::Outer(key),
+            OuterTransitionMode::TransportDelayed => OuterKeyPhase::Outer(key, Instant::now()),
         };
     }
 
     /// The current phase-2 outer key, if Noise has completed.
     pub fn outer_key(&self) -> Option<[u8; 32]> {
         match *self.key_phase.read().unwrap() {
-            OuterKeyPhase::Outer(key) => Some(key),
+            OuterKeyPhase::Outer(key, _) => Some(key),
             OuterKeyPhase::Gate | OuterKeyPhase::PromoteAfterNextSeal(_) => None,
+        }
+    }
+
+    pub(crate) fn outer_key_elapsed(&self) -> Option<Duration> {
+        match *self.key_phase.read().unwrap() {
+            OuterKeyPhase::Outer(_, installed_at) => Some(installed_at.elapsed()),
+            OuterKeyPhase::Gate | OuterKeyPhase::PromoteAfterNextSeal(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_outer_key_age_for_test(&self, age: Duration) {
+        let mut phase = self.key_phase.write().unwrap();
+        if let OuterKeyPhase::Outer(key, _) = *phase {
+            *phase = OuterKeyPhase::Outer(key, Instant::now() - age);
         }
     }
 
@@ -701,6 +728,9 @@ mod tests {
         state.promote_outer_key_after_next_seal(b"handshake");
 
         assert!(state.outer_key().is_some());
+        state.set_outer_key_age_for_test(Duration::from_secs(10));
+        state.set_outer_key_from_handshake_hash(b"handshake");
+        assert!(state.outer_key_elapsed().unwrap() >= Duration::from_secs(10));
         assert!(template.outer_key().is_none());
     }
 
@@ -827,13 +857,13 @@ impl OuterSessionState {
                 window_for(now_secs(), self.window_secs),
             ),
             OuterKeyPhase::PromoteAfterNextSeal(outer_key) => {
-                *phase = OuterKeyPhase::Outer(outer_key);
+                *phase = OuterKeyPhase::Outer(outer_key, Instant::now());
                 derive_gate_key(
                     &self.network_secret,
                     window_for(now_secs(), self.window_secs),
                 )
             }
-            OuterKeyPhase::Outer(key) => key,
+            OuterKeyPhase::Outer(key, _) => key,
         };
         drop(phase);
         Some(seal(&key, plaintext))
@@ -846,7 +876,7 @@ impl OuterSessionState {
             return None;
         }
         match *self.key_phase.read().unwrap() {
-            OuterKeyPhase::Outer(key) => return open(&key, buf),
+            OuterKeyPhase::Outer(key, _) => return open(&key, buf),
             OuterKeyPhase::Gate | OuterKeyPhase::PromoteAfterNextSeal(_) => {}
         }
         let cur = window_for(now_secs(), self.window_secs);
