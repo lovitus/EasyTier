@@ -289,7 +289,58 @@ const peerCount = computed(() => {
   return peerRouteInfos.value.length
 })
 
-const proxyFailoverEntries = computed(() => props.curNetworkInst?.detail?.proxy_failover_entries ?? [])
+function entryValue(entry: any, snakeKey: string, camelKey: string) {
+  return entry?.[snakeKey] ?? entry?.[camelKey]
+}
+
+function entryNumber(entry: any, snakeKey: string, camelKey: string): number {
+  const value = entryValue(entry, snakeKey, camelKey)
+  if (typeof value === 'number')
+    return Number.isFinite(value) ? value : 0
+  if (typeof value === 'bigint')
+    return Number(value)
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  return 0
+}
+
+function entryBool(entry: any, snakeKey: string, camelKey: string): boolean {
+  const value = entryValue(entry, snakeKey, camelKey)
+  return value === true
+}
+
+const proxyFailoverEntries = computed(() => {
+  return (props.curNetworkInst?.detail?.proxy_failover_entries ?? [])
+    .map((entry: any) => {
+      const generation = entryNumber(entry, 'generation', 'generation')
+      const src = proxySocketAddr(entry.src)
+      const dst = proxySocketAddr(entry.dst)
+      return {
+        ...entry,
+        ui_key: `${src}->${dst}:${generation}:${entryValue(entry, 'selected_transport', 'selectedTransport') ?? ''}`,
+        start_time: entryNumber(entry, 'start_time', 'startTime'),
+        generation,
+        requested_transport: entryValue(entry, 'requested_transport', 'requestedTransport') ?? '',
+        selected_transport: entryValue(entry, 'selected_transport', 'selectedTransport') ?? '',
+        fallback_reason: entryValue(entry, 'fallback_reason', 'fallbackReason') ?? '',
+        dst_peer_id: entryNumber(entry, 'dst_peer_id', 'dstPeerId'),
+        consecutive_failures: entryNumber(entry, 'consecutive_failures', 'consecutiveFailures'),
+        consecutive_successes: entryNumber(entry, 'consecutive_successes', 'consecutiveSuccesses'),
+        ambiguous_timeout_strikes: entryNumber(entry, 'ambiguous_timeout_strikes', 'ambiguousTimeoutStrikes'),
+        transport_degraded: entryBool(entry, 'transport_degraded', 'transportDegraded'),
+      }
+    })
+    .sort((a: any, b: any) => {
+      const startDiff = b.start_time - a.start_time
+      if (startDiff !== 0)
+        return startDiff
+      if (b.generation !== a.generation)
+        return b.generation - a.generation
+      return String(a.ui_key).localeCompare(String(b.ui_key))
+    })
+})
 
 function proxySocketAddr(addr: any): string {
   if (!addr)
@@ -318,6 +369,9 @@ const rxRate = ref('0')
 const showNodeDetails = ref(false)
 
 onMounted(() => {
+  prevTxSum = txGlobalSum()
+  prevRxSum = rxGlobalSum()
+
   rateIntervalId = window.setInterval(() => {
     const curTxSum = txGlobalSum()
     txRate.value = humanFileSize((curTxSum - prevTxSum) / (rateInterval / 1000))
@@ -483,7 +537,7 @@ function showEventLogs() {
             {{ t('proxy_failover.title') }}
           </template>
           <template #content>
-            <DataTable :value="proxyFailoverEntries" column-resize-mode="fit" table-class="w-full">
+            <DataTable :value="proxyFailoverEntries" data-key="ui_key" column-resize-mode="fit" table-class="w-full">
               <Column :field="(entry: any) => proxySocketAddr(entry.src)" :header="t('proxy_failover.source')" />
               <Column :field="(entry: any) => proxySocketAddr(entry.dst)" :header="t('proxy_failover.destination')" />
               <Column field="requested_transport" :header="t('proxy_failover.requested')" />

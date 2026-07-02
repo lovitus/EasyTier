@@ -26,7 +26,23 @@ export function numericValue(value: unknown): number | undefined {
 }
 
 export function peerConns(info: PeerRoutePair) {
-  return info.peer?.conns || []
+  const conns = info.peer?.conns || []
+  const connId = defaultConnId(info)
+  return [...conns].sort((a, b) => {
+    if (connId) {
+      if (a.conn_id === connId)
+        return -1
+      if (b.conn_id === connId)
+        return 1
+    }
+
+    const aTunnel = a.tunnel?.tunnel_type ?? ''
+    const bTunnel = b.tunnel?.tunnel_type ?? ''
+    if (aTunnel !== bTunnel)
+      return aTunnel.localeCompare(bTunnel)
+
+    return String(a.conn_id ?? '').localeCompare(String(b.conn_id ?? ''))
+  })
 }
 
 function defaultConnId(info: PeerRoutePair) {
@@ -53,13 +69,7 @@ function defaultConnId(info: PeerRoutePair) {
 }
 
 function defaultConnFirst(info: PeerRoutePair) {
-  const conns = peerConns(info)
-  const connId = defaultConnId(info)
-  if (!connId)
-    return conns
-
-  const defaultConn = conns.find(conn => conn.conn_id === connId)
-  return defaultConn ? [defaultConn, ...conns.filter(conn => conn !== defaultConn)] : conns
+  return peerConns(info)
 }
 
 export function latencyMs(info: PeerRoutePair) {

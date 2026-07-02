@@ -1,6 +1,6 @@
 <template>
   <div
-    class="bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-blue-900/20 dark:to-indigo-800/20 rounded-xl p-4 border border-blue-200 dark:border-blue-700 shadow-md hover:shadow-lg transition-all duration-300">
+    class="bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-blue-900/20 dark:to-indigo-800/20 rounded-xl p-4 border border-blue-200 dark:border-blue-700 shadow-md hover:shadow-lg transition-shadow duration-200">
     <div class="flex items-center justify-center mb-3">
       <div class="flex gap-2 text-sm">
         <span class="flex items-center gap-1 w-32">
@@ -59,7 +59,6 @@ const props = defineProps<Props>()
 
 const chartCanvas = ref<HTMLCanvasElement>()
 let chart: ChartJS | null = null
-let updateTimer: number | null = null
 
 // 存储历史数据，最多保存30个数据点（1分钟历史）
 const maxDataPoints = 120
@@ -183,6 +182,7 @@ function initChart() {
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      resizeDelay: 200,
       interaction: {
         intersect: false,
         mode: 'index'
@@ -231,7 +231,7 @@ function initChart() {
         }
       },
       animation: {
-        duration: 10
+        duration: 0
       }
     }
   })
@@ -240,7 +240,7 @@ function initChart() {
 // 监听props变化
 watch([() => props.uploadRate, () => props.downloadRate], () => {
   updateData()
-}, { immediate: true })
+})
 
 onMounted(async () => {
   // add initial point
@@ -261,19 +261,11 @@ onMounted(async () => {
   await nextTick()
   initChart()
   updateData()
-
-  // 启动定时器，每2秒更新一次图表
-  updateTimer = window.setInterval(() => {
-    updateData()
-  }, 2000)
 })
 
 onUnmounted(() => {
   if (chart) {
     chart.destroy()
-  }
-  if (updateTimer) {
-    clearInterval(updateTimer)
   }
 })
 </script>
