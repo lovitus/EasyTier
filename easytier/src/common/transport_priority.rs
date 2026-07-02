@@ -139,14 +139,11 @@ fn parse_scope(value: &str) -> anyhow::Result<TransportPriorityScope> {
 }
 
 pub fn protocol_is_compiled(protocol: &str) -> bool {
-    match protocol {
-        "tcp" | "udp" => true,
-        "wg" => cfg!(feature = "wireguard"),
-        "quic" => cfg!(feature = "quic"),
-        "ws" | "wss" => cfg!(feature = "websocket"),
-        "faketcp" => cfg!(feature = "faketcp"),
-        _ => false,
-    }
+    matches!(protocol, "tcp" | "udp")
+        || (protocol == "wg" && cfg!(feature = "wireguard"))
+        || (protocol == "quic" && cfg!(feature = "quic"))
+        || (matches!(protocol, "ws" | "wss") && cfg!(feature = "websocket"))
+        || (protocol == "faketcp" && cfg!(feature = "faketcp"))
 }
 
 #[cfg(test)]

@@ -1331,10 +1331,9 @@ impl PeerConn {
         if let (Some(state), Some(noise)) = (
             self.outer_session_state.as_ref(),
             self.noise_handshake_result.as_ref(),
-        ) {
-            if state.is_enabled() {
-                state.set_outer_key_from_handshake_hash(&noise.handshake_hash);
-            }
+        ) && state.is_enabled()
+        {
+            state.set_outer_key_from_handshake_hash(&noise.handshake_hash);
         }
     }
 

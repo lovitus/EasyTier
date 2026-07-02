@@ -23,7 +23,6 @@ use std::process::{ExitStatus, Output};
 
 use std::ffi::{CString, OsString};
 use std::io;
-use std::mem;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::process::ExitStatusExt;
@@ -44,10 +43,10 @@ fn get_exe_path<P: AsRef<Path>>(exe_name: P) -> Option<PathBuf> {
         return Some(exe_name.into());
     }
 
-    if let Ok(abs_path) = exe_name.canonicalize() {
-        if abs_path.is_file() {
-            return Some(abs_path);
-        }
+    if let Ok(abs_path) = exe_name.canonicalize()
+        && abs_path.is_file()
+    {
+        return Some(abs_path);
     }
 
     env::var_os(ENV_PATH).and_then(|paths| {
@@ -76,95 +75,95 @@ macro_rules! make_cstring {
 }
 
 unsafe fn gui_runas(prog: *const i8, argv: *const *const i8) -> io::Result<ExitStatus> {
-    let mut authref: AuthorizationRef = ptr::null_mut();
-    let mut pipe: *mut libc::FILE = ptr::null_mut();
+    unsafe {
+        let mut authref: AuthorizationRef = ptr::null_mut();
+        let mut pipe: *mut libc::FILE = ptr::null_mut();
 
-    if AuthorizationCreate(
-        ptr::null(),
-        ptr::null(),
-        kAuthorizationFlagDefaults,
-        &mut authref,
-    ) != errAuthorizationSuccess
-    {
-        return Err(io::Error::last_os_error());
-    }
-    if AuthorizationExecuteWithPrivileges(
-        authref,
-        prog,
-        kAuthorizationFlagDefaults,
-        argv as *const *mut _,
-        &mut pipe,
-    ) != errAuthorizationSuccess
-    {
-        AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
-        return Err(io::Error::last_os_error());
-    }
-
-    let fd = fileno(pipe);
-    if fd == -1 {
-        AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
-        return Err(io::Error::last_os_error());
-    }
-
-    // We never send input to the elevated GUI. Close the parent write half so
-    // the child sees EOF on stdin instead of waiting forever.
-    if libc::shutdown(fd, SHUT_WR) == -1 {
-        let err = io::Error::last_os_error();
-        libc::fclose(pipe);
-        AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
-        return Err(err);
-    }
-
-    // AuthorizationExecuteWithPrivileges wires the tool's stdin/stdout to a
-    // bidirectional pipe. Drain stdout so the child can't block on a full pipe.
-    let read_fd = libc::dup(fd);
-    if read_fd == -1 {
-        let err = io::Error::last_os_error();
-        libc::fclose(pipe);
-        AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
-        return Err(err);
-    }
-    let mut pipe_file = unsafe { File::from_raw_fd(read_fd) };
-    let mut sink = [0_u8; 8192];
-    loop {
-        match pipe_file.read(&mut sink) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err) => {
-                libc::fclose(pipe);
-                AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
-                return Err(err);
-            }
+        if AuthorizationCreate(
+            ptr::null(),
+            ptr::null(),
+            kAuthorizationFlagDefaults,
+            &mut authref,
+        ) != errAuthorizationSuccess
+        {
+            return Err(io::Error::last_os_error());
         }
-    }
+        if AuthorizationExecuteWithPrivileges(
+            authref,
+            prog,
+            kAuthorizationFlagDefaults,
+            argv as *const *mut _,
+            &mut pipe,
+        ) != errAuthorizationSuccess
+        {
+            AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
+            return Err(io::Error::last_os_error());
+        }
 
-    let mut status = 0;
-    loop {
-        let r = wait(&mut status);
-        if r == -1 && io::Error::last_os_error().raw_os_error() == Some(EINTR) {
-            continue;
-        } else if r == -1 {
+        let fd = fileno(pipe);
+        if fd == -1 {
+            AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
+            return Err(io::Error::last_os_error());
+        }
+
+        // We never send input to the elevated GUI. Close the parent write half so
+        // the child sees EOF on stdin instead of waiting forever.
+        if libc::shutdown(fd, SHUT_WR) == -1 {
             let err = io::Error::last_os_error();
             libc::fclose(pipe);
             AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
             return Err(err);
-        } else {
-            break;
         }
-    }
 
-    libc::fclose(pipe);
-    AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
-    Ok(ExitStatus::from_raw(status))
+        // AuthorizationExecuteWithPrivileges wires the tool's stdin/stdout to a
+        // bidirectional pipe. Drain stdout so the child can't block on a full pipe.
+        let read_fd = libc::dup(fd);
+        if read_fd == -1 {
+            let err = io::Error::last_os_error();
+            libc::fclose(pipe);
+            AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
+            return Err(err);
+        }
+        let mut pipe_file = File::from_raw_fd(read_fd);
+        let mut sink = [0_u8; 8192];
+        loop {
+            match pipe_file.read(&mut sink) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => {
+                    libc::fclose(pipe);
+                    AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
+                    return Err(err);
+                }
+            }
+        }
+
+        let mut status = 0;
+        loop {
+            let r = wait(&mut status);
+            if r == -1 && io::Error::last_os_error().raw_os_error() == Some(EINTR) {
+                continue;
+            } else if r == -1 {
+                let err = io::Error::last_os_error();
+                libc::fclose(pipe);
+                AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
+                return Err(err);
+            } else {
+                break;
+            }
+        }
+
+        libc::fclose(pipe);
+        AuthorizationFree(authref, kAuthorizationFlagDestroyRights);
+        Ok(ExitStatus::from_raw(status))
+    }
 }
 
 fn runas_root_gui(cmd: &Command) -> io::Result<ExitStatus> {
-    let exe: OsString = match get_exe_path(&cmd.cmd.get_program()) {
+    let exe: OsString = match get_exe_path(cmd.cmd.get_program()) {
         Some(exe) => exe.into(),
-        None => unsafe {
-            return Ok(mem::transmute(!0));
-        },
+        None => return Ok(ExitStatus::from_raw(!0)),
     };
     let prog = make_cstring!(exe);
     let mut args = vec![];

@@ -319,9 +319,7 @@ pub fn verify_stream_gate_preface(
         return None;
     }
     let conn_id = u32::from_be_bytes(preface[..4].try_into().unwrap());
-    let Some(token) = GateToken::from_bytes(&preface[4..]) else {
-        return None;
-    };
+    let token = GateToken::from_bytes(&preface[4..])?;
     let current = window_for(now_secs(), state.window_secs());
     for window in [current, current.wrapping_sub(1)] {
         let key = derive_gate_key(state.network_secret(), window);

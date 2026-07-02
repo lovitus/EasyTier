@@ -517,7 +517,11 @@ impl HealthChecker {
         let Some(dst_node) = p.iter().find(|x| {
             // we disable p2p, so we only check direct connected peer
             x.route.as_ref().is_some_and(|route| {
-                !route.feature_flag.unwrap().is_public_server && route.hostname != "HealthCheckNode"
+                route
+                    .feature_flag
+                    .as_ref()
+                    .is_some_and(|feature| !feature.is_public_server)
+                    && route.hostname != "HealthCheckNode"
             }) && x.peer.as_ref().is_some_and(|p| !p.conns.is_empty())
         }) else {
             anyhow::bail!("dst node is not online");

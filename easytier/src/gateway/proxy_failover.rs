@@ -2,14 +2,12 @@ use std::{
     collections::HashSet,
     hash::Hash,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
+use atomic_shim::AtomicU64;
 use dashmap::DashMap;
 use pnet::packet::{
     Packet,
@@ -518,13 +516,15 @@ impl TransportHealth {
     }
 }
 
+type TransportHealthMap = DashMap<(PeerId, ProxyTransport), Arc<Mutex<TransportHealth>>>;
+
 #[derive(Clone)]
 pub struct DeferredProxySelector {
     runtime: Arc<dyn ProxySelectorRuntime>,
     transports: Arc<Vec<Arc<dyn ProxyPrepareTransport>>>,
     prepared: Arc<PreparedProxyStore>,
     flows: Arc<DashMap<FlowKey, Arc<Mutex<DeferredFlow>>>>,
-    health: Arc<DashMap<(PeerId, ProxyTransport), Arc<Mutex<TransportHealth>>>>,
+    health: Arc<TransportHealthMap>,
     next_generation: Arc<AtomicU64>,
 }
 

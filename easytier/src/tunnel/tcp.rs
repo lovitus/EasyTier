@@ -150,14 +150,14 @@ impl TcpTunnelListener {
         let mut pending = FuturesUnordered::new();
 
         loop {
-            if pending.len() >= MAX_PENDING_STEALTH_ACCEPTS {
-                if let Some(result) = pending.next().await {
-                    match result {
-                        Ok(tunnel) => return Ok(tunnel),
-                        Err(error) => {
-                            tracing::trace!(?error, "rejected TCP stealth connection");
-                            continue;
-                        }
+            if pending.len() >= MAX_PENDING_STEALTH_ACCEPTS
+                && let Some(result) = pending.next().await
+            {
+                match result {
+                    Ok(tunnel) => return Ok(tunnel),
+                    Err(error) => {
+                        tracing::trace!(?error, "rejected TCP stealth connection");
+                        continue;
                     }
                 }
             }

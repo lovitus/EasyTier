@@ -497,7 +497,7 @@ impl KcpProxyDst {
                 write_proxy_prepare_ack(&mut kcp_stream, ProxyPrepareAckStatus::PolicyDenied)
                     .await?;
             }
-            return Err(error.into());
+            return Err(error);
         }
 
         tracing::debug!("kcp connect to dst socket: {:?}", dst_socket);

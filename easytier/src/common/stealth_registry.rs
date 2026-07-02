@@ -199,7 +199,7 @@ mod tests {
         let protocol = StealthProtocol::Tcp;
         let mut capability = protocol.capability();
         let feature = crate::proto::common::PeerFeatureFlag {
-            stealth_capabilities: vec![capability.clone()],
+            stealth_capabilities: vec![capability],
             ..Default::default()
         };
         assert!(peer_supports_protocol(&feature, protocol));

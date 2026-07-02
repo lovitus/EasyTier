@@ -1717,7 +1717,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(&echoed.payload()[..], payload);
+        assert_eq!(echoed.payload(), payload);
     }
 
     #[tokio::test]

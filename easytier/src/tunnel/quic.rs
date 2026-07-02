@@ -806,6 +806,12 @@ pub struct QuicEndpointManager {
 
 static QUIC_ENDPOINT_MANAGER: OnceLock<QuicEndpointManager> = OnceLock::new();
 
+type QuicStealthEndpoint = (
+    Endpoint,
+    Option<Arc<QuicStealthSocket>>,
+    Option<Arc<QuicStealthSession>>,
+);
+
 impl QuicEndpointManager {
     fn try_create_with_stealth(
         addr: SocketAddr,
@@ -815,14 +821,7 @@ impl QuicEndpointManager {
             Arc<crate::tunnel::stealth::OuterSessionState>,
             Option<SocketAddr>,
         )>,
-    ) -> Result<
-        (
-            Endpoint,
-            Option<Arc<QuicStealthSocket>>,
-            Option<Arc<QuicStealthSession>>,
-        ),
-        TunnelError,
-    > {
+    ) -> Result<QuicStealthEndpoint, TunnelError> {
         let socket = bind::<UdpSocket>()
             .addr(addr)
             .only_v6(addr.is_ipv6() && !dual_stack)

@@ -609,11 +609,11 @@ impl WsTunnelConnector {
     }
 
     fn bind_socket(&self, bind_addr: SocketAddr) -> Result<TcpSocket, TunnelError> {
-        Ok(bind()
+        bind()
             .addr(bind_addr)
             .only_v6(true)
             .maybe_socket_mark(self.socket_mark)
-            .call()?)
+            .call()
     }
 
     #[allow(clippy::too_many_arguments)]
