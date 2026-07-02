@@ -106,11 +106,11 @@ function rxBytes(info: PeerRoutePair) {
 }
 
 function version(info: PeerRoutePair) {
-  return info.route.version === '' ? 'unknown' : info.route.version
+  return info.route?.version === '' ? 'unknown' : (info.route?.version ?? 'unknown')
 }
 
 function ipFormat(info: PeerRoutePair) {
-  const ip = info.route.ipv4_addr
+  const ip = info.route?.ipv4_addr
   if (typeof ip === 'string')
     return ip
   return ip ? ipv4InetToString(ip) : ''
@@ -294,11 +294,11 @@ function natType(info: PeerRoutePair): string {
 }
 
 function routeIsPublicServer(info: PeerRoutePair): boolean {
-  return info.route.feature_flag?.is_public_server === true
+  return info.route?.feature_flag?.is_public_server === true
 }
 
 function routeAvoidRelayData(info: PeerRoutePair): boolean {
-  return info.route.feature_flag?.avoid_relay_data === true
+  return info.route?.feature_flag?.avoid_relay_data === true
 }
 
 const peerCount = computed(() => {

@@ -117,6 +117,10 @@ export function lossRate(info: PeerRoutePair) {
   return ''
 }
 
+function safeMap<T, U>(arr: any, mapFn: (val: T) => U): U[] {
+    return Array.isArray(arr) ? arr.map(mapFn) : [];
+}
+
 function normalizeStunInfo(stun: any): any {
     if (!stun) return stun;
     return {
@@ -141,10 +145,10 @@ function normalizeNodeInfo(node: any): any {
     const normalizedIps = ips ? {
         ...ips,
         public_ipv4: ips.public_ipv4 ?? ips.publicIpv4,
-        interface_ipv4s: ips.interface_ipv4s ?? ips.interfaceIpv4s ?? [],
+        interface_ipv4s: safeMap(ips.interface_ipv4s ?? ips.interfaceIpv4s, x => x),
         public_ipv6: ips.public_ipv6 ?? ips.publicIpv6,
-        interface_ipv6s: ips.interface_ipv6s ?? ips.interfaceIpv6s ?? [],
-        listeners: ips.listeners ?? [],
+        interface_ipv6s: safeMap(ips.interface_ipv6s ?? ips.interfaceIpv6s, x => x),
+        listeners: safeMap(ips.listeners, x => x),
     } : undefined;
 
     return {
@@ -185,7 +189,7 @@ function normalizeRoute(route: any): any {
         peer_id: route.peer_id ?? route.peerId,
         ipv4_addr: normalizeIpv4Inet(route.ipv4_addr ?? route.ipv4Addr),
         next_hop_peer_id: route.next_hop_peer_id ?? route.nextHopPeerId,
-        proxy_cidrs: route.proxy_cidrs ?? route.proxyCidrs,
+        proxy_cidrs: safeMap(route.proxy_cidrs ?? route.proxyCidrs, x => x),
         inst_id: route.inst_id ?? route.instId,
         feature_flag: normalizeFeatureFlag(route.feature_flag ?? route.featureFlag),
         stun_info: normalizeStunInfo(route.stun_info ?? route.stunInfo),
@@ -235,7 +239,7 @@ function normalizePeer(peer: any): any {
         ...peer,
         peer_id: peer.peer_id ?? peer.peerId,
         default_conn_id: peer.default_conn_id ?? peer.defaultConnId,
-        conns: (peer.conns ?? []).map(normalizePeerConn),
+        conns: safeMap(peer.conns, normalizePeerConn),
     }
 }
 
@@ -301,28 +305,32 @@ function normalizeSocketAddr(addr: any): any {
         const ipKeys = Object.keys(addr.ip);
         if (ipKeys.includes('Ipv4') || ipKeys.includes('ipv4')) {
             const inner = addr.ip.Ipv4 ?? addr.ip.ipv4;
-            return {
-                ip: {
-                    oneofKind: 'ipv4',
-                    ipv4: { addr: Number(inner.addr ?? 0) },
-                },
-                port,
-            };
+            if (inner) {
+                return {
+                    ip: {
+                        oneofKind: 'ipv4',
+                        ipv4: { addr: Number(inner.addr ?? 0) },
+                    },
+                    port,
+                };
+            }
         }
         if (ipKeys.includes('Ipv6') || ipKeys.includes('ipv6')) {
             const inner = addr.ip.Ipv6 ?? addr.ip.ipv6;
-            return {
-                ip: {
-                    oneofKind: 'ipv6',
-                    ipv6: {
-                        part1: Number(inner.part1 ?? 0),
-                        part2: Number(inner.part2 ?? 0),
-                        part3: Number(inner.part3 ?? 0),
-                        part4: Number(inner.part4 ?? 0),
+            if (inner) {
+                return {
+                    ip: {
+                        oneofKind: 'ipv6',
+                        ipv6: {
+                            part1: Number(inner.part1 ?? 0),
+                            part2: Number(inner.part2 ?? 0),
+                            part3: Number(inner.part3 ?? 0),
+                            part4: Number(inner.part4 ?? 0),
+                        },
                     },
-                },
-                port,
-            };
+                    port,
+                };
+            }
         }
     }
 
@@ -354,11 +362,11 @@ export function normalizeRunningInfo(detail: any): any {
         dev_name: detail.dev_name ?? detail.devName,
         my_node_info: normalizeNodeInfo(detail.my_node_info ?? detail.myNodeInfo),
         events: detail.events ?? detail.eventLogs ?? [],
-        routes: (detail.routes ?? []).map(normalizeRoute),
-        peers: (detail.peers ?? []).map(normalizePeer),
-        peer_route_pairs: (detail.peer_route_pairs ?? detail.peerRoutePairs ?? []).map(normalizePeerRoutePair),
+        routes: safeMap(detail.routes, normalizeRoute),
+        peers: safeMap(detail.peers, normalizePeer),
+        peer_route_pairs: safeMap(detail.peer_route_pairs ?? detail.peerRoutePairs, normalizePeerRoutePair),
         running: detail.running ?? false,
         error_msg: detail.error_msg ?? detail.errorMsg ?? '',
-        proxy_failover_entries: (detail.proxy_failover_entries ?? detail.proxyFailoverEntries ?? []).map(normalizeProxyFailoverEntry),
+        proxy_failover_entries: safeMap(detail.proxy_failover_entries ?? detail.proxyFailoverEntries, normalizeProxyFailoverEntry),
     }
 }
