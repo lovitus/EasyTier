@@ -86,12 +86,10 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Set current ref as env variable
-        if: github.ref_name != 'codex/gui-macos-arm64-test' || matrix.ARTIFACT_NAME == 'macos-aarch64'
         run: |
           echo "GIT_DESC=$(git log -1 --format=%cd.%h --date=format:%Y-%m-%d_%H:%M:%S)" >> $GITHUB_ENV
 
       - name: Prepare build environment
-        if: github.ref_name != 'codex/gui-macos-arm64-test' || matrix.ARTIFACT_NAME == 'macos-aarch64'
         uses: ./.github/actions/prepare-build
         with:
           target: ${{ matrix.TARGET }}
@@ -101,7 +99,6 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: Swatinem/rust-cache@v2
-        if: github.ref_name != 'codex/gui-macos-arm64-test' || matrix.ARTIFACT_NAME == 'macos-aarch64'
         with:
           # The prefix cache key, this can be changed to start a new cache manually.
           # default: "v0-rust"
@@ -110,7 +107,7 @@ jobs:
           cache-targets: "false"
 
       - name: copy correct DLLs
-        if: ${{ (github.ref_name != 'codex/gui-macos-arm64-test' || matrix.ARTIFACT_NAME == 'macos-aarch64') && contains(matrix.GUI_TARGET, 'windows') }}
+        if: contains(matrix.GUI_TARGET, 'windows')
         run: |
           case $TARGET in
               x86_64*)  ARCH_DIR=x86_64 ;;
@@ -122,14 +119,13 @@ jobs:
           fi
 
       - name: Build GUI
-        if: ${{ (github.ref_name != 'codex/gui-macos-arm64-test' || matrix.ARTIFACT_NAME == 'macos-aarch64') && matrix.GUI_TARGET != '' }}
+        if: matrix.GUI_TARGET != ''
         uses: tauri-apps/tauri-action@v0
         with:
           projectPath: ./easytier-gui
           args: --verbose --target ${{ matrix.GUI_TARGET }}
 
       - name: Collect artifact
-        if: github.ref_name != 'codex/gui-macos-arm64-test' || matrix.ARTIFACT_NAME == 'macos-aarch64'
         run: |
           mkdir -p ./artifacts/objects/
           
@@ -154,7 +150,6 @@ jobs:
           rm -rf ./artifacts/objects/
 
       - name: Archive artifact
-        if: github.ref_name != 'codex/gui-macos-arm64-test' || matrix.ARTIFACT_NAME == 'macos-aarch64'
         uses: actions/upload-artifact@v5
         with:
           name: easytier-gui-${{ matrix.ARTIFACT_NAME }}
