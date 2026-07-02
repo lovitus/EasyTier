@@ -424,30 +424,20 @@ impl<C: NatDstConnector> NicPacketFilter for TcpProxy<C> {
             return crate::peers::NicPacketFilterAction::Continue;
         }
 
-        let mut dst_addr = SocketAddr::V4(SocketAddrV4::new(
+        let observed_dst = SocketAddr::V4(SocketAddrV4::new(
             ip_packet.get_destination(),
             tcp_packet.get_destination(),
         ));
-        let mut need_transform_dst = false;
-
-        // for kcp proxy, the src ip of nat entry will be converted from my ip to fake ip
-        // here we need to convert it back
-        if !self.is_smoltcp_enabled() && dst_addr.ip() == Self::get_fake_local_ipv4(&my_ipv4_inet) {
-            dst_addr.set_ip(IpAddr::V4(my_ipv4));
-            need_transform_dst = true;
-        }
-
-        tracing::trace!(dst_addr = ?dst_addr, "tcp packet try find entry");
-        let entry = if let Some(entry) = self.addr_conn_map.get(&dst_addr) {
-            entry
-        } else {
-            let Some(syn_entry) = self.syn_map.get(&dst_addr) else {
-                return crate::peers::NicPacketFilterAction::Continue;
-            };
-            syn_entry
+        let Some((nat_entry, dst_addr, need_transform_dst)) = Self::find_nat_entry_for_nic(
+            &self.addr_conn_map,
+            &self.syn_map,
+            observed_dst,
+            &my_ipv4_inet,
+            !self.is_smoltcp_enabled(),
+        ) else {
+            return crate::peers::NicPacketFilterAction::Continue;
         };
-        let nat_entry = entry.clone();
-        drop(entry);
+        tracing::trace!(?observed_dst, ?dst_addr, "tcp packet found nat entry");
         assert_eq!(nat_entry.src, dst_addr);
 
         let IpAddr::V4(ip) = nat_entry.mapped_dst.ip() else {
@@ -483,6 +473,56 @@ impl<C: NatDstConnector> NicPacketFilter for TcpProxy<C> {
 }
 
 impl<C: NatDstConnector> TcpProxy<C> {
+    fn find_syn_entry_for_accept(
+        syn_map: &SynSockMap,
+        observed_src: SocketAddr,
+        my_ipv4_inet: Option<&Ipv4Inet>,
+    ) -> Option<(ArcNatDstEntry, SocketAddr)> {
+        if let Some(entry) = syn_map.get(&observed_src) {
+            return Some((entry.clone(), observed_src));
+        }
+
+        let my_ipv4_inet = my_ipv4_inet?;
+        if observed_src.ip() != Self::get_fake_local_ipv4(my_ipv4_inet) {
+            return None;
+        }
+
+        let mut translated_src = observed_src;
+        translated_src.set_ip(IpAddr::V4(my_ipv4_inet.address()));
+        syn_map
+            .get(&translated_src)
+            .map(|entry| (entry.clone(), translated_src))
+    }
+
+    fn find_nat_entry_for_nic(
+        addr_conn_map: &AddrConnSockMap,
+        syn_map: &SynSockMap,
+        observed_dst: SocketAddr,
+        my_ipv4_inet: &Ipv4Inet,
+        allow_fake_local_fallback: bool,
+    ) -> Option<(ArcNatDstEntry, SocketAddr, bool)> {
+        let find_exact = |addr: &SocketAddr| {
+            addr_conn_map
+                .get(addr)
+                .map(|entry| entry.clone())
+                .or_else(|| syn_map.get(addr).map(|entry| entry.clone()))
+        };
+
+        if let Some(entry) = find_exact(&observed_dst) {
+            return Some((entry, observed_dst, false));
+        }
+
+        if !allow_fake_local_fallback
+            || observed_dst.ip() != Self::get_fake_local_ipv4(my_ipv4_inet)
+        {
+            return None;
+        }
+
+        let mut translated_dst = observed_dst;
+        translated_dst.set_ip(IpAddr::V4(my_ipv4_inet.address()));
+        find_exact(&translated_dst).map(|entry| (entry, translated_dst, true))
+    }
+
     pub fn new(peer_manager: Arc<PeerManager>, connector: C) -> Arc<Self> {
         let (smoltcp_stack_sender, smoltcp_stack_receiver) = mpsc::channel::<ZCPacket>(1000);
         let global_ctx = peer_manager.get_global_ctx();
@@ -714,21 +754,20 @@ impl<C: NatDstConnector> TcpProxy<C> {
                     .map(Ipv4Inet::address)
                     .unwrap_or(Ipv4Addr::UNSPECIFIED);
 
-                if my_ip_inet.is_some()
-                    && socket_addr.ip() == Self::get_fake_local_ipv4(&my_ip_inet.unwrap())
-                {
-                    socket_addr.set_ip(IpAddr::V4(my_ip));
-                }
-
-                let Some(entry) = syn_map.get(&socket_addr) else {
+                let observed_src = socket_addr;
+                let Some((entry, lookup_src)) =
+                    Self::find_syn_entry_for_accept(&syn_map, observed_src, my_ip_inet.as_ref())
+                else {
                     tracing::error!(
                         ?my_ip,
-                        ?socket_addr,
+                        ?observed_src,
                         "tcp connection from unknown source, ignore it"
                     );
                     continue;
                 };
+                socket_addr = lookup_src;
                 tracing::info!(
+                    ?observed_src,
                     ?socket_addr,
                     "tcp connection accepted for proxy, nat dst: {:?}",
                     entry.real_dst
@@ -1182,5 +1221,76 @@ mod tests {
             TcpProxy::<NatDstTcpConnector>::get_fake_local_ipv4(&slash_32),
             slash_32.address()
         );
+    }
+
+    #[test]
+    fn native_nat_entry_wins_over_fake_local_fallback() {
+        let local: Ipv4Inet = "10.144.144.3/24".parse().unwrap();
+        let observed_dst: SocketAddr = "10.144.144.1:28761".parse().unwrap();
+        assert_eq!(
+            observed_dst.ip(),
+            TcpProxy::<NatDstTcpConnector>::get_fake_local_ipv4(&local)
+        );
+
+        let syn_map = Arc::new(DashMap::new());
+        let addr_conn_map = Arc::new(DashMap::new());
+        let native_entry = Arc::new(NatDstEntry::new(
+            observed_dst,
+            "10.1.2.4:23457".parse().unwrap(),
+            "10.1.2.4:23457".parse().unwrap(),
+            None,
+            None,
+        ));
+        let wrapped_src = SocketAddr::new(IpAddr::V4(local.address()), observed_dst.port());
+        let wrapped_entry = Arc::new(NatDstEntry::new(
+            wrapped_src,
+            "10.1.2.4:23457".parse().unwrap(),
+            "10.1.2.4:23457".parse().unwrap(),
+            None,
+            None,
+        ));
+        syn_map.insert(observed_dst, native_entry.clone());
+        syn_map.insert(wrapped_src, wrapped_entry.clone());
+
+        let (entry, key, transformed) = TcpProxy::<NatDstTcpConnector>::find_nat_entry_for_nic(
+            &addr_conn_map,
+            &syn_map,
+            observed_dst,
+            &local,
+            true,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&entry, &native_entry));
+        assert_eq!(key, observed_dst);
+        assert!(!transformed);
+        let (entry, key) = TcpProxy::<NatDstTcpConnector>::find_syn_entry_for_accept(
+            &syn_map,
+            observed_dst,
+            Some(&local),
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&entry, &native_entry));
+        assert_eq!(key, observed_dst);
+
+        syn_map.remove(&observed_dst);
+        let (entry, key, transformed) = TcpProxy::<NatDstTcpConnector>::find_nat_entry_for_nic(
+            &addr_conn_map,
+            &syn_map,
+            observed_dst,
+            &local,
+            true,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&entry, &wrapped_entry));
+        assert_eq!(key, wrapped_src);
+        assert!(transformed);
+        let (entry, key) = TcpProxy::<NatDstTcpConnector>::find_syn_entry_for_accept(
+            &syn_map,
+            observed_dst,
+            Some(&local),
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&entry, &wrapped_entry));
+        assert_eq!(key, wrapped_src);
     }
 }
