@@ -17,7 +17,7 @@ import {
   type Rule as AclRule,
 } from '../generated/proto/acl'
 import type { TcpProxyEntry } from '../generated/proto/api_instance'
-import { CompressionAlgoPb, NatType, type SecureModeConfig } from '../generated/proto/common'
+import { CompressionAlgoPb, NatType, type PeerFeatureFlag, type SecureModeConfig } from '../generated/proto/common'
 import { prepareNetworkConfigForProtoJson } from './networkCompat'
 
 export { AclAction, AclChainType, AclProtocol, CompressionAlgoPb, NatType, NetworkingMethod }
@@ -295,6 +295,7 @@ export interface Route {
   stun_info?: StunInfo
   inst_id: string
   version: string
+  feature_flag?: PeerFeatureFlag
 }
 
 export interface PeerInfo {

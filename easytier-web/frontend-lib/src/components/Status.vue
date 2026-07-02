@@ -14,20 +14,10 @@ const props = defineProps<{
 
 const { t } = useI18n()
 
-function detailValue<T = any>(snakeKey: string, camelKey: string): T | undefined {
-  const detail = props.curNetworkInst?.detail as any
-  return detail?.[snakeKey] ?? detail?.[camelKey]
-}
-
-function detailArray<T = any>(snakeKey: string, camelKey: string): T[] {
-  const value = detailValue<T[] | undefined>(snakeKey, camelKey)
-  return Array.isArray(value) ? value : []
-}
-
 const peerRouteInfos = computed(() => {
-  if (props.curNetworkInst) {
-    const my_node_info = detailValue<any>('my_node_info', 'myNodeInfo')
-    const peers = [...detailArray<PeerRoutePair>('peer_route_pairs', 'peerRoutePairs')]
+  if (props.curNetworkInst && props.curNetworkInst.detail) {
+    const my_node_info = props.curNetworkInst.detail.my_node_info
+    const peers = [...(props.curNetworkInst.detail.peer_route_pairs || [])]
       .sort((a, b) => {
         const ipDiff = ipFormat(a).localeCompare(ipFormat(b), undefined, { numeric: true })
         if (ipDiff !== 0)
@@ -153,10 +143,7 @@ function tunnelProto(info: PeerRoutePair) {
 }
 
 const myNodeInfo = computed(() => {
-  if (!props.curNetworkInst)
-    return {} as NodeInfo
-
-  return detailValue<NodeInfo>('my_node_info', 'myNodeInfo')
+  return props.curNetworkInst?.detail?.my_node_info || {} as NodeInfo
 })
 
 interface Chip {
@@ -193,11 +180,11 @@ const udpNatTypeStrMap = {
 }
 
 const myNodeInfoChips = computed(() => {
-  if (!props.curNetworkInst)
+  if (!props.curNetworkInst || !props.curNetworkInst.detail)
     return []
 
   const chips: Array<Chip> = []
-  const my_node_info = detailValue<any>('my_node_info', 'myNodeInfo')
+  const my_node_info = props.curNetworkInst.detail.my_node_info
   if (!my_node_info)
     return chips
 
@@ -208,7 +195,7 @@ const myNodeInfoChips = computed(() => {
   } as Chip)
 
   // TUN Device Name
-  const dev_name = detailValue<string>('dev_name', 'devName')
+  const dev_name = props.curNetworkInst.detail.dev_name
   if (dev_name) {
     chips.push({
       label: `TUN Device Name: ${dev_name}`,
@@ -306,18 +293,12 @@ function natType(info: PeerRoutePair): string {
   return ''
 }
 
-function routeFeatureFlag(info: PeerRoutePair): any {
-  return (info.route as any)?.feature_flag ?? (info.route as any)?.featureFlag ?? {}
-}
-
 function routeIsPublicServer(info: PeerRoutePair): boolean {
-  const featureFlag = routeFeatureFlag(info)
-  return featureFlag.is_public_server === true || featureFlag.isPublicServer === true
+  return info.route.feature_flag?.is_public_server === true
 }
 
 function routeAvoidRelayData(info: PeerRoutePair): boolean {
-  const featureFlag = routeFeatureFlag(info)
-  return featureFlag.avoid_relay_data === true || featureFlag.avoidRelayData === true
+  return info.route.feature_flag?.avoid_relay_data === true
 }
 
 const peerCount = computed(() => {
@@ -327,47 +308,25 @@ const peerCount = computed(() => {
   return peerRouteInfos.value.length
 })
 
-function entryValue(entry: any, snakeKey: string, camelKey: string) {
-  return entry?.[snakeKey] ?? entry?.[camelKey]
-}
-
-function entryNumber(entry: any, snakeKey: string, camelKey: string): number {
-  const value = entryValue(entry, snakeKey, camelKey)
-  if (typeof value === 'number')
-    return Number.isFinite(value) ? value : 0
-  if (typeof value === 'bigint')
-    return Number(value)
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : 0
-  }
-  return 0
-}
-
-function entryBool(entry: any, snakeKey: string, camelKey: string): boolean {
-  const value = entryValue(entry, snakeKey, camelKey)
-  return value === true
-}
-
 const proxyFailoverEntries = computed(() => {
-  return detailArray<any>('proxy_failover_entries', 'proxyFailoverEntries')
+  return (props.curNetworkInst?.detail?.proxy_failover_entries || [])
     .map((entry: any) => {
-      const generation = entryNumber(entry, 'generation', 'generation')
+      const generation = Number(entry.generation || 0)
       const src = proxySocketAddr(entry.src)
       const dst = proxySocketAddr(entry.dst)
       return {
         ...entry,
-        ui_key: `${src}->${dst}:${generation}:${entryValue(entry, 'selected_transport', 'selectedTransport') ?? ''}`,
-        start_time: entryNumber(entry, 'start_time', 'startTime'),
+        ui_key: `${src}->${dst}:${generation}:${entry.selected_transport || ''}`,
+        start_time: Number(entry.start_time || 0),
         generation,
-        requested_transport: entryValue(entry, 'requested_transport', 'requestedTransport') ?? '',
-        selected_transport: entryValue(entry, 'selected_transport', 'selectedTransport') ?? '',
-        fallback_reason: entryValue(entry, 'fallback_reason', 'fallbackReason') ?? '',
-        dst_peer_id: entryNumber(entry, 'dst_peer_id', 'dstPeerId'),
-        consecutive_failures: entryNumber(entry, 'consecutive_failures', 'consecutiveFailures'),
-        consecutive_successes: entryNumber(entry, 'consecutive_successes', 'consecutiveSuccesses'),
-        ambiguous_timeout_strikes: entryNumber(entry, 'ambiguous_timeout_strikes', 'ambiguousTimeoutStrikes'),
-        transport_degraded: entryBool(entry, 'transport_degraded', 'transportDegraded'),
+        requested_transport: entry.requested_transport || '',
+        selected_transport: entry.selected_transport || '',
+        fallback_reason: entry.fallback_reason || '',
+        dst_peer_id: Number(entry.dst_peer_id || 0),
+        consecutive_failures: Number(entry.consecutive_failures || 0),
+        consecutive_successes: Number(entry.consecutive_successes || 0),
+        ambiguous_timeout_strikes: Number(entry.ambiguous_timeout_strikes || 0),
+        transport_degraded: !!entry.transport_degraded,
       }
     })
     .sort((a: any, b: any) => {

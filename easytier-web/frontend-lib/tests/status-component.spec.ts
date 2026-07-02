@@ -2,6 +2,7 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import { defineComponent, h } from 'vue'
 import Status from '../src/components/Status.vue'
+import { normalizeRunningInfo } from '../src/modules/statusDisplay'
 
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({
@@ -171,11 +172,11 @@ describe('Status mixed-version rendering', () => {
           instance_id: 'inst-2',
           running: true,
           error_msg: '',
-          detail: {
+          detail: normalizeRunningInfo({
             devName: 'utun10',
             events: [],
             myNodeInfo: {
-              virtual_ipv4: { address: { addr: 0 }, network_length: 24 },
+              virtualIpv4: { address: { addr: 0 }, networkLength: 24 },
               hostname: 'local-camel',
               version: '2.6.7',
               peer_id: 7,
@@ -198,16 +199,36 @@ describe('Status mixed-version rendering', () => {
                 route: {
                   cost: 1,
                   hostname: 'camel-peer',
-                  ipv4_addr: { address: { addr: 0 }, network_length: 24 },
+                  ipv4Addr: { address: { addr: 0 }, networkLength: 24 },
                   next_hop_peer_id: 8,
                   peer_id: 8,
                   proxy_cidrs: [],
                   inst_id: 'inst-2',
                   version: '2.6.7',
+                  featureFlag: {
+                    isPublicServer: true,
+                    avoidRelayData: true,
+                  },
                 },
                 peer: {
                   peer_id: 8,
-                  conns: [],
+                  conns: [
+                    {
+                      connId: 'conn-1',
+                      myPeerId: 7,
+                      isClient: true,
+                      peerId: 8,
+                      lossRate: 0.05,
+                      tunnel: {
+                        tunnelType: 'udp',
+                      },
+                      stats: {
+                        txBytes: 1000,
+                        rxBytes: 2000,
+                        latencyUs: 15000,
+                      },
+                    },
+                  ],
                 },
               },
             ],
@@ -231,7 +252,7 @@ describe('Status mixed-version rendering', () => {
             peers: [],
             routes: [],
             running: true,
-          },
+          }),
         },
       },
       global: {
@@ -244,9 +265,14 @@ describe('Status mixed-version rendering', () => {
       },
     })
 
-    expect(wrapper.find('[data-stub="network-chart"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('camel-peer')
+    const chart = wrapper.find('[data-stub="network-chart"]')
+    expect(chart.exists()).toBe(true)
     expect(wrapper.text()).toContain('quic,kcp,native')
     expect(wrapper.text()).toContain('quic_policy_denied,kcp_policy_denied')
+    expect(wrapper.text()).toContain('status.server')
+    expect(wrapper.text()).toContain('status.relay')
+    expect(wrapper.text()).toContain('15ms')
+    expect(wrapper.text()).toContain('1000 B')
+    expect(wrapper.text()).toContain('2.0 KiB')
   })
 })

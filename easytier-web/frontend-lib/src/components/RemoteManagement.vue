@@ -6,6 +6,7 @@ import * as Api from '../modules/api';
 import * as Utils from '../modules/utils';
 import * as NetworkTypes from '../types/network';
 import { type MenuItem } from 'primevue/menuitem';
+import { normalizeRunningInfo } from '../modules/statusDisplay';
 
 const { t } = useI18n()
 
@@ -321,7 +322,7 @@ const loadCurrentNetworkInfo = async (preserveScroll = false) => {
         instance_id: requestedInstanceId,
         running: network_info?.running ?? false,
         error_msg: network_info?.error_msg ?? '',
-        detail: network_info,
+        detail: normalizeRunningInfo(network_info),
     } as NetworkTypes.NetworkInstance;
 
     if (scrollElement && scrollTop !== undefined) {
