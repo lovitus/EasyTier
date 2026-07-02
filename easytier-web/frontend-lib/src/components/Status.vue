@@ -363,6 +363,7 @@ let prevRateInstanceId: string | undefined
 
 // 控制节点详细信息chips的显示/隐藏
 const showNodeDetails = ref(false)
+const chartTick = ref(0)
 
 watch(
   () => props.curNetworkInst?.detail,
@@ -371,6 +372,8 @@ watch(
     const curTxSum = txGlobalSum()
     const curRxSum = rxGlobalSum()
     const instanceId = props.curNetworkInst?.instance_id
+
+    chartTick.value++
 
     if (prevRateAt === 0 || instanceId !== prevRateInstanceId) {
       prevTxSum = curTxSum
@@ -460,7 +463,7 @@ function showEventLogs() {
             <div class="gap-4">
               <!-- 网络流量图表 -->
               <div class="w-full">
-                <NetworkChart :upload-rate="txRate" :download-rate="rxRate" />
+                <NetworkChart :upload-rate="txRate" :download-rate="rxRate" :tick="chartTick" />
               </div>
             </div>
 

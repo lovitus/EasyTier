@@ -248,10 +248,93 @@ function normalizePeerRoutePair(pair: any): any {
     }
 }
 
+function normalizeSocketAddr(addr: any): any {
+    if (!addr) return addr;
+    const port = Number(addr.port ?? 0);
+    
+    // Format B: Already normalized
+    if (addr.ip && addr.ip.oneofKind) {
+        return {
+            ip: {
+                oneofKind: addr.ip.oneofKind,
+                ipv4: addr.ip.ipv4 ? { addr: Number(addr.ip.ipv4.addr ?? 0) } : undefined,
+                ipv6: addr.ip.ipv6 ? {
+                    part1: Number(addr.ip.ipv6.part1 ?? 0),
+                    part2: Number(addr.ip.ipv6.part2 ?? 0),
+                    part3: Number(addr.ip.ipv6.part3 ?? 0),
+                    part4: Number(addr.ip.ipv6.part4 ?? 0),
+                } : undefined,
+            },
+            port,
+        };
+    }
+    
+    // Format C (REST / pbjson): { ipv4: { addr: ... }, port: ... }
+    const ipv4 = addr.ipv4 ?? addr.Ipv4;
+    const ipv6 = addr.ipv6 ?? addr.Ipv6;
+    if (ipv4) {
+        return {
+            ip: {
+                oneofKind: 'ipv4',
+                ipv4: { addr: Number(ipv4.addr ?? 0) },
+            },
+            port,
+        };
+    }
+    if (ipv6) {
+        return {
+            ip: {
+                oneofKind: 'ipv6',
+                ipv6: {
+                    part1: Number(ipv6.part1 ?? 0),
+                    part2: Number(ipv6.part2 ?? 0),
+                    part3: Number(ipv6.part3 ?? 0),
+                    part4: Number(ipv6.part4 ?? 0),
+                },
+            },
+            port,
+        };
+    }
+
+    // Format A (Tauri / Serde): { ip: { Ipv4: { addr: ... } }, port: ... }
+    if (addr.ip) {
+        const ipKeys = Object.keys(addr.ip);
+        if (ipKeys.includes('Ipv4') || ipKeys.includes('ipv4')) {
+            const inner = addr.ip.Ipv4 ?? addr.ip.ipv4;
+            return {
+                ip: {
+                    oneofKind: 'ipv4',
+                    ipv4: { addr: Number(inner.addr ?? 0) },
+                },
+                port,
+            };
+        }
+        if (ipKeys.includes('Ipv6') || ipKeys.includes('ipv6')) {
+            const inner = addr.ip.Ipv6 ?? addr.ip.ipv6;
+            return {
+                ip: {
+                    oneofKind: 'ipv6',
+                    ipv6: {
+                        part1: Number(inner.part1 ?? 0),
+                        part2: Number(inner.part2 ?? 0),
+                        part3: Number(inner.part3 ?? 0),
+                        part4: Number(inner.part4 ?? 0),
+                    },
+                },
+                port,
+            };
+        }
+    }
+
+    return addr;
+}
+
 function normalizeProxyFailoverEntry(entry: any): any {
     if (!entry) return entry;
     return {
         ...entry,
+        src: normalizeSocketAddr(entry.src),
+        dst: normalizeSocketAddr(entry.dst),
         start_time: entry.start_time ?? entry.startTime,
         requested_transport: entry.requested_transport ?? entry.requestedTransport,
         selected_transport: entry.selected_transport ?? entry.selectedTransport,
