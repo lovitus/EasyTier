@@ -48,6 +48,7 @@ use crate::{
         config::{NetworkIdentity, NetworkSecretDigest},
         error::Error,
         global_ctx::ArcGlobalCtx,
+        transport_priority::TransportPathClass,
     },
     peers::peer_session::{PeerSessionStore, SessionKey, UpsertResponderSessionReturn},
     proto::{
@@ -315,6 +316,7 @@ pub struct PeerConn {
 
     // remote or local
     is_hole_punched: bool,
+    transport_path_class: TransportPathClass,
 
     close_event_notifier: Arc<PeerConnCloseNotify>,
 
@@ -413,6 +415,7 @@ impl PeerConn {
             is_client: None,
 
             is_hole_punched: true,
+            transport_path_class: TransportPathClass::Unmanaged,
 
             close_event_notifier: Arc::new(PeerConnCloseNotify::new(conn_id)),
 
@@ -463,12 +466,30 @@ impl PeerConn {
         self.is_hole_punched = is_hole_punched;
     }
 
+    pub fn set_transport_path_class(&mut self, path_class: TransportPathClass) {
+        self.transport_path_class = path_class;
+    }
+
+    pub fn transport_path_class(&self) -> TransportPathClass {
+        self.transport_path_class
+    }
+
     pub fn is_hole_punched(&self) -> bool {
         self.is_hole_punched
     }
 
     pub fn is_closed(&self) -> bool {
         self.close_event_notifier.is_closed()
+    }
+
+    pub fn tunnel_type(&self) -> Option<&str> {
+        self.tunnel_info
+            .as_ref()
+            .map(|info| info.tunnel_type.as_str())
+    }
+
+    pub fn has_latency_sample(&self) -> bool {
+        self.latency_stats.has_samples()
     }
 
     async fn wait_handshake(&self, need_retry: &mut bool) -> Result<HandshakeRequest, Error> {
@@ -1509,6 +1530,13 @@ impl PeerConn {
     #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "PeerConn"))]
     pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
         Ok(self.sink.send(msg).await?)
+    }
+
+    pub async fn send_msg_recover(&self, msg: ZCPacket) -> Result<(), (Error, ZCPacket)> {
+        self.sink
+            .send_recover(msg)
+            .await
+            .map_err(|error| (error.error.into(), error.item))
     }
 
     pub fn get_peer_id(&self) -> PeerId {

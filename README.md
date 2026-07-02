@@ -94,13 +94,69 @@ Notes:
 - OHOS artifacts are included in the GitHub Release. The release is published only after all required workflows succeed.
 - The Docker workflow has been removed from this fork-specific flow.
 
+## Fork-Specific Changes
+
+This repository is no longer a drop-in mirror of upstream EasyTier. The summary
+below reflects the fork-only delta over upstream. If you are comparing behavior
+with upstream, upgrading an existing deployment, or deciding which parameters
+to enable, read this first:
+
+- Fixes and hardening in this fork: multi-transport stealth rollout and
+  compatibility; target-scoped self-loop backoff for direct / hole-punch paths
+  instead of broad scheme suppression; QUIC/KCP proxy readiness ACK and
+  classified failover; UDP stealth fallback-budget and datagram phase-transition
+  fixes; deterministic QUIC/KCP proxy TCP capture source selection; native TCP
+  proxy NAT-entry lookup / handoff fixes; KCP close-path tail-data cleanup; and
+  accurate proxy capability advertisement for feature-gated builds.
+- Added features in this fork: structured stealth capabilities for `udp`,
+  `tcp`, `faketcp`, `quic`, `wg`, `ws`, and `wss`; direct-connect
+  `transport_priority`; strict legacy UDP hole-punch rejection control; and
+  readiness ACK plus per-transport health / fallback reporting on top of the
+  existing QUIC/KCP proxy path.
+- Behavior differences from upstream: strict stealth UDP listeners silently drop
+  legacy probes, self-loop mitigation is hardened backoff rather than a promise
+  that all residual loop traffic disappears, proxy failover order is fixed to
+  `QUIC -> KCP -> Native`, `transport_priority` only affects direct-connect,
+  `disable_quic_input` and `disable_kcp_input` do not disable underlying
+  listeners, and IPv4 exact-match transport rules win for dual-stack peers.
+- Fork-added flags in this code line: `--stealth-mode`,
+  `--stealth-window-secs`, `--stealth-protocols`,
+  `--disable-legacy-udp-hole-punch`, and `--transport-priority`.
+- Existing upstream proxy flags with fork-specific behavior:
+  `--enable-kcp-proxy`, `--enable-quic-proxy`, `--disable-kcp-input`, and
+  `--disable-quic-input` are not new, but this fork changes failover,
+  readiness, health tracking, and capability behavior around them.
+
+Start with [fork differences and configuration notes](easytier/docs/fork_differences.md)
+for the full change list, examples, and compatibility boundaries. Stealth,
+proxy, and rollout details remain in
+[the compatibility notes](easytier/docs/udp_stealth_compatibility.md).
+
+### Common Configuration Pitfalls
+
+- `--transport-priority` must use scoped rules such as
+  `global:quic,faketcp,ws,wg,udp,tcp`; a bare list like
+  `quic,faketcp,ws,wg,udp,tcp` is invalid and will fail validation.
+- `--transport-priority` overrides `default_protocol` for direct-connect.
+- `--transport-priority` is latency-bounded: among live connections, a preferred
+  transport is selected only when its RTT is at most 125% of the lowest RTT
+  connection. This prevents a configured preference from forcing a much slower
+  underlay.
+- `--stealth-mode` only becomes effective when secure mode and a non-empty
+  `network_secret` are both present; otherwise startup warns and stays plain.
+- `--disable-legacy-udp-hole-punch` still rejects legacy UDP hole-punch
+  requests without a stealth preference even when UDP stealth is inactive.
+
 ### Stealth and Transport Policy
 
 Stealth is opt-in and can protect `udp`, `tcp`, `faketcp`, `quic`, `wg`, `ws`, and `wss`.
 It requires secure mode and a non-empty network secret. The effective
 `stealth_window_secs` value is network-wide and must match on every stealth node.
 `transport_priority` only reorders direct-connect underlays; QUIC/KCP proxy failover keeps
-the fixed `QUIC -> KCP -> Native` order. See
+the fixed `QUIC -> KCP -> Native` order. The `transport_priority` syntax is
+`scope:proto,...;scope:proto,...`, for example
+`global:quic,faketcp,ws,wg,udp,tcp`. It is applied after the 125% RTT
+eligibility check for live connections. See
 [the compatibility notes](easytier/docs/udp_stealth_compatibility.md) for rollout details.
 
 ### 🚀 Basic Usage

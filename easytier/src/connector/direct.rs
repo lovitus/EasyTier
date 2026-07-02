@@ -18,10 +18,12 @@ use crate::{
         PeerId,
         dns::socket_addrs,
         error::Error,
-        global_ctx::ArcGlobalCtx,
+        global_ctx::{ArcGlobalCtx, GlobalCtxEvent},
         network::IPCollector,
         stun::StunInfoCollectorTrait,
-        transport_priority::{TransportPriority, protocol_is_compiled},
+        transport_priority::{
+            PreferenceKey, TransportPathClass, TransportPriority, protocol_is_compiled,
+        },
     },
     connector::udp_hole_punch::handle_rpc_result,
     peers::{
@@ -66,6 +68,42 @@ static UNCOMPILED_PRIORITY_WARNINGS: LazyLock<Mutex<HashSet<String>>> =
 struct DirectCandidate {
     url: url::Url,
     is_lan: bool,
+}
+
+impl DirectCandidate {
+    fn preference_key(&self, lan_order: &[String], wan_order: &[String]) -> PreferenceKey {
+        let path = if self.is_lan {
+            TransportPathClass::Lan
+        } else {
+            TransportPathClass::Wan
+        };
+        PreferenceKey::new(
+            path,
+            if self.is_lan { lan_order } else { wan_order },
+            self.url.scheme(),
+        )
+    }
+}
+
+fn retain_higher_priority_candidates(
+    candidates: Vec<DirectCandidate>,
+    lan_order: &[String],
+    wan_order: &[String],
+    existing_key: Option<PreferenceKey>,
+) -> Vec<DirectCandidate> {
+    let Some(existing_key) = existing_key else {
+        return candidates;
+    };
+    candidates
+        .into_iter()
+        .filter(|candidate| candidate.preference_key(lan_order, wan_order) < existing_key)
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectAttemptOutcome {
+    Connected(Option<PreferenceKey>),
+    AlreadySatisfied,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -185,6 +223,9 @@ impl PeerManagerForDirectConnector for PeerManager {
         let allow_public_server = use_global_var!(DIRECT_CONNECT_TO_PUBLIC_SERVER);
         let flags = self.get_global_ctx().get_flags();
         let lazy_p2p = flags.lazy_p2p;
+        let priority_enabled = !TransportPriority::parse(&flags.transport_priority)
+            .expect("transport_priority is validated while loading configuration")
+            .is_empty();
         let now = Instant::now();
 
         let routes = self.list_routes().await;
@@ -202,7 +243,15 @@ impl PeerManagerForDirectConnector for PeerManager {
                 flags.disable_p2p,
                 flags.need_p2p,
             ) && self.has_recent_traffic(route.peer_id, now);
-            if static_allowed || dynamic_allowed {
+            let priority_upgrade_allowed = priority_enabled
+                && self.get_peer_map().has_peer(route.peer_id)
+                && should_try_p2p_with_peer(
+                    route.feature_flag.as_ref(),
+                    allow_public_server,
+                    flags.disable_p2p,
+                    flags.need_p2p,
+                );
+            if static_allowed || dynamic_allowed || priority_upgrade_allowed {
                 ret.push(route.peer_id);
             }
         }
@@ -223,6 +272,7 @@ struct DirectConnectorManagerData {
     peer_manager: Arc<PeerManager>,
     dst_listener_blacklist: timedmap::TimedMap<DstListenerUrlBlackListItem, ()>,
     peer_black_list: timedmap::TimedMap<PeerId, ()>,
+    preferred_direct_targets: timedmap::TimedMap<PeerId, PreferenceKey>,
 }
 
 impl DirectConnectorManagerData {
@@ -232,6 +282,7 @@ impl DirectConnectorManagerData {
             peer_manager,
             dst_listener_blacklist: timedmap::TimedMap::new(),
             peer_black_list: timedmap::TimedMap::new(),
+            preferred_direct_targets: timedmap::TimedMap::new(),
         }
     }
 
@@ -266,6 +317,30 @@ impl DirectConnectorManagerData {
             (),
             std::time::Duration::from_secs(DIRECT_CONNECTOR_BLACKLIST_TIMEOUT_SEC),
         );
+    }
+
+    fn preference_satisfied(&self, dst_peer_id: PeerId, target: PreferenceKey) -> bool {
+        self.peer_manager
+            .best_transport_preference_key(dst_peer_id)
+            .is_some_and(|current| current <= target)
+    }
+
+    fn direct_target_satisfied(&self, dst_peer_id: PeerId) -> bool {
+        self.preferred_direct_targets
+            .get(&dst_peer_id)
+            .is_some_and(|target| self.preference_satisfied(dst_peer_id, target))
+    }
+
+    fn clear_preferred_direct_targets(&self) {
+        let keys = self
+            .preferred_direct_targets
+            .snapshot::<Vec<_>>()
+            .into_iter()
+            .map(|(peer_id, _)| peer_id)
+            .collect::<Vec<_>>();
+        for peer_id in keys {
+            self.preferred_direct_targets.remove(&peer_id);
+        }
     }
 
     async fn remote_send_udp_hole_punch_packet(
@@ -521,7 +596,8 @@ impl DirectConnectorManagerData {
         dst_peer_id: PeerId,
         addr: String,
         stealth_mode: DirectStealthMode,
-    ) -> Result<(), Error> {
+        preference_key: Option<PreferenceKey>,
+    ) -> Result<DirectAttemptOutcome, Error> {
         let mut rand_gen = rand::rngs::OsRng;
         let backoff_ms = [1000, 2000, 4000];
         let mut backoff_idx = 0;
@@ -536,8 +612,11 @@ impl DirectConnectorManagerData {
         }
 
         loop {
-            if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
-                return Ok(());
+            if preference_key.is_some_and(|target| self.preference_satisfied(dst_peer_id, target))
+                || (preference_key.is_none()
+                    && self.peer_manager.has_directly_connected_conn(dst_peer_id))
+            {
+                return Ok(DirectAttemptOutcome::AlreadySatisfied);
             }
             if self.dst_listener_blacklist.contains(&blacklist_item) {
                 return Err(Error::UrlInBlacklist);
@@ -549,15 +628,18 @@ impl DirectConnectorManagerData {
                 .await;
             tracing::debug!(?ret, ?dst_peer_id, ?addr, "try_connect_to_ip return");
             if ret.is_ok() {
-                return Ok(());
+                return Ok(DirectAttemptOutcome::Connected(preference_key));
             }
             if ret.as_ref().is_err_and(Error::is_self_loop_signal) {
                 self.blacklist_direct_target(dst_peer_id, &addr);
-                return ret;
+                return Err(ret.unwrap_err());
             }
 
-            if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
-                return Ok(());
+            if preference_key.is_some_and(|target| self.preference_satisfied(dst_peer_id, target))
+                || (preference_key.is_none()
+                    && self.peer_manager.has_directly_connected_conn(dst_peer_id))
+            {
+                return Ok(DirectAttemptOutcome::AlreadySatisfied);
             }
 
             if backoff_idx < backoff_ms.len() {
@@ -574,7 +656,7 @@ impl DirectConnectorManagerData {
                 continue;
             } else {
                 self.blacklist_direct_target(dst_peer_id, &addr);
-                return ret;
+                return Err(ret.unwrap_err());
             }
         }
     }
@@ -691,6 +773,27 @@ impl DirectConnectorManagerData {
         stealth_modes: &HashMap<String, DirectStealthMode>,
     ) -> bool {
         let mut tasks = JoinSet::new();
+        let priority_enabled =
+            !TransportPriority::parse(&self.global_ctx.get_flags().transport_priority)
+                .expect("transport_priority is validated while loading configuration")
+                .is_empty();
+        let target_key = priority_enabled.then(|| {
+            candidates
+                .iter()
+                .map(|candidate| {
+                    PreferenceKey::new(
+                        if candidate.is_lan {
+                            TransportPathClass::Lan
+                        } else {
+                            TransportPathClass::Wan
+                        },
+                        protocol_order,
+                        candidate.url.scheme(),
+                    )
+                })
+                .min()
+                .expect("candidate bucket is not empty")
+        });
         let mut group_index = 0u32;
         for protocol in protocol_order {
             let group = candidates
@@ -709,6 +812,17 @@ impl DirectConnectorManagerData {
                     .get(candidate.url.scheme())
                     .copied()
                     .unwrap_or_default();
+                let preference_key = target_key.map(|_| {
+                    PreferenceKey::new(
+                        if candidate.is_lan {
+                            TransportPathClass::Lan
+                        } else {
+                            TransportPathClass::Wan
+                        },
+                        protocol_order,
+                        candidate.url.scheme(),
+                    )
+                });
                 tasks.spawn(async move {
                     if !delay.is_zero() {
                         tokio::time::sleep(delay).await;
@@ -718,6 +832,7 @@ impl DirectConnectorManagerData {
                         dst_peer_id,
                         candidate.url.to_string(),
                         stealth_mode,
+                        preference_key,
                     )
                     .await
                 });
@@ -726,9 +841,25 @@ impl DirectConnectorManagerData {
 
         while let Some(joined) = tasks.join_next().await {
             match joined {
-                Ok(Ok(())) => {
+                Ok(Ok(DirectAttemptOutcome::Connected(None))) => {
                     tasks.abort_all();
                     return true;
+                }
+                Ok(Ok(DirectAttemptOutcome::Connected(Some(connected_key)))) => {
+                    if Some(connected_key) == target_key {
+                        tasks.abort_all();
+                        return true;
+                    }
+                }
+                Ok(Ok(DirectAttemptOutcome::AlreadySatisfied)) => {
+                    if target_key
+                        .is_some_and(|target| self.preference_satisfied(dst_peer_id, target))
+                        || (target_key.is_none()
+                            && self.peer_manager.has_directly_connected_conn(dst_peer_id))
+                    {
+                        tasks.abort_all();
+                        return true;
+                    }
                 }
                 Ok(Err(error)) => tracing::debug!(?error, ?dst_peer_id, "direct candidate failed"),
                 Err(error) if !error.is_cancelled() => {
@@ -737,7 +868,8 @@ impl DirectConnectorManagerData {
                 Err(_) => {}
             }
         }
-        self.peer_manager.has_directly_connected_conn(dst_peer_id)
+        target_key.is_some_and(|target| self.preference_satisfied(dst_peer_id, target))
+            || (target_key.is_none() && self.peer_manager.has_directly_connected_conn(dst_peer_id))
     }
 
     #[tracing::instrument(skip(self))]
@@ -792,6 +924,17 @@ impl DirectConnectorManagerData {
                 .and_then(|inet| inet.address)
                 .map(|ip| IpAddr::V6(ip.into()))
         });
+        let peer_ipv4 = remote_peer_info
+            .as_ref()
+            .and_then(|info| info.ipv4_addr)
+            .map(|ip| IpAddr::V4(ip.into()));
+        let peer_ipv6 = remote_peer_info
+            .as_ref()
+            .and_then(|info| info.ipv6_addr.as_ref())
+            .and_then(|inet| inet.address)
+            .map(|ip| IpAddr::V6(ip.into()));
+        self.peer_manager
+            .set_peer_transport_virtual_ips(dst_peer_id, peer_ipv4, peer_ipv6);
 
         let (lan_order, wan_order) = if priority.is_empty() {
             let mut order = crate::common::transport_priority::BUILTIN_TRANSPORT_ORDER
@@ -831,16 +974,46 @@ impl DirectConnectorManagerData {
         let candidates = self
             .expand_direct_candidates(&ip_list, &available_listeners)
             .await;
-        let lan_candidates = candidates
+        if !priority.is_empty()
+            && let Some(target) = candidates
+                .iter()
+                .map(|candidate| candidate.preference_key(&lan_order, &wan_order))
+                .min()
+        {
+            self.preferred_direct_targets.insert(
+                dst_peer_id,
+                target,
+                Duration::from_secs(DIRECT_CONNECTOR_BLACKLIST_TIMEOUT_SEC),
+            );
+        }
+        let mut lan_candidates = candidates
             .iter()
             .filter(|candidate| candidate.is_lan)
             .cloned()
             .collect::<Vec<_>>();
-        let wan_candidates = candidates
+        let mut wan_candidates = candidates
             .iter()
             .filter(|candidate| !candidate.is_lan)
             .cloned()
             .collect::<Vec<_>>();
+
+        let existing_key = (!priority.is_empty())
+            .then(|| self.peer_manager.best_transport_preference_key(dst_peer_id))
+            .flatten();
+        if !priority.is_empty() {
+            lan_candidates = retain_higher_priority_candidates(
+                lan_candidates,
+                &lan_order,
+                &wan_order,
+                existing_key,
+            );
+            wan_candidates = retain_higher_priority_candidates(
+                wan_candidates,
+                &lan_order,
+                &wan_order,
+                existing_key,
+            );
+        }
 
         tracing::debug!(
             ?dst_peer_id,
@@ -848,6 +1021,7 @@ impl DirectConnectorManagerData {
             ?wan_candidates,
             ?lan_order,
             ?wan_order,
+            ?existing_key,
             "scheduled direct-connect candidates"
         );
 
@@ -919,7 +1093,13 @@ impl DirectConnectorManagerData {
                 .await;
             tracing::info!(?ret, ?dst_peer_id, "do_try_direct_connect return");
 
-            if peer_manager.has_directly_connected_conn(dst_peer_id) {
+            let priority_enabled =
+                !TransportPriority::parse(&self.global_ctx.get_flags().transport_priority)
+                    .expect("transport_priority is validated while loading configuration")
+                    .is_empty();
+            if (!priority_enabled && peer_manager.has_directly_connected_conn(dst_peer_id))
+                || (priority_enabled && self.direct_target_satisfied(dst_peer_id))
+            {
                 tracing::info!(
                     "direct connect to peer {} success, has direct conn",
                     dst_peer_id
@@ -968,14 +1148,23 @@ impl PeerTaskLauncher for DirectConnectorLauncher {
 
     async fn collect_peers_need_task(&self, data: &Self::Data) -> Vec<Self::CollectPeerItem> {
         data.peer_black_list.cleanup();
+        data.preferred_direct_targets.cleanup();
         let my_peer_id = data.peer_manager.my_peer_id();
+        let flags = data.peer_manager.get_global_ctx().get_flags();
+        let priority = TransportPriority::parse(&flags.transport_priority)
+            .expect("transport_priority is validated while loading configuration");
         data.peer_manager
             .list_peers()
             .await
             .into_iter()
             .filter(|peer_id| {
+                let direct_conn_satisfies_priority = if !priority.is_empty() {
+                    data.direct_target_satisfied(*peer_id)
+                } else {
+                    data.peer_manager.has_directly_connected_conn(*peer_id)
+                };
                 *peer_id != my_peer_id
-                    && !data.peer_manager.has_directly_connected_conn(*peer_id)
+                    && !direct_conn_satisfies_priority
                     && !data.peer_black_list.contains(peer_id)
             })
             .collect()
@@ -1019,6 +1208,28 @@ impl DirectConnectorManager {
     pub fn run(&mut self) {
         self.run_as_server();
         self.run_as_client();
+        let mut events = self.global_ctx.subscribe();
+        let data = self.data.clone();
+        self.tasks.spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(GlobalCtxEvent::ConfigPatched(_)) => {
+                        data.clear_preferred_direct_targets();
+                        data.peer_manager.p2p_demand_notify().notify();
+                    }
+                    Ok(GlobalCtxEvent::PeerRemoved(peer_id)) => {
+                        data.preferred_direct_targets.remove(&peer_id);
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        data.clear_preferred_direct_targets();
+                        data.peer_manager.p2p_demand_notify().notify();
+                        events = events.resubscribe();
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
     }
 
     pub fn run_as_server(&mut self) {
@@ -1073,7 +1284,10 @@ mod tests {
 
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-    use super::{TESTING, mapped_listener_port, resolve_mapped_listener_addrs};
+    use super::{
+        DirectCandidate, TESTING, mapped_listener_port, resolve_mapped_listener_addrs,
+        retain_higher_priority_candidates,
+    };
 
     #[tokio::test]
     async fn public_ipv6_candidate_rejects_easytier_managed_addr_even_in_tests() {
@@ -1141,6 +1355,83 @@ mod tests {
         assert_eq!(
             mapped_listener_port(&"udp://127.0.0.1".parse().unwrap()),
             Some(11010)
+        );
+    }
+
+    #[test]
+    fn priority_upgrade_keeps_only_better_candidates_than_existing_direct_conn() {
+        let order = ["quic", "faketcp", "ws", "wg", "udp", "tcp", "wss"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let candidates = [
+            "tcp://127.0.0.1:11010",
+            "udp://127.0.0.1:11010",
+            "quic://127.0.0.1:11012",
+        ]
+        .into_iter()
+        .map(|url| DirectCandidate {
+            url: url.parse().unwrap(),
+            is_lan: true,
+        })
+        .collect::<Vec<_>>();
+
+        let existing_tcp_key = crate::common::transport_priority::PreferenceKey::new(
+            crate::common::transport_priority::TransportPathClass::Lan,
+            &order,
+            "tcp",
+        );
+        let upgraded = retain_higher_priority_candidates(
+            candidates.clone(),
+            &order,
+            &order,
+            Some(existing_tcp_key),
+        );
+        assert_eq!(
+            upgraded
+                .iter()
+                .map(|candidate| candidate.url.scheme())
+                .collect::<Vec<_>>(),
+            ["udp", "quic"]
+        );
+
+        let existing_quic_key = crate::common::transport_priority::PreferenceKey::new(
+            crate::common::transport_priority::TransportPathClass::Lan,
+            &order,
+            "quic",
+        );
+        let already_best = retain_higher_priority_candidates(
+            candidates.clone(),
+            &order,
+            &order,
+            Some(existing_quic_key),
+        );
+        assert!(already_best.is_empty());
+
+        let no_existing =
+            retain_higher_priority_candidates(candidates.clone(), &order, &order, None);
+        assert_eq!(no_existing.len(), candidates.len());
+    }
+
+    #[test]
+    fn priority_upgrade_compares_path_before_protocol() {
+        let order = ["quic", "tcp"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let wan_quic = DirectCandidate {
+            url: "quic://198.51.100.2:11012".parse().unwrap(),
+            is_lan: false,
+        };
+        let lan_tcp = crate::common::transport_priority::PreferenceKey::new(
+            crate::common::transport_priority::TransportPathClass::Lan,
+            &order,
+            "tcp",
+        );
+
+        assert!(
+            retain_higher_priority_candidates(vec![wan_quic], &order, &order, Some(lan_tcp),)
+                .is_empty()
         );
     }
 

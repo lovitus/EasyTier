@@ -94,12 +94,60 @@ cargo install --git https://github.com/EasyTier/EasyTier.git easytier
 - OHOS 产物会一并放入 GitHub Release；所有必要 workflow 成功后才会正式发布。
 - 这个 fork 流程里已经移除了 Docker workflow。
 
+## 本 Fork 与上游的差异
+
+这个仓库已经不再是上游 EasyTier 的“无差别镜像”。下面的摘要反映的是 fork 相对上游
+的实际增量。如果你要对比上游行为、评估升级影响、或者决定哪些参数应该开启，建议先
+看这一段：
+
+- 已修复或强化的问题：多传输 stealth rollout 与兼容路径；direct / hole-punch 的
+  目标级回环避退，不再动辄升级为大范围 scheme suppression；QUIC/KCP Proxy 就绪 ACK
+  与分类 fallback；UDP stealth fallback 预算与 datagram phase 切换时序；QUIC/KCP
+  Proxy 本地 TCP capture 伪源地址；native TCP proxy NAT entry 查找 / 交接；KCP
+  关闭路径尾包清理；以及 feature-gated 构建下更准确的 Proxy capability 广告。
+- 本 fork 新增或扩展的能力：`udp`、`tcp`、`faketcp`、`quic`、`wg`、`ws`、`wss`
+  的多传输 stealth；direct-connect `transport_priority`；legacy UDP 打洞拒绝控制；
+  以及构建在原有 QUIC/KCP Proxy 之上的 readiness ACK、按传输维度的健康状态和回退原因。
+- 与上游不同的行为：strict stealth UDP listener 会静默丢弃 legacy probe；Proxy 固定
+  顺序是 `QUIC -> KCP -> Native`；回环处理是“目标级避退强化”，不是“从此不再出现任何
+  回环流量”；`transport_priority` 只影响 direct-connect；`disable_quic_input` /
+  `disable_kcp_input` 不会关闭底层 listener；双栈 peer 的 exact 规则同时命中时 IPv4
+  优先。
+- 本 fork 新增的参数：`--stealth-mode`、`--stealth-window-secs`、
+  `--stealth-protocols`、`--disable-legacy-udp-hole-punch`、
+  `--transport-priority`。
+- 上游原本就有、但在本 fork 下相关行为发生变化的参数：
+  `--enable-kcp-proxy`、`--enable-quic-proxy`、`--disable-kcp-input`、
+  `--disable-quic-input` 不是本 fork 新发明的参数；变化的是它们周边的 Proxy
+  failover、readiness ACK、健康状态和 capability 行为。
+
+完整清单、配置示例和兼容边界见
+[fork 差异与配置说明](easytier/docs/fork_differences_cn.md)。Stealth、Proxy、回退和
+rollout 细节仍以 [兼容性说明](easytier/docs/udp_stealth_compatibility.md) 为准。
+
+### 常见配置坑点
+
+- `--transport-priority` 必须写成带 scope 的规则，例如
+  `global:quic,faketcp,ws,wg,udp,tcp`；直接写 `quic,faketcp,ws,wg,udp,tcp`
+  会校验失败。
+- `--transport-priority` 一旦设置，direct-connect 就不再按 `default_protocol`
+  选协议。
+- `--transport-priority` 受延迟约束：在已建立连接里，偏好协议只有在 RTT 不超过最低
+  RTT 连接的 125% 时才会被选为承载链路，避免因为配置偏好强行切到明显更慢的 underlay。
+- `--stealth-mode` 只有在 secure mode 和非空 `network_secret` 同时满足时才真正生效；
+  否则启动阶段只会告警并继续走 plain。
+- `--disable-legacy-udp-hole-punch` 即使在 UDP stealth 未生效时，也仍会拒绝没有
+  stealth 偏好的旧版 UDP 打洞请求。
+
 ### Stealth 与传输策略
 
 Stealth 默认关闭，可保护 `udp`、`tcp`、`faketcp`、`quic`、`wg`、`ws` 和 `wss`，
 需要启用安全模式并配置非空网络密钥。`stealth_window_secs` 的有效值是网络级参数，
 所有 Stealth 节点必须一致。`transport_priority` 只重排 direct-connect 底层协议；
-QUIC/KCP Proxy 故障转移固定采用 `QUIC -> KCP -> Native`。混合部署细节见
+QUIC/KCP Proxy 故障转移固定采用 `QUIC -> KCP -> Native`。`transport_priority`
+的格式必须是 `scope:proto,...;scope:proto,...`，例如
+`global:quic,faketcp,ws,wg,udp,tcp`。已建立连接的数据面选择会先应用 125% RTT
+合格线，再在合格集合内按协议偏好排序。混合部署细节见
 [兼容性说明](easytier/docs/udp_stealth_compatibility.md)。
 
 ### 🚀 基本用法

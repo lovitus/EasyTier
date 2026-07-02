@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use cidr::{Ipv4Cidr, Ipv6Cidr};
 use dashmap::DashMap;
 use hotpath::instant::Instant;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::{
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -27,9 +27,11 @@ use crate::{
         constants::EASYTIER_VERSION,
         error::Error,
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent, NetworkIdentity, ProtocolLoopScope},
+        network::IPCollector,
         shrink_dashmap,
         stats_manager::{CounterHandle, LabelSet, LabelType, MetricName},
         stun::StunInfoCollectorTrait,
+        transport_priority::{PreferenceKey, TransportPathClass, TransportPriority},
     },
     peers::{
         PeerPacketFilter,
@@ -59,6 +61,7 @@ use crate::{
         packet_def::{CompressorAlgo, PacketType, ZCPacket},
     },
 };
+use url::Host;
 
 use super::{
     BoxNicPacketFilter, BoxPeerPacketFilter, NicPacketContext, NicPacketFilterAction,
@@ -131,6 +134,24 @@ enum RouteAlgoInst {
     None,
 }
 
+fn normalize_transport_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(ipv6) => ipv6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ipv6)),
+        ipv4 => ipv4,
+    }
+}
+
+fn transport_ip_from_host(host: Host<&str>) -> Option<IpAddr> {
+    match host {
+        Host::Ipv4(ip) => Some(IpAddr::V4(ip)),
+        Host::Ipv6(ip) => Some(normalize_transport_ip(IpAddr::V6(ip))),
+        Host::Domain(domain) => domain.parse().ok().map(normalize_transport_ip),
+    }
+}
+
 impl Clone for RouteAlgoInst {
     fn clone(&self) -> Self {
         match self {
@@ -200,6 +221,113 @@ impl Debug for PeerManager {
 }
 
 impl PeerManager {
+    async fn classify_transport_path(
+        &self,
+        tunnel_info: Option<&TunnelInfo>,
+        is_directly_connected: bool,
+    ) -> TransportPathClass {
+        let Some(tunnel_info) = tunnel_info else {
+            return TransportPathClass::Unmanaged;
+        };
+        if IpScheme::from_tunnel_type(&tunnel_info.tunnel_type).is_none() {
+            return TransportPathClass::Unmanaged;
+        }
+        if !is_directly_connected {
+            return TransportPathClass::Wan;
+        }
+        let remote_ip = tunnel_info
+            .resolved_remote_addr
+            .as_ref()
+            .or(tunnel_info.remote_addr.as_ref())
+            .and_then(|addr| {
+                let url: url::Url = addr.clone().into();
+                transport_ip_from_host(url.host()?)
+            });
+        let Some(remote_ip) = remote_ip else {
+            return TransportPathClass::Wan;
+        };
+        if matches!(remote_ip, IpAddr::V4(ip) if ip.is_link_local())
+            || matches!(remote_ip, IpAddr::V6(ip) if ip.is_unicast_link_local())
+        {
+            return TransportPathClass::Lan;
+        }
+        let local_networks = IPCollector::collect_interfaces(self.global_ctx.net_ns.clone(), false)
+            .await
+            .into_iter()
+            .flat_map(|interface| interface.ips)
+            .collect::<Vec<_>>();
+        if local_networks
+            .iter()
+            .any(|network| network.contains(remote_ip))
+        {
+            TransportPathClass::Lan
+        } else {
+            TransportPathClass::Wan
+        }
+    }
+
+    pub fn set_peer_transport_virtual_ips(
+        &self,
+        peer_id: PeerId,
+        ipv4: Option<IpAddr>,
+        ipv6: Option<IpAddr>,
+    ) {
+        self.peers
+            .set_peer_transport_virtual_ips(peer_id, ipv4, ipv6);
+    }
+
+    pub fn update_peer_transport_virtual_ip_from_route(
+        &self,
+        route: &crate::proto::api::instance::Route,
+    ) {
+        let (ipv4, ipv6) = Self::transport_virtual_ips_from_route(route);
+        self.set_peer_transport_virtual_ips(route.peer_id, ipv4, ipv6);
+    }
+
+    fn transport_virtual_ips_from_route(
+        route: &crate::proto::api::instance::Route,
+    ) -> (Option<IpAddr>, Option<IpAddr>) {
+        let ipv4 = route
+            .ipv4_addr
+            .as_ref()
+            .and_then(|inet| inet.address)
+            .map(|ip| IpAddr::V4(ip.into()));
+        let ipv6 = route
+            .ipv6_addr
+            .as_ref()
+            .and_then(|inet| inet.address)
+            .map(|ip| IpAddr::V6(ip.into()));
+        (ipv4, ipv6)
+    }
+
+    fn sync_transport_virtual_ips_from_routes(
+        peers: &PeerMap,
+        routes: &[crate::proto::api::instance::Route],
+    ) {
+        let route_ips = routes
+            .iter()
+            .map(|route| (route.peer_id, Self::transport_virtual_ips_from_route(route)))
+            .collect::<HashMap<_, _>>();
+        for peer_id in peers.list_peers() {
+            let (ipv4, ipv6) = route_ips.get(&peer_id).copied().unwrap_or_default();
+            peers.set_peer_transport_virtual_ips(peer_id, ipv4, ipv6);
+        }
+    }
+
+    async fn refresh_peer_transport_virtual_ip(&self, peer_id: PeerId) {
+        let peer_info = self.get_route().get_peer_info(peer_id).await;
+        let ipv4 = peer_info
+            .as_ref()
+            .and_then(|info| info.ipv4_addr)
+            .map(|ip| IpAddr::V4(ip.into()));
+        let ipv6 = peer_info
+            .as_ref()
+            .and_then(|info| info.ipv6_addr.as_ref())
+            .and_then(|inet| inet.address)
+            .map(|ip| IpAddr::V6(ip.into()));
+        self.set_peer_transport_virtual_ips(peer_id, ipv4, ipv6);
+    }
+
     // Keep lazy-p2p demand alive across the 5s task rescan interval and a full on-demand
     // connect attempt, without retaining extra per-task state in the hot path.
     const RECENT_HAVE_TRAFFIC_TTL: Duration = Duration::from_secs(30);
@@ -692,12 +820,17 @@ impl PeerManager {
             }
             return Err(err);
         }
+        let transport_path = self
+            .classify_transport_path(tunnel_info.as_ref(), is_directly_connected)
+            .await;
+        peer.set_transport_path_class(transport_path);
         let conn_id = peer.get_conn_id();
         let peer_id = peer.get_peer_id();
         if peer.get_network_identity().network_name
             == self.global_ctx.get_network_identity().network_name
         {
             self.add_new_peer_conn(peer).await?;
+            self.refresh_peer_transport_virtual_ip(peer_id).await;
         } else {
             self.foreign_network_client.add_new_peer_conn(peer).await?;
         }
@@ -710,6 +843,45 @@ impl PeerManager {
         } else {
             self.foreign_network_client.get_peer_map().has_peer(peer_id)
         }
+    }
+
+    pub fn best_transport_preference_key(&self, peer_id: PeerId) -> Option<PreferenceKey> {
+        self.peers.best_transport_preference_key(peer_id)
+    }
+
+    pub fn has_live_transport(&self, peer_id: PeerId, protocol: &str) -> bool {
+        self.peers.has_live_transport(peer_id, protocol)
+    }
+
+    pub fn transport_preference_key(
+        &self,
+        path: TransportPathClass,
+        virtual_ip: Option<IpAddr>,
+        protocol: &str,
+    ) -> Option<PreferenceKey> {
+        let priority = TransportPriority::parse(&self.global_ctx.get_flags().transport_priority)
+            .expect("transport_priority is validated while loading configuration");
+        (!priority.is_empty()).then(|| priority.preference_key(path, virtual_ip, protocol))
+    }
+
+    pub fn transport_candidate_improves(
+        &self,
+        peer_id: PeerId,
+        path: TransportPathClass,
+        protocol: &str,
+    ) -> bool {
+        let Some(peer) = self.peers.get_peer_by_id(peer_id) else {
+            return true;
+        };
+        let priority = TransportPriority::parse(&self.global_ctx.get_flags().transport_priority)
+            .expect("transport_priority is validated while loading configuration");
+        if priority.is_empty() {
+            return false;
+        }
+        let candidate =
+            priority.preference_key(path, peer.transport_virtual_ip_for(&priority), protocol);
+        peer.best_transport_preference_key()
+            .is_none_or(|current| candidate < current)
     }
 
     #[tracing::instrument]
@@ -916,9 +1088,18 @@ impl PeerManager {
         }
 
         conn.set_is_hole_punched(!is_directly_connected);
+        let transport_path = self
+            .classify_transport_path(tunnel_info.as_ref(), is_directly_connected)
+            .await;
+        conn.set_transport_path_class(transport_path);
 
         let add_peer_ret = if is_local_network {
-            self.add_new_peer_conn(conn).await
+            let peer_id = conn.get_peer_id();
+            let ret = self.add_new_peer_conn(conn).await;
+            if ret.is_ok() {
+                self.refresh_peer_transport_virtual_ip(peer_id).await;
+            }
+            ret
         } else {
             self.foreign_network_manager.add_peer_conn(conn).await
         };
@@ -2072,6 +2253,55 @@ impl PeerManager {
         });
     }
 
+    async fn run_transport_selection_config_watch(&self) {
+        let mut event_receiver = self.global_ctx.subscribe();
+        let global_ctx = self.global_ctx.clone();
+        let peers = self.peers.clone();
+        let foreign_peers = self.foreign_network_client.get_peer_map();
+        let route = match &self.route_algo_inst {
+            RouteAlgoInst::Ospf(route) => Some(route.clone()),
+            RouteAlgoInst::None => None,
+        };
+        self.tasks.lock().await.spawn(async move {
+            let mut route_poll = tokio::time::interval(Duration::from_secs(1));
+            route_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last_route_update = None;
+            loop {
+                tokio::select! {
+                    event = event_receiver.recv() => match event {
+                        Ok(GlobalCtxEvent::ConfigPatched(_)) => {
+                            peers.invalidate_default_connections();
+                            foreign_peers.invalidate_default_connections();
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(
+                                skipped,
+                                "transport selection config watcher lagged; invalidating connection caches"
+                            );
+                            peers.invalidate_default_connections();
+                            foreign_peers.invalidate_default_connections();
+                            event_receiver = event_receiver.resubscribe();
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    },
+                    _ = route_poll.tick(), if route.is_some() => {
+                        if global_ctx.get_flags().transport_priority.is_empty() {
+                            continue;
+                        }
+                        let route = route.as_ref().expect("route is checked by select guard");
+                        let update = route.get_peer_info_last_update_time().await;
+                        if last_route_update != Some(update) {
+                            let routes = route.list_routes().await;
+                            Self::sync_transport_virtual_ips_from_routes(&peers, &routes);
+                            last_route_update = Some(update);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     async fn run_foriegn_network(&self) {
         self.peer_rpc_tspt
             .foreign_peers
@@ -2098,6 +2328,7 @@ impl PeerManager {
         self.run_peer_session_gc_routine().await;
         self.run_credential_gc_routine().await;
         self.run_traffic_metrics_gc_routine().await;
+        self.run_transport_selection_config_watch().await;
 
         self.run_foriegn_network().await;
 
@@ -2339,6 +2570,7 @@ mod tests {
     use std::{
         collections::HashMap,
         fmt::Debug,
+        net::IpAddr,
         sync::{Arc, Mutex as StdMutex},
         time::Duration,
     };
@@ -2381,7 +2613,27 @@ mod tests {
         },
     };
 
-    use super::PeerManager;
+    use super::{PeerManager, normalize_transport_ip, transport_ip_from_host};
+
+    #[test]
+    fn ipv4_mapped_quic_address_keeps_ipv4_path_classification() {
+        assert_eq!(
+            normalize_transport_ip("::ffff:172.17.0.2".parse().unwrap()),
+            IpAddr::V4("172.17.0.2".parse().unwrap())
+        );
+        assert_eq!(
+            normalize_transport_ip("fd00::2".parse().unwrap()),
+            "fd00::2".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            transport_ip_from_host(url::Host::Domain("172.17.0.2")),
+            Some(IpAddr::V4("172.17.0.2".parse().unwrap()))
+        );
+        assert_eq!(
+            transport_ip_from_host(url::Host::Domain("peer.example.com")),
+            None
+        );
+    }
 
     struct RecordingNicFilter {
         name: &'static str,

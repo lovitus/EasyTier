@@ -58,6 +58,15 @@ pub(crate) fn should_downgrade_udp_stealth(
     local_stealth_mode && remote_feature_flag.is_some_and(|flag| !flag.stealth_supported)
 }
 
+pub(crate) fn should_attempt_ranked_hole_punch(
+    has_peer: bool,
+    priority_enabled: bool,
+    has_same_transport: bool,
+    candidate_improves: bool,
+) -> bool {
+    !has_peer || (priority_enabled && !has_same_transport && candidate_improves)
+}
+
 async fn set_bind_addr_for_peer_connector(
     connector: &mut (impl TunnelConnector + ?Sized),
     is_ipv4: bool,
@@ -403,8 +412,18 @@ mod tests {
     };
 
     use super::{
-        create_connector_by_url, should_background_p2p_with_peer, should_try_p2p_with_peer,
+        create_connector_by_url, should_attempt_ranked_hole_punch, should_background_p2p_with_peer,
+        should_try_p2p_with_peer,
     };
+
+    #[test]
+    fn ranked_hole_punch_only_upgrades_existing_peer() {
+        assert!(should_attempt_ranked_hole_punch(false, false, false, false));
+        assert!(!should_attempt_ranked_hole_punch(true, false, false, true));
+        assert!(!should_attempt_ranked_hole_punch(true, true, true, true));
+        assert!(!should_attempt_ranked_hole_punch(true, true, false, false));
+        assert!(should_attempt_ranked_hole_punch(true, true, false, true));
+    }
 
     #[tokio::test]
     async fn connector_rejects_easytier_managed_ipv6_destination() {

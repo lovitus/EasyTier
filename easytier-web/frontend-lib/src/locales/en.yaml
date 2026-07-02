@@ -165,8 +165,8 @@ stealth_mode_help: Enable authenticated outer protection for selected transports
 stealth_window_secs: Stealth Gate Window
 stealth_window_secs_help: Network-wide rolling gate-key window in seconds. Set to 0 for 60 seconds; every stealth node in the network must match.
 stealth_protocols: Stealth Protocols
-stealth_protocols_help: Comma-separated transports protected by stealth. Empty keeps the rollout-compatible UDP-only behavior. Supported values are udp, tcp, faketcp, quic, wg, ws, and wss.
-stealth_protocols_placeholder: "udp,tcp,faketcp,quic,wg,ws,wss"
+stealth_protocols_help: Comma-separated transports protected by stealth. If left empty, only UDP is protected; the list is used only when you actually enter protocols here. Supported values are udp, tcp, faketcp, quic, wg, ws, and wss.
+stealth_protocols_placeholder: "Empty = UDP only; e.g. udp,tcp,faketcp,quic,wg,ws,wss"
 proxy_failover:
   title: Proxy Failover
   source: Source

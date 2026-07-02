@@ -14,6 +14,7 @@ use crate::{
         error::Error,
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent, NetworkIdentity},
         shrink_dashmap,
+        transport_priority::PreferenceKey,
     },
     proto::{
         api::instance::{self, PeerConnInfo},
@@ -118,6 +119,33 @@ impl PeerMap {
 
     pub fn get_peer_by_id(&self, peer_id: PeerId) -> Option<Arc<Peer>> {
         self.peer_map.get(&peer_id).map(|v| v.clone())
+    }
+
+    pub fn invalidate_default_connections(&self) {
+        for peer in self.peer_map.iter() {
+            peer.value().invalidate_default_conn();
+        }
+    }
+
+    pub fn set_peer_transport_virtual_ips(
+        &self,
+        peer_id: PeerId,
+        ipv4: Option<std::net::IpAddr>,
+        ipv6: Option<std::net::IpAddr>,
+    ) {
+        if let Some(peer) = self.get_peer_by_id(peer_id) {
+            peer.set_transport_virtual_ips(ipv4, ipv6);
+        }
+    }
+
+    pub fn best_transport_preference_key(&self, peer_id: PeerId) -> Option<PreferenceKey> {
+        self.get_peer_by_id(peer_id)
+            .and_then(|peer| peer.best_transport_preference_key())
+    }
+
+    pub fn has_live_transport(&self, peer_id: PeerId, protocol: &str) -> bool {
+        self.get_peer_by_id(peer_id)
+            .is_some_and(|peer| peer.has_live_transport(protocol))
     }
 
     pub fn get_directly_connections_by_peer_id(&self, peer_id: PeerId) -> DashSet<uuid::Uuid> {

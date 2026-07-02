@@ -14,7 +14,10 @@ use sym_to_cone::{PunchSymToConeHoleClient, PunchSymToConeHoleServer};
 use tokio::{sync::Mutex, task::JoinHandle};
 
 use crate::{
-    common::{PeerId, global_ctx::ProtocolLoopScope, stun::StunInfoCollectorTrait},
+    common::{
+        PeerId, global_ctx::ProtocolLoopScope, stun::StunInfoCollectorTrait,
+        transport_priority::TransportPathClass,
+    },
     peers::{
         peer_manager::PeerManager,
         peer_task::{PeerTaskLauncher, PeerTaskManager},
@@ -34,7 +37,8 @@ use crate::{
 };
 
 use crate::connector::{
-    should_background_p2p_with_peer, should_downgrade_udp_stealth, should_try_p2p_with_peer,
+    should_attempt_ranked_hole_punch, should_background_p2p_with_peer,
+    should_downgrade_udp_stealth, should_try_p2p_with_peer,
 };
 
 pub(crate) mod both_easy_sym;
@@ -548,7 +552,15 @@ impl PeerTaskLauncher for UdpHolePunchPeerTaskLauncher {
                 flags.disable_p2p,
                 flags.need_p2p,
             ) && data.peer_mgr.has_recent_traffic(route.peer_id, now);
-            if !static_allowed && !dynamic_allowed {
+            let priority_upgrade_allowed = !flags.transport_priority.is_empty()
+                && data.peer_mgr.get_peer_map().has_peer(route.peer_id)
+                && should_try_p2p_with_peer(
+                    route.feature_flag.as_ref(),
+                    false,
+                    flags.disable_p2p,
+                    flags.need_p2p,
+                );
+            if !static_allowed && !dynamic_allowed && !priority_upgrade_allowed {
                 continue;
             }
 
@@ -574,7 +586,18 @@ impl PeerTaskLauncher for UdpHolePunchPeerTaskLauncher {
                 continue;
             }
 
-            if data.peer_mgr.get_peer_map().has_peer(peer_id) {
+            let has_peer = data.peer_mgr.get_peer_map().has_peer(peer_id);
+            if has_peer && !flags.transport_priority.is_empty() {
+                data.peer_mgr
+                    .update_peer_transport_virtual_ip_from_route(route);
+            }
+            if !should_attempt_ranked_hole_punch(
+                has_peer,
+                !flags.transport_priority.is_empty(),
+                data.peer_mgr.has_live_transport(peer_id, "udp"),
+                data.peer_mgr
+                    .transport_candidate_improves(peer_id, TransportPathClass::Wan, "udp"),
+            ) {
                 continue;
             }
 

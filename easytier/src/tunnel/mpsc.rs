@@ -18,10 +18,25 @@ use futures::SinkExt;
 #[derive(Clone)]
 pub struct MpscTunnelSender(Sender<ZCPacket>);
 
+pub struct MpscTunnelSendError {
+    pub error: TunnelError,
+    pub item: ZCPacket,
+}
+
 impl MpscTunnelSender {
     pub async fn send(&self, item: ZCPacket) -> Result<(), TunnelError> {
         self.0.send(item).await.with_context(|| "send error")?;
         Ok(())
+    }
+
+    pub async fn send_recover(&self, item: ZCPacket) -> Result<(), MpscTunnelSendError> {
+        self.0
+            .send(item)
+            .await
+            .map_err(|error| MpscTunnelSendError {
+                error: TunnelError::Shutdown,
+                item: error.0,
+            })
     }
 
     pub fn try_send(&self, item: ZCPacket) -> Result<(), TunnelError> {
@@ -151,6 +166,17 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn recoverable_send_returns_packet_when_queue_is_closed() {
+        let (sender, receiver) = channel(1);
+        drop(receiver);
+        let sender = MpscTunnelSender(sender);
+        let packet = ZCPacket::new_with_payload(b"fallback");
+        let error = sender.send_recover(packet).await.unwrap_err();
+        assert!(matches!(error.error, TunnelError::Shutdown));
+        assert_eq!(error.item.payload(), b"fallback");
+    }
     // test slow send lock in framed tunnel
     #[tokio::test]
     async fn mpsc_slow_receiver() {

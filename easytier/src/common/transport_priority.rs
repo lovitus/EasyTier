@@ -4,6 +4,42 @@ use anyhow::{Context, bail};
 
 pub const BUILTIN_TRANSPORT_ORDER: [&str; 7] = ["tcp", "udp", "wg", "quic", "ws", "wss", "faketcp"];
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TransportPathClass {
+    Lan,
+    Wan,
+    #[default]
+    Unmanaged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PreferenceKey {
+    path_rank: u8,
+    protocol_rank: usize,
+}
+
+impl PreferenceKey {
+    pub fn new(path: TransportPathClass, protocol_order: &[String], protocol: &str) -> Self {
+        let path_rank = match path {
+            TransportPathClass::Lan => 0,
+            TransportPathClass::Wan => 1,
+            TransportPathClass::Unmanaged => 2,
+        };
+        let protocol_rank = if path == TransportPathClass::Unmanaged {
+            usize::MAX
+        } else {
+            protocol_order
+                .iter()
+                .position(|candidate| candidate == protocol)
+                .unwrap_or(usize::MAX)
+        };
+        Self {
+            path_rank,
+            protocol_rank,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransportPriorityScope {
     Global,
@@ -98,6 +134,16 @@ impl TransportPriority {
             self.promote(TransportPriorityScope::VirtualIp(ip), &mut order);
         }
         order
+    }
+
+    pub fn preference_key(
+        &self,
+        path: TransportPathClass,
+        virtual_ip: Option<IpAddr>,
+        protocol: &str,
+    ) -> PreferenceKey {
+        let order = self.order_for(path == TransportPathClass::Lan, virtual_ip);
+        PreferenceKey::new(path, &order, protocol)
     }
 
     fn promote(&self, scope: TransportPriorityScope, inherited: &mut Vec<String>) {

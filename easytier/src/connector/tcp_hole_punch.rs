@@ -12,7 +12,7 @@ use tokio::task::JoinSet;
 use crate::{
     common::{
         PeerId, global_ctx::ProtocolLoopScope, join_joinset_background,
-        stun::StunInfoCollectorTrait,
+        stun::StunInfoCollectorTrait, transport_priority::TransportPathClass,
     },
     connector::udp_hole_punch::BackOff,
     peers::{
@@ -33,7 +33,9 @@ use crate::{
     },
 };
 
-use crate::connector::{should_background_p2p_with_peer, should_try_p2p_with_peer};
+use crate::connector::{
+    should_attempt_ranked_hole_punch, should_background_p2p_with_peer, should_try_p2p_with_peer,
+};
 
 pub const BLACKLIST_TIMEOUT_SEC: u64 = 3600;
 pub const LOOP_BLACKLIST_TIMEOUT_SEC: u64 = 300;
@@ -603,7 +605,15 @@ impl PeerTaskLauncher for TcpHolePunchPeerTaskLauncher {
                 flags.disable_p2p,
                 flags.need_p2p,
             ) && data.peer_mgr.has_recent_traffic(route.peer_id, now);
-            if !static_allowed && !dynamic_allowed {
+            let priority_upgrade_allowed = !flags.transport_priority.is_empty()
+                && data.peer_mgr.get_peer_map().has_peer(route.peer_id)
+                && should_try_p2p_with_peer(
+                    route.feature_flag.as_ref(),
+                    false,
+                    flags.disable_p2p,
+                    flags.need_p2p,
+                );
+            if !static_allowed && !dynamic_allowed && !priority_upgrade_allowed {
                 continue;
             }
 
@@ -622,8 +632,19 @@ impl PeerTaskLauncher for TcpHolePunchPeerTaskLauncher {
                 continue;
             }
 
-            if data.peer_mgr.get_peer_map().has_peer(peer_id) {
-                tracing::trace!(peer_id, "tcp hole punch task collect skip already has peer");
+            let has_peer = data.peer_mgr.get_peer_map().has_peer(peer_id);
+            if has_peer && !flags.transport_priority.is_empty() {
+                data.peer_mgr
+                    .update_peer_transport_virtual_ip_from_route(route);
+            }
+            if !should_attempt_ranked_hole_punch(
+                has_peer,
+                !flags.transport_priority.is_empty(),
+                data.peer_mgr.has_live_transport(peer_id, "tcp"),
+                data.peer_mgr
+                    .transport_candidate_improves(peer_id, TransportPathClass::Wan, "tcp"),
+            ) {
+                tracing::trace!(peer_id, "tcp hole punch task collect skip existing peer");
                 continue;
             }
 

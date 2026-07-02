@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{net::IpAddr, sync::Arc};
 
 use crossbeam::atomic::AtomicCell;
 use dashmap::{DashMap, DashSet};
@@ -18,14 +18,57 @@ use crate::{
         PeerId,
         error::Error,
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent},
+        transport_priority::{PreferenceKey, TransportPriority},
     },
     proto::peer_rpc::PeerIdentityType,
-    tunnel::packet_def::ZCPacket,
+    tunnel::{IpScheme, packet_def::ZCPacket},
 };
 use tokio_util::task::AbortOnDropHandle;
 
 type ArcPeerConn = Arc<PeerConn>;
 type ConnMap = Arc<DashMap<PeerConnId, ArcPeerConn>>;
+
+#[derive(Debug, Clone, Copy)]
+struct ConnSelectionCandidate {
+    preference: PreferenceKey,
+    latency_us: u64,
+    has_latency_sample: bool,
+    conn_id: PeerConnId,
+}
+
+fn select_conn_index(
+    candidates: &[ConnSelectionCandidate],
+    priority_enabled: bool,
+) -> Option<usize> {
+    if !priority_enabled {
+        return candidates
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, candidate)| candidate.latency_us)
+            .map(|(index, _)| index);
+    }
+    let min_measured_latency = candidates
+        .iter()
+        .filter(|candidate| candidate.has_latency_sample)
+        .map(|candidate| candidate.latency_us)
+        .min();
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            min_measured_latency.is_none()
+                || (candidate.has_latency_sample
+                    && candidate.latency_us <= min_measured_latency.unwrap().saturating_mul(5) / 4)
+        })
+        .min_by_key(|(_, candidate)| {
+            (
+                candidate.preference,
+                candidate.latency_us,
+                candidate.conn_id.as_u128(),
+            )
+        })
+        .map(|(index, _)| index)
+}
 
 pub struct Peer {
     pub peer_node_id: PeerId,
@@ -42,6 +85,7 @@ pub struct Peer {
     default_conn_id: Arc<AtomicCell<PeerConnId>>,
     peer_identity_type: Arc<AtomicCell<Option<PeerIdentityType>>>,
     peer_public_key: Arc<RwLock<Option<Vec<u8>>>>,
+    transport_virtual_ips: RwLock<(Option<IpAddr>, Option<IpAddr>)>,
     default_conn_id_clear_task: AbortOnDropHandle<()>,
 }
 
@@ -58,6 +102,8 @@ impl Peer {
         let peer_identity_type_copy = peer_identity_type.clone();
         let peer_public_key = Arc::new(RwLock::new(None));
         let peer_public_key_copy = peer_public_key.clone();
+        let default_conn_id = Arc::new(AtomicCell::new(PeerConnId::default()));
+        let default_conn_id_for_close = default_conn_id.clone();
 
         let conns_copy = conns.clone();
         let shutdown_notifier_copy = shutdown_notifier.clone();
@@ -78,6 +124,7 @@ impl Peer {
                             );
 
                             if let Some((_, conn)) = conns_copy.remove(&ret) {
+                                default_conn_id_for_close.store(PeerConnId::default());
                                 global_ctx_copy.issue_event(GlobalCtxEvent::PeerConnRemoved(
                                     conn.get_conn_info(),
                                 ));
@@ -103,8 +150,6 @@ impl Peer {
             )),
         ));
 
-        let default_conn_id = Arc::new(AtomicCell::new(PeerConnId::default()));
-
         let conns_copy = conns.clone();
         let default_conn_id_copy = default_conn_id.clone();
         let default_conn_id_clear_task = AbortOnDropHandle::new(tokio::spawn(async move {
@@ -129,6 +174,7 @@ impl Peer {
             default_conn_id,
             peer_identity_type,
             peer_public_key,
+            transport_virtual_ips: RwLock::new((None, None)),
             default_conn_id_clear_task,
         }
     }
@@ -169,6 +215,7 @@ impl Peer {
         conn.start_recv_loop(self.packet_recv_chan.clone()).await;
         conn.start_pingpong();
         self.conns.insert(conn.get_conn_id(), Arc::new(conn));
+        self.invalidate_default_conn();
 
         let close_event_sender = self.close_event_sender.clone();
         tokio::spawn(async move {
@@ -186,25 +233,62 @@ impl Peer {
         Ok(())
     }
 
-    async fn select_conn(&self) -> Option<ArcPeerConn> {
+    fn conn_preference_key(&self, priority: &TransportPriority, conn: &PeerConn) -> PreferenceKey {
+        let protocol = conn
+            .tunnel_type()
+            .and_then(IpScheme::from_tunnel_type)
+            .map(Into::<&'static str>::into)
+            .unwrap_or("");
+        priority.preference_key(
+            conn.transport_path_class(),
+            self.transport_virtual_ip_for(priority),
+            protocol,
+        )
+    }
+
+    async fn select_conn_excluding(&self, excluded: Option<PeerConnId>) -> Option<ArcPeerConn> {
         let default_conn_id = self.default_conn_id.load();
-        if let Some(conn) = self.conns.get(&default_conn_id) {
+        if excluded.is_none()
+            && let Some(conn) = self.conns.get(&default_conn_id)
+            && !conn.is_closed()
+        {
             return Some(conn.clone());
         }
 
-        // find a conn with the smallest latency
-        let mut min_latency = u64::MAX;
-        for conn in self.conns.iter() {
-            let latency = conn.value().get_stats().latency_us;
-            if latency < min_latency {
-                min_latency = latency;
-                self.default_conn_id.store(conn.get_conn_id());
-            }
+        let conns = self
+            .conns
+            .iter()
+            .filter(|entry| !entry.value().is_closed() && excluded != Some(*entry.key()))
+            .map(|entry| entry.value().clone())
+            .collect::<Vec<_>>();
+        if conns.is_empty() {
+            return None;
         }
 
-        self.conns
-            .get(&self.default_conn_id.load())
-            .map(|conn| conn.clone())
+        let priority = TransportPriority::parse(&self.global_ctx.get_flags().transport_priority)
+            .expect("transport_priority is validated while loading configuration");
+        let selection_candidates = conns
+            .iter()
+            .map(|conn| ConnSelectionCandidate {
+                preference: self.conn_preference_key(&priority, conn),
+                latency_us: conn.get_stats().latency_us,
+                has_latency_sample: conn.has_latency_sample(),
+                conn_id: conn.get_conn_id(),
+            })
+            .collect::<Vec<_>>();
+        let selected = select_conn_index(&selection_candidates, !priority.is_empty())
+            .map(|index| conns[index].clone());
+
+        if excluded.is_none()
+            && let Some(conn) = selected.as_ref()
+        {
+            self.default_conn_id.store(conn.get_conn_id());
+        }
+        selected
+    }
+
+    async fn select_conn(&self) -> Option<ArcPeerConn> {
+        self.select_conn_excluding(None).await
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "Peer"))]
@@ -212,9 +296,23 @@ impl Peer {
         let Some(conn) = self.select_conn().await else {
             return Err(Error::PeerNoConnectionError(self.peer_node_id));
         };
-        conn.send_msg(msg).await?;
-
-        Ok(())
+        let failed_conn_id = conn.get_conn_id();
+        match conn.send_msg_recover(msg).await {
+            Ok(()) => Ok(()),
+            Err((error, msg)) => {
+                self.invalidate_default_conn();
+                let Some(fallback) = self.select_conn_excluding(Some(failed_conn_id)).await else {
+                    return Err(error);
+                };
+                tracing::warn!(
+                    peer_id = self.peer_node_id,
+                    ?failed_conn_id,
+                    fallback_conn_id = ?fallback.get_conn_id(),
+                    "peer connection send queue closed; retrying on fallback"
+                );
+                fallback.send_msg(msg).await
+            }
+        }
     }
 
     pub async fn close_peer_conn(&self, conn_id: &PeerConnId) -> Result<(), Error> {
@@ -254,6 +352,57 @@ impl Peer {
         self.conns
             .iter()
             .any(|entry| !entry.value().is_closed() && !entry.value().is_hole_punched())
+    }
+
+    pub fn best_transport_preference_key(&self) -> Option<PreferenceKey> {
+        let priority = TransportPriority::parse(&self.global_ctx.get_flags().transport_priority)
+            .expect("transport_priority is validated while loading configuration");
+        if priority.is_empty() {
+            return None;
+        }
+        self.conns
+            .iter()
+            .filter_map(|entry| {
+                let conn = entry.value();
+                if conn.is_closed() {
+                    return None;
+                }
+                Some(self.conn_preference_key(&priority, conn))
+            })
+            .min()
+    }
+
+    pub fn has_live_transport(&self, protocol: &str) -> bool {
+        self.conns.iter().any(|entry| {
+            let conn = entry.value();
+            !conn.is_closed()
+                && conn
+                    .tunnel_type()
+                    .and_then(IpScheme::from_tunnel_type)
+                    .map(Into::<&'static str>::into)
+                    == Some(protocol)
+        })
+    }
+
+    pub fn set_transport_virtual_ips(&self, ipv4: Option<IpAddr>, ipv6: Option<IpAddr>) {
+        if *self.transport_virtual_ips.read() == (ipv4, ipv6) {
+            return;
+        }
+        *self.transport_virtual_ips.write() = (ipv4, ipv6);
+        self.invalidate_default_conn();
+    }
+
+    pub fn transport_virtual_ip_for(&self, priority: &TransportPriority) -> Option<IpAddr> {
+        let (ipv4, ipv6) = *self.transport_virtual_ips.read();
+        if ipv4.is_some_and(|ip| priority.has_virtual_ip_rule(ip)) {
+            ipv4
+        } else {
+            ipv6
+        }
+    }
+
+    pub fn invalidate_default_conn(&self) {
+        self.default_conn_id.store(PeerConnId::default());
     }
 
     pub fn get_directly_connections(&self) -> DashSet<uuid::Uuid> {
@@ -308,7 +457,85 @@ mod tests {
         tunnel::ring::create_ring_tunnel_pair,
     };
 
-    use super::Peer;
+    use super::{ConnSelectionCandidate, Peer, select_conn_index};
+    use crate::common::transport_priority::{PreferenceKey, TransportPathClass, TransportPriority};
+
+    fn selection_candidate(
+        key: PreferenceKey,
+        latency_us: u64,
+        has_latency_sample: bool,
+        id: u128,
+    ) -> ConnSelectionCandidate {
+        ConnSelectionCandidate {
+            preference: key,
+            latency_us,
+            has_latency_sample,
+            conn_id: uuid::Uuid::from_u128(id),
+        }
+    }
+
+    #[test]
+    fn transport_preference_applies_only_inside_125_percent_rtt_window() {
+        let order = ["quic", "udp", "tcp"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let tcp = PreferenceKey::new(TransportPathClass::Wan, &order, "tcp");
+        let quic = PreferenceKey::new(TransportPathClass::Wan, &order, "quic");
+
+        let within = [
+            selection_candidate(tcp, 100, true, 1),
+            selection_candidate(quic, 125, true, 2),
+        ];
+        assert_eq!(select_conn_index(&within, true), Some(1));
+
+        let outside = [
+            selection_candidate(tcp, 100, true, 1),
+            selection_candidate(quic, 126, true, 2),
+        ];
+        assert_eq!(select_conn_index(&outside, true), Some(0));
+        assert_eq!(select_conn_index(&within, false), Some(0));
+    }
+
+    #[test]
+    fn transport_preference_waits_for_rtt_and_uses_full_path_key() {
+        let order = ["quic", "tcp"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let lan_tcp = PreferenceKey::new(TransportPathClass::Lan, &order, "tcp");
+        let wan_quic = PreferenceKey::new(TransportPathClass::Wan, &order, "quic");
+        let unmeasured = [
+            selection_candidate(lan_tcp, 100, true, 1),
+            selection_candidate(wan_quic, 0, false, 2),
+        ];
+        assert_eq!(select_conn_index(&unmeasured, true), Some(0));
+
+        let measured = [
+            selection_candidate(lan_tcp, 100, true, 1),
+            selection_candidate(wan_quic, 100, true, 2),
+        ];
+        assert_eq!(select_conn_index(&measured, true), Some(0));
+    }
+
+    #[tokio::test]
+    async fn exact_ip_rule_is_recomputed_from_cached_address_pair() {
+        let (packet_send, _packet_recv) = create_packet_recv_chan();
+        let peer = Peer::new(new_peer_id(), packet_send, get_mock_global_ctx());
+        let ipv4 = "10.44.0.3".parse().unwrap();
+        let ipv6 = "fd00::3".parse().unwrap();
+        peer.set_transport_virtual_ips(Some(ipv4), Some(ipv6));
+
+        let ipv4_rule = TransportPriority::parse("10.44.0.3:quic,tcp").unwrap();
+        assert_eq!(peer.transport_virtual_ip_for(&ipv4_rule), Some(ipv4));
+
+        let ipv6_rule = TransportPriority::parse("[fd00::3]:tcp,quic").unwrap();
+        assert_eq!(peer.transport_virtual_ip_for(&ipv6_rule), Some(ipv6));
+
+        let new_ipv4 = "10.44.0.4".parse().unwrap();
+        peer.set_transport_virtual_ips(Some(new_ipv4), Some(ipv6));
+        assert_eq!(peer.transport_virtual_ip_for(&ipv4_rule), Some(ipv6));
+    }
 
     fn set_secure_mode_cfg(global_ctx: &GlobalCtx, enabled: bool) {
         if !enabled {
