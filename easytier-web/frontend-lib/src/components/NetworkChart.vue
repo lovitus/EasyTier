@@ -13,7 +13,7 @@
         </span>
       </div>
     </div>
-    <div class="h-32 min-w-0 overflow-hidden">
+    <div class="relative h-32 min-w-0 overflow-hidden">
       <canvas ref="chartCanvas" class="block h-full w-full"></canvas>
     </div>
   </div>
@@ -53,6 +53,7 @@ ChartJS.register(
 interface Props {
   uploadRate: string
   downloadRate: string
+  tick?: number
 }
 
 const props = defineProps<Props>()
@@ -237,8 +238,8 @@ function initChart() {
   })
 }
 
-// 监听props变化
-watch([() => props.uploadRate, () => props.downloadRate], () => {
+// 监听tick变化，保证图表持续滚动更新
+watch(() => props.tick, () => {
   updateData()
 })
 
