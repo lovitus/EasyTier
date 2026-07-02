@@ -465,7 +465,7 @@ onUnmounted(() => {
       </Timeline>
     </Dialog>
 
-    <Card v-if="curNetworkInst?.error_msg">
+    <Card v-if="!curNetworkInst?.running && curNetworkInst?.error_msg">
       <template #title>
         Run Network Error
       </template>
@@ -479,6 +479,9 @@ onUnmounted(() => {
     </Card>
 
     <template v-else>
+      <div v-if="curNetworkInst?.error_msg" class="p-3 mb-4 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded text-red-600 dark:text-red-400 text-sm">
+        <b>Notice / Warning:</b> {{ curNetworkInst.error_msg }}
+      </div>
       <Card>
         <template #title>
           {{ t('my_node_info') }}
@@ -564,26 +567,27 @@ onUnmounted(() => {
         </template>
       </Card>
 
-      <template v-if="proxyFailoverEntries.length">
-        <Divider />
-        <Card>
-          <template #title>
-            {{ t('proxy_failover.title') }}
-          </template>
-          <template #content>
-            <DataTable :value="proxyFailoverEntries" data-key="ui_key" column-resize-mode="fit" table-class="w-full">
-              <Column :field="(entry: any) => proxySocketAddr(entry.src)" :header="t('proxy_failover.source')" />
-              <Column :field="(entry: any) => proxySocketAddr(entry.dst)" :header="t('proxy_failover.destination')" />
-              <Column field="requested_transport" :header="t('proxy_failover.requested')" />
-              <Column field="selected_transport" :header="t('proxy_failover.selected')" />
-              <Column field="fallback_reason" :header="t('proxy_failover.reason')" />
-              <Column field="dst_peer_id" :header="t('proxy_failover.peer')" />
-              <Column :field="proxyHealth" :header="t('proxy_failover.health')" />
-              <Column field="generation" :header="t('proxy_failover.generation')" />
-            </DataTable>
-          </template>
-        </Card>
-      </template>
+      <Divider />
+      <Card>
+        <template #title>
+          {{ t('proxy_failover.title') }}
+        </template>
+        <template #content>
+          <DataTable :value="proxyFailoverEntries" data-key="ui_key" column-resize-mode="fit" table-class="w-full">
+            <template #empty>
+              <div class="text-center text-gray-400 py-4 text-sm">{{ t('proxy_failover.empty', 'No proxy failover entries active') }}</div>
+            </template>
+            <Column :field="(entry: any) => proxySocketAddr(entry.src)" :header="t('proxy_failover.source')" />
+            <Column :field="(entry: any) => proxySocketAddr(entry.dst)" :header="t('proxy_failover.destination')" />
+            <Column field="requested_transport" :header="t('proxy_failover.requested')" />
+            <Column field="selected_transport" :header="t('proxy_failover.selected')" />
+            <Column field="fallback_reason" :header="t('proxy_failover.reason')" />
+            <Column field="dst_peer_id" :header="t('proxy_failover.peer')" />
+            <Column :field="proxyHealth" :header="t('proxy_failover.health')" />
+            <Column field="generation" :header="t('proxy_failover.generation')" />
+          </DataTable>
+        </template>
+      </Card>
     </template>
 
     <div class="w-full mt-4 flex justify-center">

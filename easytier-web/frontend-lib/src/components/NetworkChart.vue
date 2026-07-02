@@ -136,21 +136,26 @@ function updateData() {
   }
 
   // 更新图表
-  if (!chart) {
-    initChart()
+  if (!chart || chart.width === 0 || chart.height === 0) {
+    if (chart && chartCanvas.value && chartCanvas.value.clientWidth > 0) {
+      chart.destroy()
+      chart = null
+    }
+    if (!chart) {
+      initChart()
+    }
   }
   if (chart) {
     chart.data.labels = timeLabels
     chart.data.datasets[0].data = uploadHistory
     chart.data.datasets[1].data = downloadHistory
-    chart.resize()
     chart.update('none')
   }
 }
 
 // 初始化图表
 function initChart() {
-  if (!chartCanvas.value) return
+  if (!chartCanvas.value || chartCanvas.value.clientWidth === 0 || chartCanvas.value.clientHeight === 0) return
 
   const ctx = chartCanvas.value.getContext('2d')
   if (!ctx) return
@@ -275,7 +280,13 @@ onMounted(async () => {
 
   if (chartCanvas.value?.parentElement) {
     resizeObserver = new ResizeObserver(() => {
-      chart?.resize()
+      if (!chart || chart.width === 0 || chart.height === 0) {
+        if (chart) chart.destroy()
+        chart = null
+        initChart()
+      } else {
+        chart.resize()
+      }
     })
     resizeObserver.observe(chartCanvas.value.parentElement)
   }
