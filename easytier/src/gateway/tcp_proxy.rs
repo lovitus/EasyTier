@@ -59,6 +59,9 @@ pub(crate) trait NatDstConnector: Send + Sync + Clone + 'static {
         dst: SocketAddr,
         claimed: Option<ClaimedNatDstStream>,
     ) -> anyhow::Result<Self::DstStream>;
+    async fn shutdown(&self, stream: &mut Self::DstStream) -> std::io::Result<()> {
+        stream.shutdown().await
+    }
     fn claim_deferred_stream(
         &self,
         _src: SocketAddr,
@@ -734,13 +737,12 @@ impl<C: NatDstConnector> TcpProxy<C> {
 
                 let entry_clone = entry.clone();
                 drop(entry);
-                syn_map.remove_if(&socket_addr, |_, entry| entry.id == entry_clone.id);
-
                 entry_clone.state.store(NatDstEntryState::ConnectingDst);
 
                 let _ = addr_conn_map.insert(entry_clone.src, entry_clone.clone());
                 let old_nat_val = conn_map.insert(entry_clone.id, entry_clone.clone());
                 assert!(old_nat_val.is_none());
+                syn_map.remove_if(&socket_addr, |_, entry| entry.id == entry_clone.id);
 
                 let Some(tasks) = tasks.upgrade() else {
                     tracing::error!("tcp proxy tasks is dropped, exit accept loop");
@@ -845,6 +847,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
         nat_entry.state.store(NatDstEntryState::Connected);
 
         Self::handle_nat_connection(
+            connector,
             src_tcp_stream,
             dst_tcp_stream,
             conn_map,
@@ -855,6 +858,7 @@ impl<C: NatDstConnector> TcpProxy<C> {
     }
 
     async fn handle_nat_connection(
+        connector: C,
         mut src_tcp_stream: ProxyTcpStream,
         mut dst_tcp_stream: C::DstStream,
         conn_map: ConnSockMap,
@@ -871,7 +875,11 @@ impl<C: NatDstConnector> TcpProxy<C> {
             tracing::info!(nat_entry = ?nat_entry_clone, ret = ?ret, "src tcp stream shutdown");
 
             nat_entry_clone.state.store(NatDstEntryState::ClosingDst);
-            let ret = timeout(Duration::from_secs(10), dst_tcp_stream.shutdown()).await;
+            let ret = timeout(
+                Duration::from_secs(10),
+                connector.shutdown(&mut dst_tcp_stream),
+            )
+            .await;
             tracing::info!(nat_entry = ?nat_entry_clone, ret = ?ret, "dst tcp stream shutdown");
 
             drop(src_tcp_stream);

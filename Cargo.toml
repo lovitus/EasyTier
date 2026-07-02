@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "easytier",
+    "third_party/kcp-sys",
     "easytier-gui/src-tauri",
     "easytier-web",
     "easytier-contrib/easytier-ffi",

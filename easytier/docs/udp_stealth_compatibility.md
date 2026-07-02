@@ -174,6 +174,15 @@ listener 前即被丢弃，表现为 ICMP 正常但 TCP 超时。
 当前实现选择网段中的确定性可用单播 host，并处理 `/31`、`/32` 边界。该修复不改变
 QUIC/KCP 封装协议，只修正它们共用的 TCP capture 路径。
 
+KCP 的连接生命周期使用仓库内 `third_party/kcp-sys`。关闭时先排空发送队列；收到
+peer FIN 后先排空 KCP 已接收但尚未交给 stream 的数据，再返回 EOF。FIN 使用
+`LastAck` 状态重传并通过 FIN+ACK 确认。若输出链路消失或对端始终不响应，5 秒后发送
+RST 并同时删除 connection/state map；live state 最多 4096 项。该机制替代 KCP stream
+关闭阶段的固定 sleep，保证正常关闭不丢尾部数据，异常关闭也不会永久保留坏连接。
+
+本地 TCP proxy 从 pending SYN 转为 active connection 时，先发布 active map，再删除
+pending map，避免首个 ACK/Data 在两个表之间的空窗期绕过本地 proxy。
+
 Linux 三节点测试已分别验证：
 
 - QUIC proxy 的 proxy CIDR、虚拟 IP、TCP 和 UDP 数据路径。
@@ -182,6 +191,10 @@ Linux 三节点测试已分别验证：
   `DESTINATION_FAILED` 不降低 transport health。
 - QUIC/KCP prepare 被远端 ACL 拒绝时均回退 Native，且 `POLICY_DENIED` 不降低
   transport health。
+- KCP 双节点连续 3000 次短 TCP 连接无数据错误、RST 或 forced close，结束后两端
+  proxy 表为空；首个 FIN 丢失、接收 channel 堵塞和输出链路消失由确定性测试覆盖。
+- 新 source 到旧 target 连续 500 次短连接通过。旧 source 仍保留旧版本自身的 TCP
+  capture 故障，新 target 无法在远端修复该本地行为。
 
 Deferred-SYN selector 在改写前冻结目标 peer、原始 SYN 和发送 context，按
 `QUIC -> KCP -> Native` prepare。prepared stream 绑定 flow generation 和目标 peer；

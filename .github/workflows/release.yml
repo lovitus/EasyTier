@@ -3,22 +3,10 @@ name: EasyTier Release
 on:
   workflow_dispatch:
     inputs:
-      core_run_id:
-        description: 'The run id of EasyTier-Core Action in EasyTier repo'
-        type: number
-        required: true
-      gui_run_id:
-        description: 'The run id of EasyTier-GUI Action in EasyTier repo'
-        type: number
-        required: true
-      mobile_run_id:
-        description: 'The run id of EasyTier-Mobile Action in EasyTier repo'
-        type: number
-        required: true
       version:
         description: 'Version for this release'
         type: string
-        default: 'v2.6.4'
+        default: 'v2.6.5'
         required: true
       make_latest:
         description: 'Mark this release as latest'
@@ -33,15 +21,99 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      -
-        name: Checkout
+      - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Validate release version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=Invalid release version::Expected vMAJOR.MINOR.PATCH, got ${VERSION}"
+            exit 1
+          fi
+
+          cargo_version=$(
+            cargo metadata --format-version 1 --no-deps \
+              | jq -r '.packages[] | select(.name == "easytier") | .version'
+          )
+          if [[ "${VERSION}" != "v${cargo_version}" ]]; then
+            echo "::error title=Version mismatch::Workflow input ${VERSION} does not match easytier Cargo version v${cargo_version}"
+            exit 1
+          fi
+
+          if gh api "repos/${REPO}/git/ref/tags/${VERSION}" --silent 2>/dev/null; then
+            echo "::error title=Tag already exists::Refusing to overwrite ${VERSION}"
+            exit 1
+          fi
+
+      - name: Resolve workflow run IDs
+        id: resolve-runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          resolve_run_id() {
+            local workflow_file="$1"
+            local run_id
+            local api_url="https://api.github.com/repos/${REPO}/actions/workflows/${workflow_file}/runs?head_sha=${SHA}&status=completed&per_page=20"
+
+            run_id=$(
+              curl -fsSL \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "${api_url}" \
+                | jq -r '
+                  [
+                    .workflow_runs[]
+                    | select(.conclusion == "success" and (.event == "push" or .event == "workflow_dispatch"))
+                  ]
+                  | sort_by(.run_number)
+                  | last
+                  | .id // empty
+                '
+            )
+
+            if [[ -z "${run_id}" ]]; then
+              echo "::error title=Missing successful workflow run::No successful ${workflow_file} run was found for commit ${SHA}. Push the target commit to develop/main/releases/**, wait for required workflows to finish successfully, then re-run this release workflow on the same ref." >&2
+              echo "Expected workflow file: ${workflow_file}" >&2
+              echo "Repository: ${REPO}" >&2
+              echo "Commit: ${SHA}" >&2
+              echo "Workflow page: https://github.com/${REPO}/actions/workflows/${workflow_file}" >&2
+              exit 1
+            fi
+
+            echo "${run_id}"
+          }
+
+          {
+            echo "core_run_id=$(resolve_run_id core.yml)"
+            echo "gui_run_id=$(resolve_run_id gui.yml)"
+            echo "mobile_run_id=$(resolve_run_id mobile.yml)"
+            echo "test_run_id=$(resolve_run_id test.yml)"
+            echo "ohos_run_id=$(resolve_run_id ohos.yml)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Show resolved workflow run IDs
+        run: |
+          echo "core.yml   -> ${{ steps.resolve-runs.outputs.core_run_id }}"
+          echo "gui.yml    -> ${{ steps.resolve-runs.outputs.gui_run_id }}"
+          echo "mobile.yml -> ${{ steps.resolve-runs.outputs.mobile_run_id }}"
+          echo "test.yml   -> ${{ steps.resolve-runs.outputs.test_run_id }}"
+          echo "ohos.yml   -> ${{ steps.resolve-runs.outputs.ohos_run_id }}"
 
       - name: Download Core Artifact
         uses: dawidd6/action-download-artifact@v11
         with:
           github_token: ${{secrets.GITHUB_TOKEN}}
-          run_id: ${{ inputs.core_run_id }}
+          run_id: ${{ steps.resolve-runs.outputs.core_run_id }}
           repo: ${{ github.repository }}
           path: release_assets
 
@@ -49,7 +121,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v11
         with:
           github_token: ${{secrets.GITHUB_TOKEN}}
-          run_id: ${{ inputs.gui_run_id }}
+          run_id: ${{ steps.resolve-runs.outputs.gui_run_id }}
           repo: ${{ github.repository }}
           path: release_assets_nozip
 
@@ -57,7 +129,15 @@ jobs:
         uses: dawidd6/action-download-artifact@v11
         with:
           github_token: ${{secrets.GITHUB_TOKEN}}
-          run_id: ${{ inputs.mobile_run_id }}
+          run_id: ${{ steps.resolve-runs.outputs.mobile_run_id }}
+          repo: ${{ github.repository }}
+          path: release_assets_nozip
+
+      - name: Download OHOS Artifact
+        uses: dawidd6/action-download-artifact@v11
+        with:
+          github_token: ${{secrets.GITHUB_TOKEN}}
+          run_id: ${{ steps.resolve-runs.outputs.ohos_run_id }}
           repo: ${{ github.repository }}
           path: release_assets_nozip
 
@@ -65,22 +145,31 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          mkdir zipped_assets
+          set -euo pipefail
+          mkdir -p zipped_assets
 
-          find release_assets_nozip -type f -exec mv {} zipped_assets \;
-          ls -l -R ./zipped_assets
+          while IFS= read -r -d '' file; do
+            destination="zipped_assets/$(basename "${file}")"
+            if [[ -e "${destination}" ]]; then
+              echo "::error title=Duplicate release asset::${destination}"
+              exit 1
+            fi
+            mv -- "${file}" "${destination}"
+          done < <(find release_assets_nozip -type f -print0)
+          ls -lR ./zipped_assets
 
           cd release_assets
-          ls -l -R ./
+          ls -lR ./
           chmod -R 755 .
-          for x in `ls`; do
-            if [ "$x" = "Easytier-Magisk" ]; then
+          for path in ./*; do
+            x=$(basename "${path}")
+            if [[ "${x}" == "Easytier-Magisk" ]]; then
               # for Easytier-Magisk, make sure files are in the root of the zip
-              cd $x;
-              zip -r ../../zipped_assets/$x-${VERSION}.zip .;
-              cd ..;
+              pushd "${path}"
+              zip -r "../../zipped_assets/${x}-${VERSION}.zip" .
+              popd
             else
-              zip -r ../zipped_assets/$x-${VERSION}.zip $x;
+              zip -r "../zipped_assets/${x}-${VERSION}.zip" "${path}"
             fi
           done
 
@@ -88,7 +177,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ inputs.version }}
-          draft: true
+          draft: false
+          prerelease: false
+          make_latest: ${{ inputs.make_latest }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             ./zipped_assets/*
           token: ${{ secrets.GITHUB_TOKEN }}

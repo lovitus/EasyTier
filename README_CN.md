@@ -79,6 +79,21 @@ cargo install --git https://github.com/EasyTier/EasyTier.git easytier
 
 [一键注册系统服务](https://easytier.cn/guide/network/oneclick-install-as-service.html)（系统启动时自动后台运行）
 
+### GitHub Actions 构建顺序
+
+如果你使用 public fork 做构建和发布，当前 GitHub Actions 流程有明确的顺序依赖：
+
+1. 将目标提交 push 到你 fork 的 `develop`、`main` 或 `releases/**`。
+2. 等待同一提交上的 `EasyTier Core`、`EasyTier GUI`、`EasyTier Mobile`、`EasyTier Test`、`EasyTier OHOS` 全部成功。
+3. 在同一个 ref 上手动运行 `EasyTier Release`，填写发布版本号。
+
+说明：
+
+- `EasyTier Release` 会根据所选 ref 对应的 commit SHA 自动解析所需 workflow run ID，校验发布版本与 Cargo 元数据一致，并拒绝覆盖已有 tag。
+- 如果 `EasyTier Release` 提示缺少成功的 workflow run，说明当前 ref 对应提交尚未完成全部必要构建和测试，需要先补齐再重新触发 release。
+- OHOS 产物会一并放入 GitHub Release；所有必要 workflow 成功后才会正式发布。
+- 这个 fork 流程里已经移除了 Docker workflow。
+
 ### Stealth 与传输策略
 
 Stealth 默认关闭，可保护 `udp`、`tcp`、`faketcp`、`quic`、`wg`、`ws` 和 `wss`，

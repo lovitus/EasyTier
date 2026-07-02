@@ -4,7 +4,7 @@ use crate::common::global_ctx::{ArcGlobalCtx, GlobalCtx};
 use crate::gateway::CidrSet;
 use crate::gateway::proxy_failover::{
     BoxProxyStream, FlowKey, PROXY_PREPARE_ACK_VERSION, PROXY_TARGET_CONNECT_TIMEOUT,
-    PreparedProxyStore, PreparedProxyStream, ProxyPrepareError, ProxyPrepareTransport,
+    PreparedProxyStore, PreparedProxyStream, ProxyPrepareError, ProxyPrepareTransport, ProxyStream,
     ProxyTransport, await_proxy_prepare_ready, requested_proxy_prepare_version,
     write_proxy_prepare_ack,
 };
@@ -48,7 +48,7 @@ use std::ptr::copy_nonoverlapping;
 use std::sync::{Arc, Weak};
 use std::task::Poll;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, Join, join};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, Join, join};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task::JoinSet;
@@ -282,6 +282,13 @@ impl From<(SendStream, RecvStream)> for QuicStream {
         join(value.1, value.0).into()
     }
 }
+
+#[async_trait::async_trait]
+impl ProxyStream for QuicStreamInner {
+    async fn shutdown_gracefully(&mut self) -> std::io::Result<()> {
+        self.shutdown().await
+    }
+}
 //endregion
 
 #[derive(Debug, Clone)]
@@ -438,6 +445,10 @@ impl NatDstConnector for NatDstQuicConnector {
             .await
             .ok_or_else(|| anyhow!("no peer found for nat dst: {}", nat_dst))?;
         self.connect_to_peer(src, nat_dst, dst_peer).await
+    }
+
+    async fn shutdown(&self, stream: &mut Self::DstStream) -> std::io::Result<()> {
+        stream.shutdown_gracefully().await
     }
 
     fn claim_deferred_stream(

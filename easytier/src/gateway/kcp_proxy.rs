@@ -22,7 +22,7 @@ use super::{
     proxy_failover::{
         BoxProxyStream, FlowKey, PROXY_PREPARE_ACK_VERSION, PROXY_TARGET_CONNECT_TIMEOUT,
         PreparedProxyStore, PreparedProxyStream, ProxyPrepareError, ProxyPrepareTransport,
-        ProxyTransport, await_proxy_prepare_ready, requested_proxy_prepare_version,
+        ProxyStream, ProxyTransport, await_proxy_prepare_ready, requested_proxy_prepare_version,
         write_proxy_prepare_ack,
     },
     tcp_proxy::{ClaimedNatDstStream, NatDstConnector, NatDstTcpConnector, TcpProxy},
@@ -48,6 +48,8 @@ use crate::{
     },
     tunnel::packet_def::{PacketType, PeerManagerHeader, ZCPacket},
 };
+
+const KCP_PROXY_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(6);
 
 fn create_kcp_endpoint() -> KcpEndpoint {
     let mut kcp_endpoint = KcpEndpoint::new();
@@ -166,6 +168,13 @@ impl NatDstKcpConnector {
 }
 
 #[async_trait::async_trait]
+impl ProxyStream for KcpStream {
+    async fn shutdown_gracefully(&mut self) -> std::io::Result<()> {
+        KcpStream::shutdown_gracefully(self, KCP_PROXY_SHUTDOWN_TIMEOUT).await
+    }
+}
+
+#[async_trait::async_trait]
 impl NatDstConnector for NatDstKcpConnector {
     type DstStream = BoxProxyStream;
 
@@ -201,6 +210,10 @@ impl NatDstConnector for NatDstKcpConnector {
         tracing::trace!(?nat_dst, ?dst_peer, "kcp nat");
 
         self.connect_to_peer(src, nat_dst, dst_peer).await
+    }
+
+    async fn shutdown(&self, stream: &mut Self::DstStream) -> std::io::Result<()> {
+        stream.shutdown_gracefully().await
     }
 
     fn claim_deferred_stream(
@@ -495,7 +508,7 @@ impl KcpProxyDst {
         let _g = global_ctx.net_ns.guard();
         let connector = NatDstTcpConnector {};
         let connect = connector.connect("0.0.0.0:0".parse().unwrap(), dst_socket, None);
-        let ret = if ack_requested {
+        let mut ret = if ack_requested {
             match tokio::time::timeout(PROXY_TARGET_CONNECT_TIMEOUT, connect).await {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
@@ -526,11 +539,25 @@ impl KcpProxyDst {
             e.state = TcpProxyEntryState::Connected.into();
         }
 
-        acl_handler
-            .copy_bidirection_with_acl(kcp_stream, ret)
-            .await?;
+        let copy_result = acl_handler
+            .copy_bidirection_with_acl(&mut kcp_stream, &mut ret)
+            .await;
+        let close_result = kcp_stream
+            .shutdown_gracefully(KCP_PROXY_SHUTDOWN_TIMEOUT)
+            .await;
 
-        Ok(())
+        if let Err(error) = close_result {
+            tracing::warn!(
+                conn_id = ?kcp_stream.conn_id(),
+                ?error,
+                "KCP proxy stream required forced shutdown"
+            );
+            if copy_result.is_ok() {
+                return Err(error.into());
+            }
+        }
+
+        copy_result
     }
 
     async fn run_accept_task(&mut self) {

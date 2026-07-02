@@ -2272,7 +2272,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "easytier"
-version = "2.6.4"
+version = "2.6.5"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "easytier-gui"
-version = "2.6.4"
+version = "2.6.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2533,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "easytier-web"
-version = "2.6.4"
+version = "2.6.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4766,7 +4766,6 @@ dependencies = [
 [[package]]
 name = "kcp-sys"
 version = "0.1.0"
-source = "git+https://github.com/EasyTier/kcp-sys?rev=d7427c22d764deb1860a7d37acc446ed5033464c#d7427c22d764deb1860a7d37acc446ed5033464c"
 dependencies = [
  "anyhow",
  "auto_impl",

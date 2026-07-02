@@ -61,9 +61,19 @@ pub(crate) fn requested_proxy_prepare_version(remote_version: u32) -> u32 {
     }
 }
 
-pub trait ProxyStream: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
-impl<T> ProxyStream for T where T: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
+#[async_trait]
+pub trait ProxyStream: AsyncRead + AsyncWrite + Unpin + Send + Sync {
+    async fn shutdown_gracefully(&mut self) -> std::io::Result<()>;
+}
 pub type BoxProxyStream = Box<dyn ProxyStream>;
+
+#[cfg(test)]
+#[async_trait]
+impl ProxyStream for tokio::io::DuplexStream {
+    async fn shutdown_gracefully(&mut self) -> std::io::Result<()> {
+        self.shutdown().await
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyPrepareFailureClass {

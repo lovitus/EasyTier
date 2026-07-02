@@ -79,6 +79,21 @@ Additional steps:
 
 [One-Click Register Service](https://easytier.cn/en/guide/network/oneclick-install-as-service.html) (Automatically start when the system boots and run in the background)
 
+### GitHub Actions Build Order
+
+If you use a public fork for builds and releases, the current GitHub Actions flow has an explicit order dependency:
+
+1. Push the target commit to `develop`, `main`, or `releases/**` in your fork.
+2. Wait for `EasyTier Core`, `EasyTier GUI`, `EasyTier Mobile`, `EasyTier Test`, and `EasyTier OHOS` to finish successfully for the same commit.
+3. Run `EasyTier Release` manually on the same ref and fill in the release version.
+
+Notes:
+
+- `EasyTier Release` resolves the required workflow run IDs automatically from the selected ref's commit SHA, validates the requested version against Cargo metadata, and refuses to overwrite an existing tag.
+- If `EasyTier Release` reports that a successful workflow run is missing, the selected ref does not yet have all required builds and tests for that commit. Re-run those workflows first, then trigger release again.
+- OHOS artifacts are included in the GitHub Release. The release is published only after all required workflows succeed.
+- The Docker workflow has been removed from this fork-specific flow.
+
 ### Stealth and Transport Policy
 
 Stealth is opt-in and can protect `udp`, `tcp`, `faketcp`, `quic`, `wg`, `ws`, and `wss`.
