@@ -2,7 +2,7 @@
 import { useTimeAgo } from '@vueuse/core'
 import { NetworkInstance, type TunnelInfo, type NodeInfo, type PeerRoutePair } from '../types/network'
 import { useI18n } from 'vue-i18n';
-import { computed, ref, watch } from 'vue';
+import { computed, ref, watch, onUnmounted } from 'vue';
 import { ipv4InetToString, ipv4ToString, ipv6ToString } from '../modules/utils';
 import { latencyMs, lossRate, numericValue, peerConns, stableTunnelProtocols } from '../modules/statusDisplay';
 import { Badge, DataTable, Column, Tag, Chip, Button, Dialog, ScrollPanel, Timeline, Divider, Card, } from 'primevue';
@@ -365,6 +365,24 @@ let prevRateInstanceId: string | undefined
 const showNodeDetails = ref(false)
 const chartTick = ref(0)
 const showDebugModal = ref(false)
+let debugAutoCloseTimer: any = null
+
+watch(showDebugModal, (val) => {
+  if (debugAutoCloseTimer) {
+    clearTimeout(debugAutoCloseTimer)
+    debugAutoCloseTimer = null
+  }
+  if (val) {
+    debugAutoCloseTimer = setTimeout(() => {
+      showDebugModal.value = false
+    }, 10 * 60 * 1000)
+  }
+})
+
+const debugRawJson = computed(() => {
+  if (!showDebugModal.value) return ''
+  return JSON.stringify(props.curNetworkInst, null, 2)
+})
 
 watch(
   () => props.curNetworkInst?.detail,
@@ -418,9 +436,15 @@ function showEventLogs() {
 
   const events = detail.events ?? detail.eventLogs ?? []
   dialogContent.value = events.map((event: string) => JSON.parse(event))
-  dialogHeader.value = 'event_log'
   dialogVisible.value = true
 }
+
+onUnmounted(() => {
+  if (debugAutoCloseTimer) {
+    clearTimeout(debugAutoCloseTimer)
+    debugAutoCloseTimer = null
+  }
+})
 </script>
 
 <template>
@@ -566,8 +590,22 @@ function showEventLogs() {
       <Button label="🐞 Debug Status & API Inspector" severity="help" size="small" outlined @click="showDebugModal = true" />
     </div>
 
-    <Dialog v-model:visible="showDebugModal" modal header="🐞 EasyTier GUI Debug Inspector" :style="{ width: '85vw' }">
+    <Dialog v-model:visible="showDebugModal" modal header="🐞 EasyTier GUI Debug Inspector (10-Min Auto Close)" :style="{ width: '85vw' }">
       <div class="flex flex-col gap-3 text-xs">
+        <div class="p-2 bg-yellow-50 dark:bg-yellow-950/40 border border-yellow-200 dark:border-yellow-800 rounded text-yellow-800 dark:text-yellow-300">
+          ⏳ <b>Performance Protection:</b> This panel only computes raw JSON while open and will automatically close after 10 minutes to prevent memory or reactivity overhead.
+        </div>
+        <div class="p-3 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded">
+          <div class="font-bold text-blue-800 dark:text-blue-300 mb-1">🤖 For AI / Terminal Real-Time Inspection (给 AI / 命令行实时排查专区)</div>
+          <div class="text-blue-700 dark:text-blue-400 mb-2">
+            EasyTier starts a local RPC portal at <code class="bg-blue-100 dark:bg-blue-900 px-1 rounded">127.0.0.1:15888</code> (or 15999 in service mode). AI agents or terminal users can run the following commands to inspect live status directly via port without GUI JSON parsing:
+          </div>
+          <div class="font-mono bg-gray-900 text-yellow-300 p-2 rounded text-2xs space-y-1 select-all">
+            <div>easytier-cli --rpc-portal 127.0.0.1:15888 --output json node info</div>
+            <div>easytier-cli --rpc-portal 127.0.0.1:15888 --output json peer</div>
+            <div>easytier-cli --rpc-portal 127.0.0.1:15888 --output json proxy list</div>
+          </div>
+        </div>
         <div class="font-bold">Summary Metrics</div>
         <div class="grid grid-cols-2 gap-2 bg-surface-100 dark:bg-surface-800 p-3 rounded">
           <div><b>Running:</b> {{ curNetworkInst?.running }}</div>
@@ -578,7 +616,7 @@ function showEventLogs() {
           <div><b>Failover Count:</b> {{ proxyFailoverEntries?.length || 0 }}</div>
         </div>
         <div class="font-bold mt-2">Raw curNetworkInst JSON</div>
-        <pre class="bg-gray-900 text-green-400 p-3 rounded overflow-auto max-h-96 select-all">{{ JSON.stringify(curNetworkInst, null, 2) }}</pre>
+        <pre class="bg-gray-900 text-green-400 p-3 rounded overflow-auto max-h-96 select-all">{{ debugRawJson }}</pre>
       </div>
     </Dialog>
   </div>
