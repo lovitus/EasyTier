@@ -14,10 +14,20 @@ const props = defineProps<{
 
 const { t } = useI18n()
 
+function detailValue<T = any>(snakeKey: string, camelKey: string): T | undefined {
+  const detail = props.curNetworkInst?.detail as any
+  return detail?.[snakeKey] ?? detail?.[camelKey]
+}
+
+function detailArray<T = any>(snakeKey: string, camelKey: string): T[] {
+  const value = detailValue<T[] | undefined>(snakeKey, camelKey)
+  return Array.isArray(value) ? value : []
+}
+
 const peerRouteInfos = computed(() => {
   if (props.curNetworkInst) {
-    const my_node_info = props.curNetworkInst.detail?.my_node_info
-    const peers = [...(props.curNetworkInst.detail?.peer_route_pairs || [])]
+    const my_node_info = detailValue<any>('my_node_info', 'myNodeInfo')
+    const peers = [...detailArray<PeerRoutePair>('peer_route_pairs', 'peerRoutePairs')]
       .sort((a, b) => {
         const ipDiff = ipFormat(a).localeCompare(ipFormat(b), undefined, { numeric: true })
         if (ipDiff !== 0)
@@ -146,7 +156,7 @@ const myNodeInfo = computed(() => {
   if (!props.curNetworkInst)
     return {} as NodeInfo
 
-  return props.curNetworkInst.detail?.my_node_info
+  return detailValue<NodeInfo>('my_node_info', 'myNodeInfo')
 })
 
 interface Chip {
@@ -187,7 +197,7 @@ const myNodeInfoChips = computed(() => {
     return []
 
   const chips: Array<Chip> = []
-  const my_node_info = props.curNetworkInst.detail?.my_node_info
+  const my_node_info = detailValue<any>('my_node_info', 'myNodeInfo')
   if (!my_node_info)
     return chips
 
@@ -198,7 +208,7 @@ const myNodeInfoChips = computed(() => {
   } as Chip)
 
   // TUN Device Name
-  const dev_name = props.curNetworkInst.detail?.dev_name
+  const dev_name = detailValue<string>('dev_name', 'devName')
   if (dev_name) {
     chips.push({
       label: `TUN Device Name: ${dev_name}`,
@@ -340,7 +350,7 @@ function entryBool(entry: any, snakeKey: string, camelKey: string): boolean {
 }
 
 const proxyFailoverEntries = computed(() => {
-  return (props.curNetworkInst?.detail?.proxy_failover_entries ?? [])
+  return detailArray<any>('proxy_failover_entries', 'proxyFailoverEntries')
     .map((entry: any) => {
       const generation = entryNumber(entry, 'generation', 'generation')
       const src = proxySocketAddr(entry.src)
@@ -439,11 +449,12 @@ function showVpnPortalConfig() {
 }
 
 function showEventLogs() {
-  const detail = props.curNetworkInst?.detail
+  const detail = props.curNetworkInst?.detail as any
   if (!detail)
     return
 
-  dialogContent.value = detail.events?.map((event: string) => JSON.parse(event)) ?? []
+  const events = detail.events ?? detail.eventLogs ?? []
+  dialogContent.value = events.map((event: string) => JSON.parse(event))
   dialogHeader.value = 'event_log'
   dialogVisible.value = true
 }

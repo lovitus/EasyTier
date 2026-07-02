@@ -317,18 +317,12 @@ const loadCurrentNetworkInfo = async (preserveScroll = false) => {
     const scrollElement = networkContent.value;
     const scrollTop = preserveScroll ? scrollElement?.scrollTop : undefined;
 
-    if (curNetworkInfo.value?.instance_id === requestedInstanceId) {
-        curNetworkInfo.value.running = network_info?.running ?? false;
-        curNetworkInfo.value.error_msg = network_info?.error_msg ?? '';
-        curNetworkInfo.value.detail = network_info;
-    } else {
-        curNetworkInfo.value = {
-            instance_id: requestedInstanceId,
-            running: network_info?.running ?? false,
-            error_msg: network_info?.error_msg ?? '',
-            detail: network_info,
-        } as NetworkTypes.NetworkInstance;
-    }
+    curNetworkInfo.value = {
+        instance_id: requestedInstanceId,
+        running: network_info?.running ?? false,
+        error_msg: network_info?.error_msg ?? '',
+        detail: network_info,
+    } as NetworkTypes.NetworkInstance;
 
     if (scrollElement && scrollTop !== undefined) {
         await nextTick();

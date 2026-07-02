@@ -163,4 +163,90 @@ describe('Status mixed-version rendering', () => {
     expect(wrapper.text()).toContain('legacy-peer')
     expect(wrapper.find('[data-stub="network-chart"]').exists()).toBe(true)
   })
+
+  it('renders chart and proxy failover entries from camelCase detail fields', () => {
+    const wrapper = mount(Status, {
+      props: {
+        curNetworkInst: {
+          instance_id: 'inst-2',
+          running: true,
+          error_msg: '',
+          detail: {
+            devName: 'utun10',
+            events: [],
+            myNodeInfo: {
+              virtual_ipv4: { address: { addr: 0 }, network_length: 24 },
+              hostname: 'local-camel',
+              version: '2.6.7',
+              peer_id: 7,
+              listeners: [],
+              ips: {
+                public_ipv4: { addr: 0 },
+                interface_ipv4s: [],
+                public_ipv6: { part1: 0, part2: 0, part3: 0, part4: 0 },
+                interface_ipv6s: [],
+                listeners: [],
+              },
+              stun_info: {
+                udp_nat_type: 0,
+                tcp_nat_type: 0,
+                last_update_time: 0,
+              },
+            },
+            peerRoutePairs: [
+              {
+                route: {
+                  cost: 1,
+                  hostname: 'camel-peer',
+                  ipv4_addr: { address: { addr: 0 }, network_length: 24 },
+                  next_hop_peer_id: 8,
+                  peer_id: 8,
+                  proxy_cidrs: [],
+                  inst_id: 'inst-2',
+                  version: '2.6.7',
+                },
+                peer: {
+                  peer_id: 8,
+                  conns: [],
+                },
+              },
+            ],
+            proxyFailoverEntries: [
+              {
+                src: {
+                  ip: { oneofKind: 'ipv4', ipv4: { addr: 0 } },
+                  port: 1000,
+                },
+                dst: {
+                  ip: { oneofKind: 'ipv4', ipv4: { addr: 0 } },
+                  port: 2000,
+                },
+                requestedTransport: 'quic,kcp,native',
+                selectedTransport: 'native',
+                fallbackReason: 'quic_policy_denied,kcp_policy_denied',
+                dstPeerId: 1981135380,
+                generation: 3,
+              },
+            ],
+            peers: [],
+            routes: [],
+            running: true,
+          },
+        },
+      },
+      global: {
+        stubs: {
+          HumanEvent: true,
+        },
+        directives: {
+          tooltip: () => {},
+        },
+      },
+    })
+
+    expect(wrapper.find('[data-stub="network-chart"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('camel-peer')
+    expect(wrapper.text()).toContain('quic,kcp,native')
+    expect(wrapper.text()).toContain('quic_policy_denied,kcp_policy_denied')
+  })
 })
