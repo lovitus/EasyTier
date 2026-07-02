@@ -136,10 +136,14 @@ function updateData() {
   }
 
   // 更新图表
+  if (!chart) {
+    initChart()
+  }
   if (chart) {
     chart.data.labels = timeLabels
     chart.data.datasets[0].data = uploadHistory
     chart.data.datasets[1].data = downloadHistory
+    chart.resize()
     chart.update('none')
   }
 }
@@ -238,8 +242,14 @@ function initChart() {
   })
 }
 
-// 监听tick变化，保证图表持续滚动更新
+let resizeObserver: ResizeObserver | null = null
+
+// 监听tick与参数变化，保证图表持续更新
 watch(() => props.tick, () => {
+  updateData()
+})
+
+watch([() => props.uploadRate, () => props.downloadRate], () => {
   updateData()
 })
 
@@ -262,9 +272,20 @@ onMounted(async () => {
   await nextTick()
   initChart()
   updateData()
+
+  if (chartCanvas.value?.parentElement) {
+    resizeObserver = new ResizeObserver(() => {
+      chart?.resize()
+    })
+    resizeObserver.observe(chartCanvas.value.parentElement)
+  }
 })
 
 onUnmounted(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
   if (chart) {
     chart.destroy()
   }

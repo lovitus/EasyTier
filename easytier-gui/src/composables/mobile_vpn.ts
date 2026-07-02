@@ -215,14 +215,14 @@ export async function onNetworkInstanceChange(instanceId: string) {
     console.log('vpn service skipped because no_tun is enabled', instanceId)
     return
   }
-  const curNetworkInfo = (await collectNetworkInfo(instanceId)).info.map[instanceId]
+  const curNetworkInfo = (await collectNetworkInfo(instanceId)).info?.map?.[instanceId]
   if (!curNetworkInfo || curNetworkInfo?.error_msg?.length) {
     console.warn('vpn service skipped because network info is unavailable', instanceId, curNetworkInfo?.error_msg)
     await doStopVpn()
     return
   }
 
-  const virtual_ip = Utils.ipv4ToString(curNetworkInfo?.my_node_info?.virtual_ipv4.address)
+  const virtual_ip = Utils.ipv4ToString(curNetworkInfo?.my_node_info?.virtual_ipv4?.address)
 
   if (config.dhcp && (!virtual_ip || !virtual_ip.length)) {
     console.log('DHCP enabled but no IP yet, will retry in', DHCP_POLLING_INTERVAL, 'ms')

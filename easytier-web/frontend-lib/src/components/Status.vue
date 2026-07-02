@@ -364,6 +364,7 @@ let prevRateInstanceId: string | undefined
 // 控制节点详细信息chips的显示/隐藏
 const showNodeDetails = ref(false)
 const chartTick = ref(0)
+const showDebugModal = ref(false)
 
 watch(
   () => props.curNetworkInst?.detail,
@@ -560,6 +561,26 @@ function showEventLogs() {
         </Card>
       </template>
     </template>
+
+    <div class="w-full mt-4 flex justify-center">
+      <Button label="🐞 Debug Status & API Inspector" severity="help" size="small" outlined @click="showDebugModal = true" />
+    </div>
+
+    <Dialog v-model:visible="showDebugModal" modal header="🐞 EasyTier GUI Debug Inspector" :style="{ width: '85vw' }">
+      <div class="flex flex-col gap-3 text-xs">
+        <div class="font-bold">Summary Metrics</div>
+        <div class="grid grid-cols-2 gap-2 bg-surface-100 dark:bg-surface-800 p-3 rounded">
+          <div><b>Running:</b> {{ curNetworkInst?.running }}</div>
+          <div><b>Error Msg:</b> {{ curNetworkInst?.error_msg || 'None' }}</div>
+          <div><b>TX Rate:</b> {{ txRate }} | <b>RX Rate:</b> {{ rxRate }}</div>
+          <div><b>Chart Tick:</b> {{ chartTick }}</div>
+          <div><b>Peers Count:</b> {{ peerRouteInfos?.length || 0 }}</div>
+          <div><b>Failover Count:</b> {{ proxyFailoverEntries?.length || 0 }}</div>
+        </div>
+        <div class="font-bold mt-2">Raw curNetworkInst JSON</div>
+        <pre class="bg-gray-900 text-green-400 p-3 rounded overflow-auto max-h-96 select-all">{{ JSON.stringify(curNetworkInst, null, 2) }}</pre>
+      </div>
+    </Dialog>
   </div>
 </template>
 
