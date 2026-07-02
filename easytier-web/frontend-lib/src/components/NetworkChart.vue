@@ -135,16 +135,7 @@ function updateData() {
     timeLabels.shift()
   }
 
-  // 更新图表
-  if (!chart || chart.width === 0 || chart.height === 0) {
-    if (chart && chartCanvas.value && chartCanvas.value.clientWidth > 0) {
-      chart.destroy()
-      chart = null
-    }
-    if (!chart) {
-      initChart()
-    }
-  }
+  ensureChart()
   if (chart) {
     chart.data.labels = timeLabels
     chart.data.datasets[0].data = uploadHistory
@@ -153,9 +144,20 @@ function updateData() {
   }
 }
 
+function ensureChart() {
+  if (chart || !chartCanvas.value)
+    return
+
+  if (chartCanvas.value.clientWidth <= 0 || chartCanvas.value.clientHeight <= 0)
+    return
+
+  initChart()
+}
+
 // 初始化图表
 function initChart() {
-  if (!chartCanvas.value || chartCanvas.value.clientWidth === 0 || chartCanvas.value.clientHeight === 0) return
+  if (!chartCanvas.value || chart)
+    return
 
   const ctx = chartCanvas.value.getContext('2d')
   if (!ctx) return
@@ -249,12 +251,8 @@ function initChart() {
 
 let resizeObserver: ResizeObserver | null = null
 
-// 监听tick与参数变化，保证图表持续更新
+// Status increments tick once per completed status poll.
 watch(() => props.tick, () => {
-  updateData()
-})
-
-watch([() => props.uploadRate, () => props.downloadRate], () => {
   updateData()
 })
 
@@ -275,18 +273,13 @@ onMounted(async () => {
   }
 
   await nextTick()
-  initChart()
+  ensureChart()
   updateData()
 
   if (chartCanvas.value?.parentElement) {
     resizeObserver = new ResizeObserver(() => {
-      if (!chart || chart.width === 0 || chart.height === 0) {
-        if (chart) chart.destroy()
-        chart = null
-        initChart()
-      } else {
-        chart.resize()
-      }
+      ensureChart()
+      chart?.resize()
     })
     resizeObserver.observe(chartCanvas.value.parentElement)
   }

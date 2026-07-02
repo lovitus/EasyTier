@@ -296,6 +296,73 @@ describe('RemoteManagement config save', () => {
     }
   })
 
+  it('keeps status mounted for running instances with a warning', async () => {
+    const api = {
+      get_network_info: vi.fn(async () => ({
+        running: true,
+        errorMsg: 'non-fatal warning',
+        peerRoutePairs: [],
+        proxyFailoverEntries: [{
+          requestedTransport: 'quic,kcp,native',
+          selectedTransport: 'native',
+        }],
+      })),
+      get_network_metas: vi.fn(async () => ({
+        metas: {
+          [INSTANCE_ID]: {
+            config_permission: 0xffffffff,
+            inst_id: INSTANCE_UUID,
+            instance_name: 'mesh-running',
+            network_name: 'mesh-running',
+            source: 2,
+          },
+        },
+      })),
+      list_network_instance_ids: vi.fn(async () => ({
+        disabled_inst_ids: [],
+        running_inst_ids: [INSTANCE_UUID],
+      })),
+    }
+
+    const StatusStub = defineComponent({
+      props: ['curNetworkInst'],
+      setup(props) {
+        return () => h('div', {
+          'data-stub': 'status',
+          'data-running': String(props.curNetworkInst.running),
+          'data-warning': props.curNetworkInst.error_msg,
+          'data-failover-count': String(props.curNetworkInst.detail?.proxy_failover_entries?.length ?? 0),
+        })
+      },
+    })
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api: api as any,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+
+      const status = wrapper.find('[data-stub="status"]')
+      expect(status.exists()).toBe(true)
+      expect(status.attributes('data-running')).toBe('true')
+      expect(status.attributes('data-warning')).toBe('non-fatal warning')
+      expect(status.attributes('data-failover-count')).toBe('1')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('does not reload network info when the selected instance object is rebuilt', async () => {
     const api = {
       get_network_info: vi.fn(async () => ({

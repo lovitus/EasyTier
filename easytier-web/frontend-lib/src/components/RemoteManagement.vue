@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Button, ConfirmPopup, Divider, IftaLabel, Menu, Message, Select, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
+import { Button, ConfirmPopup, Divider, IftaLabel, Menu, Select, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
 import { computed, nextTick, onMounted, onUnmounted, Ref, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import * as Api from '../modules/api';
@@ -316,14 +316,16 @@ const loadCurrentNetworkInfo = async (preserveScroll = false) => {
         return;
     }
 
+    const normalizedInfo = normalizeRunningInfo(network_info);
+
     const scrollElement = networkContent.value;
     const scrollTop = preserveScroll ? scrollElement?.scrollTop : undefined;
 
     curNetworkInfo.value = {
         instance_id: requestedInstanceId,
-        running: network_info?.running ?? false,
-        error_msg: network_info?.error_msg ?? '',
-        detail: normalizeRunningInfo(network_info),
+        running: normalizedInfo?.running ?? false,
+        error_msg: normalizedInfo?.error_msg ?? '',
+        detail: normalizedInfo,
     } as NetworkTypes.NetworkInstance;
 
     if (scrollElement && scrollTop !== undefined) {
@@ -599,10 +601,9 @@ onUnmounted(() => {
                     <h2 class="text-xl font-medium">{{ t('web.device_management.network_status') }}</h2>
                 </div>
 
-                <Status v-if="curNetworkInfo && (curNetworkInfo.error_msg ?? '') === ''" v-bind:cur-network-inst="curNetworkInfo"
+                <Status v-if="curNetworkInfo" v-bind:cur-network-inst="curNetworkInfo"
                     class="mb-4">
                 </Status>
-                <Message v-else-if="curNetworkInfo?.error_msg" severity="error" class="mb-4">{{ curNetworkInfo?.error_msg }}</Message>
 
                 <div class="text-center mt-4">
                     <Button @click="stopNetwork" :disabled="!currentNetworkControl.deletable.value"
