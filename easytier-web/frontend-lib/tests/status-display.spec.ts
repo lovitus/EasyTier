@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { latencyMs, lossRate, numericValue } from '../src/modules/statusDisplay'
+import { latencyMs, lossRate, numericValue, stableTunnelProtocols } from '../src/modules/statusDisplay'
 
 describe('statusDisplay', () => {
   it('parses REST uint64 strings as numbers instead of concatenating them', () => {
@@ -35,5 +35,25 @@ describe('statusDisplay', () => {
 
     expect(latencyMs(info)).toBe('42ms')
     expect(lossRate(info)).toBe('7%')
+  })
+
+  it('keeps protocol display stable when the default connection changes', () => {
+    const info = {
+      route: {},
+      peer: {
+        default_conn_id: 'tcp-conn',
+        conns: [
+          { conn_id: 'udp-conn', tunnel: { tunnel_type: 'udp' } },
+          { conn_id: 'tcp-conn', tunnel: { tunnel_type: 'tcp' } },
+        ],
+      },
+    } as any
+
+    const format = (tunnel?: { tunnel_type: string }) => tunnel?.tunnel_type ?? ''
+    expect(stableTunnelProtocols(info, format)).toBe('tcp,udp')
+
+    info.peer.default_conn_id = 'udp-conn'
+    info.peer.conns.reverse()
+    expect(stableTunnelProtocols(info, format)).toBe('tcp,udp')
   })
 })

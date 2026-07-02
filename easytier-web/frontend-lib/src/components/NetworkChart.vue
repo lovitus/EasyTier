@@ -13,8 +13,8 @@
         </span>
       </div>
     </div>
-    <div class="h-32">
-      <canvas ref="chartCanvas"></canvas>
+    <div class="h-32 min-w-0 overflow-hidden">
+      <canvas ref="chartCanvas" class="block h-full w-full"></canvas>
     </div>
   </div>
 </template>

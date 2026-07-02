@@ -1,4 +1,4 @@
-import type { PeerRoutePair } from '../types/network'
+import type { PeerRoutePair, TunnelInfo } from '../types/network'
 
 type PeerInfoWithDefaultConn = NonNullable<PeerRoutePair['peer']> & {
   default_conn_id?: string | {
@@ -43,6 +43,15 @@ export function peerConns(info: PeerRoutePair) {
 
     return String(a.conn_id ?? '').localeCompare(String(b.conn_id ?? ''))
   })
+}
+
+export function stableTunnelProtocols(
+  info: PeerRoutePair,
+  format: (tunnel?: TunnelInfo) => string,
+) {
+  return [...new Set((info.peer?.conns ?? []).map(conn => format(conn.tunnel)).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b))
+    .join(',')
 }
 
 function defaultConnId(info: PeerRoutePair) {

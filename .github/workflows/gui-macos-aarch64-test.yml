@@ -1,0 +1,65 @@
+name: EasyTier GUI macOS ARM64 Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-gui-macos-arm64:
+    runs-on: macos-latest
+    env:
+      TARGET: aarch64-apple-darwin
+      GUI_TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set current ref as env variable
+        run: |
+          echo "GIT_DESC=$(git log -1 --format=%cd.%h --date=format:%Y-%m-%d_%H:%M:%S)" >> "$GITHUB_ENV"
+
+      - name: Prepare build environment
+        uses: ./.github/actions/prepare-build
+        with:
+          target: ${{ env.TARGET }}
+          gui: true
+          pnpm: true
+          pnpm-build-filter: ''
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ""
+          shared-key: "gui-registry"
+          cache-targets: "false"
+
+      - name: Build GUI
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: ./easytier-gui
+          args: --verbose --target ${{ env.GUI_TARGET }}
+
+      - name: Collect artifact
+        run: |
+          set -euo pipefail
+          mkdir -p ./artifacts
+          mv ./target/${GUI_TARGET}/release/bundle/dmg/*.dmg ./artifacts/
+          shasum -a 256 ./artifacts/* > ./artifacts/SHA256SUMS.txt
+          ls -lh ./artifacts
+
+      - name: Archive artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: easytier-gui-macos-aarch64-test
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ./artifacts/*

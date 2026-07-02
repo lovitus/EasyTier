@@ -2,9 +2,9 @@
 import { useTimeAgo } from '@vueuse/core'
 import { NetworkInstance, type TunnelInfo, type NodeInfo, type PeerRoutePair } from '../types/network'
 import { useI18n } from 'vue-i18n';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { ipv4InetToString, ipv4ToString, ipv6ToString } from '../modules/utils';
-import { latencyMs, lossRate, numericValue, peerConns } from '../modules/statusDisplay';
+import { latencyMs, lossRate, numericValue, peerConns, stableTunnelProtocols } from '../modules/statusDisplay';
 import { Badge, DataTable, Column, Tag, Chip, Button, Dialog, ScrollPanel, Timeline, Divider, Card, } from 'primevue';
 import NetworkChart from './NetworkChart.vue';
 
@@ -17,14 +17,28 @@ const { t } = useI18n()
 const peerRouteInfos = computed(() => {
   if (props.curNetworkInst) {
     const my_node_info = props.curNetworkInst.detail?.my_node_info
+    const peers = [...(props.curNetworkInst.detail?.peer_route_pairs || [])]
+      .sort((a, b) => {
+        const ipDiff = ipFormat(a).localeCompare(ipFormat(b), undefined, { numeric: true })
+        if (ipDiff !== 0)
+          return ipDiff
+
+        return (a.peer?.peer_id ?? a.route.peer_id ?? 0) - (b.peer?.peer_id ?? b.route.peer_id ?? 0)
+      })
+      .map(info => ({
+        ...info,
+        ui_key: `peer:${info.peer?.peer_id ?? info.route.peer_id ?? ipFormat(info)}`,
+      }))
+
     return [{
+      ui_key: `local:${my_node_info?.peer_id ?? 'unknown'}`,
       route: {
         ipv4_addr: my_node_info?.virtual_ipv4,
         hostname: my_node_info?.hostname,
         version: my_node_info?.version,
         stun_info: my_node_info?.stun_info
       },
-    }, ...(props.curNetworkInst.detail?.peer_route_pairs || [])]
+    }, ...peers]
   }
 
   return []
@@ -125,7 +139,7 @@ function oneTunnelProto(tunnel?: TunnelInfo): string {
 }
 
 function tunnelProto(info: PeerRoutePair) {
-  return [...new Set(peerConns(info).map(c => oneTunnelProto(c.tunnel)))].join(',')
+  return stableTunnelProtocols(info, oneTunnelProto)
 }
 
 const myNodeInfo = computed(() => {
@@ -282,6 +296,20 @@ function natType(info: PeerRoutePair): string {
   return ''
 }
 
+function routeFeatureFlag(info: PeerRoutePair): any {
+  return (info.route as any)?.feature_flag ?? (info.route as any)?.featureFlag ?? {}
+}
+
+function routeIsPublicServer(info: PeerRoutePair): boolean {
+  const featureFlag = routeFeatureFlag(info)
+  return featureFlag.is_public_server === true || featureFlag.isPublicServer === true
+}
+
+function routeAvoidRelayData(info: PeerRoutePair): boolean {
+  const featureFlag = routeFeatureFlag(info)
+  return featureFlag.avoid_relay_data === true || featureFlag.avoidRelayData === true
+}
+
 const peerCount = computed(() => {
   if (!peerRouteInfos.value)
     return 0
@@ -357,35 +385,43 @@ function proxyHealth(entry: any): string {
   return `${state} (${entry.consecutive_failures}/${entry.consecutive_successes}, ${t('proxy_failover.ambiguous')}: ${entry.ambiguous_timeout_strikes})`
 }
 
-// calculate tx/rx rate every 2 seconds
-let rateIntervalId = 0
-const rateInterval = 2000
-let prevTxSum = 0
-let prevRxSum = 0
 const txRate = ref('0')
 const rxRate = ref('0')
+let prevTxSum = 0
+let prevRxSum = 0
+let prevRateAt = 0
+let prevRateInstanceId: string | undefined
 
 // 控制节点详细信息chips的显示/隐藏
 const showNodeDetails = ref(false)
 
-onMounted(() => {
-  prevTxSum = txGlobalSum()
-  prevRxSum = rxGlobalSum()
-
-  rateIntervalId = window.setInterval(() => {
+watch(
+  () => props.curNetworkInst?.detail,
+  () => {
+    const now = Date.now()
     const curTxSum = txGlobalSum()
-    txRate.value = humanFileSize((curTxSum - prevTxSum) / (rateInterval / 1000))
-    prevTxSum = curTxSum
-
     const curRxSum = rxGlobalSum()
-    rxRate.value = humanFileSize((curRxSum - prevRxSum) / (rateInterval / 1000))
-    prevRxSum = curRxSum
-  }, rateInterval)
-})
+    const instanceId = props.curNetworkInst?.instance_id
 
-onUnmounted(() => {
-  clearInterval(rateIntervalId)
-})
+    if (prevRateAt === 0 || instanceId !== prevRateInstanceId) {
+      prevTxSum = curTxSum
+      prevRxSum = curRxSum
+      prevRateAt = now
+      prevRateInstanceId = instanceId
+      txRate.value = '0'
+      rxRate.value = '0'
+      return
+    }
+
+    const elapsedSecs = Math.max((now - prevRateAt) / 1000, 0.001)
+    txRate.value = humanFileSize(Math.max(curTxSum - prevTxSum, 0) / elapsedSecs)
+    rxRate.value = humanFileSize(Math.max(curRxSum - prevRxSum, 0) / elapsedSecs)
+    prevTxSum = curTxSum
+    prevRxSum = curRxSum
+    prevRateAt = now
+  },
+  { immediate: true },
+)
 
 const dialogVisible = ref(false)
 const dialogContent = ref<any>('')
@@ -495,20 +531,20 @@ function showEventLogs() {
           </div>
         </template>
         <template #content>
-          <DataTable :value="peerRouteInfos" column-resize-mode="fit" table-class="w-full">
+          <DataTable :value="peerRouteInfos" data-key="ui_key" column-resize-mode="fit" table-class="w-full">
             <Column :field="ipFormat" :header="t('virtual_ipv4')" />
             <Column :header="t('hostname')">
               <template #body="slotProps">
-                <div v-if="!slotProps.data.route.cost || !slotProps.data.route.feature_flag.is_public_server"
+                <div v-if="!slotProps.data.route.cost || !routeIsPublicServer(slotProps.data)"
                   v-tooltip="slotProps.data.route.hostname">
                   {{
                     slotProps.data.route.hostname }}
                 </div>
                 <div v-else v-tooltip="slotProps.data.route.hostname" class="space-x-1">
-                  <Tag v-if="slotProps.data.route.feature_flag.is_public_server" severity="info" value="Info">
+                  <Tag v-if="routeIsPublicServer(slotProps.data)" severity="info" value="Info">
                     {{ t('status.server') }}
                   </Tag>
-                  <Tag v-if="slotProps.data.route.feature_flag.avoid_relay_data" severity="warn" value="Warn">
+                  <Tag v-if="routeAvoidRelayData(slotProps.data)" severity="warn" value="Warn">
                     {{ t('status.relay') }}
                   </Tag>
                 </div>
@@ -561,5 +597,13 @@ function showEventLogs() {
 
 :deep(.p-datatable .p-datatable-column-title) {
   white-space: nowrap;
+}
+
+:deep(.p-datatable-tbody > tr > td) {
+  white-space: nowrap;
+}
+
+.frontend-lib {
+  overflow-anchor: none;
 }
 </style>

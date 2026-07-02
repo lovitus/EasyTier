@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
-import { nextTick } from 'vue'
+import { defineComponent, h, nextTick, onUpdated, ref } from 'vue'
 import RemoteManagement from '../src/components/RemoteManagement.vue'
 import {
   DEFAULT_NETWORK_CONFIG,
@@ -223,6 +223,126 @@ describe('RemoteManagement config save', () => {
       for (const field of BOOLEAN_CONFIG_FIELDS) {
         expect(savedConfig[field], `${field} should be saved`).toBe(expectedFlags[field])
       }
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('preserves the status scroll position across periodic refreshes', async () => {
+    let generation = 0
+    const api = {
+      get_network_info: vi.fn(async () => ({
+        running: true,
+        generation: generation++,
+        peer_route_pairs: [],
+      })),
+      get_network_metas: vi.fn(async () => ({
+        metas: {
+          [INSTANCE_ID]: {
+            config_permission: 0xffffffff,
+            inst_id: INSTANCE_UUID,
+            instance_name: 'mesh-running',
+            network_name: 'mesh-running',
+            source: 2,
+          },
+        },
+      })),
+      list_network_instance_ids: vi.fn(async () => ({
+        disabled_inst_ids: [],
+        running_inst_ids: [INSTANCE_UUID],
+      })),
+    }
+
+    const StatusStub = defineComponent({
+      props: ['curNetworkInst'],
+      setup() {
+        const element = ref<HTMLElement>()
+        onUpdated(() => {
+          const scrollElement = element.value?.closest('.network-content') as HTMLElement | null
+          if (scrollElement)
+            scrollElement.scrollTop = 0
+        })
+        return () => h('div', { ref: element, 'data-stub': 'status' })
+      },
+    })
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api: api as any,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+      const scrollElement = wrapper.find('.network-content').element as HTMLElement
+      scrollElement.scrollTop = 240
+
+      await new Promise(resolve => setTimeout(resolve, 1100))
+      await flushPromises()
+      await nextTick()
+
+      expect(api.get_network_info.mock.calls.length).toBeGreaterThanOrEqual(2)
+      expect(scrollElement.scrollTop).toBe(240)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('does not reload network info when the selected instance object is rebuilt', async () => {
+    const api = {
+      get_network_info: vi.fn(async () => ({
+        running: true,
+        peer_route_pairs: [],
+      })),
+      get_network_metas: vi.fn(async () => ({
+        metas: {
+          [INSTANCE_ID]: {
+            config_permission: 0xffffffff,
+            inst_id: INSTANCE_UUID,
+            instance_name: 'mesh-running',
+            network_name: 'mesh-running',
+            source: 2,
+          },
+        },
+      })),
+      list_network_instance_ids: vi.fn(async () => ({
+        disabled_inst_ids: [],
+        running_inst_ids: [INSTANCE_UUID],
+      })),
+    }
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api: api as any,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: true,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+      const setupState = (wrapper.vm as any).$?.setupState
+      const infoCallsBefore = api.get_network_info.mock.calls.length
+
+      setupState.instanceList = setupState.instanceList.map((item: any) => ({ ...item }))
+      await flushPromises()
+      await nextTick()
+
+      expect(api.get_network_info.mock.calls.length).toBe(infoCallsBefore)
     } finally {
       wrapper.unmount()
     }

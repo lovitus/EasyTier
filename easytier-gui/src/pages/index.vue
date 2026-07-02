@@ -231,7 +231,7 @@ onMounted(async () => {
 useTray(true)
 let toast = useToast();
 
-const remoteClient = computed(() => new GUIRemoteClient());
+const remoteClient = new GUIRemoteClient();
 const instanceId = ref<string | undefined>(undefined);
 const clientRunning = ref(false);
 
@@ -469,7 +469,7 @@ const configServerConnectionStatus = computed(() => {
 
     <Menu ref="log_menu" :model="log_menu_items_popup" :popup="true" />
 
-    <RemoteManagement v-if="clientRunning" class="flex-1 overflow-y-auto" :api="remoteClient"
+    <RemoteManagement v-if="clientRunning" class="flex-1 min-h-0 overflow-hidden" :api="remoteClient"
       :pause-auto-refresh="isModeSaving" v-model:instance-id="instanceId" />
     <div v-else class="empty-state flex-1 flex flex-col items-center py-12">
       <i class="pi pi-server text-5xl text-secondary mb-4 opacity-50"></i>
