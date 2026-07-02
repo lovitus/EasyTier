@@ -81,7 +81,7 @@ jobs:
       GUI_TARGET: ${{ matrix.GUI_TARGET }}
       OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
     needs: pre_job
-    if: needs.pre_job.outputs.should_skip != 'true'    
+    if: needs.pre_job.outputs.should_skip != 'true' && (github.ref_name != 'codex/gui-macos-arm64-test' || matrix.ARTIFACT_NAME == 'macos-aarch64')
     steps:
       - uses: actions/checkout@v5
 
