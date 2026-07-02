@@ -2,6 +2,9 @@ name: EasyTier GUI macOS ARM64 Test
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/gui-macos-arm64-test
 
 permissions:
   contents: read
