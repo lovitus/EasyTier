@@ -117,7 +117,7 @@ async function onStopService() {
 }
 
 async function initWithMode(mode: Mode) {
-  const running_inst_ids = (await remoteClient.value.list_network_instance_ids().catch(() => undefined))?.running_inst_ids ?? []
+  const running_inst_ids = (await remoteClient.list_network_instance_ids().catch(() => undefined))?.running_inst_ids ?? []
 
   if (currentMode.value.mode === 'service' && mode.mode !== 'service') {
     let serviceStatus = await getServiceStatus()
