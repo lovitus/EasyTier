@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { describe, expect, it, vi } from 'vitest'
-import { nextTick } from 'vue'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { defineComponent, h, nextTick } from 'vue'
 import RemoteManagement from '../src/components/RemoteManagement.vue'
 import {
   DEFAULT_NETWORK_CONFIG,
@@ -131,6 +131,93 @@ const INSTANCE_UUID = {
   part3: 0,
   part4: 1,
 }
+const SECOND_INSTANCE_ID = '00000000-0000-0000-0000-000000000002'
+const SECOND_INSTANCE_UUID = {
+  part1: 0,
+  part2: 0,
+  part3: 0,
+  part4: 2,
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve
+    reject = innerReject
+  })
+  return { promise, resolve, reject }
+}
+
+function runningInfo(hostname: string) {
+  return {
+    dev_name: 'utun-test',
+    events: [],
+    my_node_info: {
+      virtual_ipv4: { address: { addr: 0 }, network_length: 24 },
+      hostname,
+      version: '2.6.7',
+      peer_id: 1,
+      listeners: [],
+      ips: {
+        public_ipv4: { addr: 0 },
+        interface_ipv4s: [],
+        public_ipv6: { part1: 0, part2: 0, part3: 0, part4: 0 },
+        interface_ipv6s: [],
+        listeners: [],
+      },
+      stun_info: {
+        udp_nat_type: 0,
+        tcp_nat_type: 0,
+        last_update_time: 0,
+      },
+    },
+    peer_route_pairs: [],
+    peers: [],
+    routes: [],
+    running: true,
+  }
+}
+
+function makeStatusApi(getNetworkInfo: ReturnType<typeof vi.fn>) {
+  return {
+    delete_network: vi.fn(),
+    generate_config: vi.fn(),
+    get_network_config: vi.fn(),
+    get_network_info: getNetworkInfo,
+    get_network_metas: vi.fn(async (instanceIds: string[]) => ({
+      metas: Object.fromEntries(instanceIds.map((id) => [id, {
+        config_permission: 0xffffffff,
+        inst_id: id === SECOND_INSTANCE_ID ? SECOND_INSTANCE_UUID : INSTANCE_UUID,
+        instance_name: id,
+        network_name: id,
+        source: 2,
+      }])),
+    })),
+    list_network_instance_ids: vi.fn(async () => ({
+      disabled_inst_ids: [],
+      running_inst_ids: [INSTANCE_UUID, SECOND_INSTANCE_UUID],
+    })),
+    parse_config: vi.fn(),
+    run_network: vi.fn(),
+    save_config: vi.fn(),
+    update_network_instance_state: vi.fn(),
+    validate_config: vi.fn(),
+  }
+}
+
+const StatusStub = defineComponent({
+  name: 'Status',
+  props: {
+    curNetworkInst: Object,
+  },
+  setup(props) {
+    return () => h('div', {
+      'data-stub': 'status',
+      'data-instance': (props.curNetworkInst as any)?.instance_id,
+    }, (props.curNetworkInst as any)?.detail?.my_node_info?.hostname ?? 'empty')
+  },
+})
 
 function makeFlagConfig(): NetworkConfig {
   const config = {
@@ -163,6 +250,19 @@ async function settleRemoteManagement() {
     await nextTick()
   }
 }
+
+async function settleAsync() {
+  await flushPromises()
+  await nextTick()
+}
+
+beforeEach(() => {
+  vi.useRealTimers()
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 describe('RemoteManagement config save', () => {
   it('saves the current network config without dropping boolean fields', async () => {
@@ -223,6 +323,204 @@ describe('RemoteManagement config save', () => {
       for (const field of BOOLEAN_CONFIG_FIELDS) {
         expect(savedConfig[field], `${field} should be saved`).toBe(expectedFlags[field])
       }
+    } finally {
+      wrapper.unmount()
+    }
+  })
+})
+
+describe('RemoteManagement status refresh', () => {
+  it('keeps one empty response grace and clears stale status on the second empty response', async () => {
+    vi.useFakeTimers()
+    const getNetworkInfo = vi.fn()
+      .mockResolvedValue(runningInfo('stable-a'))
+    const api = makeStatusApi(getNetworkInfo)
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      vi.runOnlyPendingTimers()
+      await settleAsync()
+      expect(wrapper.find('[data-stub="status"]').text()).toBe('stable-a')
+
+      getNetworkInfo.mockReset()
+      getNetworkInfo
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(undefined)
+
+      vi.advanceTimersByTime(1000)
+      await settleAsync()
+      expect(wrapper.find('[data-stub="status"]').text()).toBe('stable-a')
+
+      vi.advanceTimersByTime(1000)
+      await settleAsync()
+      expect(wrapper.find('[data-stub="status"]').text()).toBe('empty')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('drops an old empty response that arrives after a newer success', async () => {
+    vi.useFakeTimers()
+    const requests: ReturnType<typeof deferred<any>>[] = []
+    const getNetworkInfo = vi.fn(() => {
+      const request = deferred<any>()
+      requests.push(request)
+      return request.promise
+    })
+    const api = makeStatusApi(getNetworkInfo)
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      vi.runOnlyPendingTimers()
+      await settleAsync()
+      if (requests.length < 2) {
+        vi.advanceTimersByTime(1000)
+        await settleAsync()
+      }
+      expect(requests.length).toBeGreaterThanOrEqual(2)
+
+      const oldRequest = requests[0]
+      const newestRequest = requests[requests.length - 1]
+      newestRequest.resolve(runningInfo('new-success'))
+      await settleAsync()
+      expect(wrapper.find('[data-stub="status"]').text()).toBe('new-success')
+
+      oldRequest.resolve(undefined)
+      await settleAsync()
+      expect(wrapper.find('[data-stub="status"]').text()).toBe('new-success')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('drops old-instance responses after switching selected instance', async () => {
+    vi.useFakeTimers()
+    const oldInstanceRequests: ReturnType<typeof deferred<any>>[] = []
+    const newInstanceRequests: ReturnType<typeof deferred<any>>[] = []
+    const getNetworkInfo = vi.fn((id: string) => {
+      const request = deferred<any>()
+      if (id === SECOND_INSTANCE_ID) {
+        newInstanceRequests.push(request)
+      } else {
+        oldInstanceRequests.push(request)
+      }
+      return request.promise
+    })
+    const api = makeStatusApi(getNetworkInfo)
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      vi.runOnlyPendingTimers()
+      await settleAsync()
+      expect(getNetworkInfo).toHaveBeenCalledWith(INSTANCE_ID)
+
+      await wrapper.setProps({ instanceId: SECOND_INSTANCE_ID })
+      await settleAsync()
+      expect(wrapper.find('[data-stub="status"]').exists()).toBe(false)
+      expect(getNetworkInfo).toHaveBeenCalledWith(SECOND_INSTANCE_ID)
+
+      const newestNewInstanceRequest = newInstanceRequests[newInstanceRequests.length - 1]
+      newestNewInstanceRequest.resolve(runningInfo('instance-b'))
+      await settleAsync()
+      const status = wrapper.find('[data-stub="status"]')
+      expect(status.text()).toBe('instance-b')
+      expect(status.attributes('data-instance')).toBe(SECOND_INSTANCE_ID)
+
+      for (const request of oldInstanceRequests) {
+        request.resolve(runningInfo('late-instance-a'))
+      }
+      await settleAsync()
+      expect(wrapper.find('[data-stub="status"]').text()).toBe('instance-b')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('drops old-instance empty responses after switching selected instance', async () => {
+    vi.useFakeTimers()
+    const oldInstanceRequests: ReturnType<typeof deferred<any>>[] = []
+    const newInstanceRequests: ReturnType<typeof deferred<any>>[] = []
+    const getNetworkInfo = vi.fn((id: string) => {
+      const request = deferred<any>()
+      if (id === SECOND_INSTANCE_ID) {
+        newInstanceRequests.push(request)
+      } else {
+        oldInstanceRequests.push(request)
+      }
+      return request.promise
+    })
+    const api = makeStatusApi(getNetworkInfo)
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      vi.runOnlyPendingTimers()
+      await settleAsync()
+
+      await wrapper.setProps({ instanceId: SECOND_INSTANCE_ID })
+      await settleAsync()
+
+      const newestNewInstanceRequest = newInstanceRequests[newInstanceRequests.length - 1]
+      newestNewInstanceRequest.resolve(runningInfo('instance-b-empty-race'))
+      await settleAsync()
+      expect(wrapper.find('[data-stub="status"]').text()).toBe('instance-b-empty-race')
+
+      for (const request of oldInstanceRequests) {
+        request.resolve(undefined)
+      }
+      await settleAsync()
+      expect(wrapper.find('[data-stub="status"]').text()).toBe('instance-b-empty-race')
     } finally {
       wrapper.unmount()
     }

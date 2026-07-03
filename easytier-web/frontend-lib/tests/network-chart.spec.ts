@@ -75,33 +75,31 @@ describe('NetworkChart lifecycle', () => {
     wrapper.unmount()
   })
 
-  it('uses numeric rate props and keeps history for the same instance across remounts', async () => {
-    const first = mount(NetworkChart, {
+  it('uses numeric rate props before string fallback', async () => {
+    const wrapper = mount(NetworkChart, {
       props: {
+        uploadRate: '1.0 KiB',
+        downloadRate: '2.0 KiB',
         uploadRateBytes: 512,
         downloadRateBytes: 1024,
-        historyKey: 'inst-history',
       },
     })
     await flushPromises()
 
-    const firstChart = chartState.instances[0]
-    expect(firstChart.data.datasets[0].data.at(-1)).toBe(512)
-    first.unmount()
+    const chart = chartState.instances[0]
+    expect(chart.data.datasets[0].data.at(-1)).toBe(512)
+    expect(chart.data.datasets[1].data.at(-1)).toBe(1024)
 
-    const second = mount(NetworkChart, {
-      props: {
-        uploadRateBytes: 2048,
-        downloadRateBytes: 4096,
-        historyKey: 'inst-history',
-      },
+    await wrapper.setProps({
+      uploadRateBytes: undefined,
+      downloadRateBytes: undefined,
+      uploadRate: '3.0 KiB',
+      downloadRate: '4.0 KiB',
     })
-    await flushPromises()
+    await nextTick()
 
-    const secondChart = chartState.instances[1]
-    expect(secondChart.data.datasets[0].data.at(-2)).toBe(512)
-    expect(secondChart.data.datasets[0].data.at(-1)).toBe(2048)
-    expect(secondChart.data.datasets[1].data.at(-1)).toBe(4096)
-    second.unmount()
+    expect(chart.data.datasets[0].data.at(-1)).toBe(3 * 1024)
+    expect(chart.data.datasets[1].data.at(-1)).toBe(4 * 1024)
+    wrapper.unmount()
   })
 })

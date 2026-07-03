@@ -25,29 +25,6 @@ export interface NetworkChartProps {
   downloadRate?: string
   uploadRateBytes?: number
   downloadRateBytes?: number
-  historyKey?: string
-}
-
-type ChartHistory = {
-  upload: number[]
-  download: number[]
-  labels: string[]
-}
-
-const chartHistoryCache = new Map<string, ChartHistory>()
-
-function getHistory(key: string): ChartHistory {
-  const cached = chartHistoryCache.get(key)
-  if (cached)
-    return cached
-
-  const history = {
-    upload: [],
-    download: [],
-    labels: [],
-  }
-  chartHistoryCache.set(key, history)
-  return history
 }
 </script>
 
@@ -89,10 +66,9 @@ let chart: ChartJS | null = null
 
 // 存储历史数据，最多保存30个数据点（1分钟历史）
 const maxDataPoints = 120
-const history = getHistory(props.historyKey ?? 'default')
-const uploadHistory = history.upload
-const downloadHistory = history.download
-const timeLabels = history.labels
+const uploadHistory: number[] = []
+const downloadHistory: number[] = []
+const timeLabels: string[] = []
 
 const currentUpload = ref('0')
 const currentDownload = ref('0')
@@ -279,20 +255,18 @@ watch([() => props.uploadRateBytes, () => props.downloadRateBytes, () => props.u
 
 onMounted(async () => {
   // add initial point
-  if (timeLabels.length === 0) {
-    const now = new Date();
-    for (let i = 0; i < maxDataPoints; i++) {
-      let date = new Date(now.getTime() - (maxDataPoints - i) * 2000)
-      const timeStr = date.toLocaleTimeString(navigator.language, {
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit'
-      })
-      uploadHistory.push(0)
-      downloadHistory.push(0)
-      timeLabels.push(timeStr)
-    }
+  const now = new Date();
+  for (let i = 0; i < maxDataPoints; i++) {
+    let date = new Date(now.getTime() - (maxDataPoints - i) * 2000)
+    const timeStr = date.toLocaleTimeString(navigator.language, {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    })
+    uploadHistory.push(0)
+    downloadHistory.push(0)
+    timeLabels.push(timeStr)
   }
 
   await nextTick()

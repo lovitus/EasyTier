@@ -362,19 +362,6 @@ function proxyHealth(entry: any): string {
   return `${state} (${entry.consecutive_failures}/${entry.consecutive_successes}, ${t('proxy_failover.ambiguous')}: ${entry.ambiguous_timeout_strikes})`
 }
 
-const proxyFailoverText = computed(() => {
-  return proxyFailoverEntries.value.map((entry: any) => [
-    `${t('proxy_failover.source')}: ${proxySocketAddr(entry.src)}`,
-    `${t('proxy_failover.destination')}: ${proxySocketAddr(entry.dst)}`,
-    `${t('proxy_failover.requested')}: ${entry.requested_transport}`,
-    `${t('proxy_failover.selected')}: ${entry.selected_transport}`,
-    `${t('proxy_failover.reason')}: ${entry.fallback_reason}`,
-    `${t('proxy_failover.peer')}: ${entry.dst_peer_id}`,
-    `${t('proxy_failover.health')}: ${proxyHealth(entry)}`,
-    `${t('proxy_failover.generation')}: ${entry.generation}`,
-  ].join(' | ')).join('\n')
-})
-
 // calculate tx/rx rate every 2 seconds
 let rateIntervalId = 0
 const rateInterval = 2000
@@ -486,8 +473,7 @@ function showEventLogs() {
               <!-- 网络流量图表 -->
               <div class="w-full">
                 <NetworkChart :key="curNetworkInst?.instance_id ?? 'default'"
-                  :upload-rate-bytes="txRateBytes" :download-rate-bytes="rxRateBytes"
-                  :history-key="curNetworkInst?.instance_id ?? 'default'" />
+                  :upload-rate-bytes="txRateBytes" :download-rate-bytes="rxRateBytes" />
               </div>
             </div>
 
@@ -569,8 +555,17 @@ function showEventLogs() {
           {{ t('proxy_failover.title') }}
         </template>
         <template #content>
-          <pre v-if="proxyFailoverEntries.length"
-            class="m-0 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-surface-50 p-3 text-xs">{{ proxyFailoverText }}</pre>
+          <DataTable v-if="proxyFailoverEntries.length" :value="proxyFailoverEntries" data-key="ui_key"
+            column-resize-mode="fit" table-class="w-full">
+            <Column :field="(entry: any) => proxySocketAddr(entry.src)" :header="t('proxy_failover.source')" />
+            <Column :field="(entry: any) => proxySocketAddr(entry.dst)" :header="t('proxy_failover.destination')" />
+            <Column field="requested_transport" :header="t('proxy_failover.requested')" />
+            <Column field="selected_transport" :header="t('proxy_failover.selected')" />
+            <Column field="fallback_reason" :header="t('proxy_failover.reason')" />
+            <Column field="dst_peer_id" :header="t('proxy_failover.peer')" />
+            <Column :field="proxyHealth" :header="t('proxy_failover.health')" />
+            <Column field="generation" :header="t('proxy_failover.generation')" />
+          </DataTable>
           <div v-else class="py-4 text-center text-gray-400">
             {{ t('proxy_failover.empty') }}
           </div>

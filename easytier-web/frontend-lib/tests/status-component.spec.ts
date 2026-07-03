@@ -17,14 +17,12 @@ vi.mock('../src/components/NetworkChart.vue', () => ({
       downloadRate: String,
       uploadRateBytes: Number,
       downloadRateBytes: Number,
-      historyKey: String,
     },
     setup(props) {
       return () => h('div', {
         'data-stub': 'network-chart',
         'data-upload': props.uploadRateBytes ?? props.uploadRate,
         'data-download': props.downloadRateBytes ?? props.downloadRate,
-        'data-history-key': props.historyKey,
       })
     },
   }),
@@ -276,8 +274,8 @@ describe('Status mixed-version rendering', () => {
 
     const chart = wrapper.find('[data-stub="network-chart"]')
     expect(chart.exists()).toBe(true)
-    expect(wrapper.text()).toContain('proxy_failover.source:')
-    expect(wrapper.text()).toContain('proxy_failover.destination:')
+    expect(wrapper.text()).toContain('0.0.0.0:1000')
+    expect(wrapper.text()).toContain('0.0.0.0:2000')
     expect(wrapper.text()).toContain('quic,kcp,native')
     expect(wrapper.text()).toContain('quic_policy_denied,kcp_policy_denied')
     expect(wrapper.text()).toContain('status.server')

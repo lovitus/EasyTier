@@ -28,6 +28,9 @@ const toast = useToast();
 const configFile = ref();
 
 const curNetworkInfo = ref<NetworkTypes.NetworkInstance | null>(null);
+let networkInfoRequestEpoch = 0;
+let networkInfoEmptyGrace = 0;
+let retainedNetworkInfo: NetworkTypes.NetworkInstance | null = null;
 
 const showConfigEditDialog = ref(false);
 const isEditingNetwork = ref(false); // Flag to indicate if we're in network editing mode
@@ -76,6 +79,15 @@ const currentNetworkControl = {
     })
 }
 
+const resetNetworkInfoRetention = (clearCurrent = false) => {
+    networkInfoRequestEpoch += 1;
+    networkInfoEmptyGrace = 0;
+    retainedNetworkInfo = null;
+    if (clearCurrent) {
+        curNetworkInfo.value = null;
+    }
+}
+
 const instanceList = ref<Array<{ uuid: string; meta?: Api.NetworkMeta }>>([]);
 const updateInstanceList = () => {
     let insts = new Set<string>();
@@ -118,7 +130,20 @@ const selectedInstanceId = computed({
         instanceId.value = value ? value.uuid : undefined;
     }
 });
+
+const currentNetworkStatusInfo = computed(() => {
+    const selectedId = selectedInstanceId.value?.uuid;
+    if (!selectedId || curNetworkInfo.value?.instance_id !== selectedId) {
+        return null;
+    }
+    return curNetworkInfo.value;
+})
+
 watch(selectedInstanceId, async (newVal, oldVal) => {
+    if (newVal?.uuid !== oldVal?.uuid) {
+        resetNetworkInfoRetention(true);
+    }
+
     if (newVal?.uuid !== oldVal?.uuid && (networkIsDisabled.value || isEditingNetwork.value)) {
         await loadCurrentNetworkConfig();
     } else {
@@ -145,6 +170,12 @@ const needShowNetworkStatus = computed(() => {
     }
     return true;
 })
+
+watch(needShowNetworkStatus, (showStatus) => {
+    if (!showStatus) {
+        resetNetworkInfoRetention(true);
+    }
+});
 
 const networkIsDisabled = computed(() => {
     if (!selectedInstanceId.value) {
@@ -174,6 +205,7 @@ const stopNetwork = async () => {
         return;
     }
 
+    resetNetworkInfoRetention(true);
     await props.api.update_network_instance_state(selectedInstanceId.value.uuid, true);
     await loadNetworkInstanceIds();
 }
@@ -288,23 +320,57 @@ const loadNetworkInstanceIds = async () => {
 }
 
 const loadCurrentNetworkInfo = async () => {
-    if (!selectedInstanceId.value) {
+    const requestedInstance = selectedInstanceId.value;
+    if (!requestedInstance) {
+        resetNetworkInfoRetention(true);
         return;
     }
     if (!needShowNetworkStatus.value) {
+        resetNetworkInfoRetention(true);
         return;
     }
 
-    let network_info = normalizeRunningInfo(await props.api.get_network_info(selectedInstanceId.value.uuid));
-    if (!network_info && curNetworkInfo.value?.instance_id === selectedInstanceId.value.uuid) {
+    const requestedInstanceId = requestedInstance.uuid;
+    const requestEpoch = ++networkInfoRequestEpoch;
+    let network_info = normalizeRunningInfo(await props.api.get_network_info(requestedInstanceId));
+
+    if (
+        requestEpoch !== networkInfoRequestEpoch
+        || selectedInstanceId.value?.uuid !== requestedInstanceId
+        || !needShowNetworkStatus.value
+    ) {
         return;
     }
 
+    if (network_info) {
+        const nextInfo = {
+            instance_id: requestedInstanceId,
+            running: network_info.running ?? false,
+            error_msg: network_info.error_msg ?? '',
+            detail: network_info,
+        } as NetworkTypes.NetworkInstance;
+        curNetworkInfo.value = nextInfo;
+        retainedNetworkInfo = nextInfo;
+        networkInfoEmptyGrace = 0;
+        return;
+    }
+
+    if (
+        networkInfoEmptyGrace === 0
+        && retainedNetworkInfo?.instance_id === requestedInstanceId
+    ) {
+        networkInfoEmptyGrace = 1;
+        curNetworkInfo.value = retainedNetworkInfo;
+        return;
+    }
+
+    networkInfoEmptyGrace = 0;
+    retainedNetworkInfo = null;
     curNetworkInfo.value = {
-        instance_id: selectedInstanceId.value.uuid,
-        running: network_info?.running ?? false,
-        error_msg: network_info?.error_msg ?? '',
-        detail: network_info,
+        instance_id: requestedInstanceId,
+        running: false,
+        error_msg: '',
+        detail: undefined,
     } as NetworkTypes.NetworkInstance;
 }
 
@@ -573,10 +639,12 @@ onUnmounted(() => {
                     <h2 class="text-xl font-medium">{{ t('web.device_management.network_status') }}</h2>
                 </div>
 
-                <Status v-if="(curNetworkInfo?.error_msg ?? '') === ''" v-bind:cur-network-inst="curNetworkInfo"
-                    class="mb-4">
+                <Status v-if="currentNetworkStatusInfo && (currentNetworkStatusInfo.error_msg ?? '') === ''"
+                    v-bind:cur-network-inst="currentNetworkStatusInfo" class="mb-4">
                 </Status>
-                <Message v-else severity="error" class="mb-4">{{ curNetworkInfo?.error_msg }}</Message>
+                <Message v-else-if="currentNetworkStatusInfo" severity="error" class="mb-4">{{
+                    currentNetworkStatusInfo.error_msg }}</Message>
+                <Message v-else severity="info" class="mb-4">{{ t('collect_network_infos') }}</Message>
 
                 <div class="text-center mt-4">
                     <Button @click="stopNetwork" :disabled="!currentNetworkControl.deletable.value"

@@ -40,6 +40,8 @@ describe('statusDisplay', () => {
   it('normalizes mixed camelCase running info at the API boundary', () => {
     const normalized = normalizeRunningInfo({
       devName: 'utun7',
+      errorMsg: 'mixed-error',
+      eventLogs: ['{"time":"2026-07-03T00:00:00Z","event":{"kind":"test"}}'],
       myNodeInfo: {
         virtualIpv4: { address: { addr: '123' }, networkLength: '24' },
         hostname: 'local',
@@ -110,6 +112,8 @@ describe('statusDisplay', () => {
     } as any)
 
     expect(normalized?.dev_name).toBe('utun7')
+    expect(normalized?.error_msg).toBe('mixed-error')
+    expect(normalized?.events).toHaveLength(1)
     expect(normalized?.my_node_info.peer_id).toBe(7)
     expect(normalized?.my_node_info.virtual_ipv4.network_length).toBe(24)
     expect(normalized?.peer_route_pairs[0].route.feature_flag?.is_public_server).toBe(true)
@@ -117,6 +121,7 @@ describe('statusDisplay', () => {
     expect(latencyMs(normalized?.peer_route_pairs[0] as any)).toBe('15ms')
     expect(normalized?.peer_route_pairs[0].peer?.conns[0].stats?.tx_bytes).toBe(1000)
     expect(normalized?.peer_route_pairs[0].peer?.conns[0].stats?.rx_bytes).toBe(2048)
+    expect(normalized?.peer_route_pairs[0].peer?.conns[0].loss_rate).toBe(0.05)
     expect(normalized?.peer_route_pairs[0].peer?.conns[0].tunnel?.tunnel_type).toBe('quic')
     expect(normalized?.proxy_failover_entries?.[0].requested_transport).toBe('quic,kcp,native')
     expect(normalized?.proxy_failover_entries?.[0].src?.ip.oneofKind).toBe('ipv4')
