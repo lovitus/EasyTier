@@ -2,9 +2,9 @@
 import { useTimeAgo } from '@vueuse/core'
 import { NetworkInstance, type TunnelInfo, type NodeInfo, type PeerRoutePair } from '../types/network'
 import { useI18n } from 'vue-i18n';
-import { computed, ref, watch, onUnmounted } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { ipv4InetToString, ipv4ToString, ipv6ToString } from '../modules/utils';
-import { latencyMs, lossRate, numericValue, peerConns, stableTunnelProtocols } from '../modules/statusDisplay';
+import { latencyMs, lossRate, numericValue, peerConns } from '../modules/statusDisplay';
 import { Badge, DataTable, Column, Tag, Chip, Button, Dialog, ScrollPanel, Timeline, Divider, Card, } from 'primevue';
 import NetworkChart from './NetworkChart.vue';
 
@@ -15,30 +15,16 @@ const props = defineProps<{
 const { t } = useI18n()
 
 const peerRouteInfos = computed(() => {
-  if (props.curNetworkInst && props.curNetworkInst.detail) {
-    const my_node_info = props.curNetworkInst.detail.my_node_info
-    const peers = [...(props.curNetworkInst.detail.peer_route_pairs || [])]
-      .sort((a, b) => {
-        const ipDiff = ipFormat(a).localeCompare(ipFormat(b), undefined, { numeric: true })
-        if (ipDiff !== 0)
-          return ipDiff
-
-        return (a.peer?.peer_id ?? a.route.peer_id ?? 0) - (b.peer?.peer_id ?? b.route.peer_id ?? 0)
-      })
-      .map(info => ({
-        ...info,
-        ui_key: `peer:${info.peer?.peer_id ?? info.route.peer_id ?? ipFormat(info)}`,
-      }))
-
+  if (props.curNetworkInst) {
+    const my_node_info = props.curNetworkInst.detail?.my_node_info
     return [{
-      ui_key: `local:${my_node_info?.peer_id ?? 'unknown'}`,
       route: {
         ipv4_addr: my_node_info?.virtual_ipv4,
         hostname: my_node_info?.hostname,
         version: my_node_info?.version,
         stun_info: my_node_info?.stun_info
       },
-    }, ...peers]
+    }, ...(props.curNetworkInst.detail?.peer_route_pairs || [])]
   }
 
   return []
@@ -106,11 +92,11 @@ function rxBytes(info: PeerRoutePair) {
 }
 
 function version(info: PeerRoutePair) {
-  return info.route?.version === '' ? 'unknown' : (info.route?.version ?? 'unknown')
+  return info.route.version === '' ? 'unknown' : info.route.version
 }
 
 function ipFormat(info: PeerRoutePair) {
-  const ip = info.route?.ipv4_addr
+  const ip = info.route.ipv4_addr
   if (typeof ip === 'string')
     return ip
   return ip ? ipv4InetToString(ip) : ''
@@ -139,11 +125,14 @@ function oneTunnelProto(tunnel?: TunnelInfo): string {
 }
 
 function tunnelProto(info: PeerRoutePair) {
-  return stableTunnelProtocols(info, oneTunnelProto)
+  return [...new Set(peerConns(info).map(c => oneTunnelProto(c.tunnel)))].join(',')
 }
 
 const myNodeInfo = computed(() => {
-  return props.curNetworkInst?.detail?.my_node_info || {} as NodeInfo
+  if (!props.curNetworkInst)
+    return {} as NodeInfo
+
+  return props.curNetworkInst.detail?.my_node_info
 })
 
 interface Chip {
@@ -180,11 +169,11 @@ const udpNatTypeStrMap = {
 }
 
 const myNodeInfoChips = computed(() => {
-  if (!props.curNetworkInst || !props.curNetworkInst.detail)
+  if (!props.curNetworkInst)
     return []
 
   const chips: Array<Chip> = []
-  const my_node_info = props.curNetworkInst.detail.my_node_info
+  const my_node_info = props.curNetworkInst.detail?.my_node_info
   if (!my_node_info)
     return chips
 
@@ -195,7 +184,7 @@ const myNodeInfoChips = computed(() => {
   } as Chip)
 
   // TUN Device Name
-  const dev_name = props.curNetworkInst.detail.dev_name
+  const dev_name = props.curNetworkInst.detail?.dev_name
   if (dev_name) {
     chips.push({
       label: `TUN Device Name: ${dev_name}`,
@@ -308,25 +297,47 @@ const peerCount = computed(() => {
   return peerRouteInfos.value.length
 })
 
+function entryValue(entry: any, snakeKey: string, camelKey: string) {
+  return entry?.[snakeKey] ?? entry?.[camelKey]
+}
+
+function entryNumber(entry: any, snakeKey: string, camelKey: string): number {
+  const value = entryValue(entry, snakeKey, camelKey)
+  if (typeof value === 'number')
+    return Number.isFinite(value) ? value : 0
+  if (typeof value === 'bigint')
+    return Number(value)
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  return 0
+}
+
+function entryBool(entry: any, snakeKey: string, camelKey: string): boolean {
+  const value = entryValue(entry, snakeKey, camelKey)
+  return value === true
+}
+
 const proxyFailoverEntries = computed(() => {
-  return (props.curNetworkInst?.detail?.proxy_failover_entries || [])
+  return (props.curNetworkInst?.detail?.proxy_failover_entries ?? [])
     .map((entry: any) => {
-      const generation = Number(entry.generation || 0)
+      const generation = entryNumber(entry, 'generation', 'generation')
       const src = proxySocketAddr(entry.src)
       const dst = proxySocketAddr(entry.dst)
       return {
         ...entry,
-        ui_key: `${src}->${dst}:${generation}:${entry.selected_transport || ''}`,
-        start_time: Number(entry.start_time || 0),
+        ui_key: `${src}->${dst}:${generation}:${entryValue(entry, 'selected_transport', 'selectedTransport') ?? ''}`,
+        start_time: entryNumber(entry, 'start_time', 'startTime'),
         generation,
-        requested_transport: entry.requested_transport || '',
-        selected_transport: entry.selected_transport || '',
-        fallback_reason: entry.fallback_reason || '',
-        dst_peer_id: Number(entry.dst_peer_id || 0),
-        consecutive_failures: Number(entry.consecutive_failures || 0),
-        consecutive_successes: Number(entry.consecutive_successes || 0),
-        ambiguous_timeout_strikes: Number(entry.ambiguous_timeout_strikes || 0),
-        transport_degraded: !!entry.transport_degraded,
+        requested_transport: entryValue(entry, 'requested_transport', 'requestedTransport') ?? '',
+        selected_transport: entryValue(entry, 'selected_transport', 'selectedTransport') ?? '',
+        fallback_reason: entryValue(entry, 'fallback_reason', 'fallbackReason') ?? '',
+        dst_peer_id: entryNumber(entry, 'dst_peer_id', 'dstPeerId'),
+        consecutive_failures: entryNumber(entry, 'consecutive_failures', 'consecutiveFailures'),
+        consecutive_successes: entryNumber(entry, 'consecutive_successes', 'consecutiveSuccesses'),
+        ambiguous_timeout_strikes: entryNumber(entry, 'ambiguous_timeout_strikes', 'ambiguousTimeoutStrikes'),
+        transport_degraded: entryBool(entry, 'transport_degraded', 'transportDegraded'),
       }
     })
     .sort((a: any, b: any) => {
@@ -354,65 +365,35 @@ function proxyHealth(entry: any): string {
   return `${state} (${entry.consecutive_failures}/${entry.consecutive_successes}, ${t('proxy_failover.ambiguous')}: ${entry.ambiguous_timeout_strikes})`
 }
 
-const txRate = ref('0')
-const rxRate = ref('0')
+// calculate tx/rx rate every 2 seconds
+let rateIntervalId = 0
+const rateInterval = 2000
 let prevTxSum = 0
 let prevRxSum = 0
-let prevRateAt = 0
-let prevRateInstanceId: string | undefined
+const txRate = ref('0')
+const rxRate = ref('0')
 
 // 控制节点详细信息chips的显示/隐藏
 const showNodeDetails = ref(false)
-const chartTick = ref(0)
-const showDebugModal = ref(false)
-let debugAutoCloseTimer: any = null
 
-watch(showDebugModal, (val) => {
-  if (debugAutoCloseTimer) {
-    clearTimeout(debugAutoCloseTimer)
-    debugAutoCloseTimer = null
-  }
-  if (val) {
-    debugAutoCloseTimer = setTimeout(() => {
-      showDebugModal.value = false
-    }, 10 * 60 * 1000)
-  }
-})
+onMounted(() => {
+  prevTxSum = txGlobalSum()
+  prevRxSum = rxGlobalSum()
 
-const debugRawJson = computed(() => {
-  if (!showDebugModal.value) return ''
-  return JSON.stringify(props.curNetworkInst, null, 2)
-})
-
-watch(
-  () => props.curNetworkInst?.detail,
-  () => {
-    const now = Date.now()
+  rateIntervalId = window.setInterval(() => {
     const curTxSum = txGlobalSum()
-    const curRxSum = rxGlobalSum()
-    const instanceId = props.curNetworkInst?.instance_id
-
-    chartTick.value++
-
-    if (prevRateAt === 0 || instanceId !== prevRateInstanceId) {
-      prevTxSum = curTxSum
-      prevRxSum = curRxSum
-      prevRateAt = now
-      prevRateInstanceId = instanceId
-      txRate.value = '0'
-      rxRate.value = '0'
-      return
-    }
-
-    const elapsedSecs = Math.max((now - prevRateAt) / 1000, 0.001)
-    txRate.value = humanFileSize(Math.max(curTxSum - prevTxSum, 0) / elapsedSecs)
-    rxRate.value = humanFileSize(Math.max(curRxSum - prevRxSum, 0) / elapsedSecs)
+    txRate.value = humanFileSize((curTxSum - prevTxSum) / (rateInterval / 1000))
     prevTxSum = curTxSum
+
+    const curRxSum = rxGlobalSum()
+    rxRate.value = humanFileSize((curRxSum - prevRxSum) / (rateInterval / 1000))
     prevRxSum = curRxSum
-    prevRateAt = now
-  },
-  { immediate: true },
-)
+  }, rateInterval)
+})
+
+onUnmounted(() => {
+  clearInterval(rateIntervalId)
+})
 
 const dialogVisible = ref(false)
 const dialogContent = ref<any>('')
@@ -430,21 +411,14 @@ function showVpnPortalConfig() {
 }
 
 function showEventLogs() {
-  const detail = props.curNetworkInst?.detail as any
+  const detail = props.curNetworkInst?.detail
   if (!detail)
     return
 
-  const events = detail.events ?? detail.eventLogs ?? []
-  dialogContent.value = events.map((event: string) => JSON.parse(event))
+  dialogContent.value = detail.events?.map((event: string) => JSON.parse(event)) ?? []
+  dialogHeader.value = 'event_log'
   dialogVisible.value = true
 }
-
-onUnmounted(() => {
-  if (debugAutoCloseTimer) {
-    clearTimeout(debugAutoCloseTimer)
-    debugAutoCloseTimer = null
-  }
-})
 </script>
 
 <template>
@@ -465,7 +439,7 @@ onUnmounted(() => {
       </Timeline>
     </Dialog>
 
-    <Card v-if="!curNetworkInst?.running && curNetworkInst?.error_msg">
+    <Card v-if="curNetworkInst?.error_msg">
       <template #title>
         Run Network Error
       </template>
@@ -479,9 +453,6 @@ onUnmounted(() => {
     </Card>
 
     <template v-else>
-      <div v-if="curNetworkInst?.error_msg" class="p-3 mb-4 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded text-red-600 dark:text-red-400 text-sm">
-        <b>Notice / Warning:</b> {{ curNetworkInst.error_msg }}
-      </div>
       <Card>
         <template #title>
           {{ t('my_node_info') }}
@@ -491,7 +462,7 @@ onUnmounted(() => {
             <div class="gap-4">
               <!-- 网络流量图表 -->
               <div class="w-full">
-                <NetworkChart :upload-rate="txRate" :download-rate="rxRate" :tick="chartTick" />
+                <NetworkChart :upload-rate="txRate" :download-rate="rxRate" />
               </div>
             </div>
 
@@ -532,7 +503,7 @@ onUnmounted(() => {
           </div>
         </template>
         <template #content>
-          <DataTable :value="peerRouteInfos" data-key="ui_key" column-resize-mode="fit" table-class="w-full">
+          <DataTable :value="peerRouteInfos" column-resize-mode="fit" table-class="w-full">
             <Column :field="ipFormat" :header="t('virtual_ipv4')" />
             <Column :header="t('hostname')">
               <template #body="slotProps">
@@ -588,40 +559,6 @@ onUnmounted(() => {
         </Card>
       </template>
     </template>
-
-    <div class="w-full mt-4 flex justify-center">
-      <Button label="🐞 Debug Status & API Inspector" severity="help" size="small" outlined @click="showDebugModal = true" />
-    </div>
-
-    <Dialog v-model:visible="showDebugModal" modal header="🐞 EasyTier GUI Debug Inspector (10-Min Auto Close)" :style="{ width: '85vw' }">
-      <div class="flex flex-col gap-3 text-xs">
-        <div class="p-2 bg-yellow-50 dark:bg-yellow-950/40 border border-yellow-200 dark:border-yellow-800 rounded text-yellow-800 dark:text-yellow-300">
-          ⏳ <b>Performance Protection:</b> This panel only computes raw JSON while open and will automatically close after 10 minutes to prevent memory or reactivity overhead.
-        </div>
-        <div class="p-3 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded">
-          <div class="font-bold text-blue-800 dark:text-blue-300 mb-1">🤖 For AI / Terminal Real-Time Inspection (给 AI / 命令行实时排查专区)</div>
-          <div class="text-blue-700 dark:text-blue-400 mb-2">
-            EasyTier starts a local RPC portal at <code class="bg-blue-100 dark:bg-blue-900 px-1 rounded">127.0.0.1:15888</code> (or 15999 in service mode). AI agents or terminal users can run the following commands to inspect live status directly via port without GUI JSON parsing:
-          </div>
-          <div class="font-mono bg-gray-900 text-yellow-300 p-2 rounded text-2xs space-y-1 select-all">
-            <div>easytier-cli --rpc-portal 127.0.0.1:15888 --output json node info</div>
-            <div>easytier-cli --rpc-portal 127.0.0.1:15888 --output json peer</div>
-            <div>easytier-cli --rpc-portal 127.0.0.1:15888 --output json proxy list</div>
-          </div>
-        </div>
-        <div class="font-bold">Summary Metrics</div>
-        <div class="grid grid-cols-2 gap-2 bg-surface-100 dark:bg-surface-800 p-3 rounded">
-          <div><b>Running:</b> {{ curNetworkInst?.running }}</div>
-          <div><b>Error Msg:</b> {{ curNetworkInst?.error_msg || 'None' }}</div>
-          <div><b>TX Rate:</b> {{ txRate }} | <b>RX Rate:</b> {{ rxRate }}</div>
-          <div><b>Chart Tick:</b> {{ chartTick }}</div>
-          <div><b>Peers Count:</b> {{ peerRouteInfos?.length || 0 }}</div>
-          <div><b>Failover Count:</b> {{ proxyFailoverEntries?.length || 0 }}</div>
-        </div>
-        <div class="font-bold mt-2">Raw curNetworkInst JSON</div>
-        <pre class="bg-gray-900 text-green-400 p-3 rounded overflow-auto max-h-96 select-all">{{ debugRawJson }}</pre>
-      </div>
-    </Dialog>
   </div>
 </template>
 
@@ -632,13 +569,5 @@ onUnmounted(() => {
 
 :deep(.p-datatable .p-datatable-column-title) {
   white-space: nowrap;
-}
-
-:deep(.p-datatable-tbody > tr > td) {
-  white-space: nowrap;
-}
-
-.frontend-lib {
-  overflow-anchor: none;
 }
 </style>

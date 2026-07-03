@@ -2,7 +2,6 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import { defineComponent, h } from 'vue'
 import Status from '../src/components/Status.vue'
-import { normalizeRunningInfo } from '../src/modules/statusDisplay'
 
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({
@@ -165,19 +164,19 @@ describe('Status mixed-version rendering', () => {
     expect(wrapper.find('[data-stub="network-chart"]').exists()).toBe(true)
   })
 
-  it('renders chart and proxy failover entries from camelCase detail fields', () => {
+  it('renders chart and proxy failover entries from the canonical API fields', () => {
     const wrapper = mount(Status, {
       props: {
         curNetworkInst: {
           instance_id: 'inst-2',
           running: true,
           error_msg: '',
-          detail: normalizeRunningInfo({
-            devName: 'utun10',
+          detail: {
+            dev_name: 'utun10',
             events: [],
-            myNodeInfo: {
-              virtualIpv4: { address: { addr: 0 }, networkLength: 24 },
-              hostname: 'local-camel',
+            my_node_info: {
+              virtual_ipv4: { address: { addr: 0 }, network_length: 24 },
+              hostname: 'local-api',
               version: '2.6.7',
               peer_id: 7,
               listeners: [],
@@ -194,45 +193,45 @@ describe('Status mixed-version rendering', () => {
                 last_update_time: 0,
               },
             },
-            peerRoutePairs: [
+            peer_route_pairs: [
               {
                 route: {
                   cost: 1,
-                  hostname: 'camel-peer',
-                  ipv4Addr: { address: { addr: 0 }, networkLength: 24 },
+                  hostname: 'api-peer',
+                  ipv4_addr: { address: { addr: 0 }, network_length: 24 },
                   next_hop_peer_id: 8,
                   peer_id: 8,
                   proxy_cidrs: [],
                   inst_id: 'inst-2',
                   version: '2.6.7',
-                  featureFlag: {
-                    isPublicServer: true,
-                    avoidRelayData: true,
+                  feature_flag: {
+                    is_public_server: true,
+                    avoid_relay_data: true,
                   },
                 },
                 peer: {
                   peer_id: 8,
                   conns: [
                     {
-                      connId: 'conn-1',
-                      myPeerId: 7,
-                      isClient: true,
-                      peerId: 8,
-                      lossRate: 0.05,
+                      conn_id: 'conn-1',
+                      my_peer_id: 7,
+                      is_client: true,
+                      peer_id: 8,
+                      loss_rate: 0.05,
                       tunnel: {
-                        tunnelType: 'udp',
+                        tunnel_type: 'udp',
                       },
                       stats: {
-                        txBytes: 1000,
-                        rxBytes: 2000,
-                        latencyUs: 15000,
+                        tx_bytes: 1000,
+                        rx_bytes: 2000,
+                        latency_us: 15000,
                       },
                     },
                   ],
                 },
               },
             ],
-            proxyFailoverEntries: [
+            proxy_failover_entries: [
               {
                 src: {
                   ip: { oneofKind: 'ipv4', ipv4: { addr: 0 } },
@@ -242,17 +241,17 @@ describe('Status mixed-version rendering', () => {
                   ip: { oneofKind: 'ipv4', ipv4: { addr: 0 } },
                   port: 2000,
                 },
-                requestedTransport: 'quic,kcp,native',
-                selectedTransport: 'native',
-                fallbackReason: 'quic_policy_denied,kcp_policy_denied',
-                dstPeerId: 1981135380,
+                requested_transport: 'quic,kcp,native',
+                selected_transport: 'native',
+                fallback_reason: 'quic_policy_denied,kcp_policy_denied',
+                dst_peer_id: 1981135380,
                 generation: 3,
               },
             ],
             peers: [],
             routes: [],
             running: true,
-          }),
+          },
         },
       },
       global: {

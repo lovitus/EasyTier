@@ -13,8 +13,8 @@
         </span>
       </div>
     </div>
-    <div class="relative h-32 min-w-0 overflow-hidden">
-      <canvas ref="chartCanvas" class="block h-full w-full"></canvas>
+    <div class="h-32">
+      <canvas ref="chartCanvas"></canvas>
     </div>
   </div>
 </template>
@@ -53,7 +53,6 @@ ChartJS.register(
 interface Props {
   uploadRate: string
   downloadRate: string
-  tick?: number
 }
 
 const props = defineProps<Props>()
@@ -135,7 +134,7 @@ function updateData() {
     timeLabels.shift()
   }
 
-  ensureChart()
+  // 更新图表
   if (chart) {
     chart.data.labels = timeLabels
     chart.data.datasets[0].data = uploadHistory
@@ -144,20 +143,9 @@ function updateData() {
   }
 }
 
-function ensureChart() {
-  if (chart || !chartCanvas.value)
-    return
-
-  if (chartCanvas.value.clientWidth <= 0 || chartCanvas.value.clientHeight <= 0)
-    return
-
-  initChart()
-}
-
 // 初始化图表
 function initChart() {
-  if (!chartCanvas.value || chart)
-    return
+  if (!chartCanvas.value) return
 
   const ctx = chartCanvas.value.getContext('2d')
   if (!ctx) return
@@ -249,10 +237,8 @@ function initChart() {
   })
 }
 
-let resizeObserver: ResizeObserver | null = null
-
-// Status increments tick once per completed status poll.
-watch(() => props.tick, () => {
+// 监听props变化
+watch([() => props.uploadRate, () => props.downloadRate], () => {
   updateData()
 })
 
@@ -273,23 +259,11 @@ onMounted(async () => {
   }
 
   await nextTick()
-  ensureChart()
+  initChart()
   updateData()
-
-  if (chartCanvas.value?.parentElement) {
-    resizeObserver = new ResizeObserver(() => {
-      ensureChart()
-      chart?.resize()
-    })
-    resizeObserver.observe(chartCanvas.value.parentElement)
-  }
 })
 
 onUnmounted(() => {
-  if (resizeObserver) {
-    resizeObserver.disconnect()
-    resizeObserver = null
-  }
   if (chart) {
     chart.destroy()
   }

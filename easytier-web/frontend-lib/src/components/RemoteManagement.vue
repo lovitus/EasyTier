@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { Button, ConfirmPopup, Divider, IftaLabel, Menu, Select, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
-import { computed, nextTick, onMounted, onUnmounted, Ref, ref, watch } from 'vue';
+import { Button, ConfirmPopup, Divider, IftaLabel, Menu, Message, Select, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
+import { computed, onMounted, onUnmounted, Ref, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import * as Api from '../modules/api';
 import * as Utils from '../modules/utils';
 import * as NetworkTypes from '../types/network';
 import { type MenuItem } from 'primevue/menuitem';
-import { normalizeRunningInfo } from '../modules/statusDisplay';
 
 const { t } = useI18n()
 
@@ -28,8 +27,6 @@ const toast = useToast();
 const configFile = ref();
 
 const curNetworkInfo = ref<NetworkTypes.NetworkInstance | null>(null);
-const networkContent = ref<HTMLElement | null>(null);
-let currentNetworkInfoRequestSeq = 0;
 
 const showConfigEditDialog = ref(false);
 const isEditingNetwork = ref(false); // Flag to indicate if we're in network editing mode
@@ -87,25 +84,14 @@ const updateInstanceList = () => {
         t.disabled_inst_ids.forEach((u) => insts.add(Utils.UuidToStr(u)));
     }
 
-    const prevById = new Map(instanceList.value.map(item => [item.uuid, item]));
-    const newList = Array.from(insts)
-        .sort((a, b) => a.localeCompare(b))
-        .map((instance: string) => {
-            const meta = networkMetaCache.value[instance];
-            const prev = prevById.get(instance);
-            if (prev && prev.meta === meta) {
-                return prev;
-            }
-            return {
-                uuid: instance,
-                meta,
-            };
-        });
+    const newList = Array.from(insts).map((instance: string) => {
+        return {
+            uuid: instance,
+            meta: networkMetaCache.value[instance]
+        };
+    });
 
-    const changed = newList.length !== instanceList.value.length
-        || newList.some((item, index) => item !== instanceList.value[index]);
-
-    if (changed) {
+    if (JSON.stringify(newList) !== JSON.stringify(instanceList.value)) {
         instanceList.value = newList;
     }
 }
@@ -131,15 +117,15 @@ const selectedInstanceId = computed({
         instanceId.value = value ? value.uuid : undefined;
     }
 });
-watch(() => selectedInstanceId.value?.uuid, async (newUuid, oldUuid) => {
-    if (newUuid !== oldUuid && (networkIsDisabled.value || isEditingNetwork.value)) {
+watch(selectedInstanceId, async (newVal, oldVal) => {
+    if (newVal?.uuid !== oldVal?.uuid && (networkIsDisabled.value || isEditingNetwork.value)) {
         await loadCurrentNetworkConfig();
     } else {
         await loadCurrentNetworkInfo();
     }
 
-    if (newUuid && !networkMetaCache.value[newUuid]) {
-        await loadNetworkMetas([newUuid]);
+    if (newVal?.uuid && !networkMetaCache.value[newVal.uuid]) {
+        await loadNetworkMetas([newVal.uuid]);
     }
 });
 
@@ -247,8 +233,7 @@ const saveAndRunNewNetwork = async (config?: NetworkTypes.NetworkConfig) => {
         await loadCurrentNetworkInfo();
     } catch (e: any) {
         console.error(e);
-        const errStr = typeof e === 'string' ? e : (e instanceof Error ? `${e.name}: ${e.message}` : (e?.message || (JSON.stringify(e.response?.data ?? e) === '{}' ? String(e) : JSON.stringify(e.response?.data ?? e))));
-        toast.add({ severity: 'error', summary: 'Error', detail: 'Failed to run network, error: ' + errStr, life: 4000 });
+        toast.add({ severity: 'error', summary: 'Error', detail: 'Failed to run network, error: ' + JSON.stringify(e.response?.data ?? e), life: 2000 });
         return;
     }
 
@@ -301,39 +286,22 @@ const loadNetworkInstanceIds = async () => {
     listInstanceIdResponse.value = await props.api.list_network_instance_ids();
 }
 
-const loadCurrentNetworkInfo = async (preserveScroll = false) => {
-    const requestedInstanceId = selectedInstanceId.value?.uuid;
-    if (!requestedInstanceId) {
+const loadCurrentNetworkInfo = async () => {
+    if (!selectedInstanceId.value) {
         return;
     }
     if (!needShowNetworkStatus.value) {
         return;
     }
 
-    const requestSeq = ++currentNetworkInfoRequestSeq;
-    const network_info = await props.api.get_network_info(requestedInstanceId);
-    if (requestSeq !== currentNetworkInfoRequestSeq || selectedInstanceId.value?.uuid !== requestedInstanceId) {
-        return;
-    }
-
-    const normalizedInfo = normalizeRunningInfo(network_info);
-
-    const scrollElement = networkContent.value;
-    const scrollTop = preserveScroll ? scrollElement?.scrollTop : undefined;
+    let network_info = await props.api.get_network_info(selectedInstanceId.value.uuid);
 
     curNetworkInfo.value = {
-        instance_id: requestedInstanceId,
-        running: normalizedInfo?.running ?? false,
-        error_msg: normalizedInfo?.error_msg ?? '',
-        detail: normalizedInfo,
+        instance_id: selectedInstanceId.value.uuid,
+        running: network_info?.running ?? false,
+        error_msg: network_info?.error_msg ?? '',
+        detail: network_info,
     } as NetworkTypes.NetworkInstance;
-
-    if (scrollElement && scrollTop !== undefined) {
-        await nextTick();
-        if (networkContent.value === scrollElement) {
-            scrollElement.scrollTop = scrollTop;
-        }
-    }
 }
 
 const exportConfig = async () => {
@@ -456,7 +424,7 @@ let periodFunc = new Utils.PeriodicTask(async () => {
         return;
     }
     try {
-        await Promise.all([loadNetworkInstanceIds(), loadCurrentNetworkInfo(true)]);
+        await Promise.all([loadNetworkInstanceIds(), loadCurrentNetworkInfo()]);
     } catch (e) {
         console.debug(e);
     }
@@ -570,7 +538,7 @@ onUnmounted(() => {
         </div>
 
         <!-- Main Content Area -->
-        <div ref="networkContent" class="network-content bg-surface-0 p-4 rounded-lg shadow-sm">
+        <div class="network-content bg-surface-0 p-4 rounded-lg shadow-sm">
             <!-- Network Creation Form -->
             <div v-if="isEditingNetwork || networkIsDisabled" class="network-creation-container">
                 <div class="network-creation-header flex items-center gap-2 mb-3">
@@ -601,9 +569,10 @@ onUnmounted(() => {
                     <h2 class="text-xl font-medium">{{ t('web.device_management.network_status') }}</h2>
                 </div>
 
-                <Status v-if="curNetworkInfo" v-bind:cur-network-inst="curNetworkInfo"
+                <Status v-if="(curNetworkInfo?.error_msg ?? '') === ''" v-bind:cur-network-inst="curNetworkInfo"
                     class="mb-4">
                 </Status>
+                <Message v-else severity="error" class="mb-4">{{ curNetworkInfo?.error_msg }}</Message>
 
                 <div class="text-center mt-4">
                     <Button @click="stopNetwork" :disabled="!currentNetworkControl.deletable.value"
@@ -643,9 +612,7 @@ onUnmounted(() => {
 
 .network-content {
     flex: 1;
-    min-height: 0;
     overflow-y: auto;
-    overflow-anchor: none;
 }
 
 /* 按钮样式 */
