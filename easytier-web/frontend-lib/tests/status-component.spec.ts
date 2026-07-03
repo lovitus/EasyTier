@@ -272,6 +272,8 @@ describe('Status mixed-version rendering', () => {
 
     const chart = wrapper.find('[data-stub="network-chart"]')
     expect(chart.exists()).toBe(true)
+    expect(wrapper.text()).toContain('proxy_failover.source:')
+    expect(wrapper.text()).toContain('proxy_failover.destination:')
     expect(wrapper.text()).toContain('quic,kcp,native')
     expect(wrapper.text()).toContain('quic_policy_denied,kcp_policy_denied')
     expect(wrapper.text()).toContain('status.server')
