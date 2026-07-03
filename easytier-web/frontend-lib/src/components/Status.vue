@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { useTimeAgo } from '@vueuse/core'
-import { NetworkInstance, type TunnelInfo, type NodeInfo, type PeerRoutePair } from '../types/network'
+import { NetworkInstance, type TunnelInfo, type PeerRoutePair } from '../types/network'
 import { useI18n } from 'vue-i18n';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ipv4InetToString, ipv4ToString, ipv6ToString } from '../modules/utils';
 import { latencyMs, lossRate, numericValue, peerConns } from '../modules/statusDisplay';
 import { Badge, DataTable, Column, Tag, Chip, Button, Dialog, ScrollPanel, Timeline, Divider, Card, } from 'primevue';
@@ -129,10 +129,7 @@ function tunnelProto(info: PeerRoutePair) {
 }
 
 const myNodeInfo = computed(() => {
-  if (!props.curNetworkInst)
-    return {} as NodeInfo
-
-  return props.curNetworkInst.detail?.my_node_info
+  return props.curNetworkInst?.detail?.my_node_info
 })
 
 interface Chip {
@@ -383,8 +380,9 @@ let rateIntervalId = 0
 const rateInterval = 2000
 let prevTxSum = 0
 let prevRxSum = 0
-const txRate = ref('0')
-const rxRate = ref('0')
+let prevRateInstanceId: string | undefined
+const txRateBytes = ref(0)
+const rxRateBytes = ref(0)
 
 // 控制节点详细信息chips的显示/隐藏
 const showNodeDetails = ref(false)
@@ -392,16 +390,28 @@ const showNodeDetails = ref(false)
 onMounted(() => {
   prevTxSum = txGlobalSum()
   prevRxSum = rxGlobalSum()
+  prevRateInstanceId = props.curNetworkInst?.instance_id
 
   rateIntervalId = window.setInterval(() => {
     const curTxSum = txGlobalSum()
-    txRate.value = humanFileSize((curTxSum - prevTxSum) / (rateInterval / 1000))
+    txRateBytes.value = curTxSum >= prevTxSum ? (curTxSum - prevTxSum) / (rateInterval / 1000) : 0
     prevTxSum = curTxSum
 
     const curRxSum = rxGlobalSum()
-    rxRate.value = humanFileSize((curRxSum - prevRxSum) / (rateInterval / 1000))
+    rxRateBytes.value = curRxSum >= prevRxSum ? (curRxSum - prevRxSum) / (rateInterval / 1000) : 0
     prevRxSum = curRxSum
   }, rateInterval)
+})
+
+watch(() => props.curNetworkInst?.instance_id, (instanceId) => {
+  if (instanceId === prevRateInstanceId)
+    return
+
+  prevRateInstanceId = instanceId
+  prevTxSum = txGlobalSum()
+  prevRxSum = rxGlobalSum()
+  txRateBytes.value = 0
+  rxRateBytes.value = 0
 })
 
 onUnmounted(() => {
@@ -475,7 +485,9 @@ function showEventLogs() {
             <div class="gap-4">
               <!-- 网络流量图表 -->
               <div class="w-full">
-                <NetworkChart :upload-rate="txRate" :download-rate="rxRate" />
+                <NetworkChart :key="curNetworkInst?.instance_id ?? 'default'"
+                  :upload-rate-bytes="txRateBytes" :download-rate-bytes="rxRateBytes"
+                  :history-key="curNetworkInst?.instance_id ?? 'default'" />
               </div>
             </div>
 

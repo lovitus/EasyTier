@@ -6,6 +6,7 @@ import * as Api from '../modules/api';
 import * as Utils from '../modules/utils';
 import * as NetworkTypes from '../types/network';
 import { type MenuItem } from 'primevue/menuitem';
+import { normalizeRunningInfo } from '../modules/statusDisplay';
 
 const { t } = useI18n()
 
@@ -294,7 +295,10 @@ const loadCurrentNetworkInfo = async () => {
         return;
     }
 
-    let network_info = await props.api.get_network_info(selectedInstanceId.value.uuid);
+    let network_info = normalizeRunningInfo(await props.api.get_network_info(selectedInstanceId.value.uuid));
+    if (!network_info && curNetworkInfo.value?.instance_id === selectedInstanceId.value.uuid) {
+        return;
+    }
 
     curNetworkInfo.value = {
         instance_id: selectedInstanceId.value.uuid,

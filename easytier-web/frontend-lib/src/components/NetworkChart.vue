@@ -19,6 +19,38 @@
   </div>
 </template>
 
+<script lang="ts">
+export interface NetworkChartProps {
+  uploadRate?: string
+  downloadRate?: string
+  uploadRateBytes?: number
+  downloadRateBytes?: number
+  historyKey?: string
+}
+
+type ChartHistory = {
+  upload: number[]
+  download: number[]
+  labels: string[]
+}
+
+const chartHistoryCache = new Map<string, ChartHistory>()
+
+function getHistory(key: string): ChartHistory {
+  const cached = chartHistoryCache.get(key)
+  if (cached)
+    return cached
+
+  const history = {
+    upload: [],
+    download: [],
+    labels: [],
+  }
+  chartHistoryCache.set(key, history)
+  return history
+}
+</script>
+
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
@@ -50,21 +82,17 @@ ChartJS.register(
   Filler
 )
 
-interface Props {
-  uploadRate: string
-  downloadRate: string
-}
-
-const props = defineProps<Props>()
+const props = defineProps<NetworkChartProps>()
 
 const chartCanvas = ref<HTMLCanvasElement>()
 let chart: ChartJS | null = null
 
 // 存储历史数据，最多保存30个数据点（1分钟历史）
 const maxDataPoints = 120
-const uploadHistory: number[] = []
-const downloadHistory: number[] = []
-const timeLabels: string[] = []
+const history = getHistory(props.historyKey ?? 'default')
+const uploadHistory = history.upload
+const downloadHistory = history.download
+const timeLabels = history.labels
 
 const currentUpload = ref('0')
 const currentDownload = ref('0')
@@ -94,6 +122,13 @@ function parseRateToBytes(rateStr: string): number {
   return value * (multipliers[unit] || 1)
 }
 
+function rateToBytes(byteValue: number | undefined, rateStr: string | undefined): number {
+  if (typeof byteValue === 'number' && Number.isFinite(byteValue))
+    return Math.max(0, byteValue)
+
+  return parseRateToBytes(rateStr ?? '')
+}
+
 // 格式化字节为可读格式
 function formatBytes(bytes: number): string {
   if (bytes < 1) return bytes.toFixed(1) + ' B'
@@ -107,8 +142,8 @@ function formatBytes(bytes: number): string {
 
 // 更新数据
 function updateData() {
-  const uploadBytes = parseRateToBytes(props.uploadRate)
-  const downloadBytes = parseRateToBytes(props.downloadRate)
+  const uploadBytes = rateToBytes(props.uploadRateBytes, props.uploadRate)
+  const downloadBytes = rateToBytes(props.downloadRateBytes, props.downloadRate)
 
   currentUpload.value = formatBytes(uploadBytes)
   currentDownload.value = formatBytes(downloadBytes)
@@ -238,24 +273,26 @@ function initChart() {
 }
 
 // 监听props变化
-watch([() => props.uploadRate, () => props.downloadRate], () => {
+watch([() => props.uploadRateBytes, () => props.downloadRateBytes, () => props.uploadRate, () => props.downloadRate], () => {
   updateData()
 })
 
 onMounted(async () => {
   // add initial point
-  const now = new Date();
-  for (let i = 0; i < maxDataPoints; i++) {
-    let date = new Date(now.getTime() - (maxDataPoints - i) * 2000)
-    const timeStr = date.toLocaleTimeString(navigator.language, {
-      hour12: false,
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit'
-    })
-    uploadHistory.push(0)
-    downloadHistory.push(0)
-    timeLabels.push(timeStr)
+  if (timeLabels.length === 0) {
+    const now = new Date();
+    for (let i = 0; i < maxDataPoints; i++) {
+      let date = new Date(now.getTime() - (maxDataPoints - i) * 2000)
+      const timeStr = date.toLocaleTimeString(navigator.language, {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      })
+      uploadHistory.push(0)
+      downloadHistory.push(0)
+      timeLabels.push(timeStr)
+    }
   }
 
   await nextTick()

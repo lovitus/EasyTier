@@ -74,4 +74,34 @@ describe('NetworkChart lifecycle', () => {
     expect(chart.data.datasets[1].data.at(-1)).toBe(4 * 1024)
     wrapper.unmount()
   })
+
+  it('uses numeric rate props and keeps history for the same instance across remounts', async () => {
+    const first = mount(NetworkChart, {
+      props: {
+        uploadRateBytes: 512,
+        downloadRateBytes: 1024,
+        historyKey: 'inst-history',
+      },
+    })
+    await flushPromises()
+
+    const firstChart = chartState.instances[0]
+    expect(firstChart.data.datasets[0].data.at(-1)).toBe(512)
+    first.unmount()
+
+    const second = mount(NetworkChart, {
+      props: {
+        uploadRateBytes: 2048,
+        downloadRateBytes: 4096,
+        historyKey: 'inst-history',
+      },
+    })
+    await flushPromises()
+
+    const secondChart = chartState.instances[1]
+    expect(secondChart.data.datasets[0].data.at(-2)).toBe(512)
+    expect(secondChart.data.datasets[0].data.at(-1)).toBe(2048)
+    expect(secondChart.data.datasets[1].data.at(-1)).toBe(4096)
+    second.unmount()
+  })
 })

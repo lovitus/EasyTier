@@ -15,12 +15,16 @@ vi.mock('../src/components/NetworkChart.vue', () => ({
     props: {
       uploadRate: String,
       downloadRate: String,
+      uploadRateBytes: Number,
+      downloadRateBytes: Number,
+      historyKey: String,
     },
     setup(props) {
       return () => h('div', {
         'data-stub': 'network-chart',
-        'data-upload': props.uploadRate,
-        'data-download': props.downloadRate,
+        'data-upload': props.uploadRateBytes ?? props.uploadRate,
+        'data-download': props.downloadRateBytes ?? props.downloadRate,
+        'data-history-key': props.historyKey,
       })
     },
   }),
