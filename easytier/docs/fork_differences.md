@@ -199,5 +199,9 @@ order:
 1. This document for the fork-level summary.
 2. [udp_stealth_compatibility.md](udp_stealth_compatibility.md) for stealth,
    proxy, rollout, and transport-priority details.
-3. The main README section "Fork-Specific Changes" for the short operator-facing
+3. [SOCKS5 performance investigation and maintenance boundaries](socks5_performance_investigation.md)
+   when diagnosing SOCKS5, `no_tun`, or QUIC/KCP Proxy throughput. It prevents
+   destination-side `no_tun` TCP ingress cost from being misattributed to the
+   SOCKS5 source path.
+4. The main README section "Fork-Specific Changes" for the short operator-facing
    summary shown on the project front page.
