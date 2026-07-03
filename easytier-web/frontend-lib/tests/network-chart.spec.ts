@@ -58,6 +58,8 @@ describe('NetworkChart lifecycle', () => {
     await flushPromises()
 
     expect(chartState.instances).toHaveLength(1)
+    expect(wrapper.find('.network-chart-canvas').exists()).toBe(true)
+    expect(wrapper.find('.network-chart-canvas canvas').exists()).toBe(true)
     const chart = chartState.instances[0]
     expect(chart.update).toHaveBeenCalledTimes(1)
 

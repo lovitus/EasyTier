@@ -68,14 +68,18 @@ vi.mock('primevue', async () => {
     setup(props, { slots }) {
       return () => {
         const columns = (slots.default?.() ?? []).filter(Boolean)
-        return h('table', { class: 'p-datatable' }, [
-          h('tbody', { class: 'p-datatable-tbody' }, (props.value as any[]).map((row, rowIndex) => h('tr', { key: row.ui_key ?? rowIndex }, columns.map((column, columnIndex) => {
-            const bodySlot = (column.children as any)?.body
-            const field = column.props?.field
-            const value = typeof field === 'function' ? field(row) : field ? row[field] : ''
-            const content = bodySlot ? bodySlot({ data: row, index: rowIndex }) : value
-            return h('td', { key: columnIndex }, content)
-          }))))
+        const rows = props.value as any[]
+        return h('div', [
+          h('table', { class: 'p-datatable' }, [
+            h('tbody', { class: 'p-datatable-tbody' }, rows.map((row, rowIndex) => h('tr', { key: row.ui_key ?? rowIndex }, columns.map((column, columnIndex) => {
+              const bodySlot = (column.children as any)?.body
+              const field = column.props?.field
+              const value = typeof field === 'function' ? field(row) : field ? row[field] : ''
+              const content = bodySlot ? bodySlot({ data: row, index: rowIndex }) : value
+              return h('td', { key: columnIndex }, content)
+            }))))
+          ]),
+          rows.length === 0 ? h('div', slots.empty?.()) : null,
         ])
       }
     },
@@ -162,6 +166,8 @@ describe('Status mixed-version rendering', () => {
 
     expect(wrapper.text()).toContain('legacy-peer')
     expect(wrapper.find('[data-stub="network-chart"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('proxy_failover.title')
+    expect(wrapper.text()).toContain('proxy_failover.empty')
   })
 
   it('renders chart and proxy failover entries from the canonical API fields', () => {

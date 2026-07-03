@@ -13,7 +13,7 @@
         </span>
       </div>
     </div>
-    <div class="h-32">
+    <div class="network-chart-canvas">
       <canvas ref="chartCanvas"></canvas>
     </div>
   </div>
@@ -269,3 +269,19 @@ onUnmounted(() => {
   }
 })
 </script>
+
+<style scoped>
+.network-chart-canvas {
+  position: relative;
+  height: 8rem;
+  min-height: 8rem;
+  overflow: hidden;
+}
+
+.network-chart-canvas canvas {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+}
+</style>

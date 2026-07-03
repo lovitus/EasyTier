@@ -613,6 +613,7 @@ onUnmounted(() => {
 .network-content {
     flex: 1;
     overflow-y: auto;
+    overflow-anchor: none;
 }
 
 /* 按钮样式 */

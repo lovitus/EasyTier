@@ -169,6 +169,7 @@ stealth_protocols_help: Comma-separated transports protected by stealth. If left
 stealth_protocols_placeholder: "Empty = UDP only; e.g. udp,tcp,faketcp,quic,wg,ws,wss"
 proxy_failover:
   title: Proxy Failover
+  empty: No active proxy failover entries
   source: Source
   destination: Destination
   requested: Requested
