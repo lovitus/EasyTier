@@ -7,7 +7,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
     common::{
-        config::{ConfigFileControl, ConfigLoader, ConfigSource, TomlConfigLoader},
+        config::{ConfigFileControl, ConfigLoader, ConfigSource, NicBackend, TomlConfigLoader},
         global_ctx::{EventBusSubscriber, GlobalCtxEvent},
         log,
     },
@@ -35,6 +35,7 @@ pub struct NetworkInstanceManager {
     config_dir: Option<PathBuf>,
     guard_counter: Arc<()>,
     remote_mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    nic_backend: NicBackend,
 }
 
 impl Default for NetworkInstanceManager {
@@ -53,11 +54,17 @@ impl NetworkInstanceManager {
             config_dir: None,
             guard_counter: Arc::new(()),
             remote_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            nic_backend: NicBackend::Tun,
         }
     }
 
     pub fn with_config_path(mut self, config_dir: Option<PathBuf>) -> Self {
         self.config_dir = config_dir;
+        self
+    }
+
+    pub fn with_nic_backend(mut self, nic_backend: NicBackend) -> Self {
+        self.nic_backend = nic_backend;
         self
     }
 
@@ -113,6 +120,10 @@ impl NetworkInstanceManager {
         watch_event: bool,
         config_file_control: ConfigFileControl,
     ) -> Result<uuid::Uuid, anyhow::Error> {
+        cfg.set_nic_backend(self.nic_backend);
+        if cfg.get_flags().no_tun && self.nic_backend != NicBackend::Tun {
+            anyhow::bail!("--no-tun conflicts with --nic-backend veth/auto");
+        }
         let instance_id = cfg.get_id();
         if self.instance_map.contains_key(&instance_id) {
             anyhow::bail!("instance {} already exists", instance_id);

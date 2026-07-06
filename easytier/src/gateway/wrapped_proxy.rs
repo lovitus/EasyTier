@@ -80,6 +80,22 @@ impl<C: NatDstConnector, T: TcpProxyForWrappedSrcTrait<Connector = C>> NicPacket
         zc_packet: &mut ZCPacket,
         context: &crate::peers::NicPacketContext,
     ) -> crate::peers::NicPacketFilterAction {
+        let data = zc_packet.payload();
+        let ip_packet = Ipv4Packet::new(data).unwrap();
+        if ip_packet.get_version() != 4
+            || ip_packet.get_next_level_protocol() != IpNextHeaderProtocols::Tcp
+        {
+            return crate::peers::NicPacketFilterAction::Continue;
+        }
+
+        if self
+            .get_tcp_proxy()
+            .get_global_ctx()
+            .is_ip_local_virtual_ip(&IpAddr::V4(ip_packet.get_destination()))
+        {
+            return crate::peers::NicPacketFilterAction::Continue;
+        }
+
         let ret = self
             .get_tcp_proxy()
             .try_process_packet_from_nic(zc_packet, context)
@@ -96,11 +112,6 @@ impl<C: NatDstConnector, T: TcpProxyForWrappedSrcTrait<Connector = C>> NicPacket
 
         let data = zc_packet.payload();
         let ip_packet = Ipv4Packet::new(data).unwrap();
-        if ip_packet.get_version() != 4
-            || ip_packet.get_next_level_protocol() != IpNextHeaderProtocols::Tcp
-        {
-            return crate::peers::NicPacketFilterAction::Continue;
-        }
 
         // if no connection is established, only allow SYN packet
         let tcp_packet = TcpPacket::new(ip_packet.payload()).unwrap();

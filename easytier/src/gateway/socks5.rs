@@ -1007,6 +1007,13 @@ impl Socks5Server {
             *self.kcp_endpoint.lock().await = kcp_endpoint.clone();
         }
         if let Some(proxy_url) = self.global_ctx.config.get_socks5_portal() {
+            #[cfg(feature = "kcp")]
+            if !self.global_ctx.get_flags().enable_kcp_proxy {
+                tracing::warn!(
+                    "SOCKS5 is running without KCP proxy; throughput may be lower on high-latency or no-TUN paths. For better SOCKS5 performance when remote peers support KCP input, restart with --enable-kcp-proxy true or set enable_kcp_proxy = true"
+                );
+            }
+
             let bind_addr = format!(
                 "{}:{}",
                 proxy_url.host_str().unwrap(),

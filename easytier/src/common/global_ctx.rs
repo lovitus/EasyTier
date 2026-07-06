@@ -11,7 +11,7 @@ use dashmap::DashMap;
 
 use super::{
     PeerId,
-    config::{ConfigLoader, Flags},
+    config::{ConfigLoader, Flags, NicBackend},
     netns::NetNS,
     network::IPCollector,
     stun::{StunInfoCollector, StunInfoCollectorTrait},
@@ -228,6 +228,7 @@ pub struct GlobalCtx {
     pub config: Box<dyn ConfigLoader>,
     pub net_ns: NetNS,
     pub network: NetworkIdentity,
+    resolved_nic_backend: std::sync::OnceLock<NicBackend>,
 
     event_bus: EventBus,
 
@@ -393,6 +394,7 @@ impl GlobalCtx {
             config: Box::new(config_fs),
             net_ns: net_ns.clone(),
             network,
+            resolved_nic_backend: std::sync::OnceLock::new(),
 
             event_bus,
             cached_ipv4: AtomicCell::new(None),
@@ -432,6 +434,18 @@ impl GlobalCtx {
 
             trusted_keys: Arc::new(TrustedKeyMapManager::new()),
         }
+    }
+
+    pub fn requested_nic_backend(&self) -> NicBackend {
+        self.config.get_nic_backend()
+    }
+
+    pub fn resolved_nic_backend(&self) -> Option<NicBackend> {
+        self.resolved_nic_backend.get().copied()
+    }
+
+    pub fn commit_nic_backend(&self, backend: NicBackend) -> Result<(), NicBackend> {
+        self.resolved_nic_backend.set(backend)
     }
 
     pub fn subscribe(&self) -> EventBusSubscriber {

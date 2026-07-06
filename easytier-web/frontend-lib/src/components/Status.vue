@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { useTimeAgo } from '@vueuse/core'
 import { NetworkInstance, type TunnelInfo, type PeerRoutePair } from '../types/network'
 import { useI18n } from 'vue-i18n';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
@@ -13,16 +12,22 @@ const props = defineProps<{
 }>()
 
 const { t } = useI18n()
+const MAX_PROXY_FAILOVER_ROWS = 256
 
 const peerRouteInfos = computed(() => {
   if (props.curNetworkInst) {
     const my_node_info = props.curNetworkInst.detail?.my_node_info
     return [{
       route: {
-        ipv4_addr: my_node_info?.virtual_ipv4,
-        hostname: my_node_info?.hostname,
-        version: my_node_info?.version,
-        stun_info: my_node_info?.stun_info
+        peer_id: my_node_info?.peer_id ?? 0,
+        ipv4_addr: my_node_info?.virtual_ipv4 ?? null,
+        next_hop_peer_id: 0,
+        cost: 0,
+        proxy_cidrs: [],
+        hostname: my_node_info?.hostname ?? '',
+        version: my_node_info?.version ?? '',
+        stun_info: my_node_info?.stun_info,
+        inst_id: props.curNetworkInst.instance_id,
       },
     }, ...(props.curNetworkInst.detail?.peer_route_pairs || [])]
   }
@@ -30,13 +35,24 @@ const peerRouteInfos = computed(() => {
   return []
 })
 
-function routeCost(info: any) {
-  if (info.route) {
-    const cost = info.route.cost
-    return cost ? cost === 1 ? 'p2p' : `relay(${cost})` : t('status.local')
-  }
-
-  return '?'
+interface PeerRow {
+  row_key: string
+  peer_id: number
+  virtual_ipv4: string
+  hostname: string
+  hostname_tooltip: string
+  route_cost: string
+  tunnel_proto: string
+  latency: string
+  tx_bytes: string
+  rx_bytes: string
+  tx_total_bytes: number
+  rx_total_bytes: number
+  loss_rate: string
+  nat_type: string
+  version: string
+  is_public_server: boolean
+  avoid_relay_data: boolean
 }
 
 function resolveObjPath(path: string, obj: any = globalThis, separator = '.') {
@@ -44,13 +60,13 @@ function resolveObjPath(path: string, obj: any = globalThis, separator = '.') {
   return properties.reduce((prev, curr) => prev?.[curr], obj)
 }
 
-function statsCommon(info: any, field: string): number | undefined {
-  if (!info.peer)
+function statsCommon(conns: any[], field: string): number | undefined {
+  if (conns.length === 0)
     return undefined
 
   let sum = 0
   let hasValue = false
-  for (const conn of peerConns(info)) {
+  for (const conn of conns) {
     const value = numericValue(resolveObjPath(field, conn))
     if (value === undefined)
       continue
@@ -81,14 +97,8 @@ function humanFileSize(bytes: number, si = false, dp = 1) {
   return `${bytes.toFixed(dp)} ${units[u]}`
 }
 
-function txBytes(info: PeerRoutePair) {
-  const tx = statsCommon(info, 'stats.tx_bytes')
-  return tx ? humanFileSize(tx) : ''
-}
-
-function rxBytes(info: PeerRoutePair) {
-  const rx = statsCommon(info, 'stats.rx_bytes')
-  return rx ? humanFileSize(rx) : ''
+function formatByteTotal(bytes?: number) {
+  return bytes ? humanFileSize(bytes) : ''
 }
 
 function version(info: PeerRoutePair) {
@@ -100,6 +110,11 @@ function ipFormat(info: PeerRoutePair) {
   if (typeof ip === 'string')
     return ip
   return ip ? ipv4InetToString(ip) : ''
+}
+
+function routeCost(info: PeerRoutePair) {
+  const cost = info.route.cost
+  return cost ? cost === 1 ? 'p2p' : `relay(${cost})` : t('status.local')
 }
 
 function oneTunnelProto(tunnel?: TunnelInfo): string {
@@ -124,8 +139,8 @@ function oneTunnelProto(tunnel?: TunnelInfo): string {
     return tunnel.tunnel_type
 }
 
-function tunnelProto(info: PeerRoutePair) {
-  return [...new Set(peerConns(info).map(c => oneTunnelProto(c.tunnel)))].join(',')
+function tunnelProto(conns: any[]) {
+  return [...new Set(conns.map(c => oneTunnelProto(c.tunnel)))].join(',')
 }
 
 const myNodeInfo = computed(() => {
@@ -252,13 +267,10 @@ const myNodeInfoChips = computed(() => {
 
 function globalSumCommon(field: string) {
   let sum = 0
-  if (!peerRouteInfos.value)
-    return sum
-
-  for (const info of peerRouteInfos.value) {
-    const tx = statsCommon(info, field)
-    if (tx)
-      sum += tx
+  for (const row of peerRows.value) {
+    const value = field === 'stats.tx_bytes' ? row.tx_total_bytes : row.rx_total_bytes
+    if (value)
+      sum += value
   }
   return sum
 }
@@ -287,12 +299,43 @@ function routeAvoidRelayData(info: PeerRoutePair): boolean {
   return info.route?.feature_flag?.avoid_relay_data === true
 }
 
-const peerCount = computed(() => {
-  if (!peerRouteInfos.value)
-    return 0
+function peerRowKey(info: PeerRoutePair, index: number): string {
+  if (info.route?.peer_id !== undefined)
+    return `peer:${info.route.peer_id}`
+  if (typeof info.route?.ipv4_addr === 'string' && info.route.ipv4_addr)
+    return `ipv4:${info.route.ipv4_addr}`
+  return `row:${index}`
+}
 
-  return peerRouteInfos.value.length
+const peerRows = computed<PeerRow[]>(() => {
+  return peerRouteInfos.value.map((info, index) => {
+    const conns = peerConns(info)
+    const txTotal = statsCommon(conns, 'stats.tx_bytes') ?? 0
+    const rxTotal = statsCommon(conns, 'stats.rx_bytes') ?? 0
+
+    return {
+      row_key: peerRowKey(info, index),
+      peer_id: info.route?.peer_id ?? 0,
+      virtual_ipv4: ipFormat(info),
+      hostname: info.route?.hostname ?? '',
+      hostname_tooltip: info.route?.hostname ?? '',
+      route_cost: routeCost(info),
+      tunnel_proto: tunnelProto(conns),
+      latency: latencyMs(info),
+      tx_bytes: formatByteTotal(txTotal),
+      rx_bytes: formatByteTotal(rxTotal),
+      tx_total_bytes: txTotal,
+      rx_total_bytes: rxTotal,
+      loss_rate: lossRate(info),
+      nat_type: natType(info),
+      version: version(info),
+      is_public_server: routeIsPublicServer(info),
+      avoid_relay_data: routeAvoidRelayData(info),
+    }
+  })
 })
+
+const peerCount = computed(() => peerRows.value.length)
 
 function entryValue(entry: any, snakeKey: string, camelKey: string) {
   return entry?.[snakeKey] ?? entry?.[camelKey]
@@ -345,6 +388,7 @@ const proxyFailoverEntries = computed(() => {
         return b.generation - a.generation
       return String(a.ui_key).localeCompare(String(b.ui_key))
     })
+    .slice(0, MAX_PROXY_FAILOVER_ROWS)
 })
 
 function proxySocketAddr(addr: any): string {
@@ -370,6 +414,8 @@ let prevRxSum = 0
 let prevRateInstanceId: string | undefined
 const txRateBytes = ref(0)
 const rxRateBytes = ref(0)
+const dialogNowMs = ref(Date.now())
+let dialogClockId = 0
 
 // 控制节点详细信息chips的显示/隐藏
 const showNodeDetails = ref(false)
@@ -403,11 +449,62 @@ watch(() => props.curNetworkInst?.instance_id, (instanceId) => {
 
 onUnmounted(() => {
   clearInterval(rateIntervalId)
+  if (dialogClockId) {
+    clearInterval(dialogClockId)
+    dialogClockId = 0
+  }
 })
 
 const dialogVisible = ref(false)
 const dialogContent = ref<any>('')
 const dialogHeader = ref('event_log')
+
+function formatTimeAgo(time?: string) {
+  if (!time)
+    return ''
+
+  const timestamp = Date.parse(time)
+  if (!Number.isFinite(timestamp))
+    return time
+
+  const diffMs = Math.max(0, dialogNowMs.value - timestamp)
+  const diffSec = Math.floor(diffMs / 1000)
+  if (diffSec < 60)
+    return `${diffSec}s ago`
+
+  const diffMin = Math.floor(diffSec / 60)
+  if (diffMin < 60)
+    return `${diffMin}m ago`
+
+  const diffHour = Math.floor(diffMin / 60)
+  if (diffHour < 24)
+    return `${diffHour}h ago`
+
+  const diffDay = Math.floor(diffHour / 24)
+  return `${diffDay}d ago`
+}
+
+watch(dialogVisible, (visible) => {
+  if (visible) {
+    dialogNowMs.value = Date.now()
+    if (!dialogClockId) {
+      dialogClockId = window.setInterval(() => {
+        dialogNowMs.value = Date.now()
+      }, 60_000)
+    }
+    return
+  }
+
+  if (dialogClockId) {
+    clearInterval(dialogClockId)
+    dialogClockId = 0
+  }
+
+  // Release dialog payloads immediately after close so WebContent does not
+  // retain large event arrays or config strings.
+  dialogContent.value = ''
+  dialogHeader.value = 'event_log'
+})
 
 function showVpnPortalConfig() {
   const my_node_info = myNodeInfo.value
@@ -433,15 +530,14 @@ function showEventLogs() {
 
 <template>
   <div class="frontend-lib">
-    <Dialog v-model:visible="dialogVisible" modal :header="t(dialogHeader)" class="w-full h-auto max-h-full"
+    <Dialog v-if="dialogVisible" v-model:visible="dialogVisible" modal :header="t(dialogHeader)" class="w-full h-auto max-h-full"
       :baseZIndex="2000">
       <ScrollPanel v-if="dialogHeader === 'vpn_portal_config'">
         <pre>{{ dialogContent }}</pre>
       </ScrollPanel>
       <Timeline v-else :value="dialogContent">
         <template #opposite="slotProps">
-          <small class="text-surface-500 dark:text-surface-400">{{ useTimeAgo(Date.parse(slotProps.item.time))
-          }}</small>
+          <small class="text-surface-500 dark:text-surface-400">{{ formatTimeAgo(slotProps.item.time) }}</small>
         </template>
         <template #content="slotProps">
           <HumanEvent :event="slotProps.item.event" />
@@ -514,37 +610,33 @@ function showEventLogs() {
           </div>
         </template>
         <template #content>
-          <DataTable :value="peerRouteInfos" column-resize-mode="fit" table-class="w-full">
-            <Column :field="ipFormat" :header="t('virtual_ipv4')" />
+          <DataTable :value="peerRows" data-key="row_key" column-resize-mode="fit" table-class="w-full">
+            <Column field="virtual_ipv4" :header="t('virtual_ipv4')" />
             <Column :header="t('hostname')">
               <template #body="slotProps">
-                <div v-if="!slotProps.data.route.cost || !routeIsPublicServer(slotProps.data)"
-                  v-tooltip="slotProps.data.route.hostname">
+                <div v-if="!slotProps.data.route_cost || !slotProps.data.is_public_server"
+                  v-tooltip="slotProps.data.hostname_tooltip">
                   {{
-                    slotProps.data.route.hostname }}
+                    slotProps.data.hostname }}
                 </div>
-                <div v-else v-tooltip="slotProps.data.route.hostname" class="space-x-1">
-                  <Tag v-if="routeIsPublicServer(slotProps.data)" severity="info" value="Info">
+                <div v-else v-tooltip="slotProps.data.hostname_tooltip" class="space-x-1">
+                  <Tag v-if="slotProps.data.is_public_server" severity="info" value="Info">
                     {{ t('status.server') }}
                   </Tag>
-                  <Tag v-if="routeAvoidRelayData(slotProps.data)" severity="warn" value="Warn">
+                  <Tag v-if="slotProps.data.avoid_relay_data" severity="warn" value="Warn">
                     {{ t('status.relay') }}
                   </Tag>
                 </div>
               </template>
             </Column>
-            <Column :field="routeCost" :header="t('route_cost')" />
-            <Column :field="tunnelProto" :header="t('tunnel_proto')" />
-            <Column :field="latencyMs" :header="t('latency')" />
-            <Column :field="txBytes" :header="t('upload_bytes')" />
-            <Column :field="rxBytes" :header="t('download_bytes')" />
-            <Column :field="lossRate" :header="t('loss_rate')" />
-            <Column :field="natType" :header="t('nat_type')" />
-            <Column :header="t('status.version')">
-              <template #body="slotProps">
-                <span>{{ version(slotProps.data) }}</span>
-              </template>
-            </Column>
+            <Column field="route_cost" :header="t('route_cost')" />
+            <Column field="tunnel_proto" :header="t('tunnel_proto')" />
+            <Column field="latency" :header="t('latency')" />
+            <Column field="tx_bytes" :header="t('upload_bytes')" />
+            <Column field="rx_bytes" :header="t('download_bytes')" />
+            <Column field="loss_rate" :header="t('loss_rate')" />
+            <Column field="nat_type" :header="t('nat_type')" />
+            <Column field="version" :header="t('status.version')" />
           </DataTable>
         </template>
       </Card>

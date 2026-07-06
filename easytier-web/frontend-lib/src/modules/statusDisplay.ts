@@ -10,6 +10,8 @@ type PeerInfoWithDefaultConn = NonNullable<PeerRoutePair['peer']> & {
   }
 }
 
+const MAX_PROXY_FAILOVER_ENTRIES = 256
+
 export function numericValue(value: unknown): number | undefined {
   if (typeof value === 'number')
     return Number.isFinite(value) ? value : undefined
@@ -302,6 +304,18 @@ export function normalizeRunningInfo(raw: any): NetworkInstanceRunningInfo | und
     return undefined
 
   const peerRoutePairs = (firstDefined(raw.peer_route_pairs, raw.peerRoutePairs, []) as any[]).map(normalizePeerRoutePair)
+  const proxyFailoverEntries = [
+    ...(firstDefined(raw.proxy_failover_entries, raw.proxyFailoverEntries, []) as any[]),
+  ]
+    .sort((left, right) => {
+      const startDiff = numericOrDefault(firstDefined(right.start_time, right.startTime))
+        - numericOrDefault(firstDefined(left.start_time, left.startTime))
+      if (startDiff !== 0)
+        return startDiff
+      return numericOrDefault(right.generation) - numericOrDefault(left.generation)
+    })
+    .slice(0, MAX_PROXY_FAILOVER_ENTRIES)
+    .map(normalizeProxyFailoverEntry)
   return {
     ...raw,
     dev_name: firstDefined(raw.dev_name, raw.devName, ''),
@@ -312,14 +326,20 @@ export function normalizeRunningInfo(raw: any): NetworkInstanceRunningInfo | und
     peer_route_pairs: peerRoutePairs,
     running: firstDefined(raw.running, false),
     error_msg: firstDefined(raw.error_msg, raw.errorMsg),
-    proxy_failover_entries: (firstDefined(raw.proxy_failover_entries, raw.proxyFailoverEntries, []) as any[]).map(normalizeProxyFailoverEntry),
+    proxy_failover_entries: proxyFailoverEntries,
   } as NetworkInstanceRunningInfo
 }
 
+const peerConnCache = new WeakMap<PeerRoutePair, any[]>()
+
 export function peerConns(info: PeerRoutePair) {
+  const cached = peerConnCache.get(info)
+  if (cached)
+    return cached
+
   const conns = info.peer?.conns || []
   const connId = defaultConnId(info)
-  return [...conns].sort((a, b) => {
+  const sorted = [...conns].sort((a, b) => {
     if (connId) {
       if (a.conn_id === connId)
         return -1
@@ -334,9 +354,11 @@ export function peerConns(info: PeerRoutePair) {
 
     return String(a.conn_id ?? '').localeCompare(String(b.conn_id ?? ''))
   })
+  peerConnCache.set(info, sorted)
+  return sorted
 }
 
-function defaultConnId(info: PeerRoutePair) {
+export function defaultConnId(info: PeerRoutePair) {
   const defaultConn = (info.peer as PeerInfoWithDefaultConn | undefined)?.default_conn_id
   if (!defaultConn)
     return undefined

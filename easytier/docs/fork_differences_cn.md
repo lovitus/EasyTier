@@ -61,6 +61,8 @@ Stealth、Proxy、回退和 rollout 细节仍然以
   RPC。
 - 在原有 QUIC/KCP Proxy 基础上新增 readiness ACK、分类 fallback reason 和按传输维度
   的健康状态。
+- 新增 Linux 原生 veth NIC 后端，供具备网络管理 capability、但无法打开或创建 TUN
+  设备的容器使用。
 - 新增 fork 自己的 GitHub Actions 发布顺序约束，要求先完成必要 build/test，再手动
   触发 release。
 
@@ -77,6 +79,11 @@ Stealth、Proxy、回退和 rollout 细节仍然以
 - `transport_priority` 只影响 direct-connect，不重排 manual/bootstrap 显式 URL，也不
   改变 Proxy 固定顺序。
 - QUIC/KCP Proxy 故障转移顺序固定为 `QUIC -> KCP -> Native`。
+- `failover` 表是 TCP SYN 的短期选择状态，不是封装连接或回环抑制清单。
+  内部 stream 交接会故意使用本机到本机的 PeerManager 标记；记录会按 TTL
+  自动清理，不影响远端 QUIC/KCP 健康或交接。原始目标精确等于本机虚拟 IP 时会在
+  建表前旁路 selector，防止本机 proxy 目标连接被 TUN 再捕获后递归放大；状态接口和
+  GUI 只展示最近 256 条用于诊断。
 - `disable_quic_input` / `disable_kcp_input` 只关闭 QUIC/KCP Proxy 入站能力，不关闭底层
   `quic://` 或 `kcp` 相关 listener 路径。
 - 双栈 peer 同时命中精确 IPv4 和精确 IPv6 规则时，确定性采用 IPv4 规则，因为
@@ -96,6 +103,7 @@ Stealth、Proxy、回退和 rollout 细节仍然以
 | `--stealth-protocols <list>` | `ET_STEALTH_PROTOCOLS` | 配置需要 stealth 的传输协议。 | 留空表示仅 UDP 进入 stealth，便于兼容 rollout。 |
 | `--disable-legacy-udp-hole-punch` | `ET_DISABLE_LEGACY_UDP_HOLE_PUNCH` | 拒绝旧版 UDP 打洞 RPC。 | 只拒绝“没有 stealth 偏好字段”的旧请求，不拒绝新节点显式请求 plain。 |
 | `--transport-priority <rules>` | `ET_TRANSPORT_PRIORITY` | 重排 direct-connect 协议顺序。 | 格式必须是 `scope:proto,...;scope:proto,...`，例如 `global:quic,faketcp,ws,wg,udp,tcp`。 |
+| `--nic-backend <tun|veth|auto>` | 无 | 选择 Linux 虚拟 NIC 后端。 | 仅 Linux `tun` 构建的 CLI 提供；默认 `tun`，不序列化到 TOML/protobuf。 |
 
 上游原本就有 `--enable-kcp-proxy`、`--enable-quic-proxy`、
 `--disable-kcp-input`、`--disable-quic-input`。本 fork 改的不是这些参数是否存在，
@@ -128,6 +136,33 @@ Stealth、Proxy、回退和 rollout 细节仍然以
 - `--disable-legacy-udp-hole-punch` 即使在 UDP stealth 当前未生效时，也仍会拒绝没有
   stealth 偏好的旧请求。
 - `stealth_protocols` 里如果写入当前构建未编译的协议，启动时会告警并跳过，不会默默生效。
+- `--nic-backend veth`、`auto` 与 `--no-tun` 冲突。veth 后端要求
+  `CAP_SYS_ADMIN + CAP_NET_ADMIN + CAP_NET_RAW`，不是无特权容器 fallback。
+- `auto` 只在 TUN open/create 返回预期的设备不可用或权限 errno 时回退；MTU、地址和
+  路由配置失败不触发 veth。
+- veth 后端保留 `169.254.255.254` 和 `fe80::e:1`；包含任一内部 gateway 的非默认
+  静态或动态路由会被拒绝。
+
+### veth 生命周期与已复核边界
+
+下面这些行为已经按实际调用链和 Linux 3.10 运行结果复核，不属于需要继续修改的功能
+问题：
+
+- 缺少 `addr_gen_mode` 的旧内核使用有界 link-local 清理。清理失败发生在
+  `TunDeviceReady` 之前，初始化错误会向上返回并销毁 veth，不会让未清理接口进入正常
+  数据面。
+- `VirtualNic` 销毁时立即清理 veth 是停止实例和 DHCP 重建路径的预期行为。此时内部
+  转发任务正在取消，不需要为了等待每个 `Arc` 自然释放而延迟接口删除。
+- veth stream 会丢弃满足内部特征的 NDP、MLD、IGMP 等链路控制流量，避免它们进入
+  overlay。普通 IPv4/IPv6 单播、广播、组播 UDP 和其他用户数据仍会转发；EasyTier 对
+  组播目标采用广播到相关 peer 的策略，不依赖 IGMP 成员关系，因此不影响常规组播。
+  只有未来明确要支持 IGMP proxy/组播路由守护进程的原始控制包隧穿时，才需要另行设计。
+- 地址回滚失败项保存在容量固定为 256 的 orphan registry 中，并在后续配置和 cleanup
+  时重试。它不会形成无界内存增长；仅在外部程序恰好并发删除地址等极端情况下可能保留
+  一个容量槽位，不需要作为当前功能阻塞项处理。
+- Linux 在删除接口地址时可能同时删除依赖该地址的显式路由。后端把后续
+  `ESRCH`/`ENOENT` 视为幂等删除成功，并继续清理 IPv4/IPv6 route cache 和
+  directed-broadcast 状态。
 
 ## 7. 配置示例
 

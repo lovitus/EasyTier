@@ -5,8 +5,8 @@ use crate::gateway::CidrSet;
 use crate::gateway::proxy_failover::{
     BoxProxyStream, FlowKey, PROXY_PREPARE_ACK_VERSION, PROXY_TARGET_CONNECT_TIMEOUT,
     PreparedProxyStore, PreparedProxyStream, ProxyPrepareError, ProxyPrepareTransport, ProxyStream,
-    ProxyTransport, await_proxy_prepare_ready, requested_proxy_prepare_version,
-    write_proxy_prepare_ack,
+    ProxyTransport, await_proxy_prepare_ready, normalize_local_proxy_destination,
+    requested_proxy_prepare_version, write_proxy_prepare_ack,
 };
 use crate::gateway::tcp_proxy::{ClaimedNatDstStream, NatDstConnector, TcpProxy};
 use crate::gateway::wrapped_proxy::{ProxyAclHandler, TcpProxyForWrappedSrcTrait};
@@ -838,9 +838,8 @@ impl QuicStreamReceiver {
         }
 
         let send_to_self = global_ctx.is_ip_local_virtual_ip(&dst_ip);
-        if send_to_self && global_ctx.no_tun() {
-            dst_socket = format!("127.0.0.1:{}", dst_socket.port()).parse()?;
-        }
+        dst_socket =
+            normalize_local_proxy_destination(dst_socket, send_to_self, global_ctx.no_tun());
 
         let acl_handler = ProxyAclHandler {
             acl_filter: global_ctx.get_acl_filter().clone(),

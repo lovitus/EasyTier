@@ -5,9 +5,9 @@ use crate::{
     common::{
         config::{
             ConfigFileControl, ConfigLoader, ConsoleLoggerConfig, EncryptionAlgorithm,
-            FileLoggerConfig, LoggingConfigLoader, NetworkIdentity, PeerConfig, PortForwardConfig,
-            TomlConfigLoader, VpnPortalConfig, load_config_from_file, parse_mapped_listener_urls,
-            process_secure_mode_cfg,
+            FileLoggerConfig, LoggingConfigLoader, NetworkIdentity, NicBackend, PeerConfig,
+            PortForwardConfig, TomlConfigLoader, VpnPortalConfig, load_config_from_file,
+            parse_mapped_listener_urls, process_secure_mode_cfg,
         },
         constants::EASYTIER_VERSION,
         log,
@@ -118,6 +118,15 @@ struct Cli {
     )]
     config_dir: Option<PathBuf>,
 
+    #[cfg(all(target_os = "linux", feature = "tun"))]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "tun",
+        help = "Virtual NIC backend: tun, veth, or auto"
+    )]
+    nic_backend: CliNicBackend,
+
     #[command(flatten)]
     network_options: NetworkOptions,
 
@@ -138,6 +147,39 @@ struct Cli {
 
     #[clap(long, help = t!("core_clap.disable_env_parsing").to_string())]
     disable_env_parsing: bool,
+}
+
+#[cfg(all(target_os = "linux", feature = "tun"))]
+#[derive(clap::ValueEnum, Debug, Clone, Copy, Default)]
+enum CliNicBackend {
+    #[default]
+    Tun,
+    Veth,
+    Auto,
+}
+
+#[cfg(all(target_os = "linux", feature = "tun"))]
+impl From<CliNicBackend> for NicBackend {
+    fn from(value: CliNicBackend) -> Self {
+        match value {
+            CliNicBackend::Tun => NicBackend::Tun,
+            CliNicBackend::Veth => NicBackend::Veth,
+            CliNicBackend::Auto => NicBackend::Auto,
+        }
+    }
+}
+
+impl Cli {
+    fn nic_backend(&self) -> NicBackend {
+        #[cfg(all(target_os = "linux", feature = "tun"))]
+        {
+            self.nic_backend.into()
+        }
+        #[cfg(not(all(target_os = "linux", feature = "tun")))]
+        {
+            NicBackend::Tun
+        }
+    }
 }
 
 #[derive(Parser, Debug, Default, PartialEq, Eq)]
@@ -1408,8 +1450,15 @@ fn win_service_main(arg: Vec<std::ffi::OsString>) {
 async fn run_main(cli: Cli) -> anyhow::Result<()> {
     defer!(dump_profile(0););
     log::init(&cli.logging_options, true)?;
+    if cli.nic_backend() != NicBackend::Tun && cli.network_options.no_tun == Some(true) {
+        anyhow::bail!("--no-tun conflicts with --nic-backend veth/auto");
+    }
 
-    let manager = Arc::new(NetworkInstanceManager::new().with_config_path(cli.config_dir.clone()));
+    let manager = Arc::new(
+        NetworkInstanceManager::new()
+            .with_config_path(cli.config_dir.clone())
+            .with_nic_backend(cli.nic_backend()),
+    );
 
     let _rpc_server = ApiRpcServer::new(
         cli.rpc_portal_options.rpc_portal,

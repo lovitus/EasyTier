@@ -138,6 +138,7 @@ const SECOND_INSTANCE_UUID = {
   part3: 0,
   part4: 2,
 }
+let hiddenState = false
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -256,12 +257,28 @@ async function settleAsync() {
   await nextTick()
 }
 
+async function advanceAndSettle(ms: number) {
+  await vi.advanceTimersByTimeAsync(ms)
+  await settleAsync()
+}
+
+function setDocumentHidden(hidden: boolean) {
+  hiddenState = hidden
+  document.dispatchEvent(new Event('visibilitychange'))
+}
+
 beforeEach(() => {
   vi.useRealTimers()
+  hiddenState = false
+  Object.defineProperty(document, 'hidden', {
+    configurable: true,
+    get: () => hiddenState,
+  })
 })
 
 afterEach(() => {
   vi.useRealTimers()
+  hiddenState = false
 })
 
 describe('RemoteManagement config save', () => {
@@ -522,6 +539,274 @@ describe('RemoteManagement status refresh', () => {
       await settleAsync()
       expect(wrapper.find('[data-stub="status"]').text()).toBe('instance-b-empty-race')
     } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('switches from active 1s refresh to idle 5s refresh after 60 seconds of no activity', async () => {
+    vi.useFakeTimers()
+    const getNetworkInfo = vi.fn().mockResolvedValue(runningInfo('idle-mode'))
+    const api = makeStatusApi(getNetworkInfo)
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await advanceAndSettle(0)
+      getNetworkInfo.mockClear()
+
+      await advanceAndSettle(59000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(59)
+
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(60)
+
+      await advanceAndSettle(4000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(60)
+
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(61)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('stops polling while hidden and refreshes immediately when visible again', async () => {
+    vi.useFakeTimers()
+    const getNetworkInfo = vi.fn().mockResolvedValue(runningInfo('visibility'))
+    const api = makeStatusApi(getNetworkInfo)
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await advanceAndSettle(0)
+      getNetworkInfo.mockClear()
+
+      setDocumentHidden(true)
+      await settleAsync()
+      expect(vi.getTimerCount()).toBe(0)
+
+      await advanceAndSettle(10000)
+      expect(getNetworkInfo).not.toHaveBeenCalled()
+
+      setDocumentHidden(false)
+      await settleAsync()
+      expect(getNetworkInfo).toHaveBeenCalledTimes(1)
+
+      getNetworkInfo.mockClear()
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(1)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('stops polling when pauseAutoRefresh is true and resumes immediately when false', async () => {
+    vi.useFakeTimers()
+    const getNetworkInfo = vi.fn().mockResolvedValue(runningInfo('pause-auto-refresh'))
+    const api = makeStatusApi(getNetworkInfo)
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await advanceAndSettle(0)
+      getNetworkInfo.mockClear()
+
+      await wrapper.setProps({ pauseAutoRefresh: true })
+      await settleAsync()
+      expect(vi.getTimerCount()).toBe(0)
+
+      await advanceAndSettle(10000)
+      expect(getNetworkInfo).not.toHaveBeenCalled()
+
+      await wrapper.setProps({ pauseAutoRefresh: false })
+      await settleAsync()
+      expect(getNetworkInfo).toHaveBeenCalledTimes(1)
+
+      getNetworkInfo.mockClear()
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(1)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('refreshes immediately on user activity after entering idle mode', async () => {
+    vi.useFakeTimers()
+    const getNetworkInfo = vi.fn().mockResolvedValue(runningInfo('user-activity'))
+    const api = makeStatusApi(getNetworkInfo)
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await advanceAndSettle(0)
+
+      await advanceAndSettle(60000)
+      getNetworkInfo.mockClear()
+
+      await advanceAndSettle(4000)
+      expect(getNetworkInfo).not.toHaveBeenCalled()
+
+      document.dispatchEvent(new Event('pointerdown'))
+      await settleAsync()
+      expect(getNetworkInfo).toHaveBeenCalledTimes(1)
+
+      getNetworkInfo.mockClear()
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(1)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('does not recreate timers after unmount when an in-flight refresh resolves later', async () => {
+    vi.useFakeTimers()
+    const getNetworkInfo = vi.fn()
+      .mockResolvedValue(runningInfo('initial'))
+    const api = makeStatusApi(getNetworkInfo)
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await advanceAndSettle(0)
+      const initialCallCount = getNetworkInfo.mock.calls.length
+      expect(initialCallCount).toBeGreaterThan(0)
+
+      const pendingRequest = deferred<any>()
+      getNetworkInfo.mockImplementationOnce(() => pendingRequest.promise)
+
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(initialCallCount + 1)
+
+      wrapper.unmount()
+      expect(vi.getTimerCount()).toBe(0)
+
+      pendingRequest.resolve(runningInfo('late-success'))
+      await settleAsync()
+      expect(vi.getTimerCount()).toBe(0)
+
+      await advanceAndSettle(30000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(initialCallCount + 1)
+      expect(vi.getTimerCount()).toBe(0)
+    } catch (error) {
+      wrapper.unmount()
+      throw error
+    }
+  })
+
+  it('backs off repeated RPC failures and resumes normal polling after recovery', async () => {
+    vi.useFakeTimers()
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const getNetworkInfo = vi.fn().mockResolvedValue(runningInfo('initial-success'))
+    const api = makeStatusApi(getNetworkInfo)
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await advanceAndSettle(0)
+
+      getNetworkInfo.mockReset()
+      getNetworkInfo.mockRejectedValue(new Error('rpc failed'))
+
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(1)
+
+      getNetworkInfo.mockClear()
+      await advanceAndSettle(4000)
+      expect(getNetworkInfo).not.toHaveBeenCalled()
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(1)
+
+      getNetworkInfo.mockClear()
+      await advanceAndSettle(9000)
+      expect(getNetworkInfo).not.toHaveBeenCalled()
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(1)
+
+      getNetworkInfo.mockClear()
+      getNetworkInfo.mockResolvedValue(runningInfo('recovered'))
+
+      await advanceAndSettle(29000)
+      expect(getNetworkInfo).not.toHaveBeenCalled()
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(1)
+
+      getNetworkInfo.mockClear()
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(1)
+    } finally {
+      debugSpy.mockRestore()
       wrapper.unmount()
     }
   })

@@ -9,6 +9,7 @@ use std::{
 
 use crate::{
     common::{
+        config::NicBackend,
         error::Error,
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent},
         ifcfg::{IfConfiger, IfConfiguerTrait},
@@ -243,11 +244,14 @@ pub struct VirtualNic {
     global_ctx: ArcGlobalCtx,
 
     ifname: Option<String>,
-    ifcfg: Box<dyn IfConfiguerTrait + Send + Sync + 'static>,
+    ifcfg: Arc<dyn IfConfiguerTrait + Send + Sync + 'static>,
+    pending_backend: Option<NicBackend>,
 }
 
 impl Drop for VirtualNic {
     fn drop(&mut self) {
+        self.ifcfg.cleanup();
+
         #[cfg(target_os = "windows")]
         {
             if let Some(ref ifname) = self.ifname {
@@ -265,11 +269,18 @@ impl Drop for VirtualNic {
 }
 
 impl VirtualNic {
+    fn runtime_netns_guard(&self) -> Option<Box<crate::common::netns::NetNSGuard>> {
+        self.ifcfg
+            .requires_runtime_netns_guard()
+            .then(|| self.global_ctx.net_ns.guard())
+    }
+
     pub fn new(global_ctx: ArcGlobalCtx) -> Self {
         Self {
             global_ctx,
             ifname: None,
-            ifcfg: Box::new(IfConfiger {}),
+            ifcfg: Arc::new(IfConfiger {}),
+            pending_backend: None,
         }
     }
 
@@ -492,7 +503,7 @@ impl VirtualNic {
         Ok(())
     }
 
-    async fn create_tun(&self) -> Result<tun::platform::Device, Error> {
+    async fn create_tun(&self, configure_up: bool) -> Result<tun::platform::Device, Error> {
         let mut config = Configuration::default();
         config.layer(Layer::L3);
 
@@ -573,7 +584,15 @@ impl VirtualNic {
             });
         }
 
-        config.up();
+        if configure_up {
+            config.up();
+        }
+        #[cfg(target_os = "linux")]
+        if !configure_up {
+            config.platform_config(|platform| {
+                platform.ensure_root_privileges(false);
+            });
+        }
 
         let _g = self.global_ctx.net_ns.guard();
         Ok(tun::create(&config)?)
@@ -619,9 +638,10 @@ impl VirtualNic {
         Ok(Box::new(ft))
     }
 
-    pub async fn create_dev(&mut self) -> Result<Box<dyn Tunnel>, Error> {
-        let dev = self.create_tun().await?;
-
+    async fn finish_tun_device(
+        &mut self,
+        dev: tun::platform::Device,
+    ) -> Result<Box<dyn Tunnel>, Error> {
         #[cfg(not(target_os = "freebsd"))]
         let ifname = dev.tun_name()?;
 
@@ -718,18 +738,110 @@ impl VirtualNic {
         Ok(Box::new(ft))
     }
 
+    #[cfg(target_os = "linux")]
+    fn tun_create_allows_auto_fallback(error: &Error) -> bool {
+        let Error::TunError(tun::Error::Io(error)) = error else {
+            return false;
+        };
+        matches!(
+            error.raw_os_error(),
+            Some(
+                nix::libc::EPERM
+                    | nix::libc::EACCES
+                    | nix::libc::ENOENT
+                    | nix::libc::ENODEV
+                    | nix::libc::ENXIO
+                    | nix::libc::EOPNOTSUPP
+            )
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn create_veth_dev(&mut self) -> Result<Box<dyn Tunnel>, Error> {
+        let flags = self.global_ctx.config.get_flags();
+        let mut mtu = flags.mtu;
+        if flags.enable_encryption {
+            mtu -= 20;
+        }
+        let created = super::linux_veth::create(self.global_ctx.clone(), mtu).await?;
+        self.ifname = Some(created.ifname);
+        self.ifcfg = created.ifcfg;
+        Ok(Box::new(TunnelWrapper::new(
+            created.stream,
+            created.sink,
+            None,
+        )))
+    }
+
+    pub async fn create_dev(&mut self) -> Result<Box<dyn Tunnel>, Error> {
+        #[cfg(target_os = "linux")]
+        {
+            let requested = self
+                .global_ctx
+                .resolved_nic_backend()
+                .unwrap_or_else(|| self.global_ctx.requested_nic_backend());
+            match requested {
+                NicBackend::Tun => {
+                    let dev = self.create_tun(true).await?;
+                    let tunnel = self.finish_tun_device(dev).await?;
+                    self.pending_backend = Some(NicBackend::Tun);
+                    return Ok(tunnel);
+                }
+                NicBackend::Veth => {
+                    let tunnel = self.create_veth_dev().await?;
+                    self.pending_backend = Some(NicBackend::Veth);
+                    return Ok(tunnel);
+                }
+                NicBackend::Auto => match self.create_tun(false).await {
+                    Ok(dev) => {
+                        let tunnel = self.finish_tun_device(dev).await?;
+                        self.pending_backend = Some(NicBackend::Tun);
+                        return Ok(tunnel);
+                    }
+                    Err(tun_error) if Self::tun_create_allows_auto_fallback(&tun_error) => {
+                        tracing::warn!(
+                            error = %tun_error,
+                            "TUN creation is unavailable; trying native veth backend"
+                        );
+                        match self.create_veth_dev().await {
+                            Ok(tunnel) => {
+                                self.pending_backend = Some(NicBackend::Veth);
+                                return Ok(tunnel);
+                            }
+                            Err(veth_error) => {
+                                return Err(anyhow::anyhow!(
+                                    "both NIC backends failed; tun: {tun_error}; veth: {veth_error}"
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                    Err(error) => return Err(error),
+                },
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let dev = self.create_tun(true).await?;
+            let tunnel = self.finish_tun_device(dev).await?;
+            self.pending_backend = Some(NicBackend::Tun);
+            Ok(tunnel)
+        }
+    }
+
     pub fn ifname(&self) -> &str {
         self.ifname.as_ref().unwrap().as_str()
     }
 
     pub async fn link_up(&self) -> Result<(), Error> {
-        let _g = self.global_ctx.net_ns.guard();
+        let _g = self.runtime_netns_guard();
         self.ifcfg.set_link_status(self.ifname(), true).await?;
         Ok(())
     }
 
     pub async fn add_route(&self, address: Ipv4Addr, cidr: u8) -> Result<(), Error> {
-        let _g = self.global_ctx.net_ns.guard();
+        let _g = self.runtime_netns_guard();
         self.ifcfg
             .add_ipv4_route(self.ifname(), address, cidr, None)
             .await?;
@@ -746,7 +858,7 @@ impl VirtualNic {
         cidr: u8,
         cost: Option<i32>,
     ) -> Result<(), Error> {
-        let _g = self.global_ctx.net_ns.guard();
+        let _g = self.runtime_netns_guard();
         self.ifcfg
             .add_ipv6_route(self.ifname(), address, cidr, cost)
             .await?;
@@ -754,7 +866,7 @@ impl VirtualNic {
     }
 
     pub async fn remove_ipv6_route(&self, address: Ipv6Addr, cidr: u8) -> Result<(), Error> {
-        let _g = self.global_ctx.net_ns.guard();
+        let _g = self.runtime_netns_guard();
         self.ifcfg
             .remove_ipv6_route(self.ifname(), address, cidr)
             .await?;
@@ -762,19 +874,19 @@ impl VirtualNic {
     }
 
     pub async fn remove_ip(&self, ip: Option<Ipv4Inet>) -> Result<(), Error> {
-        let _g = self.global_ctx.net_ns.guard();
+        let _g = self.runtime_netns_guard();
         self.ifcfg.remove_ip(self.ifname(), ip).await?;
         Ok(())
     }
 
     pub async fn remove_ipv6(&self, ip: Option<Ipv6Inet>) -> Result<(), Error> {
-        let _g = self.global_ctx.net_ns.guard();
+        let _g = self.runtime_netns_guard();
         self.ifcfg.remove_ipv6(self.ifname(), ip).await?;
         Ok(())
     }
 
     pub async fn add_ip(&self, ip: Ipv4Addr, cidr: i32) -> Result<(), Error> {
-        let _g = self.global_ctx.net_ns.guard();
+        let _g = self.runtime_netns_guard();
         self.ifcfg
             .add_ipv4_ip(self.ifname(), ip, cidr as u8)
             .await?;
@@ -782,15 +894,34 @@ impl VirtualNic {
     }
 
     pub async fn add_ipv6(&self, ip: Ipv6Addr, cidr: i32) -> Result<(), Error> {
-        let _g = self.global_ctx.net_ns.guard();
+        let _g = self.runtime_netns_guard();
         self.ifcfg
             .add_ipv6_ip(self.ifname(), ip, cidr as u8)
             .await?;
         Ok(())
     }
 
-    pub fn get_ifcfg(&self) -> impl IfConfiguerTrait + use<> {
-        IfConfiger {}
+    pub fn get_ifcfg(&self) -> Arc<dyn IfConfiguerTrait + Send + Sync + 'static> {
+        self.ifcfg.clone()
+    }
+
+    pub fn commit_backend(&mut self) -> Result<(), Error> {
+        let Some(backend) = self.pending_backend.take() else {
+            return Err(anyhow::anyhow!("NIC backend was not initialized").into());
+        };
+        if let Some(committed) = self.global_ctx.resolved_nic_backend() {
+            if committed != backend {
+                return Err(anyhow::anyhow!(
+                    "NIC backend changed from {committed:?} to {backend:?}"
+                )
+                .into());
+            }
+            return Ok(());
+        }
+        self.global_ctx
+            .commit_nic_backend(backend)
+            .map_err(|_| anyhow::anyhow!("NIC backend was committed concurrently"))?;
+        Ok(())
     }
 }
 
@@ -1039,7 +1170,7 @@ impl NicCtx {
     }
 
     async fn apply_route_changes(
-        ifcfg: &impl IfConfiguerTrait,
+        ifcfg: &(impl IfConfiguerTrait + ?Sized),
         ifname: &str,
         net_ns: &crate::common::netns::NetNS,
         cur_proxy_cidrs: &mut BTreeSet<cidr::Ipv4Cidr>,
@@ -1053,7 +1184,7 @@ impl NicCtx {
             if !cur_proxy_cidrs.contains(&cidr) {
                 continue;
             }
-            let _g = net_ns.guard();
+            let _g = ifcfg.requires_runtime_netns_guard().then(|| net_ns.guard());
             let ret = ifcfg
                 .remove_ipv4_route(ifname, cidr.first_address(), cidr.network_length())
                 .await;
@@ -1073,7 +1204,7 @@ impl NicCtx {
             if cur_proxy_cidrs.contains(&cidr) {
                 continue;
             }
-            let _g = net_ns.guard();
+            let _g = ifcfg.requires_runtime_netns_guard().then(|| net_ns.guard());
             let ret = ifcfg
                 .add_ipv4_route(ifname, cidr.first_address(), cidr.network_length(), None)
                 .await;
@@ -1090,7 +1221,7 @@ impl NicCtx {
     }
 
     async fn apply_public_ipv6_route_changes(
-        ifcfg: &impl IfConfiguerTrait,
+        ifcfg: &(impl IfConfiguerTrait + ?Sized),
         ifname: &str,
         net_ns: &crate::common::netns::NetNS,
         cur_routes: &mut BTreeSet<cidr::Ipv6Inet>,
@@ -1101,7 +1232,7 @@ impl NicCtx {
             if !cur_routes.contains(&route) {
                 continue;
             }
-            let _g = net_ns.guard();
+            let _g = ifcfg.requires_runtime_netns_guard().then(|| net_ns.guard());
             let ret = ifcfg
                 .remove_ipv6_route(ifname, route.address(), route.network_length())
                 .await;
@@ -1115,7 +1246,7 @@ impl NicCtx {
             if cur_routes.contains(&route) {
                 continue;
             }
-            let _g = net_ns.guard();
+            let _g = ifcfg.requires_runtime_netns_guard().then(|| net_ns.guard());
             let ret = ifcfg
                 .add_ipv6_route(ifname, route.address(), route.network_length(), None)
                 .await;
@@ -1149,7 +1280,7 @@ impl NicCtx {
             )
             .await;
             Self::apply_route_changes(
-                &ifcfg,
+                ifcfg.as_ref(),
                 &ifname,
                 &net_ns,
                 &mut cur_proxy_cidrs,
@@ -1188,7 +1319,7 @@ impl NicCtx {
                 };
 
                 Self::apply_route_changes(
-                    &ifcfg,
+                    ifcfg.as_ref(),
                     &ifname,
                     &net_ns,
                     &mut cur_proxy_cidrs,
@@ -1218,7 +1349,7 @@ impl NicCtx {
             let initial_routes = peer_mgr.list_public_ipv6_routes().await;
             let initial_added = initial_routes.iter().copied().collect::<Vec<_>>();
             Self::apply_public_ipv6_route_changes(
-                &ifcfg,
+                ifcfg.as_ref(),
                 &ifname,
                 &net_ns,
                 &mut cur_routes,
@@ -1246,7 +1377,7 @@ impl NicCtx {
                 };
 
                 Self::apply_public_ipv6_route_changes(
-                    &ifcfg,
+                    ifcfg.as_ref(),
                     &ifname,
                     &net_ns,
                     &mut cur_routes,
@@ -1360,8 +1491,6 @@ impl NicCtx {
                             .await;
                     }
 
-                    self.global_ctx
-                        .issue_event(GlobalCtxEvent::TunDeviceReady(nic.ifname().to_string()));
                     ret
                 }
                 Err(err) => {
@@ -1371,11 +1500,6 @@ impl NicCtx {
                 }
             }
         };
-
-        let (stream, sink) = tunnel.split();
-
-        self.do_forward_nic_to_peers_task(stream)?;
-        self.do_forward_peers_to_nic(sink);
 
         // Assign IPv4 address if provided
         if let Some(ipv4_addr) = ipv4_addr {
@@ -1388,12 +1512,25 @@ impl NicCtx {
         if let Some(ipv6_addr) = ipv6_addr {
             self.assign_ipv6_to_tun_device(ipv6_addr).await?;
         }
+        if ipv4_addr.is_none() && ipv6_addr.is_none() {
+            self.nic.lock().await.link_up().await?;
+        }
 
         self.run_proxy_cidrs_route_updater().await?;
         self.run_public_ipv6_route_updater().await?;
         // Keep the updater running so runtime config patches can enable auto mode
         // without recreating the NIC.
         self.run_public_ipv6_addr_updater().await?;
+
+        let mut nic = self.nic.lock().await;
+        nic.commit_backend()?;
+        self.global_ctx
+            .issue_event(GlobalCtxEvent::TunDeviceReady(nic.ifname().to_string()));
+        drop(nic);
+
+        let (stream, sink) = tunnel.split();
+        self.do_forward_nic_to_peers_task(stream)?;
+        self.do_forward_peers_to_nic(sink);
 
         Ok(())
     }

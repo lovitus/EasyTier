@@ -22,6 +22,12 @@ use super::error::Error;
 
 #[async_trait]
 pub trait IfConfiguerTrait: Send + Sync {
+    fn cleanup(&self) {}
+
+    fn requires_runtime_netns_guard(&self) -> bool {
+        true
+    }
+
     async fn add_ipv4_route(
         &self,
         _name: &str,

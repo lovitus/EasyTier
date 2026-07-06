@@ -127,4 +127,17 @@ describe('statusDisplay', () => {
     expect(normalized?.proxy_failover_entries?.[0].src?.ip.oneofKind).toBe('ipv4')
     expect(normalized?.proxy_failover_entries?.[0].generation).toBe(4)
   })
+
+  it('keeps only the newest failover entries returned by older cores', () => {
+    const normalized = normalizeRunningInfo({
+      proxyFailoverEntries: Array.from({ length: 300 }, (_, generation) => ({
+        startTime: Math.floor(generation / 2),
+        generation,
+      })),
+    })
+
+    expect(normalized?.proxy_failover_entries).toHaveLength(256)
+    expect(normalized?.proxy_failover_entries?.[0].generation).toBe(299)
+    expect(normalized?.proxy_failover_entries?.[255].generation).toBe(44)
+  })
 })

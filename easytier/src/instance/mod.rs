@@ -11,5 +11,8 @@ pub mod proxy_cidrs_monitor;
 #[cfg(feature = "tun")]
 pub mod virtual_nic;
 
+#[cfg(all(target_os = "linux", feature = "tun"))]
+mod linux_veth;
+
 #[cfg(any(windows, test))]
 pub(crate) mod windows_udp_broadcast;

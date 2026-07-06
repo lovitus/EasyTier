@@ -489,29 +489,163 @@ const actionMenu: Ref<MenuItem[]> = ref([
     }
 ]);
 
-let periodFunc = new Utils.PeriodicTask(async () => {
-    if (props.pauseAutoRefresh || document.hidden) {
+const ACTIVE_REFRESH_MS = 1000;
+const IDLE_REFRESH_MS = 5000;
+const IDLE_AFTER_MS = 60000;
+const FAILURE_BACKOFF_MS = [5000, 10000, 30000] as const;
+
+type RefreshMode = 'active' | 'idle';
+
+const refreshMode = ref<RefreshMode>('active');
+let schedulerActive = false;
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let lastUserActivityAt = Date.now();
+let refreshCurrentViewPromise: Promise<boolean> | null = null;
+let consecutiveRefreshFailures = 0;
+
+const shouldRefreshNow = (): boolean => {
+    return schedulerActive && props.pauseAutoRefresh !== true && document.hidden === false;
+}
+
+const computeRefreshMode = (): RefreshMode => {
+    return Date.now() - lastUserActivityAt < IDLE_AFTER_MS ? 'active' : 'idle';
+}
+
+const computeBaseDelayMs = (): number => {
+    refreshMode.value = computeRefreshMode();
+    return refreshMode.value === 'active' ? ACTIVE_REFRESH_MS : IDLE_REFRESH_MS;
+}
+
+const computeNextDelayMs = (): number => {
+    const baseDelay = computeBaseDelayMs();
+    if (consecutiveRefreshFailures === 0) {
+        return baseDelay;
+    }
+
+    const backoffDelay =
+        FAILURE_BACKOFF_MS[Math.min(consecutiveRefreshFailures - 1, FAILURE_BACKOFF_MS.length - 1)];
+    return Math.max(baseDelay, backoffDelay);
+}
+
+const clearRefreshTimer = (): void => {
+    if (refreshTimer !== null) {
+        clearTimeout(refreshTimer);
+        refreshTimer = null;
+    }
+}
+
+const scheduleNextRefresh = (delayOverrideMs?: number): void => {
+    if (!schedulerActive) {
         return;
     }
-    try {
-        await Promise.all([loadNetworkInstanceIds(), loadCurrentNetworkInfo()]);
-    } catch (e) {
-        console.debug(e);
+
+    clearRefreshTimer();
+    if (!shouldRefreshNow()) {
+        return;
     }
-}, 1000);
+
+    const delay = delayOverrideMs ?? computeNextDelayMs();
+    refreshTimer = setTimeout(() => {
+        void runRefreshTick();
+    }, delay);
+}
+
+const refreshCurrentView = async (): Promise<boolean> => {
+    if (!shouldRefreshNow()) {
+        return false;
+    }
+    if (refreshCurrentViewPromise) {
+        return await refreshCurrentViewPromise;
+    }
+
+    refreshCurrentViewPromise = (async () => {
+        try {
+            await Promise.all([loadNetworkInstanceIds(), loadCurrentNetworkInfo()]);
+            consecutiveRefreshFailures = 0;
+            refreshMode.value = computeRefreshMode();
+            return true;
+        } catch (e) {
+            console.debug(e);
+            consecutiveRefreshFailures += 1;
+            refreshMode.value = computeRefreshMode();
+            return false;
+        } finally {
+            refreshCurrentViewPromise = null;
+        }
+    })();
+
+    return await refreshCurrentViewPromise;
+}
+
+const runRefreshTick = async (): Promise<void> => {
+    try {
+        await refreshCurrentView();
+    } finally {
+        scheduleNextRefresh();
+    }
+}
+
+const markUserActivity = (): void => {
+    const previousMode = computeRefreshMode();
+    lastUserActivityAt = Date.now();
+    refreshMode.value = 'active';
+
+    if (previousMode === 'idle' && shouldRefreshNow()) {
+        void refreshCurrentView();
+        scheduleNextRefresh(ACTIVE_REFRESH_MS);
+    }
+}
+
+const handleVisibilityChange = (): void => {
+    if (document.hidden) {
+        clearRefreshTimer();
+        return;
+    }
+
+    lastUserActivityAt = Date.now();
+    refreshMode.value = 'active';
+    consecutiveRefreshFailures = 0;
+    void refreshCurrentView();
+    scheduleNextRefresh(ACTIVE_REFRESH_MS);
+}
+
+watch(() => props.pauseAutoRefresh, (pauseAutoRefresh) => {
+    if (pauseAutoRefresh) {
+        clearRefreshTimer();
+        return;
+    }
+
+    if (schedulerActive && document.hidden === false) {
+        lastUserActivityAt = Date.now();
+        refreshMode.value = 'active';
+        consecutiveRefreshFailures = 0;
+        void refreshCurrentView();
+        scheduleNextRefresh(ACTIVE_REFRESH_MS);
+    }
+});
 
 onMounted(async () => {
-    periodFunc.start();
+    schedulerActive = true;
 
     // 添加屏幕尺寸监听
     window.addEventListener('resize', updateScreenWidth);
+    document.addEventListener('pointerdown', markUserActivity);
+    document.addEventListener('keydown', markUserActivity);
+    document.addEventListener('focusin', markUserActivity);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    scheduleNextRefresh(0);
 });
 
 onUnmounted(() => {
-    periodFunc.stop();
+    schedulerActive = false;
+    clearRefreshTimer();
 
     // 移除屏幕尺寸监听
     window.removeEventListener('resize', updateScreenWidth);
+    document.removeEventListener('pointerdown', markUserActivity);
+    document.removeEventListener('keydown', markUserActivity);
+    document.removeEventListener('focusin', markUserActivity);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
 });
 
 </script>

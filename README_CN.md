@@ -103,11 +103,14 @@ cargo install --git https://github.com/EasyTier/EasyTier.git easytier
 - 已修复或强化的问题：多传输 stealth rollout 与兼容路径；direct / hole-punch 的
   目标级回环避退，不再动辄升级为大范围 scheme suppression；QUIC/KCP Proxy 就绪 ACK
   与分类 fallback；UDP stealth fallback 预算与 datagram phase 切换时序；QUIC/KCP
-  Proxy 本地 TCP capture 伪源地址；native TCP proxy NAT entry 查找 / 交接；KCP
+  Proxy 本地 TCP capture 伪源地址和 exact-local SYN 递归回环；native TCP proxy NAT
+  entry 查找 / 交接；KCP
   关闭路径尾包清理；以及 feature-gated 构建下更准确的 Proxy capability 广告。
 - 本 fork 新增或扩展的能力：`udp`、`tcp`、`faketcp`、`quic`、`wg`、`ws`、`wss`
   的多传输 stealth；direct-connect `transport_priority`；legacy UDP 打洞拒绝控制；
-  以及构建在原有 QUIC/KCP Proxy 之上的 readiness ACK、按传输维度的健康状态和回退原因。
+  构建在原有 QUIC/KCP Proxy 之上的 readiness ACK、按传输维度的健康状态和回退原因；
+  以及 Linux `tun` feature 构建下，在设备 cgroup 或设备节点禁止 TUN 时可用的原生
+  veth NIC fallback。
 - 与上游不同的行为：strict stealth UDP listener 会静默丢弃 legacy probe；Proxy 固定
   顺序是 `QUIC -> KCP -> Native`；回环处理是“目标级避退强化”，不是“从此不再出现任何
   回环流量”；`transport_priority` 只影响 direct-connect；`disable_quic_input` /
@@ -115,7 +118,7 @@ cargo install --git https://github.com/EasyTier/EasyTier.git easytier
   优先。
 - 本 fork 新增的参数：`--stealth-mode`、`--stealth-window-secs`、
   `--stealth-protocols`、`--disable-legacy-udp-hole-punch`、
-  `--transport-priority`。
+  `--transport-priority`，以及仅 Linux 提供的 `--nic-backend`。
 - 上游原本就有、但在本 fork 下相关行为发生变化的参数：
   `--enable-kcp-proxy`、`--enable-quic-proxy`、`--disable-kcp-input`、
   `--disable-quic-input` 不是本 fork 新发明的参数；变化的是它们周边的 Proxy
@@ -138,6 +141,26 @@ rollout 细节仍以 [兼容性说明](easytier/docs/udp_stealth_compatibility.m
   否则启动阶段只会告警并继续走 plain。
 - `--disable-legacy-udp-hole-punch` 即使在 UDP stealth 未生效时，也仍会拒绝没有
   stealth 偏好的旧版 UDP 打洞请求。
+- `--nic-backend tun|veth|auto` 只属于 CLI，默认仍为 `tun`。`auto` 只在 TUN
+  设备创建失败时回退；MTU、地址或路由配置失败仍是硬错误。`veth/auto` 与
+  `--no-tun` 冲突。
+
+### Linux veth NIC fallback
+
+Linux 的 `--nic-backend veth` 使用隔离 veth peer 和 AF_PACKET 提供 EasyTier 的 L3
+虚拟网卡边界。它需要 `CAP_SYS_ADMIN + CAP_NET_ADMIN + CAP_NET_RAW`，用于容器允许
+网络管理、但 `/dev/net/tun` 或 device cgroup 不允许 TUN 的场景，不解决普通无特权
+容器问题。`--nic-backend auto` 始终先尝试 TUN，默认路径不变。
+
+veth 后端保留 `169.254.255.254` 和 `fe80::e:1` 作为内部 gateway。用户地址以及除
+默认路由外的动态路由不得包含这两个地址；冲突路由会明确拒绝，不会静默安装。该参数
+不写入 TOML、protobuf 或 GUI 配置。
+
+旧内核 link-local 清理失败发生在设备 Ready 之前，实例会失败并清理接口，不会带病
+进入数据面。实例停止或 DHCP 重建时主动删除 veth 是预期生命周期，不需要等待转发
+任务持有的每个内部引用自然释放。后端按设计抑制 veth 路径的链路控制协议；普通
+IPv4/IPv6 单播、广播和组播数据仍会转发，EasyTier 的常规组播也不依赖 IGMP 成员关系
+选路。这些行为不影响现有功能，无需为追求与 TUN 的内部实现形式一致而修改。
 
 ### Stealth 与传输策略
 

@@ -309,7 +309,20 @@ pub trait ConfigLoader: Send + Sync {
     }
     fn set_network_config_source(&self, _source: Option<ConfigSource>) {}
 
+    fn get_nic_backend(&self) -> NicBackend {
+        NicBackend::Tun
+    }
+    fn set_nic_backend(&self, _backend: NicBackend) {}
+
     fn dump(&self) -> String;
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NicBackend {
+    #[default]
+    Tun,
+    Veth,
+    Auto,
 }
 
 pub trait LoggingConfigLoader {
@@ -667,6 +680,7 @@ fn format_toml_parse_error(source_name: &str, config_str: &str, error: &toml::de
 #[derive(Debug, Clone)]
 pub struct TomlConfigLoader {
     config: Arc<Mutex<Config>>,
+    nic_backend: Arc<Mutex<NicBackend>>,
 }
 
 impl Default for TomlConfigLoader {
@@ -728,6 +742,7 @@ impl TomlConfigLoader {
 
         let config = TomlConfigLoader {
             config: Arc::new(Mutex::new(config)),
+            nic_backend: Arc::new(Mutex::new(NicBackend::Tun)),
         };
 
         let old_ns = config.get_network_identity();
@@ -853,6 +868,14 @@ impl TomlConfigLoader {
 }
 
 impl ConfigLoader for TomlConfigLoader {
+    fn get_nic_backend(&self) -> NicBackend {
+        *self.nic_backend.lock().unwrap()
+    }
+
+    fn set_nic_backend(&self, backend: NicBackend) {
+        *self.nic_backend.lock().unwrap() = backend;
+    }
+
     fn get_inst_name(&self) -> String {
         self.config
             .lock()

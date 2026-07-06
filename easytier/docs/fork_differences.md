@@ -74,6 +74,8 @@ Detailed stealth rollout notes still live in
   carry a stealth preference.
 - Readiness ACK, classified fallback reasons, and per-transport health tracking
   built on top of the pre-existing QUIC/KCP proxy path.
+- A Linux native veth NIC backend for containers that have network-management
+  capabilities but cannot open or create TUN devices.
 - Fork-specific GitHub Actions release flow that requires successful build/test
   runs before the release workflow is triggered.
 
@@ -91,6 +93,14 @@ to operators:
 - `transport_priority` only reorders direct-connect attempts. It does not
   reorder manual/bootstrap URLs and does not affect proxy failover.
 - QUIC/KCP proxy failover order is fixed to `QUIC -> KCP -> Native`.
+- The `failover` table is short-lived TCP SYN selection state, not a list of
+  wrapped connections or loop-suppression entries. Prepared-stream handoff
+  deliberately uses a local-to-local PeerManager marker; its TTL-bound status
+  does not affect remote QUIC/KCP health or handoff. An original SYN whose
+  destination exactly matches the local virtual IP bypasses the selector before
+  state is created, preventing a local proxy destination socket from being
+  recaptured by TUN and recursively amplified. Status output shows only the
+  latest 256 entries for diagnostic stability.
 - `disable_quic_input` and `disable_kcp_input` only disable QUIC/KCP Proxy
   inbound capability advertisement and acceptance. They do not disable the
   underlying `quic://` or `kcp`-backed listener path.
@@ -114,6 +124,7 @@ and are part of this fork's operator-facing surface.
 | `--stealth-protocols <list>` | `ET_STEALTH_PROTOCOLS` | Comma-separated stealth transports. | Empty means UDP-only stealth for rollout compatibility. |
 | `--disable-legacy-udp-hole-punch` | `ET_DISABLE_LEGACY_UDP_HOLE_PUNCH` | Reject legacy UDP hole-punch RPCs without stealth preference. | New peers that explicitly request plain remain allowed. |
 | `--transport-priority <rules>` | `ET_TRANSPORT_PRIORITY` | Reorder direct-connect underlays. | Format is `scope:proto,...;scope:proto,...`, for example `global:quic,faketcp,ws,udp,tcp`. |
+| `--nic-backend <tun|veth|auto>` | None | Select the Linux virtual NIC backend. | CLI-only in Linux `tun` builds; defaults to `tun` and is not serialized to TOML/protobuf. |
 
 Upstream-style proxy flags such as `--enable-kcp-proxy`, `--enable-quic-proxy`,
 `--disable-kcp-input`, and `--disable-quic-input` still exist in this fork.
@@ -155,6 +166,43 @@ execution path.
   preference even when UDP stealth is currently inactive.
 - `stealth_protocols` entries that are not compiled into the current build are
   warned and skipped rather than silently becoming active.
+- `--nic-backend veth` and `auto` conflict with `--no-tun`. The veth backend
+  requires `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, and `CAP_NET_RAW`; it is not an
+  unprivileged-container fallback.
+- `auto` falls back only for a TUN open/create failure with an expected device
+  availability or permission errno. MTU, address, and route failures do not
+  trigger veth fallback.
+- The veth backend reserves `169.254.255.254` and `fe80::e:1`. Non-default
+  configured or dynamic routes containing either internal gateway are rejected.
+
+### Reviewed veth lifecycle boundaries
+
+The following behaviors have been checked against their production call paths
+and Linux 3.10 runtime behavior. They are not outstanding functional defects:
+
+- Kernels without `addr_gen_mode` use bounded link-local cleanup. A cleanup
+  failure happens before `TunDeviceReady`; initialization propagates the error
+  and destroys the veth instead of exposing a partially initialized data path.
+- Immediate veth cleanup from `VirtualNic` destruction is intentional during
+  instance shutdown and DHCP rebuild. Internal forwarding tasks are being
+  cancelled at that point, so interface deletion does not need to wait for
+  every task-held `Arc` to expire naturally.
+- The veth stream suppresses NDP, MLD, IGMP, and similar link-control packets
+  that match its internal-control rules. Ordinary IPv4/IPv6 unicast, broadcast,
+  multicast UDP, and other user data continue to pass. EasyTier floods
+  multicast destinations to the relevant peers rather than routing from IGMP
+  membership, so normal multicast behavior is unaffected. Raw IGMP tunnelling
+  for an IGMP proxy or multicast-routing daemon would be a separate future
+  feature.
+- Address rollback failures are retained in an orphan registry capped at 256
+  entries and retried during later configuration and cleanup. This cannot
+  become unbounded memory growth. A slot can remain occupied only in exceptional
+  races such as an external process deleting the address concurrently, which
+  is not a current functional blocker.
+- Linux may remove an address-dependent explicit route when the address is
+  deleted. A following `ESRCH` or `ENOENT` is treated as idempotent success, and
+  the backend still clears its IPv4/IPv6 route cache and directed-broadcast
+  state.
 
 ## 7. Configuration Examples
 

@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     hash::Hash,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
@@ -44,6 +44,7 @@ const PREPARED_TTL: Duration = Duration::from_secs(5);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(1);
 const HALF_OPEN_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_PENDING_FLOWS: usize = 4096;
+const MAX_STATUS_ENTRIES: usize = 256;
 const MAX_HEALTH_ENTRIES: usize = 4096;
 const HEALTH_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_ROUTE_RESTARTS: u8 = 2;
@@ -57,6 +58,31 @@ pub(crate) fn requested_proxy_prepare_version(remote_version: u32) -> u32 {
     } else {
         0
     }
+}
+
+fn retain_latest_statuses(statuses: &mut Vec<TcpProxyEntry>) {
+    statuses.sort_unstable_by(|left, right| {
+        right
+            .start_time
+            .cmp(&left.start_time)
+            .then_with(|| right.generation.cmp(&left.generation))
+    });
+    statuses.truncate(MAX_STATUS_ENTRIES);
+}
+
+pub(crate) fn normalize_local_proxy_destination(
+    destination: SocketAddr,
+    send_to_self: bool,
+    no_tun: bool,
+) -> SocketAddr {
+    if !send_to_self || !no_tun {
+        return destination;
+    }
+    let loopback = match destination.ip() {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+    };
+    SocketAddr::new(loopback, destination.port())
 }
 
 #[async_trait]
@@ -224,6 +250,8 @@ pub(crate) async fn await_proxy_prepare_ready(
 trait ProxySelectorRuntime: Send + Sync {
     async fn target_snapshot(&self, dst_ip: Ipv4Addr) -> Option<(PeerId, CapabilitySnapshot)>;
 
+    fn is_local_virtual_ip(&self, dst_ip: Ipv4Addr) -> bool;
+
     async fn send_after_pipeline(
         &self,
         packet: ZCPacket,
@@ -270,6 +298,12 @@ impl ProxySelectorRuntime for PeerManagerSelectorRuntime {
             .send_msg_after_nic_pipeline(packet, context)
             .await
             .map_err(Into::into)
+    }
+
+    fn is_local_virtual_ip(&self, dst_ip: Ipv4Addr) -> bool {
+        self.peer_manager
+            .get_global_ctx()
+            .is_ip_local_virtual_ip(&IpAddr::V4(dst_ip))
     }
 
     fn my_peer_id(&self) -> PeerId {
@@ -1191,6 +1225,7 @@ impl DeferredProxySelector {
                 ambiguous_timeout_strikes,
             });
         }
+        retain_latest_statuses(&mut statuses);
         statuses
     }
 }
@@ -1231,6 +1266,14 @@ impl NicPacketFilter for DeferredProxySelector {
         let Some((flow, sequence)) = Self::parse_syn(packet) else {
             return NicPacketFilterAction::Continue;
         };
+
+        let SocketAddr::V4(dst) = flow.dst else {
+            return NicPacketFilterAction::Continue;
+        };
+        if self.runtime.is_local_virtual_ip(*dst.ip()) {
+            return NicPacketFilterAction::Continue;
+        }
+
         self.cleanup_flows().await;
 
         if let Some(existing_entry) = self.flows.get(&flow).map(|entry| entry.clone()) {
@@ -1266,9 +1309,6 @@ impl NicPacketFilter for DeferredProxySelector {
             tracing::warn!(?flow, "proxy selector pending table is full; using native");
             return NicPacketFilterAction::StopAndSend;
         }
-        let SocketAddr::V4(dst) = flow.dst else {
-            return NicPacketFilterAction::Continue;
-        };
         let Some((dst_peer_id, capabilities)) = self.target_snapshot(*dst.ip()).await else {
             return NicPacketFilterAction::Continue;
         };
@@ -1339,6 +1379,44 @@ mod tests {
         assert_eq!(requested_proxy_prepare_version(0), 0);
         assert_eq!(requested_proxy_prepare_version(1), 1);
         assert_eq!(requested_proxy_prepare_version(2), 1);
+    }
+
+    #[test]
+    fn proxy_status_output_is_bounded_and_newest_first() {
+        let mut statuses = (0..MAX_STATUS_ENTRIES + 10)
+            .map(|generation| TcpProxyEntry {
+                start_time: (generation / 2) as u64,
+                generation: generation as u64,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+
+        retain_latest_statuses(&mut statuses);
+
+        assert_eq!(statuses.len(), MAX_STATUS_ENTRIES);
+        assert_eq!(statuses[0].generation, (MAX_STATUS_ENTRIES + 9) as u64);
+        assert!(statuses.windows(2).all(|pair| {
+            pair[0].start_time > pair[1].start_time
+                || (pair[0].start_time == pair[1].start_time
+                    && pair[0].generation >= pair[1].generation)
+        }));
+    }
+
+    #[test]
+    fn local_proxy_destination_only_uses_family_loopback_without_tun() {
+        let ipv4 = "10.44.0.3:443".parse().unwrap();
+        let ipv6 = "[fd00::3]:443".parse().unwrap();
+
+        assert_eq!(normalize_local_proxy_destination(ipv4, false, true), ipv4);
+        assert_eq!(normalize_local_proxy_destination(ipv4, true, false), ipv4);
+        assert_eq!(
+            normalize_local_proxy_destination(ipv4, true, true),
+            "127.0.0.1:443".parse().unwrap()
+        );
+        assert_eq!(
+            normalize_local_proxy_destination(ipv6, true, true),
+            "[::1]:443".parse().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1516,6 +1594,7 @@ mod tests {
     #[derive(Default)]
     struct FakeRuntime {
         routes: DashMap<Ipv4Addr, (PeerId, CapabilitySnapshot)>,
+        local_virtual_ips: DashMap<Ipv4Addr, ()>,
         sent: Mutex<Vec<(ZCPacket, NicPacketContext)>>,
         sent_notify: Notify,
     }
@@ -1523,6 +1602,10 @@ mod tests {
     impl FakeRuntime {
         fn set_route(&self, dst: Ipv4Addr, peer: PeerId, capabilities: CapabilitySnapshot) {
             self.routes.insert(dst, (peer, capabilities));
+        }
+
+        fn set_local_virtual_ip(&self, dst: Ipv4Addr) {
+            self.local_virtual_ips.insert(dst, ());
         }
 
         async fn wait_for_sent(&self, count: usize) {
@@ -1553,6 +1636,10 @@ mod tests {
             self.sent.lock().await.push((packet, context));
             self.sent_notify.notify_waiters();
             Ok(())
+        }
+
+        fn is_local_virtual_ip(&self, dst_ip: Ipv4Addr) -> bool {
+            self.local_virtual_ips.contains_key(&dst_ip)
         }
 
         fn my_peer_id(&self) -> PeerId {
@@ -1684,6 +1771,83 @@ mod tests {
             transports,
             Arc::new(PreparedProxyStore::default()),
         )
+    }
+
+    #[tokio::test]
+    async fn exact_local_virtual_ip_bypasses_proxy_without_creating_state() {
+        let dst = "10.44.0.3".parse().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.set_local_virtual_ip(dst);
+        runtime.set_route(
+            dst,
+            runtime.my_peer_id(),
+            CapabilitySnapshot {
+                quic: true,
+                kcp: true,
+                prepare_ack_version: 1,
+            },
+        );
+        let transport = Arc::new(FakeTransport::new(
+            ProxyTransport::Quic,
+            [FakePrepareResult::Success],
+        ));
+        let selector = fake_selector(runtime, vec![transport.clone()]);
+        let context = NicPacketContext {
+            ip_addr: dst.into(),
+            not_send_to_self: true,
+        };
+        let (mut packet, _) = tcp_syn(100);
+
+        assert_eq!(
+            selector
+                .try_process_packet_from_nic(&mut packet, &context)
+                .await,
+            NicPacketFilterAction::Continue
+        );
+        assert!(selector.flows.is_empty());
+        assert!(selector.prepared.streams.is_empty());
+        assert!(transport.calls.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn self_peer_subnet_destination_still_uses_proxy() {
+        let dst = "10.44.0.3".parse().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.set_route(
+            dst,
+            runtime.my_peer_id(),
+            CapabilitySnapshot {
+                quic: true,
+                kcp: false,
+                prepare_ack_version: 0,
+            },
+        );
+        let release = Arc::new(Notify::new());
+        let transport = Arc::new(FakeTransport::new(
+            ProxyTransport::Quic,
+            [FakePrepareResult::WaitThenSuccess(release.clone())],
+        ));
+        let selector = fake_selector(runtime.clone(), vec![transport.clone()]);
+        let context = NicPacketContext {
+            ip_addr: dst.into(),
+            not_send_to_self: true,
+        };
+        let (mut packet, _) = tcp_syn(100);
+
+        assert_eq!(
+            selector
+                .try_process_packet_from_nic(&mut packet, &context)
+                .await,
+            NicPacketFilterAction::Consume
+        );
+        transport.wait_for_calls(1).await;
+        assert_eq!(
+            transport.calls.lock().await.as_slice(),
+            &[runtime.my_peer_id()]
+        );
+
+        release.notify_one();
+        runtime.wait_for_sent(1).await;
     }
 
     #[tokio::test]

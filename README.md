@@ -105,14 +105,17 @@ to enable, read this first:
   compatibility; target-scoped self-loop backoff for direct / hole-punch paths
   instead of broad scheme suppression; QUIC/KCP proxy readiness ACK and
   classified failover; UDP stealth fallback-budget and datagram phase-transition
-  fixes; deterministic QUIC/KCP proxy TCP capture source selection; native TCP
-  proxy NAT-entry lookup / handoff fixes; KCP close-path tail-data cleanup; and
+  fixes; deterministic QUIC/KCP proxy TCP capture source selection and
+  exact-local SYN recursion prevention; native TCP proxy NAT-entry lookup /
+  handoff fixes; KCP close-path tail-data cleanup; and
   accurate proxy capability advertisement for feature-gated builds.
 - Added features in this fork: structured stealth capabilities for `udp`,
   `tcp`, `faketcp`, `quic`, `wg`, `ws`, and `wss`; direct-connect
   `transport_priority`; strict legacy UDP hole-punch rejection control; and
   readiness ACK plus per-transport health / fallback reporting on top of the
-  existing QUIC/KCP proxy path.
+  existing QUIC/KCP proxy path. Linux builds with the `tun` feature also add a
+  native veth NIC fallback for environments where TUN is blocked by the device
+  cgroup or device node policy.
 - Behavior differences from upstream: strict stealth UDP listeners silently drop
   legacy probes, self-loop mitigation is hardened backoff rather than a promise
   that all residual loop traffic disappears, proxy failover order is fixed to
@@ -121,7 +124,8 @@ to enable, read this first:
   listeners, and IPv4 exact-match transport rules win for dual-stack peers.
 - Fork-added flags in this code line: `--stealth-mode`,
   `--stealth-window-secs`, `--stealth-protocols`,
-  `--disable-legacy-udp-hole-punch`, and `--transport-priority`.
+  `--disable-legacy-udp-hole-punch`, `--transport-priority`, and the Linux-only
+  `--nic-backend`.
 - Existing upstream proxy flags with fork-specific behavior:
   `--enable-kcp-proxy`, `--enable-quic-proxy`, `--disable-kcp-input`, and
   `--disable-quic-input` are not new, but this fork changes failover,
@@ -146,6 +150,34 @@ proxy, and rollout details remain in
   `network_secret` are both present; otherwise startup warns and stays plain.
 - `--disable-legacy-udp-hole-punch` still rejects legacy UDP hole-punch
   requests without a stealth preference even when UDP stealth is inactive.
+- `--nic-backend tun|veth|auto` is CLI-only and defaults to `tun`. `auto`
+  falls back only when the TUN device cannot be created; later MTU, address, or
+  route errors remain fatal. `veth`/`auto` conflict with `--no-tun`.
+
+### Linux veth NIC fallback
+
+The Linux-only `--nic-backend veth` mode provides the same EasyTier L3 NIC
+boundary through an isolated veth peer and AF_PACKET. It requires
+`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, and `CAP_NET_RAW`; it is intended for
+containers where network administration is allowed but `/dev/net/tun` or its
+device cgroup permission is unavailable, not for ordinary unprivileged
+containers. `--nic-backend auto` tries TUN first and preserves TUN as the
+default path.
+
+The veth backend reserves `169.254.255.254` and `fe80::e:1` as internal
+gateways. Configured addresses and non-default dynamic routes must not contain
+these addresses; conflicting routes are rejected instead of being installed.
+This option is not stored in TOML, protobuf, or GUI configuration.
+
+Legacy-kernel link-local cleanup failures happen before the device becomes
+ready, so startup fails and removes the interface instead of exposing a
+partially initialized data path. Prompt veth deletion during instance shutdown
+or DHCP rebuild is also intentional; it does not need to wait for every
+internal forwarding-task reference to expire naturally. The backend suppresses
+link-control protocols on the veth path by design while continuing to forward
+ordinary IPv4/IPv6 unicast, broadcast, and multicast data. EasyTier's normal
+multicast forwarding does not use IGMP membership for routing, so these
+implementation details do not require compatibility changes.
 
 ### Stealth and Transport Policy
 

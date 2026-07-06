@@ -208,6 +208,22 @@ Deferred-SYN selector 在改写前冻结目标 peer、原始 SYN 和发送 conte
 route 变化、late result、健康降级和 native fallback 均有界处理，proxy 分发保持本地
 自投递，不设置额外 wire `no_proxy`。
 
+`failover` 状态表展示的是 selector 对 TCP SYN 的短期决策缓存，不是已建立
+QUIC/KCP 封装连接的清单。因此 Pending、最终选择 Native 的流以及 prepare
+失败过的流都可能显示；Pending 最长保留 5 秒，已决策项保留 30 秒后清理。
+表中的 `src` / `dst` 是原始 TCP socket endpoint，`dst_peer_id` 才是路由解析的
+目标 peer。
+
+封装准备成功后，selector 会故意把 PeerManager header 标记为
+`from_peer_id == to_peer_id == 本机`，用于把已准备 stream 交给本机 QUIC/KCP source
+proxy。该包通过 pipeline 之后的发送入口交接，不会再次进入 selector，所以这种
+“本机到本机”是内部交接，不是 underlay 回环。原始 TCP 目标精确等于本机虚拟 IP
+时则会在进入清理、建表和 prepare 前跳过 failover selector。旧实现会让本机 proxy
+目标连接再次被 TUN 捕获并递归进入 selector；与其他 TUN/proxy 软件共存时，可能
+快速产生大量 self-target 连接和状态。该旁路不删除 prepared stream 的内部交接标记，
+也不影响远端 QUIC/KCP Proxy。`failover` RPC 和 GUI 最多展示最近 256 条状态，避免
+短连接风暴把诊断界面本身放大成内存问题。
+
 新版本 peer 通过 `proxy_prepare_ack_version` 宣告就绪确认能力。双方支持 v1 时，
 远端 proxy 在 ACL 通过后返回 `ACCEPTED`，目标 TCP 建立成功后返回 `READY`；源端只有
 收到 `READY` 才提交 prepared stream。旧 peer 仍使用原有 fire-and-forget 流程，新远端
