@@ -118,7 +118,7 @@ struct Cli {
     )]
     config_dir: Option<PathBuf>,
 
-    #[cfg(all(target_os = "linux", feature = "tun"))]
+    #[cfg(all(target_os = "linux", not(target_env = "ohos"), feature = "tun"))]
     #[arg(
         long,
         value_enum,
@@ -149,7 +149,7 @@ struct Cli {
     disable_env_parsing: bool,
 }
 
-#[cfg(all(target_os = "linux", feature = "tun"))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), feature = "tun"))]
 #[derive(clap::ValueEnum, Debug, Clone, Copy, Default)]
 enum CliNicBackend {
     #[default]
@@ -158,7 +158,7 @@ enum CliNicBackend {
     Auto,
 }
 
-#[cfg(all(target_os = "linux", feature = "tun"))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), feature = "tun"))]
 impl From<CliNicBackend> for NicBackend {
     fn from(value: CliNicBackend) -> Self {
         match value {
@@ -171,11 +171,11 @@ impl From<CliNicBackend> for NicBackend {
 
 impl Cli {
     fn nic_backend(&self) -> NicBackend {
-        #[cfg(all(target_os = "linux", feature = "tun"))]
+        #[cfg(all(target_os = "linux", not(target_env = "ohos"), feature = "tun"))]
         {
             self.nic_backend.into()
         }
-        #[cfg(not(all(target_os = "linux", feature = "tun")))]
+        #[cfg(not(all(target_os = "linux", not(target_env = "ohos"), feature = "tun")))]
         {
             NicBackend::Tun
         }

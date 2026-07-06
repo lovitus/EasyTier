@@ -193,7 +193,7 @@ fn interface_index(name: &str) -> anyhow::Result<u32> {
 }
 
 fn interface_name(index: u32) -> anyhow::Result<String> {
-    let mut buf = [0i8; libc::IF_NAMESIZE];
+    let mut buf = [0 as libc::c_char; libc::IF_NAMESIZE];
     let ptr = unsafe { libc::if_indextoname(index, buf.as_mut_ptr()) };
     if ptr.is_null() {
         return Err(io::Error::last_os_error()).context("resolve veth interface name");

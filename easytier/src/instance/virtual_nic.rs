@@ -587,7 +587,7 @@ impl VirtualNic {
         if configure_up {
             config.up();
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         if !configure_up {
             config.platform_config(|platform| {
                 platform.ensure_root_privileges(false);
@@ -738,7 +738,7 @@ impl VirtualNic {
         Ok(Box::new(ft))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     fn tun_create_allows_auto_fallback(error: &Error) -> bool {
         let Error::TunError(tun::Error::Io(error)) = error else {
             return false;
@@ -756,7 +756,7 @@ impl VirtualNic {
         )
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     async fn create_veth_dev(&mut self) -> Result<Box<dyn Tunnel>, Error> {
         let flags = self.global_ctx.config.get_flags();
         let mut mtu = flags.mtu;
@@ -774,7 +774,7 @@ impl VirtualNic {
     }
 
     pub async fn create_dev(&mut self) -> Result<Box<dyn Tunnel>, Error> {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         {
             let requested = self
                 .global_ctx
@@ -821,7 +821,7 @@ impl VirtualNic {
             }
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
         {
             let dev = self.create_tun(true).await?;
             let tunnel = self.finish_tun_device(dev).await?;

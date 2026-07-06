@@ -11,7 +11,7 @@ pub mod proxy_cidrs_monitor;
 #[cfg(feature = "tun")]
 pub mod virtual_nic;
 
-#[cfg(all(target_os = "linux", feature = "tun"))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), feature = "tun"))]
 mod linux_veth;
 
 #[cfg(any(windows, test))]
