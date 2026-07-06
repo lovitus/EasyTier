@@ -490,7 +490,7 @@ const actionMenu: Ref<MenuItem[]> = ref([
 ]);
 
 let periodFunc = new Utils.PeriodicTask(async () => {
-    if (props.pauseAutoRefresh) {
+    if (props.pauseAutoRefresh || document.hidden) {
         return;
     }
     try {
