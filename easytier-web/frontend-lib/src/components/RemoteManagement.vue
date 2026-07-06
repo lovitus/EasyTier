@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Button, ConfirmPopup, Divider, IftaLabel, Menu, Message, Select, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
-import { computed, onMounted, onUnmounted, Ref, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, Ref, ref, shallowRef, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import * as Api from '../modules/api';
 import * as Utils from '../modules/utils';
@@ -27,7 +27,7 @@ const toast = useToast();
 
 const configFile = ref();
 
-const curNetworkInfo = ref<NetworkTypes.NetworkInstance | null>(null);
+const curNetworkInfo = shallowRef<NetworkTypes.NetworkInstance | null>(null);
 let networkInfoRequestEpoch = 0;
 let networkInfoEmptyGrace = 0;
 let retainedNetworkInfo: NetworkTypes.NetworkInstance | null = null;

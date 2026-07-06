@@ -1173,11 +1173,20 @@ impl StunInfoCollector {
     }
 
     fn start_stun_routine(&self) {
-        if self.started.load(std::sync::atomic::Ordering::Relaxed) {
+        if self
+            .started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
             return;
         }
-        self.started
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        tracing::info!("starting stun routine (udp + tcp + ipv6)");
 
         let stun_servers = self.stun_servers.clone();
         let udp_nat_test_result = self.udp_nat_test_result.clone();
