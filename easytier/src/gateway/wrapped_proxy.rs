@@ -80,21 +80,16 @@ impl<C: NatDstConnector, T: TcpProxyForWrappedSrcTrait<Connector = C>> NicPacket
         zc_packet: &mut ZCPacket,
         context: &crate::peers::NicPacketContext,
     ) -> crate::peers::NicPacketFilterAction {
-        let data = zc_packet.payload();
-        let ip_packet = Ipv4Packet::new(data).unwrap();
-        if ip_packet.get_version() != 4
-            || ip_packet.get_next_level_protocol() != IpNextHeaderProtocols::Tcp
-        {
-            return crate::peers::NicPacketFilterAction::Continue;
-        }
-
-        if self
-            .get_tcp_proxy()
-            .get_global_ctx()
-            .is_ip_local_virtual_ip(&IpAddr::V4(ip_packet.get_destination()))
-        {
-            return crate::peers::NicPacketFilterAction::Continue;
-        }
+        let destination = {
+            let data = zc_packet.payload();
+            let ip_packet = Ipv4Packet::new(data).unwrap();
+            if ip_packet.get_version() != 4
+                || ip_packet.get_next_level_protocol() != IpNextHeaderProtocols::Tcp
+            {
+                return crate::peers::NicPacketFilterAction::Continue;
+            }
+            ip_packet.get_destination()
+        };
 
         let ret = self
             .get_tcp_proxy()
@@ -108,6 +103,17 @@ impl<C: NatDstConnector, T: TcpProxyForWrappedSrcTrait<Connector = C>> NicPacket
         if hdr.packet_type != PacketType::Data as u8 {
             // already handled by other proxy
             return crate::peers::NicPacketFilterAction::StopAndSend;
+        }
+
+        // Proxy stack responses are also addressed to our virtual IP. Only
+        // bypass new local-destination traffic after existing NAT entries had
+        // a chance to translate their response packets above.
+        if self
+            .get_tcp_proxy()
+            .get_global_ctx()
+            .is_ip_local_virtual_ip(&IpAddr::V4(destination))
+        {
+            return crate::peers::NicPacketFilterAction::Continue;
         }
 
         let data = zc_packet.payload();
