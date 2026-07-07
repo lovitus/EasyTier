@@ -1,11 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { latencyMs, lossRate, normalizeRunningInfo, numericValue } from '../src/modules/statusDisplay'
+import { latencyMs, lossRate, normalizeNatTypeValue, normalizeRunningInfo, numericValue } from '../src/modules/statusDisplay'
 
 describe('statusDisplay', () => {
   it('parses REST uint64 strings as numbers instead of concatenating them', () => {
     expect(numericValue('42000')).toBe(42000)
     expect(numericValue(42000n)).toBe(42000)
     expect(numericValue('')).toBeUndefined()
+  })
+
+  it('normalizes protobuf JSON NAT enum strings', () => {
+    expect(normalizeNatTypeValue('FullCone')).toBe(3)
+    expect(normalizeNatTypeValue('PortRestricted')).toBe(5)
+    expect(normalizeNatTypeValue('sym_udp_firewall')).toBe(7)
+    expect(normalizeNatTypeValue('6')).toBe(6)
   })
 
   it('uses the default connection latency when available', () => {
@@ -54,7 +61,7 @@ describe('statusDisplay', () => {
           publicIpv6: { part1: '1', part2: '2', part3: '3', part4: '4' },
           interfaceIpv6s: [],
         },
-        stunInfo: { udpNatType: 3, tcpNatType: 4, lastUpdateTime: '5' },
+        stunInfo: { udpNatType: 'FullCone', tcpNatType: 'Restricted', lastUpdateTime: '5' },
       },
       peerRoutePairs: [{
         route: {
@@ -64,6 +71,7 @@ describe('statusDisplay', () => {
           cost: 1,
           proxyCidrs: [],
           hostname: 'peer',
+          stunInfo: { udpNatType: 'PortRestricted', tcpNatType: 'Symmetric', lastUpdateTime: '6' },
           instId: 'inst',
           version: '2.6.7',
           featureFlag: {
@@ -116,6 +124,10 @@ describe('statusDisplay', () => {
     expect(normalized?.events).toHaveLength(1)
     expect(normalized?.my_node_info.peer_id).toBe(7)
     expect(normalized?.my_node_info.virtual_ipv4.network_length).toBe(24)
+    expect(normalized?.my_node_info.stun_info.udp_nat_type).toBe(3)
+    expect(normalized?.my_node_info.stun_info.tcp_nat_type).toBe(4)
+    expect(normalized?.peer_route_pairs[0].route.stun_info?.udp_nat_type).toBe(5)
+    expect(normalized?.peer_route_pairs[0].route.stun_info?.tcp_nat_type).toBe(6)
     expect(normalized?.peer_route_pairs[0].route.feature_flag?.is_public_server).toBe(true)
     expect(normalized?.peer_route_pairs[0].route.feature_flag?.proxy_prepare_ack_version).toBe(1)
     expect(latencyMs(normalized?.peer_route_pairs[0] as any)).toBe('15ms')

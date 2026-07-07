@@ -127,7 +127,7 @@ describe('Status mixed-version rendering', () => {
                 listeners: [],
               },
               stun_info: {
-                udp_nat_type: 0,
+                udp_nat_type: 'PortRestricted' as any,
                 tcp_nat_type: 0,
                 last_update_time: 0,
               },
@@ -212,6 +212,11 @@ describe('Status mixed-version rendering', () => {
                   proxy_cidrs: [],
                   inst_id: 'inst-2',
                   version: '2.6.7',
+                  stun_info: {
+                    udp_nat_type: 'FullCone' as any,
+                    tcp_nat_type: 'Restricted' as any,
+                    last_update_time: 0,
+                  },
                   feature_flag: {
                     is_public_server: true,
                     avoid_relay_data: true,
@@ -280,6 +285,8 @@ describe('Status mixed-version rendering', () => {
     expect(wrapper.text()).toContain('quic_policy_denied,kcp_policy_denied')
     expect(wrapper.text()).toContain('status.server')
     expect(wrapper.text()).toContain('status.relay')
+    expect(wrapper.text()).toContain('Full Cone')
+    expect(wrapper.text()).toContain('Port Restricted')
     expect(wrapper.text()).toContain('15ms')
     expect(wrapper.text()).toContain('1000 B')
     expect(wrapper.text()).toContain('2.0 KiB')

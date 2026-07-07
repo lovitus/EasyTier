@@ -3,7 +3,7 @@ import { NetworkInstance, type TunnelInfo, type PeerRoutePair } from '../types/n
 import { useI18n } from 'vue-i18n';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ipv4InetToString, ipv4ToString, ipv6ToString } from '../modules/utils';
-import { latencyMs, lossRate, numericValue, peerConns } from '../modules/statusDisplay';
+import { latencyMs, lossRate, normalizeNatTypeValue, numericValue, peerConns } from '../modules/statusDisplay';
 import { Badge, DataTable, Column, Tag, Chip, Button, Dialog, ScrollPanel, Timeline, Divider, Card, } from 'primevue';
 import NetworkChart from './NetworkChart.vue';
 
@@ -152,32 +152,21 @@ interface Chip {
   icon: string
 }
 
-// udp nat type
-enum NatType {
-  // has NAT; but own a single public IP, port is not changed
-  Unknown = 0,
-  OpenInternet = 1,
-  NoPAT = 2,
-  FullCone = 3,
-  Restricted = 4,
-  PortRestricted = 5,
-  Symmetric = 6,
-  SymUdpFirewall = 7,
-  SymmetricEasyInc = 8,
-  SymmetricEasyDec = 9,
-};
+const udpNatTypeStrMap: Record<number, string> = {
+  0: 'Unknown',
+  1: 'Open Internet',
+  2: 'No PAT',
+  3: 'Full Cone',
+  4: 'Restricted',
+  5: 'Port Restricted',
+  6: 'Symmetric',
+  7: 'Symmetric UDP Firewall',
+  8: 'Symmetric Easy Inc',
+  9: 'Symmetric Easy Dec',
+}
 
-const udpNatTypeStrMap = {
-  [NatType.Unknown]: 'Unknown',
-  [NatType.OpenInternet]: 'Open Internet',
-  [NatType.NoPAT]: 'No PAT',
-  [NatType.FullCone]: 'Full Cone',
-  [NatType.Restricted]: 'Restricted',
-  [NatType.PortRestricted]: 'Port Restricted',
-  [NatType.Symmetric]: 'Symmetric',
-  [NatType.SymUdpFirewall]: 'Symmetric UDP Firewall',
-  [NatType.SymmetricEasyInc]: 'Symmetric Easy Inc',
-  [NatType.SymmetricEasyDec]: 'Symmetric Easy Dec',
+function natTypeLabel(value: unknown): string {
+  return udpNatTypeStrMap[normalizeNatTypeValue(value)] ?? udpNatTypeStrMap[0]
 }
 
 const myNodeInfoChips = computed(() => {
@@ -254,10 +243,10 @@ const myNodeInfoChips = computed(() => {
     } as Chip)
   }
 
-  const udpNatType: NatType = my_node_info.stun_info?.udp_nat_type
+  const udpNatType = my_node_info.stun_info?.udp_nat_type
   if (udpNatType !== undefined) {
     chips.push({
-      label: `UDP NAT Type: ${udpNatTypeStrMap[udpNatType]}`,
+      label: `UDP NAT Type: ${natTypeLabel(udpNatType)}`,
       icon: '',
     } as Chip)
   }
@@ -286,7 +275,7 @@ function rxGlobalSum() {
 function natType(info: PeerRoutePair): string {
   const udpNatType = info.route?.stun_info?.udp_nat_type;
   if (udpNatType !== undefined)
-    return udpNatTypeStrMap[udpNatType as NatType]
+    return natTypeLabel(udpNatType)
 
   return ''
 }

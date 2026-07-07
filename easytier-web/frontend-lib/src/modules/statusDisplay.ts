@@ -36,6 +36,34 @@ function numericOrDefault(value: unknown, fallback = 0): number {
   return numericValue(value) ?? fallback
 }
 
+const natTypeNameToValue: Record<string, number> = {
+  unknown: 0,
+  openinternet: 1,
+  nopat: 2,
+  fullcone: 3,
+  restricted: 4,
+  portrestricted: 5,
+  symmetric: 6,
+  symudpfirewall: 7,
+  symmetriceasyinc: 8,
+  symmetriceasydec: 9,
+}
+
+function enumNameKey(value: string): string {
+  return value.replace(/[^a-z0-9]/gi, '').toLowerCase()
+}
+
+export function normalizeNatTypeValue(value: unknown, fallback = 0): number {
+  const numeric = numericValue(value)
+  if (numeric !== undefined)
+    return numeric
+
+  if (typeof value !== 'string')
+    return fallback
+
+  return natTypeNameToValue[enumNameKey(value.trim())] ?? fallback
+}
+
 function normalizeIpv4Addr(ip: any): any {
   if (!ip)
     return ip
@@ -87,8 +115,8 @@ function normalizeStunInfo(stun: any): any {
 
   return {
     ...stun,
-    udp_nat_type: numericOrDefault(firstDefined(stun.udp_nat_type, stun.udpNatType)),
-    tcp_nat_type: numericOrDefault(firstDefined(stun.tcp_nat_type, stun.tcpNatType)),
+    udp_nat_type: normalizeNatTypeValue(firstDefined(stun.udp_nat_type, stun.udpNatType)),
+    tcp_nat_type: normalizeNatTypeValue(firstDefined(stun.tcp_nat_type, stun.tcpNatType)),
     last_update_time: numericOrDefault(firstDefined(stun.last_update_time, stun.lastUpdateTime)),
   }
 }
