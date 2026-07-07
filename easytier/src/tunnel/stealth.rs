@@ -598,6 +598,12 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_secret_does_not_enable_stealth() {
+        assert!(!is_stealth_effectively_enabled(Some("   "), true, true));
+        assert!(!build_outer_session(Some("   "), true, true, 0).is_enabled());
+    }
+
+    #[test]
     fn stream_gate_ack_is_direction_and_challenge_bound() {
         let state = OuterSessionState::new(b"stream-secret".to_vec(), DEFAULT_GATE_WINDOW_SECS);
         let request = build_stream_gate_preface(&state);
@@ -997,7 +1003,7 @@ pub fn is_stealth_effectively_enabled(
     stealth_mode: bool,
     secure_mode: bool,
 ) -> bool {
-    stealth_mode && secure_mode && network_secret.is_some_and(|secret| !secret.is_empty())
+    stealth_mode && secure_mode && network_secret.is_some_and(|secret| !secret.trim().is_empty())
 }
 
 /// Build a shared [`OuterSessionState`] from config. Returns a disabled state

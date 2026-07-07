@@ -10,6 +10,8 @@
 
 Stealth、Proxy、回退和 rollout 细节仍然以
 [udp_stealth_compatibility.md](udp_stealth_compatibility.md) 为准。
+与 Mihomo/Clash/sing-box TUN 共存时的 CPU 异常和复现步骤见
+[mihomo_tun_interop_cn.md](mihomo_tun_interop_cn.md)。
 
 ## 1. 这个 Fork 修复了什么
 
@@ -63,6 +65,9 @@ Stealth、Proxy、回退和 rollout 细节仍然以
   的健康状态。
 - 新增 Linux 原生 veth NIC 后端，供具备网络管理 capability、但无法打开或创建 TUN
   设备的容器使用。
+- 新增默认开启的 `underlay_candidate_guard`，会从本机 IP 通告、direct candidate、
+  direct UDP 路由源校验、hole-punch candidate 和 bind-source 列表中过滤配置的
+  fake-IP/TUN CIDR 以及 EasyTier 运行态虚拟地址。
 - 新增 fork 自己的 GitHub Actions 发布顺序约束，要求先完成必要 build/test，再手动
   触发 release。
 
@@ -72,8 +77,8 @@ Stealth、Proxy、回退和 rollout 细节仍然以
 
 - 固定的 stealth `udp://` listener 不接受 legacy plain SYN 探测；旧节点主动拨 strict
   stealth listener 时会被静默丢弃，这是设计上的 anti-probe 取舍。
-- `stealth_protocols` 留空时，仍保持“只保护 UDP”的兼容发布行为；只有显式列出的协议
-  才会进入 stealth。
+- 默认 `stealth_protocols` 已列出所有支持的传输。显式把它设为空字符串时，才是
+  “只保护 UDP”的兼容发布覆盖。
 - `stealth_window_secs` 是网络级参数；`0` 等价于 60 秒，同一网络中所有 stealth 节点
   必须使用相同有效值。
 - `transport_priority` 只影响 direct-connect，不重排 manual/bootstrap 显式 URL，也不
@@ -91,6 +96,10 @@ Stealth、Proxy、回退和 rollout 细节仍然以
 - `default_protocol` 仍可保留作为兼容配置，但一旦设置 `transport_priority`，
   direct-connect 实际以 `transport_priority` 为准。
 - 回环处理现在是目标级 TTL 避退，不应理解为“所有残余回环流量都会自动消失”。
+- 与 Mihomo/Clash/sing-box TUN 同时运行时，默认 underlay guard 会减少明显污染的
+  direct candidate，但它不是“所有 generic underlay socket 都跨平台强制绕过系统
+  TUN”的硬保证。这不是 QUIC/KCP Proxy fallback 本身的无界状态；排查步骤见
+  [Mihomo TUN 共存风险](mihomo_tun_interop_cn.md)。
 
 ## 4. 本 Fork 新增参数
 
@@ -98,11 +107,13 @@ Stealth、Proxy、回退和 rollout 细节仍然以
 
 | CLI 参数 | 环境变量 | 用途 | 说明 |
 | --- | --- | --- | --- |
-| `--stealth-mode` | `ET_STEALTH_MODE` | 启用 stealth。 | 需要 secure mode 和非空 `network_secret`。 |
+| `--stealth-mode` | `ET_STEALTH_MODE` | 启用 stealth。 | 默认开启；需要非空 `network_secret`。未显式配置 `secure_mode` 时，握手密钥只为 Stealth-protected PeerConn 握手在运行期派生。 |
 | `--stealth-window-secs <n>` | `ET_STEALTH_WINDOW_SECS` | 设置 gate-key 滚动窗口。 | `0` 表示 60 秒；同一网络所有 stealth 节点必须一致。 |
-| `--stealth-protocols <list>` | `ET_STEALTH_PROTOCOLS` | 配置需要 stealth 的传输协议。 | 留空表示仅 UDP 进入 stealth，便于兼容 rollout。 |
+| `--stealth-protocols <list>` | `ET_STEALTH_PROTOCOLS` | 配置需要 stealth 的传输协议。 | 默认列出所有支持的传输；显式留空表示仅 UDP 进入 stealth，便于兼容 rollout。 |
 | `--disable-legacy-udp-hole-punch` | `ET_DISABLE_LEGACY_UDP_HOLE_PUNCH` | 拒绝旧版 UDP 打洞 RPC。 | 只拒绝“没有 stealth 偏好字段”的旧请求，不拒绝新节点显式请求 plain。 |
 | `--transport-priority <rules>` | `ET_TRANSPORT_PRIORITY` | 重排 direct-connect 协议顺序。 | 格式必须是 `scope:proto,...;scope:proto,...`，例如 `global:quic,faketcp,ws,wg,udp,tcp`。 |
+| `--underlay-candidate-guard` | `ET_UNDERLAY_CANDIDATE_GUARD` | 过滤污染 underlay candidate。 | 默认开启；不改变 listener 绑定。 |
+| `--underlay-exclude-cidrs <cidrs>` | `ET_UNDERLAY_EXCLUDE_CIDRS` | 从 IP 通告、direct candidate、hole-punch candidate，以及相关 direct-UDP 路由源 / bind-source 校验中排除的 CIDR。 | 默认 `198.18.0.0/15,fdfe:dcba:9876::/48,192.19.0.0/24`；清空后只保留运行态 EasyTier 虚拟地址过滤。 |
 | `--nic-backend <tun|veth|auto>` | 无 | 选择 Linux 虚拟 NIC 后端。 | 仅 Linux `tun` 构建的 CLI 提供；默认 `tun`，不序列化到 TOML/protobuf。 |
 
 上游原本就有 `--enable-kcp-proxy`、`--enable-quic-proxy`、
@@ -130,8 +141,20 @@ Stealth、Proxy、回退和 rollout 细节仍然以
   含义，不应再把两者理解为共同控制同一路径。
 - 数据面协议偏好受延迟约束：Peer 会先排除 RTT 超过最低 RTT 125% 的连接，然后才在
   合格集合里按偏好顺序选择。
-- `--stealth-mode` 如果缺少 secure mode 或非空 `network_secret`，不会变成硬错误；启动
-  时会告警，并继续保持 plain。
+- `--underlay-candidate-guard` 是 candidate 净化，不是进程级强制绕过
+  Mihomo/Clash/sing-box TUN。它过滤的是 EasyTier 对外通告和主动拨打的 underlay
+  candidate；listener 仍可绑定 `0.0.0.0`。命中 guard 的公网 IPv4 UDP 直连候选会
+  直接 fail-closed 跳过，不再退回 generic direct UDP fallback。
+- `--stealth-mode` 如果缺少非空 `network_secret`，不会变成硬错误；启动时会告警，并
+  继续保持 plain。
+- `secure_mode` 是显式高级 credential/Noise 配置。已有配置如果包含 `[secure_mode]`
+  但没有显式 `stealth_mode=true`，会保持旧行为：Stealth 关闭。显式
+  `stealth_mode=true` 同时 `secure_mode.enabled=false` 会被拒绝为冲突。
+- 运行期派生的 Stealth 密钥不会作为 RoutePeerInfo 的 `noise_static_pubkey` 发布，也不会
+  启用全局 RelayPeerMap/PeerManager secure relay/session 语义；这些路径仍只跟随显式
+  `secure_mode`。
+- 当前 GUI 只编辑 Stealth；显式 `secure_mode` 仍属于 CLI/TOML/RPC 高级配置。后续 GUI
+  入口计划见 [todo/gui_global_secure_identity.md](todo/gui_global_secure_identity.md)。
 - 自定义 `--stealth-window-secs` 时，同一网络内所有 stealth 节点必须使用相同有效值。
 - `--disable-legacy-udp-hole-punch` 即使在 UDP stealth 当前未生效时，也仍会拒绝没有
   stealth 偏好的旧请求。
@@ -175,7 +198,6 @@ Stealth、Proxy、回退和 rollout 细节仍然以
 easytier-core \
   --network-name demo \
   --network-secret demo-secret \
-  --secure-mode \
   --stealth-mode \
   --stealth-window-secs 60 \
   --stealth-protocols udp,tcp,faketcp,quic,wg,ws,wss \
@@ -193,6 +215,8 @@ stealth_window_secs = 60
 stealth_protocols = "udp,tcp,faketcp,quic,wg,ws,wss"
 disable_legacy_udp_hole_punch = false
 transport_priority = "global:quic,faketcp,ws,wg,udp,tcp"
+underlay_candidate_guard = true
+underlay_exclude_cidrs = "198.18.0.0/15,fdfe:dcba:9876::/48,192.19.0.0/24"
 enable_quic_proxy = true
 enable_kcp_proxy = true
 disable_quic_input = false

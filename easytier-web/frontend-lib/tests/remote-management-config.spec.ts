@@ -30,6 +30,7 @@ const BOOLEAN_CONFIG_FIELDS = [
   'disable_udp_hole_punching',
   'stealth_mode',
   'disable_legacy_udp_hole_punch',
+  'underlay_candidate_guard',
   'enable_magic_dns',
   'enable_private_mode',
   'enable_quic_proxy',

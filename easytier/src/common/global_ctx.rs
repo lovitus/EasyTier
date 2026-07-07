@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeSet, HashMap, hash_map::DefaultHasher},
     hash::Hasher,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -11,7 +11,9 @@ use dashmap::DashMap;
 
 use super::{
     PeerId,
-    config::{ConfigLoader, Flags, NicBackend},
+    config::{
+        ConfigLoader, Flags, NicBackend, is_effective_secure_mode_enabled, process_secure_mode_cfg,
+    },
     netns::NetNS,
     network::IPCollector,
     stun::{StunInfoCollector, StunInfoCollectorTrait},
@@ -25,7 +27,7 @@ use crate::{
     proto::{
         acl::GroupIdentity,
         api::{config::InstanceConfigPatch, instance::PeerConnInfo},
-        common::{PeerFeatureFlag, PortForwardConfigPb},
+        common::{PeerFeatureFlag, PortForwardConfigPb, SecureModeConfig},
         peer_rpc::PeerGroupInfo,
     },
     rpc_service::protected_port,
@@ -229,6 +231,7 @@ pub struct GlobalCtx {
     pub net_ns: NetNS,
     pub network: NetworkIdentity,
     resolved_nic_backend: std::sync::OnceLock<NicBackend>,
+    derived_secure_mode: OnceLock<SecureModeConfig>,
 
     event_bus: EventBus,
 
@@ -370,6 +373,16 @@ impl GlobalCtx {
         let stun_info_collector = Arc::new(stun_info_collector);
 
         let flags = config_fs.get_flags();
+        let explicit_secure_mode = config_fs.get_secure_mode();
+        let stealth_protocols =
+            crate::common::stealth_registry::StealthProtocolSet::parse(&flags.stealth_protocols)
+                .expect("stealth_protocols is validated while loading configuration");
+        crate::common::config::TomlConfigLoader::warn_stealth_configuration(
+            &flags,
+            explicit_secure_mode.as_ref(),
+            network.network_secret.as_deref(),
+            &stealth_protocols,
+        );
 
         let base_feature_flags = PeerFeatureFlag::default();
         let feature_flags = Self::derive_feature_flags(
@@ -377,10 +390,11 @@ impl GlobalCtx {
             base_feature_flags.clone(),
             Self::stealth_enabled_for_config(
                 &flags,
-                config_fs
-                    .get_secure_mode()
-                    .map(|sm| sm.enabled)
-                    .unwrap_or(false),
+                is_effective_secure_mode_enabled(
+                    explicit_secure_mode.as_ref(),
+                    flags.stealth_mode,
+                    network.network_secret.as_deref(),
+                ),
                 network.network_secret.as_deref(),
             ),
         );
@@ -395,6 +409,7 @@ impl GlobalCtx {
             net_ns: net_ns.clone(),
             network,
             resolved_nic_backend: std::sync::OnceLock::new(),
+            derived_secure_mode: OnceLock::new(),
 
             event_bus,
             cached_ipv4: AtomicCell::new(None),
@@ -625,22 +640,65 @@ impl GlobalCtx {
         self.flags.load().as_ref().clone()
     }
 
-    pub fn is_secure_mode_enabled(&self) -> bool {
+    pub fn get_effective_secure_mode(&self) -> Option<SecureModeConfig> {
+        if let Some(explicit) = self.config.get_secure_mode() {
+            return explicit.enabled.then_some(explicit);
+        }
+
+        let flags = self.get_flags();
+        let secret = self.get_network_identity().network_secret;
+        if !flags.stealth_mode || secret.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            return None;
+        }
+
+        Some(
+            self.derived_secure_mode
+                .get_or_init(|| {
+                    process_secure_mode_cfg(SecureModeConfig {
+                        enabled: true,
+                        local_private_key: None,
+                        local_public_key: None,
+                    })
+                    .expect("generated secure mode keypair must be valid")
+                })
+                .clone(),
+        )
+    }
+
+    pub fn get_secure_mode_for_tunnel(&self, stealth_protected: bool) -> Option<SecureModeConfig> {
+        if let Some(explicit) = self.config.get_secure_mode() {
+            return explicit.enabled.then_some(explicit);
+        }
+        stealth_protected
+            .then(|| self.get_effective_secure_mode())
+            .flatten()
+    }
+
+    pub fn is_explicit_secure_mode_enabled(&self) -> bool {
         self.config
             .get_secure_mode()
-            .map(|sm| sm.enabled)
-            .unwrap_or(false)
+            .is_some_and(|secure_mode| secure_mode.enabled)
+    }
+
+    pub fn is_secure_mode_enabled(&self) -> bool {
+        self.get_effective_secure_mode()
+            .is_some_and(|secure_mode| secure_mode.enabled)
     }
 
     pub fn set_flags(&self, flags: Flags) {
-        self.config.set_flags(flags.clone());
+        self.config.set_flags(flags);
+        let flags = self.config.get_flags();
         self.feature_flags
             .store(Arc::new(Self::derive_feature_flags(
                 &flags,
                 self.base_feature_flags.load().as_ref().clone(),
                 Self::stealth_enabled_for_config(
                     &flags,
-                    self.is_secure_mode_enabled(),
+                    is_effective_secure_mode_enabled(
+                        self.config.get_secure_mode().as_ref(),
+                        flags.stealth_mode,
+                        self.get_network_identity().network_secret.as_deref(),
+                    ),
                     self.get_network_identity().network_secret.as_deref(),
                 ),
             )));
@@ -1018,7 +1076,7 @@ pub mod tests {
             new_peer_id,
             stun::MockStunInfoCollector,
         },
-        proto::common::{NatType, SecureModeConfig},
+        proto::common::NatType,
     };
 
     use super::*;
@@ -1212,6 +1270,9 @@ pub mod tests {
 
     #[tokio::test]
     async fn should_deny_proxy_for_process_wide_rpc_port() {
+        let _guard = protected_port::PROTECTED_TCP_PORTS_TEST_LOCK
+            .lock()
+            .unwrap();
         protected_port::clear_protected_tcp_ports_for_test();
         protected_port::register_protected_tcp_port(15888);
 
@@ -1243,6 +1304,9 @@ pub mod tests {
 
     #[tokio::test]
     async fn public_ipv6_lease_is_treated_as_local_ip() {
+        let _guard = protected_port::PROTECTED_TCP_PORTS_TEST_LOCK
+            .lock()
+            .unwrap();
         protected_port::clear_protected_tcp_ports_for_test();
 
         let config = TomlConfigLoader::default();
@@ -1323,32 +1387,86 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn stealth_supported_requires_secure_mode_and_secret() {
+    async fn derived_secure_mode_is_lazy_and_tracks_stealth_conditions() {
+        let config = TomlConfigLoader::default();
+        let global_ctx = GlobalCtx::new(config);
+
+        assert!(global_ctx.get_effective_secure_mode().is_none());
+        assert!(global_ctx.derived_secure_mode.get().is_none());
+        assert!(!global_ctx.get_feature_flags().stealth_supported);
+
+        global_ctx.config.set_network_identity(NetworkIdentity {
+            network_name: "test".to_owned(),
+            network_secret: Some("secret".to_owned()),
+            network_secret_digest: None,
+        });
+        let derived = global_ctx.get_effective_secure_mode().unwrap();
+        assert!(derived.enabled);
+        assert!(global_ctx.config.get_secure_mode().is_none());
+        assert!(global_ctx.derived_secure_mode.get().is_some());
+        assert!(global_ctx.get_feature_flags().stealth_supported);
+
+        let mut flags = global_ctx.get_flags();
+        flags.stealth_mode = false;
+        global_ctx.set_flags(flags.clone());
+        assert!(global_ctx.get_effective_secure_mode().is_none());
+        assert!(!global_ctx.get_feature_flags().stealth_supported);
+
+        flags.stealth_mode = true;
+        global_ctx.set_flags(flags);
+        let restored = global_ctx.get_effective_secure_mode().unwrap();
+        assert_eq!(derived.local_private_key, restored.local_private_key);
+    }
+
+    #[tokio::test]
+    async fn explicit_disabled_secure_mode_suppresses_effective_secure_mode() {
         let config = TomlConfigLoader::default();
         config.set_network_identity(NetworkIdentity {
             network_name: "test".to_owned(),
             network_secret: Some("secret".to_owned()),
             network_secret_digest: None,
         });
+        let enabled_secure = process_secure_mode_cfg(SecureModeConfig {
+            enabled: true,
+            local_private_key: None,
+            local_public_key: None,
+        })
+        .unwrap();
+        config.set_secure_mode(Some(SecureModeConfig {
+            enabled: false,
+            ..enabled_secure
+        }));
+        config.set_stealth_mode_explicit(true);
+        let mut flags = config.get_flags();
+        flags.stealth_mode = true;
+        config.set_flags(flags);
+
         let global_ctx = GlobalCtx::new(config);
+
+        assert!(global_ctx.get_effective_secure_mode().is_none());
+        assert!(global_ctx.get_secure_mode_for_tunnel(true).is_none());
+        assert!(!global_ctx.get_feature_flags().stealth_supported);
+    }
+
+    #[tokio::test]
+    async fn set_flags_uses_reconciled_runtime_flags() {
+        let config = TomlConfigLoader::default();
+        config.set_secure_mode(Some(SecureModeConfig {
+            enabled: true,
+            ..Default::default()
+        }));
+        let global_ctx = GlobalCtx::new(config);
+        global_ctx.config.set_network_identity(NetworkIdentity {
+            network_name: "test".to_owned(),
+            network_secret: Some("secret".to_owned()),
+            network_secret_digest: None,
+        });
 
         let mut flags = global_ctx.get_flags();
         flags.stealth_mode = true;
         global_ctx.set_flags(flags);
 
-        assert!(!global_ctx.get_feature_flags().stealth_supported);
-
-        global_ctx.config.set_secure_mode(Some(SecureModeConfig {
-            enabled: true,
-            ..Default::default()
-        }));
-        assert!(global_ctx.get_feature_flags().stealth_supported);
-
-        global_ctx.config.set_network_identity(NetworkIdentity {
-            network_name: "test".to_owned(),
-            network_secret: None,
-            network_secret_digest: None,
-        });
+        assert!(!global_ctx.get_flags().stealth_mode);
         assert!(!global_ctx.get_feature_flags().stealth_supported);
     }
 

@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use crate::{
-    common::{dns::socket_addrs, error::Error, global_ctx::ArcGlobalCtx, idn},
+    common::{dns::socket_addrs, error::Error, global_ctx::ArcGlobalCtx, idn, underlay_guard},
     connector::dns_connector::DnsTunnelConnector,
     proto::common::PeerFeatureFlag,
     tunnel::{
@@ -87,6 +87,10 @@ async fn set_bind_addr_for_peer_connector(
     if is_ipv4 {
         let mut bind_addrs = vec![];
         for ipv4 in ips.interface_ipv4s {
+            let ip = IpAddr::V4(ipv4.into());
+            if underlay_guard::should_block_underlay_ip(global_ctx, ip) {
+                continue;
+            }
             let socket_addr = SocketAddrV4::new(ipv4.into(), 0).into();
             bind_addrs.push(socket_addr);
         }
@@ -95,7 +99,9 @@ async fn set_bind_addr_for_peer_connector(
         let mut bind_addrs = vec![];
         for ipv6 in ips.interface_ipv6s.iter().chain(ips.public_ipv6.iter()) {
             let ipv6 = std::net::Ipv6Addr::from(*ipv6);
-            if global_ctx.is_ip_easytier_managed_ipv6(&ipv6) {
+            if global_ctx.is_ip_easytier_managed_ipv6(&ipv6)
+                || underlay_guard::should_block_underlay_ip(global_ctx, IpAddr::V6(ipv6))
+            {
                 continue;
             }
             let socket_addr = SocketAddrV6::new(ipv6, 0, 0, 0).into();

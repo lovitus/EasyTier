@@ -973,6 +973,7 @@ impl NetworkConfig {
 
         if let Some(stealth_mode) = self.stealth_mode {
             flags.stealth_mode = stealth_mode;
+            cfg.set_stealth_mode_explicit(true);
         }
 
         if let Some(stealth_window_secs) = self.stealth_window_secs {
@@ -993,6 +994,16 @@ impl NetworkConfig {
             crate::common::transport_priority::TransportPriority::parse(transport_priority)
                 .context("failed to parse transport_priority")?;
             flags.transport_priority = transport_priority.clone();
+        }
+
+        if let Some(underlay_candidate_guard) = self.underlay_candidate_guard {
+            flags.underlay_candidate_guard = underlay_candidate_guard;
+        }
+
+        if let Some(underlay_exclude_cidrs) = &self.underlay_exclude_cidrs {
+            crate::common::underlay_guard::validate_exclude_cidrs(underlay_exclude_cidrs)
+                .context("failed to parse underlay_exclude_cidrs")?;
+            flags.underlay_exclude_cidrs = underlay_exclude_cidrs.clone();
         }
 
         if let Some(disable_upnp) = self.disable_upnp {
@@ -1046,6 +1057,7 @@ impl NetworkConfig {
         }
 
         cfg.set_flags(flags);
+        cfg.reconcile_security_modes()?;
         Ok(cfg)
     }
 
@@ -1187,6 +1199,8 @@ impl NetworkConfig {
         result.stealth_protocols = Some(flags.stealth_protocols.clone());
         result.disable_legacy_udp_hole_punch = Some(flags.disable_legacy_udp_hole_punch);
         result.transport_priority = Some(flags.transport_priority.clone());
+        result.underlay_candidate_guard = Some(flags.underlay_candidate_guard);
+        result.underlay_exclude_cidrs = Some(flags.underlay_exclude_cidrs.clone());
         result.disable_upnp = Some(flags.disable_upnp);
         result.disable_relay_data = Some(flags.disable_relay_data);
         result.enable_udp_broadcast_relay = Some(flags.enable_udp_broadcast_relay);
@@ -1501,6 +1515,12 @@ mod tests {
                 } else {
                     "global:udp,tcp;wan:quic,wss".to_string()
                 };
+                flags.underlay_candidate_guard = rng.gen_bool(0.8);
+                flags.underlay_exclude_cidrs = if rng.gen_bool(0.5) {
+                    crate::common::underlay_guard::DEFAULT_UNDERLAY_EXCLUDE_CIDRS.to_string()
+                } else {
+                    "198.18.0.0/15".to_string()
+                };
                 flags.disable_upnp = rng.gen_bool(0.2);
                 flags.enable_udp_broadcast_relay = rng.gen_bool(0.2);
                 flags.accept_dns = rng.gen_bool(0.6);
@@ -1599,6 +1619,26 @@ mod tests {
             Some(credential_secret)
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn derived_secure_mode_is_not_serialized_by_network_config() -> Result<(), anyhow::Error> {
+        let network_config = super::NetworkConfig {
+            network_name: Some("derived-secure".to_string()),
+            network_secret: Some("secret".to_string()),
+            networking_method: Some(super::NetworkingMethod::Manual as i32),
+            stealth_mode: Some(true),
+            secure_mode: None,
+            ..Default::default()
+        };
+
+        let generated = network_config.gen_config()?;
+        assert!(generated.get_secure_mode().is_none());
+
+        let round_trip = super::NetworkConfig::new_from_config(&generated)?;
+        assert!(round_trip.secure_mode.is_none());
+        assert_eq!(round_trip.stealth_mode, Some(true));
         Ok(())
     }
 

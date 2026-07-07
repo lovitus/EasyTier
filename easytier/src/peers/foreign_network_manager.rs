@@ -282,12 +282,16 @@ impl ForeignNetworkEntry {
         config.set_secure_mode(global_ctx.config.get_secure_mode());
 
         let mut flags = config.get_flags();
-        flags.disable_relay_kcp = !global_ctx.get_flags().enable_relay_foreign_network_kcp;
-        flags.disable_relay_quic = !global_ctx.get_flags().enable_relay_foreign_network_quic;
+        let parent_flags = global_ctx.get_flags();
+        flags.stealth_mode = parent_flags.stealth_mode;
+        flags.stealth_window_secs = parent_flags.stealth_window_secs;
+        flags.stealth_protocols = parent_flags.stealth_protocols.clone();
+        flags.disable_relay_kcp = !parent_flags.enable_relay_foreign_network_kcp;
+        flags.disable_relay_quic = !parent_flags.enable_relay_foreign_network_quic;
         // socket_mark is a host-wide socket option: propagate from parent so
         // outbound sockets the foreign-network entry initiates inherit the same
         // mark as the rest of the node.
-        flags.socket_mark = global_ctx.get_flags().socket_mark;
+        flags.socket_mark = parent_flags.socket_mark;
         config.set_flags(flags);
 
         config.set_mapped_listeners(Some(global_ctx.config.get_mapped_listeners()));

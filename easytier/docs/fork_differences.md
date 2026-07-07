@@ -12,6 +12,8 @@ answer four practical questions quickly:
 
 Detailed stealth rollout notes still live in
 [udp_stealth_compatibility.md](udp_stealth_compatibility.md).
+CPU spikes and reproduction steps for Mihomo/Clash/sing-box TUN coexistence are
+documented in [mihomo_tun_interop.md](mihomo_tun_interop.md).
 
 ## 1. Problems Fixed In This Fork
 
@@ -76,6 +78,10 @@ Detailed stealth rollout notes still live in
   built on top of the pre-existing QUIC/KCP proxy path.
 - A Linux native veth NIC backend for containers that have network-management
   capabilities but cannot open or create TUN devices.
+- `underlay_candidate_guard`, enabled by default, filters configured
+  fake-IP/TUN CIDRs and runtime EasyTier virtual addresses from IP
+  advertisement, direct candidates, direct UDP route-source validation,
+  hole-punch candidates, and bind-source lists.
 - Fork-specific GitHub Actions release flow that requires successful build/test
   runs before the release workflow is triggered.
 
@@ -86,8 +92,9 @@ to operators:
 
 - A fixed stealth `udp://` listener does not accept legacy plain SYN probes.
   Legacy nodes dialing a strict stealth listener are silently dropped by design.
-- Empty `stealth_protocols` keeps the rollout-compatible UDP-only stealth
-  behavior; explicitly listing protocols opts those transports into stealth.
+- The default `stealth_protocols` lists all supported transports. Explicitly
+  setting it to an empty string is the rollout-compatible override that keeps
+  UDP-only stealth behavior.
 - `stealth_window_secs` is a network-wide value. `0` means 60 seconds, and all
   stealth-enabled nodes in the same network must use the same effective value.
 - `transport_priority` only reorders direct-connect attempts. It does not
@@ -111,6 +118,11 @@ to operators:
   `transport_priority`.
 - Self-loop mitigation is now target-scoped backoff, not a guarantee that every
   remaining loop-flow pattern disappears.
+- When EasyTier runs together with Mihomo/Clash/sing-box TUN, the default
+  underlay candidate guard reduces obvious polluted direct candidates, but it is
+  not a hard cross-platform guarantee that every generic underlay socket bypasses
+  the system TUN. This is not unbounded QUIC/KCP Proxy failover state; see
+  [Mihomo TUN interoperability risk](mihomo_tun_interop.md).
 
 ## 4. Fork-Added Parameters
 
@@ -119,11 +131,13 @@ and are part of this fork's operator-facing surface.
 
 | CLI flag | Env | Purpose | Notes |
 | --- | --- | --- | --- |
-| `--stealth-mode` | `ET_STEALTH_MODE` | Enable stealth for the configured transports. | Requires secure mode and a non-empty `network_secret`. |
+| `--stealth-mode` | `ET_STEALTH_MODE` | Enable stealth for the configured transports. | Enabled by default; requires a non-empty `network_secret`. Without explicit `secure_mode`, handshake keys are derived only at runtime for Stealth-protected PeerConn handshakes. |
 | `--stealth-window-secs <n>` | `ET_STEALTH_WINDOW_SECS` | Set the gate-key rolling window. | `0` means 60 seconds; all stealth nodes in one network must match. |
-| `--stealth-protocols <list>` | `ET_STEALTH_PROTOCOLS` | Comma-separated stealth transports. | Empty means UDP-only stealth for rollout compatibility. |
+| `--stealth-protocols <list>` | `ET_STEALTH_PROTOCOLS` | Comma-separated stealth transports. | The default lists all supported transports; an explicitly empty value means UDP-only stealth for rollout compatibility. |
 | `--disable-legacy-udp-hole-punch` | `ET_DISABLE_LEGACY_UDP_HOLE_PUNCH` | Reject legacy UDP hole-punch RPCs without stealth preference. | New peers that explicitly request plain remain allowed. |
 | `--transport-priority <rules>` | `ET_TRANSPORT_PRIORITY` | Reorder direct-connect underlays. | Format is `scope:proto,...;scope:proto,...`, for example `global:quic,faketcp,ws,udp,tcp`. |
+| `--underlay-candidate-guard` | `ET_UNDERLAY_CANDIDATE_GUARD` | Filter polluted underlay candidates. | Defaults to true; does not change listener binding. |
+| `--underlay-exclude-cidrs <cidrs>` | `ET_UNDERLAY_EXCLUDE_CIDRS` | CIDRs excluded from IP advertisement, direct candidates, hole-punch candidates, and related direct-UDP route-source / bind-source checks. | Defaults to `198.18.0.0/15,fdfe:dcba:9876::/48,192.19.0.0/24`; empty keeps only runtime EasyTier virtual-address filtering while the guard is enabled. |
 | `--nic-backend <tun|veth|auto>` | None | Select the Linux virtual NIC backend. | CLI-only in Linux `tun` builds; defaults to `tun` and is not serialized to TOML/protobuf. |
 
 Upstream-style proxy flags such as `--enable-kcp-proxy`, `--enable-quic-proxy`,
@@ -157,9 +171,23 @@ execution path.
 - Data-plane transport preference is bounded by latency. A preferred live
   connection is selected only after the peer filters out connections whose RTT
   is greater than 125% of the lowest RTT connection.
-- `--stealth-mode` without secure mode or a non-empty `network_secret` does not
-  become a hard config error. Startup warns and the node continues in plain
-  mode.
+- `--underlay-candidate-guard` is candidate sanitization, not a process-level
+  bypass of Mihomo/Clash/sing-box TUN. It filters what EasyTier advertises or
+  dials as underlay candidates; listeners may still bind `0.0.0.0`. A guarded
+  public IPv4 UDP direct candidate is skipped fail-closed and is not retried
+  through the generic direct UDP fallback path.
+- `--stealth-mode` without a non-empty `network_secret` does not become a hard
+  config error. Startup warns and the node continues in plain mode.
+- `secure_mode` is an explicit advanced credential/Noise configuration. Existing
+  configs that contain `[secure_mode]` but do not explicitly set
+  `stealth_mode=true` keep legacy behavior with Stealth disabled. Explicit
+  `stealth_mode=true` plus `secure_mode.enabled=false` is rejected as a conflict.
+- Runtime-derived Stealth keys are not published as RoutePeerInfo
+  `noise_static_pubkey` and do not enable global RelayPeerMap/PeerManager secure
+  relay/session semantics. Those paths remain tied to explicit `secure_mode`.
+- The current GUI edits Stealth only. Explicit `secure_mode` remains an advanced
+  CLI/TOML/RPC setting; the planned GUI entry is tracked in
+  [todo/gui_global_secure_identity.md](todo/gui_global_secure_identity.md).
 - A custom `--stealth-window-secs` value must match every stealth-enabled node
   in the same network.
 - `--disable-legacy-udp-hole-punch` still rejects old requests without stealth
@@ -215,7 +243,6 @@ this fork changes behavior around the QUIC/KCP Proxy path.
 easytier-core \
   --network-name demo \
   --network-secret demo-secret \
-  --secure-mode \
   --stealth-mode \
   --stealth-window-secs 60 \
   --stealth-protocols udp,tcp,faketcp,quic,wg,ws,wss \
@@ -233,6 +260,8 @@ stealth_window_secs = 60
 stealth_protocols = "udp,tcp,faketcp,quic,wg,ws,wss"
 disable_legacy_udp_hole_punch = false
 transport_priority = "global:quic,faketcp,ws,wg,udp,tcp"
+underlay_candidate_guard = true
+underlay_exclude_cidrs = "198.18.0.0/15,fdfe:dcba:9876::/48,192.19.0.0/24"
 enable_quic_proxy = true
 enable_kcp_proxy = true
 disable_quic_input = false

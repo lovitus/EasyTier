@@ -9,9 +9,8 @@ rollout 相关的实现与兼容细节。
 
 ## 1. 范围与启用条件
 
-当前支持 `udp`、`tcp`、`faketcp`、`quic`、`wg`、`ws` 和 `wss`。`stealth_mode=true`
-且 `stealth_protocols` 留空时仍只保护 UDP，避免升级后隐式改变其他传输的 wire format。
-显式配置示例：
+当前默认对 `udp`、`tcp`、`faketcp`、`quic`、`wg`、`ws` 和 `wss` 开启 Stealth。
+显式把 `stealth_protocols` 设为空时才退回只保护 UDP 的兼容模式。配置示例：
 
 ```text
 --stealth-protocols udp,tcp,faketcp,quic,wg,ws,wss
@@ -20,8 +19,37 @@ rollout 相关的实现与兼容细节。
 以下条件必须同时满足，节点才会宣告对应结构化 capability 并实际启用：
 
 - `flags.stealth_mode = true`
-- secure mode 已启用
 - `network_secret` 存在且非空
+
+未显式配置 `secure_mode` 时，认证握手配置只在运行期派生，不写入 TOML 或 RPC。
+显式 `secure_mode` 仍表示高级 credential/Noise 配置；旧配置中存在 `[secure_mode]`
+但未显式设置 `stealth_mode=true` 时会保持旧行为，Stealth 关闭。显式
+`stealth_mode=true` 加 `secure_mode.enabled=false` 会被拒绝为配置冲突。
+运行期派生的 Stealth 密钥只用于 Stealth-protected PeerConn 握手，不会作为
+RoutePeerInfo 的 `noise_static_pubkey` 发布，也不会启用全局 RelayPeerMap/PeerManager
+secure relay/session 语义。
+
+对普通用户和 GUI 用户，推荐只理解 `network_secret + stealth_mode`：
+
+| 配置方式 | 生效范围 | 不会改变的范围 |
+| --- | --- | --- |
+| GUI/新默认：`network_secret` + Stealth | 对配置的底层传输启用 Stealth 外层握手，并保护 Stealth-protected PeerConn 的内层 payload。 | 不发布 RoutePeerInfo `noise_static_pubkey`，不启用全局 RelayPeerMap/PeerManager secure relay/session，不进入 credential 身份模式。 |
+| 显式 `secure_mode.enabled=true` | 启用完整显式 Noise 身份：RoutePeerInfo 公钥发布、secure relay/session、credential 兼容身份。 | 不是默认 Stealth 的必要条件；只在需要显式身份/credential/secure relay 语义时使用。 |
+
+更直白地说：
+
+- GUI 的 `network_secret + Stealth` 负责隐藏连接入口、防陌生探测、防止 DPI 直接识别
+  EasyTier 握手。它作用在 `udp`、`tcp`、`faketcp`、`quic`、`wg`、`ws`、`wss`
+  这些底层传输的握手入口。
+- 打洞只负责找到路径；路径找到后，真正建立对应底层传输时仍可按 capability 和配置走
+  Stealth。混合旧版本时，新节点可能为了兼容明确降级到 plain。
+- 显式 `secure_mode.enabled=true` 负责节点身份：发布 Noise 公钥、允许其他节点 pin
+  公钥、启用 secure relay/session，并支持 credential 临时节点不持有 `network_secret`
+  也能被网络识别和撤销。
+- 因此，普通隐藏协议特征和 anti-probe 不需要显式 `secure_mode`；需要 credential、
+  共享节点身份、节点公钥 pinning 或 secure relay/session 时，才需要显式开启。
+- 当前 GUI 只编辑 Stealth 偏好，不编辑显式 `secure_mode`。后续 GUI “全局安全身份”
+  入口计划见 [todo/gui_global_secure_identity.md](todo/gui_global_secure_identity.md)。
 
 命令行入口：
 
@@ -34,8 +62,7 @@ rollout 相关的实现与兼容细节。
 ```
 
 对应环境变量使用同名 `ET_` 前缀。窗口配置为 `0`
-时使用 60 秒默认值。stealth 是 opt-in，默认关闭，因此升级本身不会改变既有网络
-行为。
+时使用 60 秒默认值。显式 `stealth_mode=false` 可恢复原有非 Stealth 行为。
 
 ## 2. 协议流程
 
@@ -67,8 +94,9 @@ random_nonce[12] || ciphertext || tag[16]
 
 TCP/FakeTCP 使用认证 preface 和带长度的 record protector；WS/WSS 使用认证 HTTP
 upgrade header、challenge-bound response ACK 和受保护的 binary frame。当前 seal 使用
-HMAC-SHA256 派生的独立 stream key 和 MAC key，并采用
-encrypt-then-MAC。内层 payload 仍由 secure mode 的会话保护。
+HMAC-SHA256 派生的独立 stream key 和 MAC key，并采用 encrypt-then-MAC。Stealth
+保护的 PeerConn 会使用 effective secure mode；没有显式 `secure_mode` 时使用运行期
+派生的会话配置保护该连接的内层 payload。
 
 ### 2.3 Phase 2：连接级 outer key
 

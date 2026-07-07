@@ -30,6 +30,9 @@ use super::env_parser;
 
 pub type Flags = crate::proto::common::FlagsInConfig;
 
+pub const DEFAULT_STEALTH_PROTOCOLS: &str = "udp,tcp,faketcp,quic,wg,ws,wss";
+pub const DEFAULT_TRANSPORT_PRIORITY: &str = "global:quic,faketcp,ws,wg,udp,tcp";
+
 pub fn gen_default_flags() -> Flags {
     #[allow(deprecated)]
     Flags {
@@ -76,11 +79,14 @@ pub fn gen_default_flags() -> Flags {
         disable_relay_data: false,
         enable_udp_broadcast_relay: false,
         socket_mark: None,
-        stealth_mode: false,
+        stealth_mode: true,
         stealth_window_secs: 0,
         disable_legacy_udp_hole_punch: false,
-        transport_priority: String::new(),
-        stealth_protocols: String::new(),
+        transport_priority: DEFAULT_TRANSPORT_PRIORITY.to_string(),
+        stealth_protocols: DEFAULT_STEALTH_PROTOCOLS.to_string(),
+        underlay_candidate_guard: true,
+        underlay_exclude_cidrs: crate::common::underlay_guard::DEFAULT_UNDERLAY_EXCLUDE_CIDRS
+            .to_string(),
     }
 }
 
@@ -591,6 +597,17 @@ pub fn process_secure_mode_cfg(mut user_cfg: SecureModeConfig) -> anyhow::Result
     Ok(user_cfg)
 }
 
+pub fn is_effective_secure_mode_enabled(
+    explicit_secure_mode: Option<&SecureModeConfig>,
+    stealth_mode: bool,
+    network_secret: Option<&str>,
+) -> bool {
+    explicit_secure_mode.map_or_else(
+        || stealth_mode && network_secret.is_some_and(|secret| !secret.trim().is_empty()),
+        |secure_mode| secure_mode.enabled,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 struct Config {
     netns: Option<String>,
@@ -625,6 +642,9 @@ struct Config {
 
     #[serde(skip)]
     flags_struct: Option<Flags>,
+
+    #[serde(skip)]
+    stealth_mode_explicit: bool,
 
     acl: Option<Acl>,
 
@@ -720,6 +740,11 @@ impl TomlConfigLoader {
             anyhow::Error::new(err).context(message)
         })?;
 
+        config.stealth_mode_explicit = config
+            .flags
+            .as_ref()
+            .is_some_and(|flags| flags.contains_key("stealth_mode"));
+
         Self::normalize_config_source(&mut config);
 
         Self::new_from_config(config).map_err(|err| {
@@ -729,14 +754,15 @@ impl TomlConfigLoader {
     }
 
     fn new_from_config(mut config: Config) -> Result<Self, anyhow::Error> {
-        let flags = Self::gen_flags(config.flags.clone().unwrap_or_default())
+        let mut flags = Self::gen_flags(config.flags.clone().unwrap_or_default())
             .context("failed to parse flags")?;
+        Self::reconcile_stealth_secure_mode(&config, &mut flags)?;
         crate::common::transport_priority::TransportPriority::parse(&flags.transport_priority)
             .context("failed to parse transport_priority")?;
-        let stealth_protocols =
-            crate::common::stealth_registry::StealthProtocolSet::parse(&flags.stealth_protocols)
-                .context("failed to parse stealth_protocols")?;
-        Self::warn_stealth_configuration(&config, &flags, &stealth_protocols);
+        crate::common::stealth_registry::StealthProtocolSet::parse(&flags.stealth_protocols)
+            .context("failed to parse stealth_protocols")?;
+        crate::common::underlay_guard::validate_exclude_cidrs(&flags.underlay_exclude_cidrs)
+            .context("failed to parse underlay_exclude_cidrs")?;
         config.flags_struct = Some(flags);
         let has_network_identity = config.network_identity.is_some();
 
@@ -770,12 +796,18 @@ impl TomlConfigLoader {
         Ok(config)
     }
 
-    fn warn_stealth_configuration(
-        config: &Config,
+    pub(crate) fn warn_stealth_configuration(
         flags: &Flags,
+        explicit_secure_mode: Option<&SecureModeConfig>,
+        network_secret: Option<&str>,
         protocols: &crate::common::stealth_registry::StealthProtocolSet,
     ) {
-        for warning in Self::stealth_configuration_warnings(config, flags, protocols) {
+        for warning in Self::stealth_configuration_warnings(
+            flags,
+            explicit_secure_mode,
+            network_secret,
+            protocols,
+        ) {
             match warning {
                 StealthConfigurationWarning::ProtocolNotImplemented(protocol) => {
                     tracing::warn!(
@@ -807,8 +839,9 @@ impl TomlConfigLoader {
     }
 
     fn stealth_configuration_warnings(
-        config: &Config,
         flags: &Flags,
+        explicit_secure_mode: Option<&SecureModeConfig>,
+        network_secret: Option<&str>,
         protocols: &crate::common::stealth_registry::StealthProtocolSet,
     ) -> Vec<StealthConfigurationWarning> {
         let mut warnings = protocols
@@ -816,25 +849,23 @@ impl TomlConfigLoader {
             .filter(|protocol| !protocol.is_implemented())
             .map(StealthConfigurationWarning::ProtocolNotImplemented)
             .collect::<Vec<_>>();
-        let secure_mode = config
-            .secure_mode
-            .as_ref()
-            .is_some_and(|secure| secure.enabled);
-        let has_secret = config
-            .network_identity
-            .as_ref()
-            .and_then(|identity| identity.network_secret.as_deref())
-            .is_some_and(|secret| !secret.is_empty());
+        let has_secret = network_secret.is_some_and(|secret| !secret.trim().is_empty());
+        let secure_mode = is_effective_secure_mode_enabled(
+            explicit_secure_mode,
+            flags.stealth_mode,
+            network_secret,
+        );
         let effective = flags.stealth_mode && secure_mode && has_secret;
 
-        if flags.stealth_mode && !secure_mode {
-            warnings.push(StealthConfigurationWarning::SecureModeDisabled);
-        } else if flags.stealth_mode && !has_secret {
+        if flags.stealth_mode && !has_secret {
             warnings.push(StealthConfigurationWarning::NetworkSecretMissing);
+        } else if flags.stealth_mode && !secure_mode {
+            warnings.push(StealthConfigurationWarning::SecureModeDisabled);
         } else if flags.stealth_mode && protocols.effective_protocols(true).is_empty() {
             warnings.push(StealthConfigurationWarning::NoCompiledProtocol);
         } else if !flags.stealth_mode
-            && (!flags.stealth_protocols.trim().is_empty() || flags.stealth_window_secs != 0)
+            && (flags.stealth_protocols.trim() != DEFAULT_STEALTH_PROTOCOLS
+                || flags.stealth_window_secs != 0)
         {
             warnings.push(StealthConfigurationWarning::StealthOptionsWithoutMode);
         }
@@ -853,6 +884,37 @@ impl TomlConfigLoader {
             warnings.push(StealthConfigurationWarning::LegacyRejectWithoutUdpStealth);
         }
         warnings
+    }
+
+    fn reconcile_stealth_secure_mode(
+        config: &Config,
+        flags: &mut Flags,
+    ) -> Result<(), anyhow::Error> {
+        let Some(secure_mode) = config.secure_mode.as_ref() else {
+            return Ok(());
+        };
+        if config.stealth_mode_explicit && flags.stealth_mode && !secure_mode.enabled {
+            anyhow::bail!("stealth_mode=true conflicts with secure_mode.enabled=false");
+        }
+        if !config.stealth_mode_explicit {
+            flags.stealth_mode = false;
+        }
+        Ok(())
+    }
+
+    pub fn set_stealth_mode_explicit(&self, explicit: bool) {
+        self.config.lock().unwrap().stealth_mode_explicit = explicit;
+    }
+
+    pub fn reconcile_security_modes(&self) -> Result<(), anyhow::Error> {
+        let mut config = self.config.lock().unwrap();
+        let mut flags = config
+            .flags_struct
+            .clone()
+            .unwrap_or_else(gen_default_flags);
+        Self::reconcile_stealth_secure_mode(&config, &mut flags)?;
+        config.flags_struct = Some(flags);
+        Ok(())
     }
 
     fn gen_flags(
@@ -1141,8 +1203,12 @@ impl ConfigLoader for TomlConfigLoader {
             .unwrap_or_default()
     }
 
-    fn set_flags(&self, flags: Flags) {
-        self.config.lock().unwrap().flags_struct = Some(flags);
+    fn set_flags(&self, mut flags: Flags) {
+        let mut config = self.config.lock().unwrap();
+        if config.secure_mode.is_some() && !config.stealth_mode_explicit {
+            flags.stealth_mode = false;
+        }
+        config.flags_struct = Some(flags);
     }
 
     fn get_exit_nodes(&self) -> Vec<IpAddr> {
@@ -1242,7 +1308,13 @@ impl ConfigLoader for TomlConfigLoader {
     }
 
     fn set_secure_mode(&self, secure_mode: Option<SecureModeConfig>) {
-        self.config.lock().unwrap().secure_mode = secure_mode;
+        let mut config = self.config.lock().unwrap();
+        config.secure_mode = secure_mode;
+        if config.secure_mode.is_some() && !config.stealth_mode_explicit {
+            if let Some(flags) = config.flags_struct.as_mut() {
+                flags.stealth_mode = false;
+            }
+        }
     }
 
     fn get_credential_file(&self) -> Option<PathBuf> {
@@ -1489,7 +1561,15 @@ pub mod tests {
         flags.stealth_protocols = protocols.to_string();
         let protocols =
             crate::common::stealth_registry::StealthProtocolSet::parse(protocols).unwrap();
-        TomlConfigLoader::stealth_configuration_warnings(&config, &flags, &protocols)
+        TomlConfigLoader::stealth_configuration_warnings(
+            &flags,
+            config.secure_mode.as_ref(),
+            config
+                .network_identity
+                .as_ref()
+                .and_then(|identity| identity.network_secret.as_deref()),
+            &protocols,
+        )
     }
 
     #[test]
@@ -1506,7 +1586,7 @@ pub mod tests {
         assert_eq!(
             warnings,
             [
-                StealthConfigurationWarning::SecureModeDisabled,
+                StealthConfigurationWarning::NetworkSecretMissing,
                 StealthConfigurationWarning::CustomWindow(61),
                 StealthConfigurationWarning::LegacyRejectWithoutUdpStealth,
             ]
@@ -1522,7 +1602,14 @@ pub mod tests {
             [StealthConfigurationWarning::NetworkSecretMissing]
         );
 
-        let warnings = stealth_warnings("", |flags| flags.stealth_window_secs = 30, "tcp");
+        let warnings = stealth_warnings(
+            "",
+            |flags| {
+                flags.stealth_mode = false;
+                flags.stealth_window_secs = 30;
+            },
+            "tcp",
+        );
         assert_eq!(
             warnings,
             [
@@ -1550,6 +1637,82 @@ network_secret = "secret"
             "udp",
         );
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn derived_secure_mode_has_no_disabled_warning() {
+        let warnings = stealth_warnings(
+            r#"
+[network_identity]
+network_name = "test"
+network_secret = "secret"
+"#,
+            |flags| flags.stealth_mode = true,
+            "udp",
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn implicit_default_protocols_do_not_warn_when_stealth_is_disabled() {
+        let warnings = stealth_warnings(
+            "",
+            |flags| flags.stealth_mode = false,
+            DEFAULT_STEALTH_PROTOCOLS,
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn legacy_explicit_secure_false_disables_implicit_stealth() {
+        let config = TomlConfigLoader::new_from_str(
+            r#"
+[secure_mode]
+enabled = false
+"#,
+        )
+        .unwrap();
+        assert!(!config.get_flags().stealth_mode);
+    }
+
+    #[test]
+    fn legacy_explicit_secure_true_disables_implicit_stealth() {
+        let config = TomlConfigLoader::new_from_str(
+            r#"
+[secure_mode]
+enabled = true
+"#,
+        )
+        .unwrap();
+        assert!(!config.get_flags().stealth_mode);
+        assert!(config.get_secure_mode().is_some_and(|mode| mode.enabled));
+    }
+
+    #[test]
+    fn programmatic_flags_keep_legacy_explicit_secure_compatibility() {
+        let config = TomlConfigLoader::default();
+        config.set_secure_mode(Some(SecureModeConfig {
+            enabled: true,
+            ..Default::default()
+        }));
+        config.set_flags(gen_default_flags());
+
+        assert!(!config.get_flags().stealth_mode);
+    }
+
+    #[test]
+    fn explicit_stealth_conflicts_with_explicit_secure_false() {
+        let error = TomlConfigLoader::new_from_str(
+            r#"
+[secure_mode]
+enabled = false
+
+[flags]
+stealth_mode = true
+"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("stealth_mode=true conflicts"));
     }
 
     #[test]

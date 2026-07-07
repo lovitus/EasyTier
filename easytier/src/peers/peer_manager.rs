@@ -397,11 +397,7 @@ impl PeerManager {
             global_ctx.set_avoid_relay_data_preference(true);
         }
 
-        let is_secure_mode_enabled = global_ctx
-            .config
-            .get_secure_mode()
-            .map(|cfg| cfg.enabled)
-            .unwrap_or(false);
+        let is_secure_mode_enabled = global_ctx.is_explicit_secure_mode_enabled();
 
         // TODO: remove these because we have impl pipeline processor.
         let (peer_rpc_tspt_sender, peer_rpc_tspt_recv) = mpsc::unbounded_channel();
@@ -697,13 +693,7 @@ impl PeerManager {
         let my_identity = self.global_ctx.get_network_identity();
         let peer_identity = peer_conn.get_network_identity();
         let conn_info = peer_conn.get_conn_info();
-        let local_secure_mode = self
-            .global_ctx
-            .config
-            .get_secure_mode()
-            .as_ref()
-            .map(|cfg| cfg.enabled)
-            .unwrap_or(false);
+        let local_secure_mode = peer_conn.is_secure_mode_enabled();
         let peer_secure_mode = !conn_info.noise_remote_static_pubkey.is_empty();
 
         if local_secure_mode != peer_secure_mode {

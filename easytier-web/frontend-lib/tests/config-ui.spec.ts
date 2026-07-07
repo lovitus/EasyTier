@@ -4,6 +4,9 @@ import { defineComponent, h, nextTick, reactive } from 'vue'
 import Config from '../src/components/Config.vue'
 import {
   DEFAULT_NETWORK_CONFIG,
+  DEFAULT_STEALTH_PROTOCOLS,
+  DEFAULT_TRANSPORT_PRIORITY,
+  DEFAULT_UNDERLAY_EXCLUDE_CIDRS,
   toBackendNetworkConfig,
   type NetworkConfig,
 } from '../src/types/network'
@@ -32,6 +35,7 @@ const CONFIG_FLAG_FIELDS = [
   'disable_udp_hole_punching',
   'stealth_mode',
   'disable_legacy_udp_hole_punch',
+  'underlay_candidate_guard',
   'enable_udp_broadcast_relay',
   'disable_upnp',
   'disable_sym_hole_punching',
@@ -314,6 +318,7 @@ function makeConfig(): NetworkConfig {
     vpn_portal_listen_port: 22023,
     listener_urls: ['tcp://0.0.0.0:12010'],
     dev_name: 'tun-test',
+    underlay_exclude_cidrs: '198.18.0.0/15,192.19.0.0/24',
     mtu: 1280,
     instance_recv_bps_limit: '9007199254740993',
     enable_relay_network_whitelist: true,
@@ -378,6 +383,29 @@ async function setInput(wrapper: VueWrapper, selector: string, value: string) {
 }
 
 describe('Config.vue network config projection', () => {
+  it('uses the stealth and transport defaults for new networks', () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+
+    expect(config.stealth_mode).toBe(true)
+    expect(config.stealth_protocols).toBe(DEFAULT_STEALTH_PROTOCOLS)
+    expect(config.transport_priority).toBe(DEFAULT_TRANSPORT_PRIORITY)
+  })
+
+  it('disables and visually clears stealth while the network secret is empty', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    const { curNetwork, wrapper } = mountConfig(config)
+    await nextTick()
+
+    const stealth = input(wrapper, '#stealth_mode')
+    expect(stealth.disabled).toBe(true)
+    expect(stealth.checked).toBe(false)
+    expect(curNetwork.stealth_mode).toBe(true)
+
+    await setInput(wrapper, '#network_secret', 'secret')
+    expect(input(wrapper, '#stealth_mode').disabled).toBe(false)
+    expect(input(wrapper, '#stealth_mode').checked).toBe(true)
+  })
+
   it('projects config values into the visible form controls', async () => {
     const { curNetwork, wrapper } = mountConfig()
     await nextTick()
@@ -396,6 +424,8 @@ describe('Config.vue network config projection', () => {
     expect(input(wrapper, '#subnet-proxy').value).toBe('10.10.0.0/16,172.16.1.0/24')
     expect(input(wrapper, 'input[placeholder="vpn_portal_client_network"]').value).toBe('10.144.0.0')
     expect(input(wrapper, '#dev_name').value).toBe('tun-test')
+    expect(input(wrapper, '#underlay_exclude_cidrs').value).toBe('198.18.0.0/15,192.19.0.0/24')
+    expect(input(wrapper, '#underlay_exclude_cidrs').placeholder).toBe(DEFAULT_UNDERLAY_EXCLUDE_CIDRS)
     expect(input(wrapper, '#mtu').value).toBe('1280')
     expect(input(wrapper, '#instance_recv_bps_limit').value).toBe('9007199254740993')
     expect(input(wrapper, '#relay_network_whitelist').value).toBe('network-a')
@@ -427,6 +457,7 @@ describe('Config.vue network config projection', () => {
     await setInput(wrapper, 'input[placeholder="vpn_portal_client_network"]', '10.200.0.0')
     await setInput(wrapper, 'input[data-add-label="add_listener_url"]', 'tcp://0.0.0.0:13010')
     await setInput(wrapper, '#dev_name', 'tun-edited')
+    await setInput(wrapper, '#underlay_exclude_cidrs', '198.18.0.0/15,fdfe:dcba:9876::/48')
     await setInput(wrapper, '#mtu', '1260')
     await setInput(wrapper, '#instance_recv_bps_limit', '9007199254740993')
     await setInput(wrapper, '#relay_network_whitelist', 'network-edited')
@@ -455,6 +486,7 @@ describe('Config.vue network config projection', () => {
       vpn_portal_client_network_addr: '10.200.0.0',
       listener_urls: ['tcp://0.0.0.0:13010'],
       dev_name: 'tun-edited',
+      underlay_exclude_cidrs: '198.18.0.0/15,fdfe:dcba:9876::/48',
       mtu: 1260,
       instance_recv_bps_limit: '9007199254740993',
       relay_network_whitelist: ['network-edited'],
@@ -478,6 +510,7 @@ describe('Config.vue network config projection', () => {
       network_secret: 'secret-edited',
       peer_urls: ['tcp://peer-x:11010', 'udp://peer-y:11010'],
       listener_urls: ['tcp://0.0.0.0:13010'],
+      underlay_exclude_cidrs: '198.18.0.0/15,fdfe:dcba:9876::/48',
       mtu: 1260,
       instance_recv_bps_limit: '9007199254740993',
       port_forwards: [{

@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use crate::{
-    common::{global_ctx::ArcGlobalCtx, network::IPCollector},
+    common::{global_ctx::ArcGlobalCtx, network::IPCollector, underlay_guard},
     proto::{
         common::Void,
         peer_rpc::{
@@ -25,6 +25,40 @@ fn remove_easytier_managed_ipv6s(ret: &mut GetIpListResponse, global_ctx: &ArcGl
         .as_ref()
         .map(|ip| std::net::Ipv6Addr::from(*ip))
         .is_some_and(|ip| global_ctx.is_ip_easytier_managed_ipv6(&ip))
+    {
+        ret.public_ipv6 = None;
+    }
+}
+
+fn sanitize_get_ip_list(ret: &mut GetIpListResponse, global_ctx: &ArcGlobalCtx) {
+    remove_easytier_managed_ipv6s(ret, global_ctx);
+
+    if !global_ctx.get_flags().underlay_candidate_guard {
+        return;
+    }
+
+    ret.interface_ipv4s.retain(|ip| {
+        let ip = IpAddr::V4(std::net::Ipv4Addr::from(*ip));
+        !underlay_guard::should_block_underlay_ip(global_ctx, ip)
+    });
+    if ret
+        .public_ipv4
+        .as_ref()
+        .map(|ip| IpAddr::V4(std::net::Ipv4Addr::from(*ip)))
+        .is_some_and(|ip| underlay_guard::should_block_underlay_ip(global_ctx, ip))
+    {
+        ret.public_ipv4 = None;
+    }
+
+    ret.interface_ipv6s.retain(|ip| {
+        let ip = IpAddr::V6(std::net::Ipv6Addr::from(*ip));
+        !underlay_guard::should_block_underlay_ip(global_ctx, ip)
+    });
+    if ret
+        .public_ipv6
+        .as_ref()
+        .map(|ip| IpAddr::V6(std::net::Ipv6Addr::from(*ip)))
+        .is_some_and(|ip| underlay_guard::should_block_underlay_ip(global_ctx, ip))
     {
         ret.public_ipv6 = None;
     }
@@ -134,7 +168,7 @@ impl DirectConnectorRpc for DirectConnectorManagerRpcServer {
             .chain(self.global_ctx.get_running_listeners())
             .map(Into::into)
             .collect();
-        remove_easytier_managed_ipv6s(&mut ret, &self.global_ctx);
+        sanitize_get_ip_list(&mut ret, &self.global_ctx);
         tracing::trace!(
             "get_ip_list: public_ipv4: {:?}, public_ipv6: {:?}, listeners: {:?}",
             ret.public_ipv4,
@@ -200,7 +234,9 @@ mod tests {
 
     use crate::{
         common::global_ctx::tests::get_mock_global_ctx,
-        peers::peer_rpc_service::{connector_addrs_from_request, remove_easytier_managed_ipv6s},
+        peers::peer_rpc_service::{
+            connector_addrs_from_request, remove_easytier_managed_ipv6s, sanitize_get_ip_list,
+        },
         proto::peer_rpc::{GetIpListResponse, SendUdpHolePunchPacketRequest},
     };
 
@@ -230,6 +266,83 @@ mod tests {
 
         assert_eq!(ip_list.public_ipv6, None);
         assert_eq!(ip_list.interface_ipv6s, vec![physical_ipv6.into()]);
+    }
+
+    #[tokio::test]
+    async fn get_ip_list_sanitizer_removes_guarded_ipv4_and_cidrs() {
+        let global_ctx = get_mock_global_ctx();
+        global_ctx.set_ipv4(Some("10.44.0.9/16".parse().unwrap()));
+        let mut flags = global_ctx.get_flags();
+        flags.underlay_candidate_guard = true;
+        flags.underlay_exclude_cidrs =
+            crate::common::underlay_guard::DEFAULT_UNDERLAY_EXCLUDE_CIDRS.to_string();
+        global_ctx.set_flags(flags);
+
+        let lan_ipv4: std::net::Ipv4Addr = "192.168.2.160".parse().unwrap();
+        let mut ip_list = GetIpListResponse {
+            public_ipv4: Some("198.18.0.1".parse::<std::net::Ipv4Addr>().unwrap().into()),
+            interface_ipv4s: vec![
+                "10.44.0.9".parse::<std::net::Ipv4Addr>().unwrap().into(),
+                "192.19.0.1".parse::<std::net::Ipv4Addr>().unwrap().into(),
+                lan_ipv4.into(),
+            ],
+            public_ipv6: Some(
+                "fdfe:dcba:9876::1"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .into(),
+            ),
+            interface_ipv6s: vec![
+                "fdfe:dcba:9876::2"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .into(),
+                "2001:db8::3".parse::<std::net::Ipv6Addr>().unwrap().into(),
+            ],
+            ..Default::default()
+        };
+
+        sanitize_get_ip_list(&mut ip_list, &global_ctx);
+
+        assert_eq!(ip_list.public_ipv4, None);
+        assert_eq!(ip_list.interface_ipv4s, vec![lan_ipv4.into()]);
+        assert_eq!(ip_list.public_ipv6, None);
+        assert_eq!(
+            ip_list.interface_ipv6s,
+            vec!["2001:db8::3".parse::<std::net::Ipv6Addr>().unwrap().into()]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_ip_list_sanitizer_guard_disabled_keeps_new_ipv4_filters_inactive() {
+        let global_ctx = get_mock_global_ctx();
+        global_ctx.set_ipv4(Some("10.44.0.9/16".parse().unwrap()));
+        let mut flags = global_ctx.get_flags();
+        flags.underlay_candidate_guard = false;
+        flags.underlay_exclude_cidrs =
+            crate::common::underlay_guard::DEFAULT_UNDERLAY_EXCLUDE_CIDRS.to_string();
+        global_ctx.set_flags(flags);
+
+        let virtual_ipv6 = "fd00::1/64".parse().unwrap();
+        global_ctx.set_ipv6(Some(virtual_ipv6));
+        let mut ip_list = GetIpListResponse {
+            public_ipv4: Some("198.18.0.1".parse::<std::net::Ipv4Addr>().unwrap().into()),
+            interface_ipv4s: vec![
+                "10.44.0.9".parse::<std::net::Ipv4Addr>().unwrap().into(),
+                "198.18.0.2".parse::<std::net::Ipv4Addr>().unwrap().into(),
+            ],
+            interface_ipv6s: vec![virtual_ipv6.address().into()],
+            ..Default::default()
+        };
+
+        sanitize_get_ip_list(&mut ip_list, &global_ctx);
+
+        assert_eq!(
+            ip_list.public_ipv4,
+            Some("198.18.0.1".parse::<std::net::Ipv4Addr>().unwrap().into())
+        );
+        assert_eq!(ip_list.interface_ipv4s.len(), 2);
+        assert!(ip_list.interface_ipv6s.is_empty());
     }
 
     #[test]

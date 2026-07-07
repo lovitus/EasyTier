@@ -161,13 +161,13 @@ disable_udp_hole_punching: 禁用UDP打洞
 disable_udp_hole_punching_help: 禁用UDP打洞功能
 
 stealth_mode: 启用 Stealth
-stealth_mode_help: 对选定传输启用认证和外层保护，需要同时启用安全模式并配置非空网络密钥。
+stealth_mode_help: 对选定传输启用认证和外层保护。未配置网络密钥时不可启用；认证握手由运行时自动派生。
 
 stealth_window_secs: Stealth Gate 时间窗口
 stealth_window_secs_help: 网络级 Gate 密钥滚动窗口秒数，设为 0 时使用默认 60 秒；同一网络的所有 Stealth 节点必须一致。
 stealth_protocols: Stealth 传输协议
 stealth_protocols_help: 使用逗号分隔需要 stealth 保护的传输协议。留空时实际只保护 UDP；输入内容时才按你填写的协议列表生效。当前支持 udp、tcp、faketcp、quic、wg、ws、wss。
-stealth_protocols_placeholder: "留空=仅UDP；例如：udp,tcp,faketcp,quic,wg,ws,wss"
+stealth_protocols_placeholder: "udp,tcp,faketcp,quic,wg,ws,wss"
 proxy_failover:
   title: Proxy 故障转移
   empty: 当前没有活动的 Proxy 故障转移记录
@@ -187,7 +187,11 @@ disable_legacy_udp_hole_punch: 拒绝旧版 UDP 打洞
 disable_legacy_udp_hole_punch_help: 拒绝未携带 stealth 偏好的旧版打洞请求；新节点显式请求 plain 时仍允许。
 transport_priority: 直连传输协议优先级
 transport_priority_help: 仅影响 direct-connect，不影响固定的 QUIC→KCP→Native Proxy 顺序。使用分号分隔 scope:协议列表；IPv6 scope 必须使用方括号；双栈 Peer 同时命中精确规则时 IPv4 优先。
-transport_priority_placeholder: "global:tcp,udp;wan:quic,wss;lan:udp,faketcp"
+transport_priority_placeholder: "global:quic,faketcp,ws,wg,udp,tcp"
+underlay_candidate_guard: Underlay 候选地址净化
+underlay_candidate_guard_help: 过滤可能来自系统 TUN/fake-IP 或 EasyTier 自身虚拟地址的通告、直连和打洞候选；不影响 listener 监听 0.0.0.0。
+underlay_exclude_cidrs: 排除通告/直连候选网段
+underlay_exclude_cidrs_help: 逗号分隔的完整排除 CIDR 列表。编辑会替换整份列表；清空仅关闭配置 CIDR 过滤，仍保留 EasyTier 运行态虚拟地址过滤。
 
 enable_udp_broadcast_relay: UDP 广播中继
 enable_udp_broadcast_relay_help: "仅 Windows：捕获物理网卡上的本机 UDP 广播包并转发给 EasyTier 对等节点，帮助局域网游戏发现房间。需要管理员权限。"

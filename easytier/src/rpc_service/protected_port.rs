@@ -6,6 +6,9 @@ use once_cell::sync::Lazy;
 static PROTECTED_TCP_PORTS: Lazy<Mutex<HashMap<u16, usize>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(test)]
+pub(crate) static PROTECTED_TCP_PORTS_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
 pub fn register_protected_tcp_port(port: u16) {
     let mut ports = PROTECTED_TCP_PORTS.lock().unwrap();
     *ports.entry(port).or_default() += 1;
@@ -39,6 +42,7 @@ mod tests {
 
     #[test]
     fn protected_tcp_port_registry_is_ref_counted() {
+        let _guard = super::PROTECTED_TCP_PORTS_TEST_LOCK.lock().unwrap();
         clear_protected_tcp_ports_for_test();
 
         register_protected_tcp_port(15888);
@@ -54,6 +58,7 @@ mod tests {
 
     #[test]
     fn unregistering_unknown_port_is_a_noop() {
+        let _guard = super::PROTECTED_TCP_PORTS_TEST_LOCK.lock().unwrap();
         clear_protected_tcp_ports_for_test();
         unregister_protected_tcp_port(15888);
         assert!(!is_protected_tcp_port(15888));

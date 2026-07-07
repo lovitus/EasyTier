@@ -369,7 +369,11 @@ impl PeerConn {
         let tunnel_info = tunnel.info();
         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
 
-        let secure_mode_cfg = global_ctx.config.get_secure_mode();
+        let secure_mode_cfg = global_ctx.get_secure_mode_for_tunnel(
+            outer_session_state
+                .as_ref()
+                .is_some_and(|state| state.is_enabled()),
+        );
         let session_filter = PeerSessionTunnelFilter::new_with_peer(
             my_peer_id,
             secure_mode_cfg
@@ -1754,7 +1758,7 @@ pub mod tests {
         for ctx in [&c_ctx, &s_ctx] {
             ctx.config
                 .set_network_identity(NetworkIdentity::new("net1".to_owned(), "sec1".to_owned()));
-            set_secure_mode_cfg(ctx, true);
+            assert!(ctx.config.get_secure_mode().is_none());
         }
 
         let mut client = PeerConn::new(
@@ -1769,6 +1773,8 @@ pub mod tests {
             server_tunnel,
             Arc::new(PeerSessionStore::new()),
         );
+        assert!(client.is_secure_mode_enabled());
+        assert!(server.is_secure_mode_enabled());
 
         let (client_ret, server_ret) = tokio::time::timeout(Duration::from_secs(10), async {
             tokio::join!(

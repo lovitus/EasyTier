@@ -58,6 +58,7 @@ const BOOLEAN_CONFIG_FIELDS = [
   'disable_relay_data',
   'enable_udp_broadcast_relay',
   'disable_tcp_hole_punching',
+  'underlay_candidate_guard',
 ]
 
 function readGeneratedNetworkConfigFields() {
@@ -228,6 +229,8 @@ function allFieldFixture() {
     disable_relay_data: true,
     enable_udp_broadcast_relay: true,
     socket_mark: 1234,
+    underlay_candidate_guard: false,
+    underlay_exclude_cidrs: '198.18.0.0/15,fdfe:dcba:9876::/48',
   }
 }
 
@@ -269,6 +272,8 @@ function assertFullFieldRoundTrip() {
   assert.equal(backend.acl.acl_v1.chains[0].rules[0].action, 'Allow')
   assert.equal(backend.port_forwards[1].proto, 'udp')
   assert.equal(backend.socket_mark, 1234)
+  assert.equal(backend.underlay_candidate_guard, false)
+  assert.equal(backend.underlay_exclude_cidrs, '198.18.0.0/15,fdfe:dcba:9876::/48')
 }
 
 function assertBooleanFieldValuesPreserved() {

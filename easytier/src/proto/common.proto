@@ -85,8 +85,9 @@ message FlagsInConfig {
   // non-Linux platforms.
   optional uint32 socket_mark = 43;
 
-  // Multi-transport stealth outer-protection (opt-in). Requires secure_mode and
-  // a non-empty network_secret.
+  // Multi-transport stealth outer-protection. A non-empty network_secret is
+  // required; authenticated handshake state is derived at runtime when no
+  // explicit secure_mode configuration exists.
   bool stealth_mode = 44;
   // Network-wide rolling gate-key window in seconds. 0 = default (60). Every
   // stealth node in the same network must use the same effective value.
@@ -100,6 +101,12 @@ message FlagsInConfig {
   // Comma-separated stealth transports. Empty keeps the rollout-compatible
   // UDP-only behavior when stealth_mode is enabled.
   string stealth_protocols = 48;
+  // Filter underlay candidates that are likely to route back through local
+  // system TUN/fake-IP overlays or EasyTier's own virtual addresses.
+  bool underlay_candidate_guard = 49;
+  // Comma-separated CIDR list used by underlay_candidate_guard. Empty disables
+  // user CIDR filtering but keeps runtime EasyTier address filtering.
+  string underlay_exclude_cidrs = 50;
 }
 
 message RpcDescriptor {

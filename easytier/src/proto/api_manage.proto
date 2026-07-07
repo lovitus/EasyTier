@@ -107,6 +107,8 @@ message NetworkConfig {
   optional bool disable_legacy_udp_hole_punch = 70;
   optional string transport_priority = 71;
   optional string stealth_protocols = 72;
+  optional bool underlay_candidate_guard = 73;
+  optional string underlay_exclude_cidrs = 74;
 }
 
 message PortForwardConfig {

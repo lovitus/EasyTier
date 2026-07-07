@@ -34,6 +34,9 @@ export type NetworkConfig = Omit<
 }
 
 const UINT64_MAX = (1n << 64n) - 1n
+export const DEFAULT_UNDERLAY_EXCLUDE_CIDRS = '198.18.0.0/15,fdfe:dcba:9876::/48,192.19.0.0/24'
+export const DEFAULT_STEALTH_PROTOCOLS = 'udp,tcp,faketcp,quic,wg,ws,wss'
+export const DEFAULT_TRANSPORT_PRIORITY = 'global:quic,faketcp,ws,wg,udp,tcp'
 
 interface NetworkingConfigFields {
   peer_urls: string[]
@@ -95,11 +98,13 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     disable_encryption: false,
     disable_tcp_hole_punching: false,
     disable_udp_hole_punching: false,
-    stealth_mode: false,
+    stealth_mode: true,
     stealth_window_secs: 0,
-    stealth_protocols: '',
+    stealth_protocols: DEFAULT_STEALTH_PROTOCOLS,
     disable_legacy_udp_hole_punch: false,
-    transport_priority: '',
+    transport_priority: DEFAULT_TRANSPORT_PRIORITY,
+    underlay_candidate_guard: true,
+    underlay_exclude_cidrs: DEFAULT_UNDERLAY_EXCLUDE_CIDRS,
     disable_upnp: false,
     enable_udp_broadcast_relay: false,
     disable_sym_hole_punching: false,

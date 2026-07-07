@@ -340,6 +340,22 @@ struct NetworkOptions {
 
     #[arg(
         long,
+        env = "ET_UNDERLAY_CANDIDATE_GUARD",
+        help = "filter underlay candidates that match EasyTier virtual addresses or configured CIDRs",
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    underlay_candidate_guard: Option<bool>,
+
+    #[arg(
+        long,
+        env = "ET_UNDERLAY_EXCLUDE_CIDRS",
+        help = "comma-separated CIDRs excluded from underlay advertisement and direct candidates"
+    )]
+    underlay_exclude_cidrs: Option<String>,
+
+    #[arg(
+        long,
         env = "ET_STEALTH_MODE",
         help = "enable stealth outer-protection underlay (opt-in, requires secure mode)",
         num_args = 0..=1,
@@ -1157,15 +1173,17 @@ impl NetworkOptions {
                 local_public_key: None,
             };
             cfg.set_secure_mode(Some(process_secure_mode_cfg(c)?));
-        } else if let Some(secure_mode) = self.secure_mode
-            && secure_mode
-        {
-            let c = SecureModeConfig {
+        } else if let Some(secure_mode) = self.secure_mode {
+            let mut c = cfg.get_secure_mode().unwrap_or(SecureModeConfig {
                 enabled: secure_mode,
                 local_private_key: self.local_private_key.clone(),
                 local_public_key: self.local_public_key.clone(),
-            };
-            cfg.set_secure_mode(Some(process_secure_mode_cfg(c)?));
+            });
+            c.enabled = secure_mode;
+            if secure_mode {
+                c = process_secure_mode_cfg(c)?;
+            }
+            cfg.set_secure_mode(Some(c));
         }
 
         let mut f = cfg.get_flags();
@@ -1177,13 +1195,24 @@ impl NetworkOptions {
                 .context("failed to parse --transport-priority")?;
             f.transport_priority = transport_priority.clone();
         }
+        f.underlay_candidate_guard = self
+            .underlay_candidate_guard
+            .unwrap_or(f.underlay_candidate_guard);
+        if let Some(underlay_exclude_cidrs) = &self.underlay_exclude_cidrs {
+            crate::common::underlay_guard::validate_exclude_cidrs(underlay_exclude_cidrs)
+                .context("failed to parse --underlay-exclude-cidrs")?;
+            f.underlay_exclude_cidrs = underlay_exclude_cidrs.clone();
+        }
         if let Some(v) = self.disable_encryption {
             f.enable_encryption = !v;
         }
         if let Some(algorithm) = &self.encryption_algorithm {
             f.encryption_algorithm = algorithm.to_string();
         }
-        f.stealth_mode = self.stealth_mode.unwrap_or(f.stealth_mode);
+        if let Some(stealth_mode) = self.stealth_mode {
+            f.stealth_mode = stealth_mode;
+            cfg.set_stealth_mode_explicit(true);
+        }
         if let Some(w) = self.stealth_window_secs {
             f.stealth_window_secs = w;
         }
@@ -1275,6 +1304,7 @@ impl NetworkOptions {
             f.tld_dns_zone = tld_dns_zone.clone();
         }
         cfg.set_flags(f);
+        cfg.reconcile_security_modes()?;
 
         if !self.exit_nodes.is_empty() {
             cfg.set_exit_nodes(self.exit_nodes.clone());
@@ -1876,5 +1906,39 @@ enabled = true
         assert_eq!(identity.network_secret, None);
         assert_eq!(identity.network_secret_digest, None);
         assert_eq!(cfg.get_hostname(), "override-host");
+    }
+
+    #[test]
+    fn cli_secure_false_requires_explicitly_disabling_configured_stealth() {
+        let config_toml = r#"
+[network_identity]
+network_name = "test"
+network_secret = "secret"
+
+[secure_mode]
+enabled = true
+
+[flags]
+stealth_mode = true
+"#;
+        let cfg = TomlConfigLoader::new_from_str(config_toml).unwrap();
+        let error = NetworkOptions {
+            secure_mode: Some(false),
+            ..Default::default()
+        }
+        .merge_into(&cfg)
+        .unwrap_err();
+        assert!(error.to_string().contains("stealth_mode=true conflicts"));
+
+        let cfg = TomlConfigLoader::new_from_str(config_toml).unwrap();
+        NetworkOptions {
+            secure_mode: Some(false),
+            stealth_mode: Some(false),
+            ..Default::default()
+        }
+        .merge_into(&cfg)
+        .unwrap();
+        assert!(!cfg.get_flags().stealth_mode);
+        assert!(cfg.get_secure_mode().is_some_and(|mode| !mode.enabled));
     }
 }

@@ -24,6 +24,7 @@ use crate::{
         transport_priority::{
             PreferenceKey, TransportPathClass, TransportPriority, protocol_is_compiled,
         },
+        underlay_guard,
     },
     connector::udp_hole_punch::handle_rpc_result,
     peers::{
@@ -40,7 +41,7 @@ use crate::{
         },
         rpc_types::controller::BaseController,
     },
-    tunnel::{IpVersion, matches_protocol, udp::UdpTunnelConnector},
+    tunnel::{IpVersion, common::bind, matches_protocol, udp::UdpTunnelConnector},
     use_global_var,
 };
 
@@ -106,6 +107,27 @@ enum DirectAttemptOutcome {
     AlreadySatisfied,
 }
 
+#[derive(Debug)]
+enum DirectConnectAttemptError {
+    Guarded(Error),
+    Failed(Error),
+}
+
+impl DirectConnectAttemptError {
+    fn into_error(self) -> Error {
+        match self {
+            Self::Guarded(err) | Self::Failed(err) => err,
+        }
+    }
+
+    fn is_self_loop_signal(&self) -> bool {
+        match self {
+            Self::Guarded(_) => false,
+            Self::Failed(err) => err.is_self_loop_signal(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum DirectStealthMode {
     #[default]
@@ -168,6 +190,7 @@ fn push_ipv6_hole_punch_candidate(
 ) {
     if candidates.len() >= limit
         || !is_usable_public_ipv6_candidate(&ip, global_ctx)
+        || underlay_guard::should_block_underlay_ip(global_ctx, IpAddr::V6(ip))
         || candidates.contains(&ip)
     {
         return;
@@ -208,6 +231,86 @@ async fn collect_ipv6_hole_punch_candidates(global_ctx: &ArcGlobalCtx) -> Vec<Ip
     }
 
     candidates
+}
+
+fn wildcard_udp_bind_addr(remote_addr: SocketAddr) -> SocketAddr {
+    if remote_addr.is_ipv4() {
+        "0.0.0.0:0".parse().unwrap()
+    } else {
+        "[::]:0".parse().unwrap()
+    }
+}
+
+fn bind_direct_udp_socket(
+    global_ctx: &ArcGlobalCtx,
+    remote_addr: SocketAddr,
+) -> Result<UdpSocket, Error> {
+    Ok(bind::<UdpSocket>()
+        .addr(wildcard_udp_bind_addr(remote_addr))
+        .net_ns(global_ctx.net_ns.clone())
+        .only_v6(remote_addr.is_ipv6())
+        .maybe_socket_mark(global_ctx.get_flags().socket_mark)
+        .call()?)
+}
+
+async fn guarded_direct_route_source(
+    global_ctx: &ArcGlobalCtx,
+    remote_addr: SocketAddr,
+) -> Result<Option<IpAddr>, Error> {
+    if !global_ctx.get_flags().underlay_candidate_guard {
+        return Ok(None);
+    }
+
+    let socket = bind_direct_udp_socket(global_ctx, remote_addr)?;
+    socket.connect(remote_addr).await?;
+    let local_ip = socket.local_addr()?.ip();
+
+    Ok(underlay_guard::should_block_underlay_ip(global_ctx, local_ip).then_some(local_ip))
+}
+
+async fn ensure_direct_route_source_allowed(
+    global_ctx: &ArcGlobalCtx,
+    remote_url: &url::Url,
+    remote_addr: SocketAddr,
+) -> Result<(), Error> {
+    if let Some(local_ip) = guarded_direct_route_source(global_ctx, remote_addr).await? {
+        tracing::debug!(
+            ?remote_url,
+            ?remote_addr,
+            ?local_ip,
+            "skip direct candidate; connected UDP source matches underlay guard"
+        );
+        return Err(Error::InvalidUrl(format!(
+            "direct candidate {remote_url} would use guarded local source {local_ip}"
+        )));
+    }
+
+    Ok(())
+}
+
+async fn resolve_public_ipv4_connect_result<T, F, Fut>(
+    remote_url: &url::Url,
+    attempt: Result<T, DirectConnectAttemptError>,
+    fallback: F,
+) -> Result<T, DirectConnectAttemptError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, DirectConnectAttemptError>>,
+{
+    match attempt {
+        Ok(ret) => Ok(ret),
+        Err(DirectConnectAttemptError::Guarded(err)) => {
+            Err(DirectConnectAttemptError::Guarded(err))
+        }
+        Err(DirectConnectAttemptError::Failed(err)) => {
+            tracing::debug!(
+                ?err,
+                %remote_url,
+                "udp public ipv4 listener punch failed, falling back to direct connect"
+            );
+            fallback().await
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -401,9 +504,10 @@ impl DirectConnectorManagerData {
         remote_url: &url::Url,
         stealth_mode: DirectStealthMode,
     ) -> Result<(PeerId, PeerConnId), Error> {
+        let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V6).await?;
+        ensure_direct_route_source_allowed(&self.global_ctx, remote_url, remote_addr).await?;
         let local_socket = Arc::new(
-            UdpSocket::bind("[::]:0")
-                .await
+            bind_direct_udp_socket(&self.global_ctx, remote_addr)
                 .with_context(|| format!("failed to bind local socket for {}", remote_url))?,
         );
         let connector_ips = collect_ipv6_hole_punch_candidates(&self.global_ctx).await;
@@ -458,7 +562,6 @@ impl DirectConnectorManagerData {
                 udp_connector.prefer_stealth_with_legacy_fallback(stealth);
             }
         }
-        let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V6).await?;
         let ret = udp_connector
             .try_connect_with_socket(local_socket, remote_addr)
             .await?;
@@ -474,22 +577,26 @@ impl DirectConnectorManagerData {
         dst_peer_id: PeerId,
         remote_url: &url::Url,
         stealth_mode: DirectStealthMode,
-    ) -> Result<(PeerId, PeerConnId), Error> {
-        let local_socket = {
-            let _g = self.global_ctx.net_ns.guard();
-            Arc::new(
-                UdpSocket::bind("0.0.0.0:0")
-                    .await
-                    .with_context(|| format!("failed to bind local socket for {}", remote_url))?,
-            )
-        };
+    ) -> Result<(PeerId, PeerConnId), DirectConnectAttemptError> {
+        let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V4)
+            .await
+            .map_err(|err| DirectConnectAttemptError::Failed(err.into()))?;
+        ensure_direct_route_source_allowed(&self.global_ctx, remote_url, remote_addr)
+            .await
+            .map_err(DirectConnectAttemptError::Guarded)?;
+        let local_socket = Arc::new(
+            bind_direct_udp_socket(&self.global_ctx, remote_addr)
+                .with_context(|| format!("failed to bind local socket for {}", remote_url))
+                .map_err(|err| DirectConnectAttemptError::Failed(err.into()))?,
+        );
         let connector_addr = self
             .peer_manager
             .get_global_ctx()
             .get_stun_info_collector()
             .get_udp_port_mapping_with_socket(local_socket.clone())
             .await
-            .with_context(|| format!("failed to get udp port mapping for {}", remote_url))?;
+            .with_context(|| format!("failed to get udp port mapping for {}", remote_url))
+            .map_err(|err| DirectConnectAttemptError::Failed(err.into()))?;
 
         let _ = self
             .remote_send_udp_hole_punch_packet(dst_peer_id, vec![connector_addr], None, remote_url)
@@ -505,14 +612,31 @@ impl DirectConnectorManagerData {
                 udp_connector.prefer_stealth_with_legacy_fallback(stealth);
             }
         }
-        let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V4).await?;
         let ret = udp_connector
             .try_connect_with_socket(local_socket, remote_addr)
-            .await?;
+            .await
+            .map_err(|err| DirectConnectAttemptError::Failed(err.into()))?;
 
         self.peer_manager
             .add_client_tunnel_with_peer_id_hint(ret, true, Some(dst_peer_id))
             .await
+            .map_err(DirectConnectAttemptError::Failed)
+    }
+
+    async fn try_direct_connect_with_peer_id_hint_timeout(
+        &self,
+        connector: Box<dyn crate::tunnel::TunnelConnector + 'static>,
+        dst_peer_id: PeerId,
+    ) -> Result<(PeerId, PeerConnId), DirectConnectAttemptError> {
+        timeout(
+            std::time::Duration::from_secs(3),
+            self.peer_manager
+                .try_direct_connect_with_peer_id_hint(connector, Some(dst_peer_id)),
+        )
+        .await
+        .map_err(Error::from)
+        .map_err(DirectConnectAttemptError::Failed)?
+        .map_err(DirectConnectAttemptError::Failed)
     }
 
     async fn do_try_connect_to_ip(
@@ -520,9 +644,10 @@ impl DirectConnectorManagerData {
         dst_peer_id: PeerId,
         addr: String,
         stealth_mode: DirectStealthMode,
-    ) -> Result<(), Error> {
-        let mut connector =
-            create_connector_by_url(&addr, &self.global_ctx, IpVersion::Both).await?;
+    ) -> Result<(), DirectConnectAttemptError> {
+        let mut connector = create_connector_by_url(&addr, &self.global_ctx, IpVersion::Both)
+            .await
+            .map_err(DirectConnectAttemptError::Failed)?;
         match stealth_mode {
             DirectStealthMode::Disabled => connector.disable_stealth(),
             DirectStealthMode::Required => connector.require_stealth(),
@@ -531,49 +656,32 @@ impl DirectConnectorManagerData {
         let remote_url = connector.remote_url();
         let (peer_id, conn_id) = if matches_scheme!(remote_url, TunnelScheme::Ip(IpScheme::Udp)) {
             match remote_url.host() {
-                Some(Host::Ipv6(_)) => {
-                    self.connect_to_public_ipv6(dst_peer_id, &remote_url, stealth_mode)
-                        .await?
-                }
+                Some(Host::Ipv6(_)) => self
+                    .connect_to_public_ipv6(dst_peer_id, &remote_url, stealth_mode)
+                    .await
+                    .map_err(DirectConnectAttemptError::Failed)?,
                 Some(Host::Ipv4(ip)) if is_public_ipv4(ip) => {
-                    match self
-                        .connect_to_public_ipv4(dst_peer_id, &remote_url, stealth_mode)
-                        .await
-                    {
-                        Ok(ret) => ret,
-                        Err(err) => {
-                            tracing::debug!(
-                                ?err,
-                                %remote_url,
-                                "udp public ipv4 listener punch failed, falling back to direct connect"
-                            );
-                            timeout(
-                                std::time::Duration::from_secs(3),
-                                self.peer_manager.try_direct_connect_with_peer_id_hint(
-                                    connector,
-                                    Some(dst_peer_id),
-                                ),
+                    resolve_public_ipv4_connect_result(
+                        &remote_url,
+                        self.connect_to_public_ipv4(dst_peer_id, &remote_url, stealth_mode)
+                            .await,
+                        || {
+                            self.try_direct_connect_with_peer_id_hint_timeout(
+                                connector,
+                                dst_peer_id,
                             )
-                            .await??
-                        }
-                    }
+                        },
+                    )
+                    .await?
                 }
                 _ => {
-                    timeout(
-                        std::time::Duration::from_secs(3),
-                        self.peer_manager
-                            .try_direct_connect_with_peer_id_hint(connector, Some(dst_peer_id)),
-                    )
-                    .await??
+                    self.try_direct_connect_with_peer_id_hint_timeout(connector, dst_peer_id)
+                        .await?
                 }
             }
         } else {
-            timeout(
-                std::time::Duration::from_secs(3),
-                self.peer_manager
-                    .try_direct_connect_with_peer_id_hint(connector, Some(dst_peer_id)),
-            )
-            .await??
+            self.try_direct_connect_with_peer_id_hint_timeout(connector, dst_peer_id)
+                .await?
         };
 
         if peer_id != dst_peer_id && !TESTING.load(Ordering::Relaxed) {
@@ -583,8 +691,11 @@ impl DirectConnectorManagerData {
                 dst_peer_id,
                 peer_id
             );
-            self.peer_manager.close_peer_conn(peer_id, &conn_id).await?;
-            return Err(Error::InvalidUrl(addr));
+            self.peer_manager
+                .close_peer_conn(peer_id, &conn_id)
+                .await
+                .map_err(DirectConnectAttemptError::Failed)?;
+            return Err(DirectConnectAttemptError::Failed(Error::InvalidUrl(addr)));
         }
 
         Ok(())
@@ -630,9 +741,15 @@ impl DirectConnectorManagerData {
             if ret.is_ok() {
                 return Ok(DirectAttemptOutcome::Connected(preference_key));
             }
-            if ret.as_ref().is_err_and(Error::is_self_loop_signal) {
+            if matches!(ret, Err(DirectConnectAttemptError::Guarded(_))) {
+                return Err(ret.unwrap_err().into_error());
+            }
+            if ret
+                .as_ref()
+                .is_err_and(DirectConnectAttemptError::is_self_loop_signal)
+            {
                 self.blacklist_direct_target(dst_peer_id, &addr);
-                return Err(ret.unwrap_err());
+                return Err(ret.unwrap_err().into_error());
             }
 
             if preference_key.is_some_and(|target| self.preference_satisfied(dst_peer_id, target))
@@ -656,7 +773,7 @@ impl DirectConnectorManagerData {
                 continue;
             } else {
                 self.blacklist_direct_target(dst_peer_id, &addr);
-                return Err(ret.unwrap_err());
+                return Err(ret.unwrap_err().into_error());
             }
         }
     }
@@ -733,6 +850,10 @@ impl DirectConnectorManagerData {
 
             for addr in expanded {
                 if addr.ip().is_loopback() && !TESTING.load(Ordering::Relaxed) {
+                    continue;
+                }
+                if underlay_guard::should_block_underlay_ip(&self.global_ctx, addr.ip()) {
+                    tracing::debug!(?listener, ?addr, "skip guarded underlay direct candidate");
                     continue;
                 }
                 if let IpAddr::V6(ip) = addr.ip()
@@ -1264,10 +1385,16 @@ impl DirectConnectorManager {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, sync::Arc};
+    use std::{
+        collections::BTreeSet,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering as AtomicOrdering},
+        },
+    };
 
     use crate::{
-        common::global_ctx::tests::get_mock_global_ctx,
+        common::{error::Error, global_ctx::tests::get_mock_global_ctx},
         connector::direct::{
             DirectConnectorManager, DirectConnectorManagerData, DstListenerUrlBlackListItem,
         },
@@ -1285,8 +1412,8 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     use super::{
-        DirectCandidate, TESTING, mapped_listener_port, resolve_mapped_listener_addrs,
-        retain_higher_priority_candidates,
+        DirectCandidate, DirectConnectAttemptError, TESTING, mapped_listener_port,
+        resolve_mapped_listener_addrs, retain_higher_priority_candidates,
     };
 
     #[tokio::test]
@@ -1638,6 +1765,49 @@ mod tests {
             super::direct_stealth_mode(StealthProtocol::Tcp, Some(&feature)),
             super::DirectStealthMode::Required
         );
+    }
+
+    #[tokio::test]
+    async fn guarded_public_ipv4_attempt_does_not_trigger_direct_fallback() {
+        let remote_url: url::Url = "udp://198.51.100.10:11010".parse().unwrap();
+        let fallback_called = Arc::new(AtomicBool::new(false));
+        let fallback_called_clone = fallback_called.clone();
+        let attempt: Result<(u32, uuid::Uuid), DirectConnectAttemptError> = Err(
+            DirectConnectAttemptError::Guarded(Error::InvalidUrl("guarded".to_owned())),
+        );
+
+        let ret = super::resolve_public_ipv4_connect_result(&remote_url, attempt, move || {
+            let fallback_called = fallback_called_clone.clone();
+            async move {
+                fallback_called.store(true, AtomicOrdering::Relaxed);
+                Err(DirectConnectAttemptError::Failed(Error::NotFound))
+            }
+        })
+        .await;
+
+        assert!(matches!(ret, Err(DirectConnectAttemptError::Guarded(_))));
+        assert!(!fallback_called.load(AtomicOrdering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn failed_public_ipv4_attempt_still_uses_direct_fallback() {
+        let remote_url: url::Url = "udp://198.51.100.10:11010".parse().unwrap();
+        let fallback_called = Arc::new(AtomicBool::new(false));
+        let fallback_called_clone = fallback_called.clone();
+        let attempt: Result<(u32, uuid::Uuid), DirectConnectAttemptError> =
+            Err(DirectConnectAttemptError::Failed(Error::NotFound));
+
+        let ret = super::resolve_public_ipv4_connect_result(&remote_url, attempt, move || {
+            let fallback_called = fallback_called_clone.clone();
+            async move {
+                fallback_called.store(true, AtomicOrdering::Relaxed);
+                Ok((7, uuid::Uuid::nil()))
+            }
+        })
+        .await;
+
+        assert_eq!(ret.unwrap().0, 7);
+        assert!(fallback_called.load(AtomicOrdering::Relaxed));
     }
 
     #[test]

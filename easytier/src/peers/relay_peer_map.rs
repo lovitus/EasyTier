@@ -66,11 +66,7 @@ impl RelayPeerMap {
         my_peer_id: PeerId,
         peer_session_store: Arc<PeerSessionStore>,
     ) -> Arc<Self> {
-        let is_secure_mode_enabled = global_ctx
-            .config
-            .get_secure_mode()
-            .map(|cfg| cfg.enabled)
-            .unwrap_or(false);
+        let is_secure_mode_enabled = global_ctx.is_explicit_secure_mode_enabled();
         Arc::new(Self {
             control_metrics: AggregateTrafficMetrics::control(
                 global_ctx.stats_manager().clone(),
@@ -96,8 +92,7 @@ impl RelayPeerMap {
     fn get_local_keypair(&self) -> Result<(Vec<u8>, Vec<u8>), Error> {
         let cfg = self
             .global_ctx
-            .config
-            .get_secure_mode()
+            .get_secure_mode_for_tunnel(false)
             .ok_or_else(|| Error::RouteError(Some("secure mode config not set".to_string())))?;
         let private = cfg
             .private_key()

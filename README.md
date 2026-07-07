@@ -117,16 +117,23 @@ to enable, read this first:
   readiness ACK plus per-transport health / fallback reporting on top of the
   existing QUIC/KCP proxy path. Linux builds with the `tun` feature also add a
   native veth NIC fallback for environments where TUN is blocked by the device
-  cgroup or device node policy.
+  cgroup or device node policy. Underlay candidate sanitization is enabled by
+  default to avoid advertising or dialing common system-TUN/fake-IP ranges and
+  EasyTier's own virtual addresses as direct underlays.
 - Behavior differences from upstream: strict stealth UDP listeners silently drop
   legacy probes, self-loop mitigation is hardened backoff rather than a promise
   that all residual loop traffic disappears, proxy failover order is fixed to
   `QUIC -> KCP -> Native`, `transport_priority` only affects direct-connect,
   `disable_quic_input` and `disable_kcp_input` do not disable underlying
   listeners, and IPv4 exact-match transport rules win for dual-stack peers.
+  When EasyTier runs together with Mihomo/Clash/sing-box TUN, the built-in
+  underlay guard reduces polluted direct candidates but is not a hard
+  cross-platform promise that every generic underlay socket bypasses the system
+  TUN; see [Mihomo TUN interoperability risk](easytier/docs/mihomo_tun_interop.md).
 - Fork-added flags in this code line: `--stealth-mode`,
   `--stealth-window-secs`, `--stealth-protocols`,
-  `--disable-legacy-udp-hole-punch`, `--transport-priority`, and the Linux-only
+  `--disable-legacy-udp-hole-punch`, `--transport-priority`,
+  `--underlay-candidate-guard`, `--underlay-exclude-cidrs`, and the Linux-only
   `--nic-backend`.
 - Existing upstream proxy flags with fork-specific behavior:
   `--enable-kcp-proxy`, `--enable-quic-proxy`, `--disable-kcp-input`, and
@@ -148,13 +155,25 @@ proxy, and rollout details remain in
   transport is selected only when its RTT is at most 125% of the lowest RTT
   connection. This prevents a configured preference from forcing a much slower
   underlay.
-- `--stealth-mode` only becomes effective when secure mode and a non-empty
-  `network_secret` are both present; otherwise startup warns and stays plain.
+- `--stealth-mode` only becomes effective with a non-empty `network_secret`.
+  If no explicit `secure_mode` exists, the authentication keypair is derived at
+  runtime and is not written back to TOML/RPC. An empty secret warns and stays
+  plain.
+- Existing configs that already contain an explicit `[secure_mode]` section keep
+  legacy plain behavior unless `stealth_mode=true` is also set explicitly.
 - `--disable-legacy-udp-hole-punch` still rejects legacy UDP hole-punch
   requests without a stealth preference even when UDP stealth is inactive.
 - `--nic-backend tun|veth|auto` is CLI-only and defaults to `tun`. `auto`
   falls back only when the TUN device cannot be created; later MTU, address, or
   route errors remain fatal. `veth`/`auto` conflict with `--no-tun`.
+- When EasyTier coexists with Mihomo/Clash/sing-box TUN, verify that EasyTier
+  underlay destinations are not captured by the system TUN. A proxy `DIRECT`
+  rule may still pass packets through the TUN first; see
+  [Mihomo TUN interoperability risk](easytier/docs/mihomo_tun_interop.md).
+- `--underlay-candidate-guard` sanitizes advertised/dialed underlay candidates
+  plus related bind-source and direct-UDP route-source checks. Guarded public
+  IPv4 UDP direct candidates are skipped fail-closed instead of retrying
+  through the generic direct fallback path.
 
 ### Linux veth NIC fallback
 
@@ -183,8 +202,14 @@ implementation details do not require compatibility changes.
 
 ### Stealth and Transport Policy
 
-Stealth is opt-in and can protect `udp`, `tcp`, `faketcp`, `quic`, `wg`, `ws`, and `wss`.
-It requires secure mode and a non-empty network secret. The effective
+Stealth defaults to enabled for `udp`, `tcp`, `faketcp`, `quic`, `wg`, `ws`, and `wss`.
+It requires a non-empty network secret. Without an explicit `secure_mode`
+section, authenticated handshake keys are derived at runtime and are not
+serialized. The derived keys are used only for Stealth-protected PeerConn
+handshakes; they are not advertised in RoutePeerInfo and do not enable global
+relay/session secure mode. Explicit `secure_mode` remains the advanced
+credential/Noise configuration. Explicitly clearing `stealth_protocols` restores the
+rollout-compatible UDP-only stealth behavior. The effective
 `stealth_window_secs` value is network-wide and must match on every stealth node.
 `transport_priority` only reorders direct-connect underlays; QUIC/KCP proxy failover keeps
 the fixed `QUIC -> KCP -> Native` order. The `transport_priority` syntax is
@@ -192,6 +217,24 @@ the fixed `QUIC -> KCP -> Native` order. The `transport_priority` syntax is
 `global:quic,faketcp,ws,wg,udp,tcp`. It is applied after the 125% RTT
 eligibility check for live connections. See
 [the compatibility notes](easytier/docs/udp_stealth_compatibility.md) for rollout details.
+
+For operators, the security modes differ as follows:
+
+| Setup | What it protects | What it does not enable |
+| --- | --- | --- |
+| GUI/new default: `network_secret` + Stealth | Stealth outer handshakes and Stealth-protected PeerConn payloads for configured transports. | RoutePeerInfo public key advertisement, global RelayPeerMap/PeerManager secure relay/session mode, credential identity. |
+| Explicit `secure_mode.enabled=true` | Full explicit Noise identity, RoutePeerInfo public key advertisement, secure relay/session semantics, credential-compatible identity. | It is not required just to make default Stealth work. |
+
+In plain terms: GUI Stealth hides and authenticates connection entrances so
+`udp`, `tcp`, `faketcp`, `quic`, `wg`, `ws`, and `wss` do not expose plain
+EasyTier handshakes to random probes. Explicit `secure_mode=true` is a separate
+advanced identity mode: it lets the node publish a Noise public key, be pinned by
+other nodes, participate in secure relay/session semantics, and use credential
+workflows where temporary nodes can join without knowing the network secret.
+The current GUI edits the Stealth preference only; explicit `secure_mode` remains
+an advanced CLI/TOML/RPC setting. A GUI plan for that advanced identity setting
+is tracked in
+[gui_global_secure_identity.md](easytier/docs/todo/gui_global_secure_identity.md).
 
 ### 🚀 Basic Usage
 
@@ -274,8 +317,9 @@ sudo easytier-core -i 10.144.144.2 -p udp://FIRST_NODE_PUBLIC_IP:11010
 Note: when `--stealth-mode` is enabled, a fixed `udp://` listener no longer accepts
 plain SYN probes. A new node dialing a legacy endpoint can retry plain on a fresh
 attempt, but a legacy node dialing a strict stealth listener is still silently
-dropped. Empty `--stealth-protocols` protects UDP only; explicitly list additional
-transports when the rollout supports them. See [stealth compatibility notes](easytier/docs/udp_stealth_compatibility.md).
+dropped. The default `--stealth-protocols` lists all supported transports; an
+explicitly empty value is a compatibility override that protects UDP only. See
+[stealth compatibility notes](easytier/docs/udp_stealth_compatibility.md).
 
 3. Verify Connection:
 

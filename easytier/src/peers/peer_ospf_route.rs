@@ -240,6 +240,7 @@ impl RoutePeerInfo {
         let noise_static_pubkey = global_ctx
             .config
             .get_secure_mode()
+            .filter(|cfg| cfg.enabled)
             .and_then(|cfg| cfg.public_key().ok())
             .map(|pk| pk.as_bytes().to_vec())
             .unwrap_or_default();
@@ -4260,7 +4261,7 @@ mod tests {
     use crate::{
         common::{
             PeerId,
-            config::NetworkIdentity,
+            config::{NetworkIdentity, process_secure_mode_cfg},
             global_ctx::{
                 GlobalCtxEvent, TrustedKeySource,
                 tests::{get_mock_global_ctx, get_mock_global_ctx_with_network},
@@ -4276,7 +4277,7 @@ mod tests {
         },
         proto::{
             acl::{Acl, AclV1, GroupIdentity, GroupInfo},
-            common::{NatType, PeerFeatureFlag},
+            common::{NatType, PeerFeatureFlag, SecureModeConfig},
             peer_rpc::{
                 ForeignNetworkRouteInfoEntry, ForeignNetworkRouteInfoKey, PeerGroupInfo,
                 PeerIdentityType, RoutePeerInfo, RoutePeerInfos, SyncRouteInfoRequest,
@@ -4363,6 +4364,42 @@ mod tests {
         fn my_peer_id(&self) -> PeerId {
             self.my_peer_id
         }
+    }
+
+    #[tokio::test]
+    async fn route_info_does_not_publish_derived_secure_key() {
+        let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity {
+            network_name: "test".to_owned(),
+            network_secret: Some("secret".to_owned()),
+            network_secret_digest: None,
+        }));
+
+        let route_info = RoutePeerInfo::new_updated_self(1, 1, &ctx, None);
+
+        assert!(ctx.get_effective_secure_mode().is_some());
+        assert!(ctx.config.get_secure_mode().is_none());
+        assert!(route_info.noise_static_pubkey.is_empty());
+    }
+
+    #[tokio::test]
+    async fn route_info_publishes_explicit_secure_key() {
+        let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity {
+            network_name: "test".to_owned(),
+            network_secret: Some("secret".to_owned()),
+            network_secret_digest: None,
+        }));
+        let secure_mode = process_secure_mode_cfg(SecureModeConfig {
+            enabled: true,
+            local_private_key: None,
+            local_public_key: None,
+        })
+        .unwrap();
+        let expected_pubkey = secure_mode.public_key().unwrap().as_bytes().to_vec();
+        ctx.config.set_secure_mode(Some(secure_mode));
+
+        let route_info = RoutePeerInfo::new_updated_self(1, 1, &ctx, None);
+
+        assert_eq!(route_info.noise_static_pubkey, expected_pubkey);
     }
 
     #[tokio::test]

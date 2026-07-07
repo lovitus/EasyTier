@@ -5,6 +5,7 @@ import InputGroupAddon from 'primevue/inputgroupaddon'
 import {
   addRow,
   DEFAULT_NETWORK_CONFIG,
+  DEFAULT_UNDERLAY_EXCLUDE_CIDRS,
   NetworkConfig,
   normalizeNetworkConfig,
   removeRow
@@ -101,12 +102,29 @@ const bool_flags: BoolFlag[] = [
   { field: 'disable_udp_hole_punching', help: 'disable_udp_hole_punching_help' },
   { field: 'stealth_mode', help: 'stealth_mode_help' },
   { field: 'disable_legacy_udp_hole_punch', help: 'disable_legacy_udp_hole_punch_help' },
+  { field: 'underlay_candidate_guard', help: 'underlay_candidate_guard_help' },
   { field: 'enable_udp_broadcast_relay', help: 'enable_udp_broadcast_relay_help' },
   { field: 'disable_upnp', help: 'disable_upnp_help' },
   { field: 'disable_sym_hole_punching', help: 'disable_sym_hole_punching_help' },
   { field: 'enable_magic_dns', help: 'enable_magic_dns_help' },
   { field: 'enable_private_mode', help: 'enable_private_mode_help' },
 ]
+
+const hasNetworkSecret = computed(() => (curNetwork.value.network_secret ?? '').trim().length > 0)
+
+function boolFlagValue(field: keyof NetworkConfig): boolean {
+  if (field === 'stealth_mode' && !hasNetworkSecret.value) {
+    return false
+  }
+  return Boolean(curNetwork.value[field])
+}
+
+function setBoolFlagValue(field: keyof NetworkConfig, value: boolean): void {
+  if (field === 'stealth_mode' && !hasNetworkSecret.value) {
+    return
+  }
+  ;(curNetwork.value as Record<string, unknown>)[field] = value
+}
 
 const portForwardProtocolOptions = ref(["tcp", "udp"]);
 
@@ -268,7 +286,10 @@ const instanceRecvBpsLimitInput = computed<string>({
                   <div class="flex flex-row flex-wrap">
 
                     <div class="basis-[20rem] flex items-center" v-for="flag in bool_flags">
-                      <Checkbox v-model="curNetwork[flag.field]" :input-id="flag.field" :binary="true" />
+                      <Checkbox :model-value="boolFlagValue(flag.field)"
+                        @update:model-value="setBoolFlagValue(flag.field, Boolean($event))"
+                        :input-id="flag.field" :binary="true"
+                        :disabled="flag.field === 'stealth_mode' && !hasNetworkSecret" />
                       <label :for="flag.field" class="ml-2"> {{ t(flag.field) }} </label>
                       <span class="pi pi-question-circle ml-2 self-center" v-tooltip="t(flag.help)"></span>
                     </div>
@@ -344,6 +365,18 @@ const instanceRecvBpsLimitInput = computed<string>({
                   </div>
                   <InputText id="transport_priority" v-model="curNetwork.transport_priority"
                     :placeholder="t('transport_priority_placeholder')" />
+                </div>
+              </div>
+
+              <div class="flex flex-row gap-x-9 flex-wrap">
+                <div class="flex flex-col gap-2 basis-5/12 grow">
+                  <div class="flex">
+                    <label for="underlay_exclude_cidrs">{{ t('underlay_exclude_cidrs') }}</label>
+                    <span class="pi pi-question-circle ml-2 self-center"
+                      v-tooltip="t('underlay_exclude_cidrs_help')"></span>
+                  </div>
+                  <InputText id="underlay_exclude_cidrs" v-model="curNetwork.underlay_exclude_cidrs"
+                    :placeholder="DEFAULT_UNDERLAY_EXCLUDE_CIDRS" />
                 </div>
               </div>
 
