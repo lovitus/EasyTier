@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32},
+    atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     Arc,
 };
 
@@ -98,8 +98,8 @@ struct KcpConnection {
 }
 
 impl KcpConnection {
-    pub fn new(conn_id: ConnId) -> Result<Self, Error> {
-        let kcp = Kcp::new(KcpConfig::new_turbo(conn_id.conv))?;
+    fn new_with_config(conn_id: ConnId, config: KcpConfig) -> Result<Self, Error> {
+        let kcp = Kcp::new(config)?;
 
         let (send_sender, send_receiver) = tokio::sync::mpsc::channel(128);
         let (recv_sender, recv_receiver) = tokio::sync::mpsc::channel(128);
@@ -432,6 +432,9 @@ struct KcpEndpointData {
     conn_map: DashMap<ConnId, KcpConnection>,
     state_map: DashMap<ConnId, KcpConnectionState>,
     conn_slots: Arc<Semaphore>,
+    connect_cancel_cleanup_total: AtomicUsize,
+    forced_cleanup_total: AtomicUsize,
+    orphan_timeout_cleanup_total: AtomicUsize,
 }
 
 impl KcpEndpointData {
@@ -441,7 +444,103 @@ impl KcpEndpointData {
             conn_map: DashMap::new(),
             state_map: DashMap::new(),
             conn_slots: Arc::new(Semaphore::new(max_connections)),
+            connect_cancel_cleanup_total: AtomicUsize::new(0),
+            forced_cleanup_total: AtomicUsize::new(0),
+            orphan_timeout_cleanup_total: AtomicUsize::new(0),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct KcpEndpointStats {
+    pub(crate) state_map_len: usize,
+    pub(crate) conn_map_len: usize,
+    pub(crate) connect_cancel_cleanup_total: usize,
+    pub(crate) forced_cleanup_total: usize,
+    pub(crate) orphan_timeout_cleanup_total: usize,
+}
+
+fn make_rst_packet(conn_id: ConnId) -> KcpPacket {
+    let mut rst = KcpPacket::new(0);
+    conn_id.fill_packet_header(&mut rst);
+    rst.mut_header().set_rst(true);
+    rst
+}
+
+fn cleanup_connection_state(data: &KcpEndpointData, conn_id: ConnId) {
+    data.conn_map.remove(&conn_id);
+    data.state_map.remove(&conn_id);
+}
+
+fn cleanup_stale_connections(data: &KcpEndpointData) {
+    let mut timed_out_count = 0usize;
+    data.state_map.retain(|_, state| {
+        let timed_out = state.is_pong_timeout();
+        if timed_out {
+            timed_out_count += 1;
+        }
+        !matches!(state.fsm, KcpConnectionFSM::Closed) && !timed_out
+    });
+    if timed_out_count > 0 {
+        data.orphan_timeout_cleanup_total
+            .fetch_add(timed_out_count, Ordering::Relaxed);
+    }
+    data.conn_map
+        .retain(|conn_id, _| data.state_map.contains_key(conn_id));
+    data.state_map.shrink_to_fit();
+    data.conn_map.shrink_to_fit();
+}
+
+struct ConnectCleanupGuard {
+    data: Arc<KcpEndpointData>,
+    output_sender: KcpPakcetSender,
+    conn_id: ConnId,
+    active: bool,
+}
+
+impl ConnectCleanupGuard {
+    fn new(data: Arc<KcpEndpointData>, output_sender: KcpPakcetSender, conn_id: ConnId) -> Self {
+        Self {
+            data,
+            output_sender,
+            conn_id,
+            active: true,
+        }
+    }
+
+    fn cleanup(mut self, count_as_cancel: bool) {
+        self.cleanup_inner(count_as_cancel);
+    }
+
+    fn disarm(mut self) {
+        self.active = false;
+    }
+
+    fn cleanup_inner(&mut self, count_as_cancel: bool) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        cleanup_connection_state(&self.data, self.conn_id);
+        if count_as_cancel {
+            self.data
+                .connect_cancel_cleanup_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if let Err(error) = self.output_sender.try_send(make_rst_packet(self.conn_id)) {
+            tracing::debug!(
+                ?error,
+                conn_id = ?self.conn_id,
+                "failed to enqueue KCP reset during connect cleanup"
+            );
+        }
+    }
+}
+
+impl Drop for ConnectCleanupGuard {
+    fn drop(&mut self) {
+        self.cleanup_inner(true);
     }
 }
 
@@ -451,12 +550,10 @@ async fn force_close_connection(
     conn_id: ConnId,
     send_timeout: std::time::Duration,
 ) {
-    let mut rst = KcpPacket::new(0);
-    conn_id.fill_packet_header(&mut rst);
-    rst.mut_header().set_rst(true);
+    let rst = make_rst_packet(conn_id);
     let _ = timeout(send_timeout, output_sender.send(rst)).await;
-    data.conn_map.remove(&conn_id);
-    data.state_map.remove(&conn_id);
+    cleanup_connection_state(data, conn_id);
+    data.forced_cleanup_total.fetch_add(1, Ordering::Relaxed);
     tracing::warn!(?conn_id, "KCP graceful close timed out; forcing cleanup");
 }
 
@@ -691,13 +788,7 @@ impl KcpEndpoint {
         let data = self.data.clone();
         self.tasks.spawn(async move {
             loop {
-                data.state_map.retain(|_, state| {
-                    !matches!(state.fsm, KcpConnectionFSM::Closed) && !state.is_pong_timeout()
-                });
-                data.conn_map
-                    .retain(|conn_id, _| data.state_map.contains_key(conn_id));
-                data.state_map.shrink_to_fit();
-                data.conn_map.shrink_to_fit();
+                cleanup_stale_connections(&data);
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
         });
@@ -736,7 +827,8 @@ impl KcpEndpoint {
     }
 
     fn add_conn(&self, conn_id: ConnId) -> Result<(), Error> {
-        let mut conn = KcpConnection::new(conn_id)?;
+        let mut conn =
+            KcpConnection::new_with_config(conn_id, (self.kcp_config_factory)(conn_id.conv))?;
         conn.run(self.output_sender.clone());
 
         let data = self.data.clone();
@@ -874,6 +966,23 @@ impl KcpEndpoint {
         Some(state.conn_data.clone())
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn stats(&self) -> KcpEndpointStats {
+        KcpEndpointStats {
+            state_map_len: self.data.state_map.len(),
+            conn_map_len: self.data.conn_map.len(),
+            connect_cancel_cleanup_total: self
+                .data
+                .connect_cancel_cleanup_total
+                .load(Ordering::Relaxed),
+            forced_cleanup_total: self.data.forced_cleanup_total.load(Ordering::Relaxed),
+            orphan_timeout_cleanup_total: self
+                .data
+                .orphan_timeout_cleanup_total
+                .load(Ordering::Relaxed),
+        }
+    }
+
     #[tracing::instrument(ret)]
     pub async fn connect(
         &self,
@@ -909,19 +1018,21 @@ impl KcpEndpoint {
         state.set_data(conn_data);
         let notify = state.notify();
         self.data.state_map.insert(conn_id, state);
+        let cleanup_guard =
+            ConnectCleanupGuard::new(self.data.clone(), self.output_sender.clone(), conn_id);
 
         conn_id.fill_packet_header(&mut out_packet);
 
         tracing::trace!(?conn_id, "connect packet: {:?}", out_packet);
         if let Err(error) = self.output_sender.send(out_packet).await {
-            self.data.state_map.remove(&conn_id);
+            cleanup_guard.cleanup(false);
             return Err(anyhow::Error::from(error)
                 .context("send connect packet failed")
                 .into());
         }
 
         if timeout(timeout_dur, notify.notified()).await.is_err() {
-            self.data.state_map.remove(&conn_id);
+            cleanup_guard.cleanup(false);
             return Err(Error::ConnectTimeout);
         }
 
@@ -930,17 +1041,20 @@ impl KcpEndpoint {
             if matches!(state.fsm, KcpConnectionFSM::Established) {
                 if let Err(error) = self.add_conn(conn_id) {
                     drop(state);
-                    self.data.state_map.remove(&conn_id);
+                    cleanup_guard.cleanup(false);
                     return Err(error);
                 }
+                drop(state);
+                cleanup_guard.disarm();
                 return Ok(conn_id);
             } else {
                 drop(state);
-                self.data.state_map.remove(&conn_id);
+                cleanup_guard.cleanup(false);
+                return Err(anyhow::anyhow!("connect failed").into());
             }
-            // if task aborted, the state map will be cleaned by periodic task
         }
 
+        cleanup_guard.cleanup(false);
         return Err(anyhow::anyhow!("connect failed").into());
     }
 
@@ -958,7 +1072,12 @@ impl KcpEndpoint {
             };
 
             if matches!(state.fsm, KcpConnectionFSM::Established) {
-                self.add_conn(conn_id)?;
+                if let Err(error) = self.add_conn(conn_id) {
+                    drop(state);
+                    cleanup_connection_state(&self.data, conn_id);
+                    let _ = self.output_sender.try_send(make_rst_packet(conn_id));
+                    return Err(error);
+                }
                 return Ok(conn_id);
             }
         }
@@ -1082,7 +1201,8 @@ mod tests {
     async fn wait_until_empty(endpoint: &KcpEndpoint) {
         timeout(std::time::Duration::from_secs(2), async {
             loop {
-                if endpoint.data.conn_map.is_empty() && endpoint.data.state_map.is_empty() {
+                let stats = endpoint.stats();
+                if stats.conn_map_len == 0 && stats.state_map_len == 0 {
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1090,6 +1210,229 @@ mod tests {
         })
         .await
         .expect("KCP connection state was not reclaimed");
+    }
+
+    async fn wait_until_state_count(endpoint: &KcpEndpoint, count: usize) {
+        timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if endpoint.stats().state_map_len == count {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("KCP connection state count did not reach expected value");
+    }
+
+    #[tokio::test]
+    async fn dropped_connect_future_reclaims_state_and_enqueues_rst() {
+        let mut endpoint = KcpEndpoint::new();
+        let mut output_receiver = endpoint.output_receiver().unwrap();
+        let endpoint = Arc::new(endpoint);
+        let connect_endpoint = endpoint.clone();
+        let task = tokio::spawn(async move {
+            connect_endpoint
+                .connect(
+                    std::time::Duration::from_secs(60),
+                    1,
+                    3,
+                    Bytes::from("conn"),
+                )
+                .await
+        });
+
+        wait_until_state_count(&endpoint, 1).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        wait_until_empty(&endpoint).await;
+        assert_eq!(endpoint.stats().connect_cancel_cleanup_total, 1);
+
+        let mut saw_rst = false;
+        while let Ok(packet) = output_receiver.try_recv() {
+            saw_rst |= packet.header().is_rst();
+        }
+        assert!(
+            saw_rst,
+            "connect cancellation should enqueue a reset packet"
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_cancelled_connects_do_not_leave_hedge_loser_state() {
+        let mut endpoint = KcpEndpoint::new();
+        let _output_receiver = endpoint.output_receiver().unwrap();
+        let endpoint = Arc::new(endpoint);
+        let mut tasks = JoinSet::new();
+        for index in 0..5u32 {
+            let connect_endpoint = endpoint.clone();
+            tasks.spawn(async move {
+                connect_endpoint
+                    .connect(
+                        std::time::Duration::from_secs(60),
+                        index + 1,
+                        index + 100,
+                        Bytes::from("conn"),
+                    )
+                    .await
+            });
+        }
+
+        wait_until_state_count(&endpoint, 5).await;
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            assert!(result.unwrap_err().is_cancelled());
+        }
+        wait_until_empty(&endpoint).await;
+        assert_eq!(endpoint.stats().connect_cancel_cleanup_total, 5);
+    }
+
+    #[tokio::test]
+    async fn connect_timeout_and_send_failure_reclaim_state() {
+        let endpoint = KcpEndpoint::new();
+        let timeout_error = endpoint
+            .connect(
+                std::time::Duration::from_millis(20),
+                1,
+                3,
+                Bytes::from("conn"),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(timeout_error, Error::ConnectTimeout));
+        wait_until_empty(&endpoint).await;
+        assert_eq!(endpoint.stats().connect_cancel_cleanup_total, 0);
+
+        let mut endpoint = KcpEndpoint::new();
+        drop(endpoint.output_receiver().unwrap());
+        let send_error = endpoint
+            .connect(std::time::Duration::from_secs(1), 1, 3, Bytes::from("conn"))
+            .await
+            .unwrap_err();
+        assert!(matches!(send_error, Error::AnyhowError(_)));
+        wait_until_empty(&endpoint).await;
+        assert_eq!(endpoint.stats().connect_cancel_cleanup_total, 0);
+    }
+
+    #[tokio::test]
+    async fn late_syn_ack_after_connect_cancel_does_not_recreate_state() {
+        let mut endpoint = KcpEndpoint::new();
+        endpoint.run().await;
+        let endpoint = Arc::new(endpoint);
+        let connect_endpoint = endpoint.clone();
+        let task = tokio::spawn(async move {
+            connect_endpoint
+                .connect(
+                    std::time::Duration::from_secs(60),
+                    1,
+                    3,
+                    Bytes::from("conn"),
+                )
+                .await
+        });
+
+        wait_until_state_count(&endpoint, 1).await;
+        let conn_id = *endpoint.data.state_map.iter().next().unwrap().key();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        wait_until_empty(&endpoint).await;
+
+        let mut syn_ack = KcpPacket::new(0);
+        conn_id.fill_packet_header(&mut syn_ack);
+        syn_ack.mut_header().set_syn(true).set_ack(true);
+        endpoint.input_sender().send(syn_ack).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        wait_until_empty(&endpoint).await;
+    }
+
+    #[tokio::test]
+    async fn dropped_stream_reclaims_connection_state() {
+        let (client_endpoint, server_endpoint, tasks) = prepare_test().await;
+        let (connect_ret, accept_ret) = tokio::join!(
+            client_endpoint.connect(std::time::Duration::from_secs(1), 1, 3, Bytes::from("conn")),
+            server_endpoint.accept()
+        );
+        let conn_id = connect_ret.unwrap();
+        assert_eq!(conn_id, accept_ret.unwrap());
+
+        let client = KcpStream::new(&client_endpoint, conn_id).unwrap();
+        let server = KcpStream::new(&server_endpoint, conn_id).unwrap();
+        drop(client);
+        drop(server);
+
+        wait_until_empty(&client_endpoint).await;
+        wait_until_empty(&server_endpoint).await;
+        drop(client_endpoint);
+        drop(server_endpoint);
+        tasks.join_all().await;
+    }
+
+    #[tokio::test]
+    async fn stream_new_failure_after_concurrent_cleanup_has_no_residual_state() {
+        let (client_endpoint, server_endpoint, tasks) = prepare_test().await;
+        let (connect_ret, accept_ret) = tokio::join!(
+            client_endpoint.connect(std::time::Duration::from_secs(1), 1, 3, Bytes::from("conn")),
+            server_endpoint.accept()
+        );
+        let conn_id = connect_ret.unwrap();
+        assert_eq!(conn_id, accept_ret.unwrap());
+
+        cleanup_connection_state(&client_endpoint.data, conn_id);
+        assert!(KcpStream::new(&client_endpoint, conn_id).is_none());
+        wait_until_empty(&client_endpoint).await;
+
+        cleanup_connection_state(&server_endpoint.data, conn_id);
+        wait_until_empty(&server_endpoint).await;
+        drop(client_endpoint);
+        drop(server_endpoint);
+        tasks.join_all().await;
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_reclaims_timed_out_orphan_state_and_conn() {
+        let (client_endpoint, server_endpoint, tasks) = prepare_test().await;
+        let (connect_ret, accept_ret) = tokio::join!(
+            client_endpoint.connect(std::time::Duration::from_secs(1), 1, 3, Bytes::from("conn")),
+            server_endpoint.accept()
+        );
+        let conn_id = connect_ret.unwrap();
+        assert_eq!(conn_id, accept_ret.unwrap());
+
+        {
+            let mut state = server_endpoint.data.state_map.get_mut(&conn_id).unwrap();
+            state.last_pong = std::time::Instant::now() - std::time::Duration::from_secs(61);
+        }
+        cleanup_stale_connections(&server_endpoint.data);
+        wait_until_empty(&server_endpoint).await;
+        assert_eq!(server_endpoint.stats().orphan_timeout_cleanup_total, 1);
+
+        cleanup_connection_state(&client_endpoint.data, conn_id);
+        wait_until_empty(&client_endpoint).await;
+        drop(client_endpoint);
+        drop(server_endpoint);
+        tasks.join_all().await;
+    }
+
+    #[tokio::test]
+    async fn endpoint_uses_config_factory_for_new_connections() {
+        let mut endpoint = KcpEndpoint::new();
+        endpoint.set_kcp_config_factory(Box::new(|conv| {
+            let mut config = KcpConfig::new_turbo(conv);
+            config.interval = Some(37);
+            config
+        }));
+        let conn_id = ConnId {
+            conv: 7,
+            src_session_id: 1,
+            dst_session_id: 3,
+        };
+
+        endpoint.add_conn(conn_id).unwrap();
+        let conn = endpoint.data.conn_map.get(&conn_id).unwrap();
+        assert_eq!(conn.kcp.lock().config().interval, Some(37));
+        drop(conn);
+        cleanup_connection_state(&endpoint.data, conn_id);
+        wait_until_empty(&endpoint).await;
     }
 
     #[tokio::test]

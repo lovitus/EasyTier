@@ -110,6 +110,11 @@ impl Kcp {
         self.output_cb = Some(output_cb);
     }
 
+    #[cfg(test)]
+    pub(crate) fn config(&self) -> KcpConfig {
+        self.config
+    }
+
     /// Installs a KCP 2.0 congestion control implementation.
     ///
     /// # Safety
