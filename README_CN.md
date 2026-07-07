@@ -79,20 +79,22 @@ cargo install --git https://github.com/EasyTier/EasyTier.git easytier
 
 [一键注册系统服务](https://easytier.cn/guide/network/oneclick-install-as-service.html)（系统启动时自动后台运行）
 
-### GitHub Actions 构建顺序
+### Fork 的预发布验证与发布顺序
 
-如果你使用 public fork 做构建和发布，当前 GitHub Actions 流程有明确的顺序依赖：
+本 fork 将“开发中的真机验证”和“正式发布构建”明确分开，避免每次修复都消耗完整的跨平台构建资源：
 
-1. 将目标提交 push 到你 fork 的 `develop`、`main` 或 `releases/**`。
-2. 等待同一提交上的 `EasyTier Core`、`EasyTier GUI`、`EasyTier Mobile`、`EasyTier Test`、`EasyTier OHOS` 全部成功。
-3. 在同一个 ref 上手动运行 `EasyTier Release`，填写发布版本号。
+1. 修复提交 push 到 `releases/**` 前，在 commit message 中加入 `[skip ci]`，避免该次 push 自动启动完整 workflow 集合。
+2. push 完成后，只手动运行 `EasyTier GUI macOS ARM64 Test`，并选择刚刚 push 的同一 ref。
+3. 使用该 workflow 产出的 macOS ARM64 GUI 进行真机功能验证。此阶段不得由自动化代理触发 Core、GUI 全平台、Mobile、OHOS、完整 Test 或 Release。
+4. 只有在维护者明确确认真机验证通过后，才为同一 commit 显式补跑正式发布所需的 `EasyTier Core`、`EasyTier GUI`、`EasyTier Mobile`、`EasyTier Test` 和 `EasyTier OHOS`。
+5. 上述 workflow 全部成功后，再手动运行 `EasyTier Release`，填写发布版本号，由发布流程创建 tag 和 GitHub Release。
 
 说明：
 
+- 不要在真机验证前创建 tag，也不要提前触发 `EasyTier Release`。
 - `EasyTier Release` 会根据所选 ref 对应的 commit SHA 自动解析所需 workflow run ID，校验发布版本与 Cargo 元数据一致，并拒绝覆盖已有 tag。
-- 如果 `EasyTier Release` 提示缺少成功的 workflow run，说明当前 ref 对应提交尚未完成全部必要构建和测试，需要先补齐再重新触发 release。
-- OHOS 产物会一并放入 GitHub Release；所有必要 workflow 成功后才会正式发布。
-- 这个 fork 流程里已经移除了 Docker workflow。
+- 如果 `EasyTier Release` 提示缺少成功的 workflow run，说明当前 commit 尚未完成全部正式发布构建，需要先补齐对应 workflow。
+- OHOS 产物会一并放入 GitHub Release；这个 fork 的发布流程不包含 Docker workflow。
 
 ## 本 Fork 与上游的差异
 

@@ -79,20 +79,22 @@ Additional steps:
 
 [One-Click Register Service](https://easytier.cn/en/guide/network/oneclick-install-as-service.html) (Automatically start when the system boots and run in the background)
 
-### GitHub Actions Build Order
+### Fork Pre-release Validation and Release Order
 
-If you use a public fork for builds and releases, the current GitHub Actions flow has an explicit order dependency:
+This fork separates in-development device validation from formal release builds so that each fix does not consume the complete cross-platform build matrix:
 
-1. Push the target commit to `develop`, `main`, or `releases/**` in your fork.
-2. Wait for `EasyTier Core`, `EasyTier GUI`, `EasyTier Mobile`, `EasyTier Test`, and `EasyTier OHOS` to finish successfully for the same commit.
-3. Run `EasyTier Release` manually on the same ref and fill in the release version.
+1. Before pushing a fix commit to `releases/**`, include `[skip ci]` in the commit message to prevent that push from starting the full workflow set.
+2. After pushing, manually run only `EasyTier GUI macOS ARM64 Test` on the same ref.
+3. Validate the generated macOS ARM64 GUI on a real device. During this stage, automation must not trigger Core, the full GUI matrix, Mobile, OHOS, the full Test workflow, or Release.
+4. Only after the maintainer explicitly confirms device validation should the required `EasyTier Core`, `EasyTier GUI`, `EasyTier Mobile`, `EasyTier Test`, and `EasyTier OHOS` workflows be run for the same commit.
+5. After all required workflows succeed, run `EasyTier Release` manually and provide the release version; the release workflow creates the tag and GitHub Release.
 
 Notes:
 
-- `EasyTier Release` resolves the required workflow run IDs automatically from the selected ref's commit SHA, validates the requested version against Cargo metadata, and refuses to overwrite an existing tag.
-- If `EasyTier Release` reports that a successful workflow run is missing, the selected ref does not yet have all required builds and tests for that commit. Re-run those workflows first, then trigger release again.
-- OHOS artifacts are included in the GitHub Release. The release is published only after all required workflows succeed.
-- The Docker workflow has been removed from this fork-specific flow.
+- Do not create a tag or trigger `EasyTier Release` before device validation.
+- `EasyTier Release` resolves required workflow run IDs from the selected ref's commit SHA, validates the requested version against Cargo metadata, and refuses to overwrite an existing tag.
+- If `EasyTier Release` reports a missing successful workflow run, complete the corresponding formal release build for that commit first.
+- OHOS artifacts are included in the GitHub Release. Docker is not part of this fork's release workflow.
 
 ## Fork-Specific Changes
 
