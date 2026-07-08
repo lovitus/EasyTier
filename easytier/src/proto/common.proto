@@ -104,8 +104,8 @@ message FlagsInConfig {
   // Filter underlay candidates that are likely to route back through local
   // system TUN/fake-IP overlays or EasyTier's own virtual addresses.
   bool underlay_candidate_guard = 49;
-  // Comma-separated CIDR list used by underlay_candidate_guard. Empty disables
-  // user CIDR filtering but keeps runtime EasyTier address filtering.
+  // Comma-separated user CIDRs added to underlay_candidate_guard. Empty clears
+  // only user CIDRs; built-in fake-IP and runtime EasyTier guards still apply.
   string underlay_exclude_cidrs = 50;
 }
 

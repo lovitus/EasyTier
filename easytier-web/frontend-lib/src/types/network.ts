@@ -34,7 +34,7 @@ export type NetworkConfig = Omit<
 }
 
 const UINT64_MAX = (1n << 64n) - 1n
-export const DEFAULT_UNDERLAY_EXCLUDE_CIDRS = '198.18.0.0/15,fdfe:dcba:9876::/48,192.19.0.0/24'
+export const DEFAULT_UNDERLAY_EXCLUDE_CIDRS = '198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,192.19.0.0/24'
 export const DEFAULT_STEALTH_PROTOCOLS = 'udp,tcp,faketcp,quic,wg,ws,wss'
 export const DEFAULT_TRANSPORT_PRIORITY = 'global:quic,faketcp,ws,wg,udp,tcp'
 

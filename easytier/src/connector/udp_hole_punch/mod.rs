@@ -296,7 +296,11 @@ impl UdpHoePunchConnectorData {
 
                 if let Err(e) = self
                     .peer_mgr
-                    .add_client_tunnel_without_runtime_loop_record(tunnel, false)
+                    .add_client_tunnel_with_peer_id_hint_without_runtime_loop_record(
+                        tunnel,
+                        false,
+                        Some(dst_peer_id),
+                    )
                     .await
                 {
                     tracing::warn!("add client tunnel failed, err: {}", e);

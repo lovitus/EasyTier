@@ -16,7 +16,11 @@ use tokio::{
 use tracing::Instrument;
 
 use crate::{
-    common::{PeerId, error::Error},
+    common::{
+        PeerId,
+        error::Error,
+        global_ctx::{ArcGlobalCtx, UnderlayAttemptContext},
+    },
     peers::traffic_metrics::AggregateTrafficMetrics,
     tunnel::{
         TunnelError,
@@ -122,6 +126,8 @@ pub struct PeerConnPinger {
     throughput_stats: Arc<Throughput>,
     control_metrics: AggregateTrafficMetrics,
     tasks: JoinSet<Result<(), TunnelError>>,
+    underlay_attempt_context: Option<UnderlayAttemptContext>,
+    global_ctx: ArcGlobalCtx,
 }
 
 impl std::fmt::Debug for PeerConnPinger {
@@ -144,6 +150,8 @@ impl PeerConnPinger {
         loss_rate_stats: Arc<AtomicU32>,
         throughput_stats: Arc<Throughput>,
         control_metrics: AggregateTrafficMetrics,
+        underlay_attempt_context: Option<UnderlayAttemptContext>,
+        global_ctx: ArcGlobalCtx,
     ) -> Self {
         Self {
             my_peer_id,
@@ -155,6 +163,8 @@ impl PeerConnPinger {
             loss_rate_stats,
             throughput_stats,
             control_metrics,
+            underlay_attempt_context,
+            global_ctx,
         }
     }
 
@@ -301,12 +311,26 @@ impl PeerConnPinger {
 
         let throughput = self.throughput_stats.clone();
         let mut last_rx_packets = throughput.rx_packets();
+        let mut breaker_cleared_after_pong = false;
 
         while let Some(ret) = ping_res_receiver.recv().await {
             if let Ok(lat) = ret {
                 latency_stats.record_latency(lat as u32);
 
                 loss_rate_stats_1.record_latency(0);
+                if !breaker_cleared_after_pong {
+                    if let Some(context) = self.underlay_attempt_context.as_ref() {
+                        self.global_ctx.clear_underlay_breaker(
+                            context.endpoint_key(),
+                            "peer_pong_success",
+                        );
+                        if let Some(peer_key) = context.peer_key() {
+                            self.global_ctx
+                                .clear_underlay_breaker(peer_key, "peer_pong_success");
+                        }
+                    }
+                    breaker_cleared_after_pong = true;
+                }
             } else {
                 loss_rate_stats_1.record_latency(1);
                 loss_counter.fetch_add(1, Ordering::Relaxed);

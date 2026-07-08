@@ -170,20 +170,38 @@ ip -s link
 EasyTier 内部开关。Linux 可以使用 socket mark / policy route，macOS 和 Windows
 需要不同的 socket/interface 绑定或 Network Extension/WFP 语义；这会变成平台级重构。
 
-本 fork 先内置一层更小的 fail-safe guard，默认开启，只做 underlay 候选地址净化：
+本 fork 先内置一层更小的 fail-safe guard，默认开启。它不是系统级 socket
+protect，而是 underlay 候选地址净化 + 运行时局部熔断：
 
 - `--underlay-candidate-guard` 默认是 `true`。
-- `--underlay-exclude-cidrs` 默认是
-  `198.18.0.0/15,fdfe:dcba:9876::/48,192.19.0.0/24`。
+- 内置 fake-IP base set 固定包含
+  `198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,192.19.0.0/24`，覆盖常见
+  Mihomo/sing-box/Clash/V2Ray/Xray/Surge fake-IP 池。
+- `--underlay-exclude-cidrs` 是用户附加列表；清空只关闭用户附加 CIDR，不关闭内置
+  base set、EasyTier 运行态虚拟地址过滤或历史 EasyTier-managed IPv6 过滤。
 - GUI 高级设置里同样提供“Underlay 候选地址净化”和一个完整 CIDR 列表输入框。
 - guard 会过滤本机 IP 通告、direct candidate 展开、IPv6 hole-punch candidate、
-  hole-punch RPC 前的 direct UDP 路由源地址验证，以及 connector bind-source 列表。
+  hole-punch RPC 前的 direct UDP 路由源地址验证、收到的 hole-punch RPC connector 地址、
+  generic connector 目标/源地址，以及 connector bind-source 列表。
+- generic connector 与 direct validation 会用临时 connected UDP socket 探测系统实际
+  source IP；目标 IP 或 source IP 命中内置/用户/EasyTier 运行态 guard 时，直接拒绝
+  该候选。
+- 如果 source IP 未命中 CIDR，但反查到 `utun`/`tun`/`tap`/`wintun`/point-to-point
+  这类可疑接口，v1 只记录 warning 和 bounded soft strike，不硬拒绝，也不触发熔断。
+- 内部 breaker 固定最多 4096 个 key，按 `Endpoint(remote_addr, scheme, scope)` 或
+  `Peer(peer_id, scheme, scope)` 计数。3 次 hard strike / 30 秒触发 300 秒 TTL，
+  重复触发指数退避到 1800 秒。
+- hard strike 只来自高置信信号：guard hard hit、已知目标 peer 的 handshake peer
+  mismatch，以及现有 self-loop 检测。prepare timeout、ACL/Policy、目标拒绝和普通快速
+  失败只记录日志，不触发熔断。
+- Peer 与 Endpoint key 使用同一 lease 原子获取，TTL 错位时不会互相消费 half-open。
+  preflight 取消只回滚自身 lease，第一次真实连接或打洞副作用前才 commit。
+- TTL 到期后每组 key 只放行一个 half-open attempt；Direct、generic 和 TCP/UDP
+  hole-punch 都必须等认证 PeerConn 收到首个 pong 后精确解除，单纯握手成功不会清理。
 - 命中 guard 的公网 IPv4 UDP 直连候选会直接 fail-closed 跳过，不再退回 generic
   direct UDP fallback。
-- 清空 `underlay_exclude_cidrs` 只关闭配置 CIDR 过滤；只要 guard 仍开启，EasyTier
-  运行态虚拟地址过滤仍然生效。
 - 设置 `underlay_candidate_guard=false` 会旁路本次新增的净化钩子，仅保留旧的
-  EasyTier-managed IPv6 过滤。
+  EasyTier-managed IPv6 过滤；同时不检查 breaker、不记录 hard/soft strike、不触发 TTL。
 
 listener 仍然可以监听 `0.0.0.0`；guard 过滤的是 EasyTier 对外通告和主动拨打的
 underlay candidate。它不改变 PeerManager、Proxy、Stealth、SOCKS、wire format，

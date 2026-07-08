@@ -15,7 +15,12 @@ use zerocopy::FromBytes as _;
 
 use crate::{
     common::{
-        PeerId, error::Error, global_ctx::ArcGlobalCtx, join_joinset_background, netns::NetNS, upnp,
+        PeerId,
+        error::Error,
+        global_ctx::{
+            ArcGlobalCtx, UnderlayBreakerKey, UnderlayBreakerScope, UnderlayPreflightGuard,
+        },
+        join_joinset_background, netns::NetNS, underlay_guard, upnp,
     },
     peers::peer_manager::PeerManager,
     proto::common::NatType,
@@ -25,6 +30,34 @@ use crate::{
         udp::{UdpTunnelConnector, UdpTunnelListener, new_hole_punch_packet},
     },
 };
+
+pub(crate) fn peer_hole_punch_is_blocked(
+    global_ctx: &ArcGlobalCtx,
+    peer_id: PeerId,
+    scheme: crate::tunnel::IpScheme,
+) -> bool {
+    global_ctx.is_underlay_attempt_blocked(&[UnderlayBreakerKey::peer(
+        peer_id,
+        scheme,
+        UnderlayBreakerScope::HolePunch,
+    )])
+}
+
+pub(crate) async fn prepare_hole_punch_attempt(
+    global_ctx: &ArcGlobalCtx,
+    remote_addr: SocketAddr,
+    peer_id: PeerId,
+    scheme: crate::tunnel::IpScheme,
+) -> Result<UnderlayPreflightGuard, Error> {
+    underlay_guard::prepare_underlay_attempt(
+        global_ctx,
+        remote_addr,
+        scheme,
+        UnderlayBreakerScope::HolePunch,
+        Some(peer_id),
+    )
+    .await
+}
 
 pub(crate) const HOLE_PUNCH_PACKET_BODY_LEN: u16 = 16;
 // This cap is per mode. Keeping separate bounded pools prevents a burst of
@@ -895,7 +928,6 @@ mod tests {
     use crate::{
         common::{global_ctx::NetworkIdentity, global_ctx::tests::get_mock_global_ctx},
         connector::udp_hole_punch::tests::create_mock_peer_manager_with_mock_stun,
-        peers::peer_conn::tests::set_secure_mode_cfg,
         proto::common::NatType,
     };
 
@@ -930,7 +962,6 @@ mod tests {
                 .get_global_ctx()
                 .config
                 .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
-            set_secure_mode_cfg(&peer_mgr.get_global_ctx(), true);
             let mut flags = peer_mgr.get_global_ctx().get_flags();
             flags.stealth_mode = true;
             peer_mgr.get_global_ctx().set_flags(flags);
@@ -967,7 +998,6 @@ mod tests {
                 .get_global_ctx()
                 .config
                 .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
-            set_secure_mode_cfg(&peer_mgr.get_global_ctx(), true);
             let mut flags = peer_mgr.get_global_ctx().get_flags();
             flags.stealth_mode = true;
             peer_mgr.get_global_ctx().set_flags(flags);

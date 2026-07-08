@@ -302,7 +302,9 @@ struct IpSchemeAttributes {
     port_offset: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Display, EnumString, IntoStaticStr, VariantArray)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, IntoStaticStr, VariantArray,
+)]
 #[strum(serialize_all = "lowercase")]
 pub enum IpScheme {
     Tcp,

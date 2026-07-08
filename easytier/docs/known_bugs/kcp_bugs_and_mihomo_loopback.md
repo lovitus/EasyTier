@@ -2,7 +2,7 @@
 
 **状态**
 
-- 已复现。KCP endpoint 生命周期缺陷已在本分支修复；Mihomo/sing-box/Clash TUN 捕获 underlay 后形成的系统层回流仍需作为独立问题继续观察。
+- 已复现。KCP endpoint 生命周期缺陷已在本分支修复；idle 状态下 generic connector 经 Mihomo/sing-box/Clash TUN 选源形成的系统层回流也已补一层 underlay guard。
 - 结论来自实机压测、系统进程/TUN 计数观察、当前代码路径审计，以及 `kcp-sys`/Proxy targeted 测试。
 - 该问题不是单一 bug：KCP 生命周期缺陷会放大系统 TUN 回流，Mihomo TUN 回流又会放大 KCP 的重试、hedge 和关闭失败。本次修复先切断 KCP state 泄漏放大器，不承诺 generic underlay socket 永远绕过系统 TUN。
 
@@ -12,6 +12,7 @@
 
 1. **KCP 本身存在真实的连接生命周期缺陷。**压力下会出现连接失败、关闭超时，以及 hedged 建连遗留会话。该部分已通过 `KcpEndpoint::connect()` lifecycle guard、同步 cleanup、best-effort RST 和 stale cleanup 修复。
 2. **Mihomo 回环位于更底层的 PeerConn/系统 TUN。**KCP 不是直接创建系统 UDP socket 的根因，但会通过高频分片、重传、ping 和重复建连迅速放大回环。
+3. **idle 回环可由 generic connector 触发。**即使没有 SOCKS/KCP 压测，后台 P2P/连接维护解析到 IPv6 underlay candidate 时，系统可能选择 Mihomo fake IPv6 作为本地源地址，导致 EasyTier 和 Mihomo 在空闲状态下互相拉高 CPU。
 
 **影响范围**
 
@@ -77,8 +78,9 @@ Overlay 的 `forward_counter > 7` 只能阻止 overlay 路由循环，见 [peer_
 现有 underlay guard 也不是完整 bypass：
 
 - 能过滤广告地址、direct candidate、IPv6 hole-punch，以及 public UDP direct 的路由源。
-- 不能保证 TCP、WS、QUIC listener connector、FakeTCP、manual/bootstrap 等 generic underlay socket 永远绕过 Mihomo TUN。
-- 当前持久化配置缺少 `fdfe:dcba:9876::/48` 时，Mihomo IPv6 TUN 地址仍可能被选中。
+- 修复后，generic connector 解析出的候选目标地址也会被 guard 检查；建立连接前还会使用同一 netns、同一 address family、同一 `socket_mark` 创建临时 connected UDP socket，验证系统实际选择的本地源地址。如果目标或源地址命中 guarded 网段，则跳过该候选。
+- 该修复堵住了 idle 状态下 TCP/WS/QUIC/WG/FakeTCP 等通用 connector 因源地址选择进入 Mihomo TUN 的主要路径，但仍不承诺所有 manual/bootstrap/generic underlay 在所有平台上具备内核级 TUN bypass。
+- `198.18.0.0/15`、`fc00::/18`、`fdfe:dcba:9876::/48` 和 `192.19.0.0/24` 已作为 guard 内置 base set；即使用户配置的 `underlay_exclude_cidrs` 为空或缺项，常见 Mihomo/Clash、sing-box、V2Ray/Xray、Surge fake-IP 源/目标仍会被过滤。
 - Mihomo 的 `10/8 DIRECT` 只处理 overlay 地址；EasyTier underlay 通常连接公网 IP，不属于 `10/8`。
 - 进程 DIRECT 规则也不等于路由层 bypass，数据仍可能先进入 utun。
 
@@ -97,7 +99,7 @@ Mihomo 捕获 underlay
 
 - 需要稳定运行时，避免在 Mihomo/Clash/sing-box TUN 开启状态下做 KCP-only 或高并发 SOCKS KCP 压测。
 - 优先使用 QUIC 或 Native 路径；如果必须使用 SOCKS，避免把 SOCKS chain 设计成经同一个 overlay 反复回到本机或同一下一跳。该规避会牺牲 no-TUN / smoltcp SOCKS 性能，不应视为最终修复。
-- 确认 `underlay_exclude_cidrs` 包含默认排除项：`198.18.0.0/15,fdfe:dcba:9876::/48,192.19.0.0/24`。
+- 确认 `underlay_candidate_guard=true`。默认 fake-IP base set 已内置；如果使用了其他 fake-IP 网段，再追加到 `underlay_exclude_cidrs`。
 - 触发高 CPU 后，重启 EasyTier 主实例和 Mihomo 可以释放当前循环状态；这只是恢复手段，不是修复。
 
 **修复顺序**
@@ -106,7 +108,27 @@ Mihomo 捕获 underlay
 2. 已完成：修复 `kcp_config_factory` 未生效问题，确保 proxy 创建的 endpoint 参数确实作用到连接。
 3. 已完成：增加 KCP endpoint 内部 stats：`state_map_len`、`conn_map_len`、`connect_cancel_cleanup_total`、`forced_cleanup_total`、`orphan_timeout_cleanup_total`。首版只用于 tracing 和测试断言，不进入 RPC/protobuf/GUI。
 4. 明确不做：本轮不让 SOCKS KCP 回退 QUIC/Native，也不把 SOCKS legacy `proxy_prepare_version=0` 改为 READY-aware。这样避免把 lifecycle 修复扩大为策略重构，并保留 no-TUN / smoltcp 场景下已经验证过的 KCP 性能路径。
-5. 后续继续：单独验证 generic PeerConn 的真实出接口。Mihomo 回环不能只靠 underlay candidate guard 和 KCP lifecycle fix 解决。
+5. 已完成：修复 `should_deny_proxy()`（见 [global_ctx.rs](../../src/common/global_ctx.rs)）只检查目标端口是否在
+   EasyTier 自身 `running_listeners`/`protected_port` 里的漏洞。当目的地址等于本机 EasyTier 虚拟 IP
+   （`dst_is_local_et_ip`）且端口不属于 EasyTier 自身监听器时，新增一次针对该精确地址的 bind 探测
+   （`is_local_port_occupied`）：如果 bind 失败说明本机有其他进程（例如 Mihomo/Clash 的通配监听）
+   占用了该端口，直接拒绝代理，避免把流量转发进入无关本地进程并形成回环。
+   该检查刻意不应用于 `dst_is_local_phy_ip`（物理网卡地址），因为向本机物理 LAN 地址上真实存在的服务
+   转发正是 `proxy_cidrs` 出口节点场景的正常用法，不能一并拒绝。
+6. 已完成：generic connector 的候选目标和临时 connected UDP 源地址验证接入 `underlay_guard`。
+   这覆盖了运行后未访问、未压测时仍由后台连接维护触发的 Mihomo fake IPv6 源地址选择问题。
+   该修复复用 `bind()` 的 netns、address family、`socket_mark` 和 bind-source 语义；收到的
+   hole-punch RPC connector 地址也会先净化。不改 listener 绑定、不改 Proxy/KCP/SOCKS/wire。
+7. 已完成：新增运行时局部 breaker。目标 IP 或系统实际 source IP 命中内置 fake-IP base set、
+   用户附加 CIDR 或 EasyTier 运行态虚拟地址时，只记 `Endpoint(remote_addr, scheme, scope)`
+   hard strike；handshake peer mismatch 有 expected peer 时才记 `Peer(expected_peer_id, scheme,
+   scope)`。3 次 hard strike / 30 秒触发 TTL；Peer/Endpoint key 使用同一 generation lease
+   原子进入 half-open，取消的 preflight 只回滚自身 lease，真实连接开始后失败才触发超时退避。
+   Direct、generic 与 TCP/UDP hole-punch 都在首个认证 pong 后精确清理，握手成功不会提前清理。
+8. 已完成：source-interface 反查只作为 soft signal。`utun`/`tun`/`tap`/`wintun`/point-to-point
+   等接口如果没有命中 CIDR/IP guard，不会被硬拒绝，也不会触发熔断，只用于 warning 和诊断。
+9. 明确边界：`underlay_candidate_guard=false` 时，本轮新增的 guard、breaker gate、hard/soft
+   strike 和 TTL 都不生效；只保留历史 EasyTier-managed IPv6 保护。
 
 **验收条件**
 

@@ -18,7 +18,10 @@ use crate::{
         PeerId,
         dns::socket_addrs,
         error::Error,
-        global_ctx::{ArcGlobalCtx, GlobalCtxEvent},
+        global_ctx::{
+            ArcGlobalCtx, GlobalCtxEvent, UnderlayBreakerKey, UnderlayBreakerScope,
+            UnderlayBreakerStrikeKind, UnderlayBreakerTrace,
+        },
         network::IPCollector,
         stun::StunInfoCollectorTrait,
         transport_priority::{
@@ -41,13 +44,15 @@ use crate::{
         },
         rpc_types::controller::BaseController,
     },
-    tunnel::{IpVersion, common::bind, matches_protocol, udp::UdpTunnelConnector},
+    tunnel::{
+        IpVersion, TunnelConnector, common::bind, matches_protocol, udp::UdpTunnelConnector,
+    },
     use_global_var,
 };
 
 use super::{
-    create_connector_by_url, should_background_p2p_with_peer, should_try_p2p_with_peer,
-    udp_hole_punch,
+    create_connector_by_url_with_scope, should_background_p2p_with_peer,
+    should_try_p2p_with_peer, udp_hole_punch,
 };
 use crate::tunnel::{FromUrl, IpScheme, TunnelScheme, matches_scheme};
 use anyhow::Context;
@@ -160,6 +165,12 @@ fn mapped_listener_port(url: &url::Url) -> Option<u16> {
     })
 }
 
+fn direct_ip_scheme_from_url(url: &url::Url) -> Option<IpScheme> {
+    TunnelScheme::try_from(url)
+        .ok()
+        .and_then(|scheme| IpScheme::try_from(scheme).ok())
+}
+
 async fn resolve_mapped_listener_addrs(listener: &url::Url) -> Result<Vec<SocketAddr>, Error> {
     socket_addrs(listener, || mapped_listener_port(listener)).await
 }
@@ -251,41 +262,6 @@ fn bind_direct_udp_socket(
         .only_v6(remote_addr.is_ipv6())
         .maybe_socket_mark(global_ctx.get_flags().socket_mark)
         .call()?)
-}
-
-async fn guarded_direct_route_source(
-    global_ctx: &ArcGlobalCtx,
-    remote_addr: SocketAddr,
-) -> Result<Option<IpAddr>, Error> {
-    if !global_ctx.get_flags().underlay_candidate_guard {
-        return Ok(None);
-    }
-
-    let socket = bind_direct_udp_socket(global_ctx, remote_addr)?;
-    socket.connect(remote_addr).await?;
-    let local_ip = socket.local_addr()?.ip();
-
-    Ok(underlay_guard::should_block_underlay_ip(global_ctx, local_ip).then_some(local_ip))
-}
-
-async fn ensure_direct_route_source_allowed(
-    global_ctx: &ArcGlobalCtx,
-    remote_url: &url::Url,
-    remote_addr: SocketAddr,
-) -> Result<(), Error> {
-    if let Some(local_ip) = guarded_direct_route_source(global_ctx, remote_addr).await? {
-        tracing::debug!(
-            ?remote_url,
-            ?remote_addr,
-            ?local_ip,
-            "skip direct candidate; connected UDP source matches underlay guard"
-        );
-        return Err(Error::InvalidUrl(format!(
-            "direct candidate {remote_url} would use guarded local source {local_ip}"
-        )));
-    }
-
-    Ok(())
 }
 
 async fn resolve_public_ipv4_connect_result<T, F, Fut>(
@@ -502,10 +478,9 @@ impl DirectConnectorManagerData {
         &self,
         dst_peer_id: PeerId,
         remote_url: &url::Url,
+        remote_addr: SocketAddr,
         stealth_mode: DirectStealthMode,
     ) -> Result<(PeerId, PeerConnId), Error> {
-        let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V6).await?;
-        ensure_direct_route_source_allowed(&self.global_ctx, remote_url, remote_addr).await?;
         let local_socket = Arc::new(
             bind_direct_udp_socket(&self.global_ctx, remote_addr)
                 .with_context(|| format!("failed to bind local socket for {}", remote_url))?,
@@ -568,7 +543,12 @@ impl DirectConnectorManagerData {
 
         // NOTICE: must add as directly connected tunnel
         self.peer_manager
-            .add_client_tunnel_with_peer_id_hint(ret, true, Some(dst_peer_id))
+            .add_client_tunnel_with_peer_id_hint_scoped(
+                ret,
+                true,
+                Some(dst_peer_id),
+                UnderlayBreakerScope::Direct,
+            )
             .await
     }
 
@@ -576,14 +556,9 @@ impl DirectConnectorManagerData {
         &self,
         dst_peer_id: PeerId,
         remote_url: &url::Url,
+        remote_addr: SocketAddr,
         stealth_mode: DirectStealthMode,
     ) -> Result<(PeerId, PeerConnId), DirectConnectAttemptError> {
-        let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V4)
-            .await
-            .map_err(|err| DirectConnectAttemptError::Failed(err.into()))?;
-        ensure_direct_route_source_allowed(&self.global_ctx, remote_url, remote_addr)
-            .await
-            .map_err(DirectConnectAttemptError::Guarded)?;
         let local_socket = Arc::new(
             bind_direct_udp_socket(&self.global_ctx, remote_addr)
                 .with_context(|| format!("failed to bind local socket for {}", remote_url))
@@ -618,20 +593,32 @@ impl DirectConnectorManagerData {
             .map_err(|err| DirectConnectAttemptError::Failed(err.into()))?;
 
         self.peer_manager
-            .add_client_tunnel_with_peer_id_hint(ret, true, Some(dst_peer_id))
+            .add_client_tunnel_with_peer_id_hint_scoped(
+                ret,
+                true,
+                Some(dst_peer_id),
+                UnderlayBreakerScope::Direct,
+            )
             .await
             .map_err(DirectConnectAttemptError::Failed)
     }
 
-    async fn try_direct_connect_with_peer_id_hint_timeout(
+    async fn try_direct_connect_with_peer_id_hint_timeout<C>(
         &self,
-        connector: Box<dyn crate::tunnel::TunnelConnector + 'static>,
+        connector: C,
         dst_peer_id: PeerId,
-    ) -> Result<(PeerId, PeerConnId), DirectConnectAttemptError> {
+    ) -> Result<(PeerId, PeerConnId), DirectConnectAttemptError>
+    where
+        C: crate::tunnel::TunnelConnector + std::fmt::Debug,
+    {
         timeout(
             std::time::Duration::from_secs(3),
             self.peer_manager
-                .try_direct_connect_with_peer_id_hint(connector, Some(dst_peer_id)),
+                .try_direct_connect_with_peer_id_hint_scoped(
+                    connector,
+                    Some(dst_peer_id),
+                    UnderlayBreakerScope::Direct,
+                ),
         )
         .await
         .map_err(Error::from)
@@ -645,9 +632,15 @@ impl DirectConnectorManagerData {
         addr: String,
         stealth_mode: DirectStealthMode,
     ) -> Result<(), DirectConnectAttemptError> {
-        let mut connector = create_connector_by_url(&addr, &self.global_ctx, IpVersion::Both)
-            .await
-            .map_err(DirectConnectAttemptError::Failed)?;
+        let mut connector = create_connector_by_url_with_scope(
+            &addr,
+            &self.global_ctx,
+            IpVersion::Both,
+            UnderlayBreakerScope::Direct,
+            Some(dst_peer_id),
+        )
+        .await
+        .map_err(DirectConnectAttemptError::Failed)?;
         match stealth_mode {
             DirectStealthMode::Disabled => connector.disable_stealth(),
             DirectStealthMode::Required => connector.require_stealth(),
@@ -656,14 +649,45 @@ impl DirectConnectorManagerData {
         let remote_url = connector.remote_url();
         let (peer_id, conn_id) = if matches_scheme!(remote_url, TunnelScheme::Ip(IpScheme::Udp)) {
             match remote_url.host() {
-                Some(Host::Ipv6(_)) => self
-                    .connect_to_public_ipv6(dst_peer_id, &remote_url, stealth_mode)
-                    .await
-                    .map_err(DirectConnectAttemptError::Failed)?,
+                Some(Host::Ipv6(_)) => {
+                    // Reuse the exact address the underlay guard already
+                    // validated instead of re-resolving `remote_url`, which
+                    // picks a random address on every call and could pick a
+                    // different, unvalidated address for multi-addr URLs.
+                    let remote_addr = match connector.resolved_addr() {
+                        Some(addr) => addr,
+                        None => SocketAddr::from_url(remote_url.clone(), IpVersion::V6)
+                            .await
+                            .map_err(|err| DirectConnectAttemptError::Failed(err.into()))?,
+                    };
+                    // Keep this commit immediately before entering the public UDP helper.
+                    // Awaiting the helper polls it in the current task, and that helper
+                    // synchronously binds the real UDP socket before its first await. This
+                    // preserves the preflight boundary: cancellation before this point rolls
+                    // back, while cancellation after this point happens after the real socket
+                    // side effect has started. Do not move this into the helper unless that
+                    // ordering is preserved.
+                    connector.commit_preflight();
+                    self.connect_to_public_ipv6(dst_peer_id, &remote_url, remote_addr, stealth_mode)
+                        .await
+                        .map_err(DirectConnectAttemptError::Failed)?
+                }
                 Some(Host::Ipv4(ip)) if is_public_ipv4(ip) => {
+                    let remote_addr = match connector.resolved_addr() {
+                        Some(addr) => addr,
+                        None => SocketAddr::from_url(remote_url.clone(), IpVersion::V4)
+                            .await
+                            .map_err(|err| DirectConnectAttemptError::Failed(err.into()))?,
+                    };
+                    // Same boundary as the IPv6 branch: the awaited helper is immediately
+                    // polled and synchronously creates the real UDP socket before its first
+                    // await, then proceeds to STUN/hole-punch. Keeping the commit here avoids
+                    // a second breaker lease while still rolling back candidates dropped before
+                    // the public UDP path starts.
+                    connector.commit_preflight();
                     resolve_public_ipv4_connect_result(
                         &remote_url,
-                        self.connect_to_public_ipv4(dst_peer_id, &remote_url, stealth_mode)
+                        self.connect_to_public_ipv4(dst_peer_id, &remote_url, remote_addr, stealth_mode)
                             .await,
                         || {
                             self.try_direct_connect_with_peer_id_hint_timeout(
@@ -691,6 +715,21 @@ impl DirectConnectorManagerData {
                 dst_peer_id,
                 peer_id
             );
+            if let Some(scheme) = direct_ip_scheme_from_url(&remote_url) {
+                let blocked = self.global_ctx.record_underlay_breaker_strike(
+                    UnderlayBreakerKey::peer(dst_peer_id, scheme, UnderlayBreakerScope::Direct),
+                    UnderlayBreakerStrikeKind::Hard,
+                    "handshake_peer_mismatch",
+                    Some(UnderlayBreakerTrace {
+                        expected_peer_id: Some(dst_peer_id),
+                        actual_peer_id: Some(peer_id),
+                        ..Default::default()
+                    }),
+                );
+                if blocked {
+                    self.peer_manager.invalidate_peer_default_conn(dst_peer_id);
+                }
+            }
             self.peer_manager
                 .close_peer_conn(peer_id, &conn_id)
                 .await

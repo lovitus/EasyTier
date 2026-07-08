@@ -191,7 +191,7 @@ transport_priority_placeholder: "global:quic,faketcp,ws,wg,udp,tcp"
 underlay_candidate_guard: Underlay 候选地址净化
 underlay_candidate_guard_help: 过滤可能来自系统 TUN/fake-IP 或 EasyTier 自身虚拟地址的通告、直连和打洞候选；不影响 listener 监听 0.0.0.0。
 underlay_exclude_cidrs: 排除通告/直连候选网段
-underlay_exclude_cidrs_help: 逗号分隔的完整排除 CIDR 列表。编辑会替换整份列表；清空仅关闭配置 CIDR 过滤，仍保留 EasyTier 运行态虚拟地址过滤。
+underlay_exclude_cidrs_help: 追加到内置 guard 的用户 CIDR 列表，逗号分隔。编辑只替换用户列表；清空后仍保留内置 fake-IP 网段和 EasyTier 运行态虚拟地址过滤。
 
 enable_udp_broadcast_relay: UDP 广播中继
 enable_udp_broadcast_relay_help: "仅 Windows：捕获物理网卡上的本机 UDP 广播包并转发给 EasyTier 对等节点，帮助局域网游戏发现房间。需要管理员权限。"

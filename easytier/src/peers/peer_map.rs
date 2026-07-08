@@ -127,6 +127,12 @@ impl PeerMap {
         }
     }
 
+    pub fn invalidate_peer_default_conn(&self, peer_id: PeerId) {
+        if let Some(peer) = self.get_peer_by_id(peer_id) {
+            peer.invalidate_default_conn();
+        }
+    }
+
     pub fn set_peer_transport_virtual_ips(
         &self,
         peer_id: PeerId,

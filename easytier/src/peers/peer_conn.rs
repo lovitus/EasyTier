@@ -47,7 +47,7 @@ use crate::{
         PeerId,
         config::{NetworkIdentity, NetworkSecretDigest},
         error::Error,
-        global_ctx::ArcGlobalCtx,
+        global_ctx::{ArcGlobalCtx, UnderlayAttemptContext},
         transport_priority::TransportPathClass,
     },
     peers::peer_session::{PeerSessionStore, SessionKey, UpsertResponderSessionReturn},
@@ -317,6 +317,7 @@ pub struct PeerConn {
     // remote or local
     is_hole_punched: bool,
     transport_path_class: TransportPathClass,
+    underlay_attempt_context: Option<UnderlayAttemptContext>,
 
     close_event_notifier: Arc<PeerConnCloseNotify>,
 
@@ -420,6 +421,7 @@ impl PeerConn {
 
             is_hole_punched: true,
             transport_path_class: TransportPathClass::Unmanaged,
+            underlay_attempt_context: None,
 
             close_event_notifier: Arc::new(PeerConnCloseNotify::new(conn_id)),
 
@@ -472,6 +474,16 @@ impl PeerConn {
 
     pub fn set_transport_path_class(&mut self, path_class: TransportPathClass) {
         self.transport_path_class = path_class;
+    }
+
+    pub fn set_underlay_attempt_context(&mut self, context: Option<UnderlayAttemptContext>) {
+        self.underlay_attempt_context = context;
+    }
+
+    pub fn complete_underlay_attempt_peer(&mut self, peer_id: PeerId) {
+        if let Some(context) = self.underlay_attempt_context.as_mut() {
+            context.set_peer_id_if_missing(peer_id);
+        }
     }
 
     pub fn transport_path_class(&self) -> TransportPathClass {
@@ -1516,6 +1528,8 @@ impl PeerConn {
             self.loss_rate_stats.clone(),
             self.throughput.clone(),
             self.control_metrics(&self.get_conn_info().network_name),
+            self.underlay_attempt_context.clone(),
+            self.global_ctx.clone(),
         );
 
         let close_event_notifier = self.close_event_notifier.clone();

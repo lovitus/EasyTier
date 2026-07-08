@@ -113,6 +113,13 @@ impl PunchConeHoleClient {
         let tid = rand::random();
 
         let global_ctx = self.peer_mgr.get_global_ctx();
+        if super::common::peer_hole_punch_is_blocked(
+            &global_ctx,
+            dst_peer_id,
+            crate::tunnel::IpScheme::Udp,
+        ) {
+            anyhow::bail!("udp hole punch peer is gated by underlay breaker");
+        }
         let use_stealth = should_request_udp_stealth(&global_ctx, disable_udp_stealth);
         let udp_array = UdpSocketArray::new(1, global_ctx.net_ns.clone());
 
@@ -143,6 +150,15 @@ impl PunchConeHoleClient {
         let remote_mapped_addr = resp.listener_mapped_addr.ok_or(anyhow::anyhow!(
             "select_punch_listener response missing listener_mapped_addr"
         ))?;
+
+        let mut preflight = super::common::prepare_hole_punch_attempt(
+            &global_ctx,
+            remote_mapped_addr.into(),
+            dst_peer_id,
+            crate::tunnel::IpScheme::Udp,
+        )
+        .await?;
+        preflight.commit();
 
         let local_socket = {
             let _g = self.peer_mgr.get_global_ctx().net_ns.guard();

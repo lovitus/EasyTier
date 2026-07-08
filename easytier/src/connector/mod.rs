@@ -1,7 +1,13 @@
-use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use crate::{
-    common::{dns::socket_addrs, error::Error, global_ctx::ArcGlobalCtx, idn, underlay_guard},
+    common::{
+        PeerId,
+        dns::socket_addrs,
+        error::Error,
+        global_ctx::{ArcGlobalCtx, UnderlayBreakerScope, UnderlayPreflightGuard},
+        idn, underlay_guard,
+    },
     connector::dns_connector::DnsTunnelConnector,
     proto::common::PeerFeatureFlag,
     tunnel::{
@@ -115,6 +121,76 @@ async fn set_bind_addr_for_peer_connector(
 struct ResolvedConnectorAddr {
     addr: SocketAddr,
     ip_version: IpVersion,
+    preflight: UnderlayPreflightGuard,
+}
+
+pub(crate) struct PreparedUnderlayConnector {
+    inner: Box<dyn TunnelConnector + 'static>,
+    preflight: Option<UnderlayPreflightGuard>,
+    resolved_addr: Option<SocketAddr>,
+}
+
+impl std::fmt::Debug for PreparedUnderlayConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedUnderlayConnector")
+            .field("remote_url", &self.inner.remote_url())
+            .field("has_preflight", &self.preflight.is_some())
+            .finish()
+    }
+}
+
+impl PreparedUnderlayConnector {
+    pub(crate) fn commit_preflight(&mut self) {
+        if let Some(mut preflight) = self.preflight.take() {
+            preflight.commit();
+        }
+    }
+
+    /// The exact address that was resolved and validated by the underlay
+    /// guard for this connector. Callers that bypass `connect()` and build
+    /// their own transport (e.g. direct UDP hole-punch) must reuse this
+    /// address instead of re-resolving the remote URL, otherwise the
+    /// re-resolved address (DNS/multi-addr URLs are resolved randomly, see
+    /// `SocketAddr::from_url`) may never have been checked by the guard.
+    pub(crate) fn resolved_addr(&self) -> Option<SocketAddr> {
+        self.resolved_addr
+    }
+}
+
+#[async_trait::async_trait]
+impl TunnelConnector for PreparedUnderlayConnector {
+    async fn connect(&mut self) -> Result<Box<dyn tunnel::Tunnel>, TunnelError> {
+        self.commit_preflight();
+        self.inner.connect().await
+    }
+
+    fn remote_url(&self) -> url::Url {
+        self.inner.remote_url()
+    }
+
+    fn set_bind_addrs(&mut self, addrs: Vec<SocketAddr>) {
+        self.inner.set_bind_addrs(addrs);
+    }
+
+    fn set_ip_version(&mut self, ip_version: IpVersion) {
+        self.inner.set_ip_version(ip_version);
+    }
+
+    fn set_resolved_addr(&mut self, addr: SocketAddr) {
+        self.inner.set_resolved_addr(addr);
+    }
+
+    fn set_socket_mark(&mut self, socket_mark: Option<u32>) {
+        self.inner.set_socket_mark(socket_mark);
+    }
+
+    fn disable_stealth(&mut self) {
+        self.inner.disable_stealth();
+    }
+
+    fn require_stealth(&mut self) {
+        self.inner.require_stealth();
+    }
 }
 
 fn connector_default_port(url: &url::Url) -> Option<u16> {
@@ -140,59 +216,15 @@ fn infer_effective_ip_version(addrs: &[SocketAddr], requested_ip_version: IpVers
     }
 }
 
-async fn easytier_managed_ipv6_source_for_dst(
-    global_ctx: &ArcGlobalCtx,
-    dst_addr: SocketAddrV6,
-) -> Result<Option<Ipv6Addr>, Error> {
-    let socket = {
-        let _g = global_ctx.net_ns.guard();
-        tokio::net::UdpSocket::bind("[::]:0").await?
-    };
-    socket.connect(SocketAddr::V6(dst_addr)).await?;
-
-    let IpAddr::V6(local_ip) = socket.local_addr()?.ip() else {
-        return Ok(None);
-    };
-
-    Ok(global_ctx
-        .is_ip_easytier_managed_ipv6(&local_ip)
-        .then_some(local_ip))
-}
-
-async fn ipv6_connector_reject_reason(
-    url: &url::Url,
-    global_ctx: &ArcGlobalCtx,
-    v6_addr: SocketAddrV6,
-    skip_source_validation_errors: bool,
-) -> Result<Option<String>, Error> {
-    if global_ctx.is_ip_easytier_managed_ipv6(v6_addr.ip()) {
-        return Ok(Some(format!(
-            "{} resolves to EasyTier-managed IPv6 {}",
-            url,
-            v6_addr.ip()
-        )));
-    }
-
-    match easytier_managed_ipv6_source_for_dst(global_ctx, v6_addr).await {
-        Ok(Some(local_ip)) => Ok(Some(format!(
-            "{} would use EasyTier-managed IPv6 {} as local source for {}",
-            url, local_ip, v6_addr
-        ))),
-        Ok(None) => Ok(None),
-        Err(err) if skip_source_validation_errors => Ok(Some(format!(
-            "{} IPv6 candidate {} could not be validated: {}",
-            url, v6_addr, err
-        ))),
-        Err(err) => Err(err),
-    }
-}
-
 async fn resolve_connector_socket_addr(
     url: &url::Url,
     global_ctx: &ArcGlobalCtx,
+    scheme: IpScheme,
     ip_version: IpVersion,
+    scope: UnderlayBreakerScope,
+    expected_peer_id: Option<PeerId>,
 ) -> Result<ResolvedConnectorAddr, Error> {
-    let addrs = socket_addrs(url, || connector_default_port(url))
+    let mut addrs = socket_addrs(url, || connector_default_port(url))
         .await
         .map_err(|e| {
             TunnelError::InvalidAddr(format!(
@@ -201,53 +233,49 @@ async fn resolve_connector_socket_addr(
             ))
         })?;
 
-    let mut usable_addrs = Vec::new();
-    let mut rejected_ipv6_reason = None;
-    let skip_source_validation_errors = ip_version == IpVersion::Both;
-    for addr in addrs
-        .into_iter()
-        .filter(|addr| addr_matches_ip_version(addr, ip_version))
-    {
-        if let SocketAddr::V6(v6_addr) = addr
-            && let Some(reason) = ipv6_connector_reject_reason(
-                url,
-                global_ctx,
-                v6_addr,
-                skip_source_validation_errors,
-            )
-            .await?
-        {
-            rejected_ipv6_reason = Some(reason);
-            continue;
-        }
+    addrs.retain(|addr| addr_matches_ip_version(addr, ip_version));
+    let effective_ip_version = infer_effective_ip_version(&addrs, ip_version);
+    addrs.shuffle(&mut rand::thread_rng());
 
-        usable_addrs.push(addr);
+    let mut rejected_reason = None;
+    let skip_source_validation_errors = ip_version == IpVersion::Both;
+    for addr in addrs {
+        match underlay_guard::prepare_underlay_attempt(
+            global_ctx,
+            addr,
+            scheme,
+            scope,
+            expected_peer_id,
+        )
+        .await
+        {
+            Ok(preflight) => {
+                return Ok(ResolvedConnectorAddr {
+                    addr,
+                    ip_version: effective_ip_version,
+                    preflight,
+                });
+            }
+            Err(err) if skip_source_validation_errors => {
+                rejected_reason = Some(format!(
+                    "{} candidate {} could not be validated: {}",
+                    url, addr, err
+                ));
+            }
+            Err(err) => return Err(err),
+        }
     }
 
-    if usable_addrs.is_empty() {
-        if let Some(reason) = rejected_ipv6_reason {
-            return Err(Error::InvalidUrl(format!(
-                "{}, refusing overlay-backed underlay connection",
-                reason
-            )));
-        }
-
-        return Err(Error::TunnelError(TunnelError::NoDnsRecordFound(
-            ip_version,
+    if let Some(reason) = rejected_reason {
+        return Err(Error::InvalidUrl(format!(
+            "{}, refusing guarded underlay connection",
+            reason
         )));
     }
 
-    let effective_ip_version = infer_effective_ip_version(&usable_addrs, ip_version);
-
-    let addr = usable_addrs
-        .choose(&mut rand::thread_rng())
-        .copied()
-        .ok_or_else(|| Error::TunnelError(TunnelError::NoDnsRecordFound(ip_version)))?;
-
-    Ok(ResolvedConnectorAddr {
-        addr,
-        ip_version: effective_ip_version,
-    })
+    Err(Error::TunnelError(TunnelError::NoDnsRecordFound(
+        ip_version,
+    )))
 }
 
 pub async fn create_connector_by_url(
@@ -255,16 +283,47 @@ pub async fn create_connector_by_url(
     global_ctx: &ArcGlobalCtx,
     ip_version: IpVersion,
 ) -> Result<Box<dyn TunnelConnector + 'static>, Error> {
+    Ok(Box::new(
+        create_connector_by_url_with_scope(
+            url,
+            global_ctx,
+            ip_version,
+            UnderlayBreakerScope::Generic,
+            None,
+        )
+        .await?,
+    ))
+}
+
+pub(crate) async fn create_connector_by_url_with_scope(
+    url: &str,
+    global_ctx: &ArcGlobalCtx,
+    ip_version: IpVersion,
+    scope: UnderlayBreakerScope,
+    expected_peer_id: Option<PeerId>,
+) -> Result<PreparedUnderlayConnector, Error> {
     let url = url::Url::parse(url).map_err(|_| Error::InvalidUrl(url.to_owned()))?;
     let url = idn::convert_idn_to_ascii(url)?;
     let scheme = (&url)
         .try_into()
         .map_err(|_| TunnelError::InvalidProtocol(url.scheme().to_owned()))?;
     let mut effective_connector_ip_version = ip_version;
+    let mut preflight = None;
+    let mut resolved_socket_addr = None;
     let mut connector: Box<dyn TunnelConnector + 'static> = match scheme {
         TunnelScheme::Ip(scheme) => {
-            let resolved_addr = resolve_connector_socket_addr(&url, global_ctx, ip_version).await?;
+            let resolved_addr = resolve_connector_socket_addr(
+                &url,
+                global_ctx,
+                scheme,
+                ip_version,
+                scope,
+                expected_peer_id,
+            )
+            .await?;
             effective_connector_ip_version = resolved_addr.ip_version;
+            resolved_socket_addr = Some(resolved_addr.addr);
+            preflight = Some(resolved_addr.preflight);
             let mut connector: Box<dyn TunnelConnector> = match scheme {
                 IpScheme::Tcp => {
                     let mut connector = TcpTunnelConnector::new(url);
@@ -404,7 +463,11 @@ pub async fn create_connector_by_url(
     };
     connector.set_ip_version(effective_connector_ip_version);
 
-    Ok(connector)
+    Ok(PreparedUnderlayConnector {
+        inner: connector,
+        preflight,
+        resolved_addr: resolved_socket_addr,
+    })
 }
 
 #[cfg(test)]
@@ -442,6 +505,33 @@ mod tests {
 
         assert!(matches!(
             ret,
+            Err(crate::common::error::Error::InvalidUrl(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn connector_rejects_configured_underlay_destination() {
+        let global_ctx = get_mock_global_ctx();
+        let mut flags = global_ctx.get_flags();
+        flags.underlay_candidate_guard = true;
+        flags.underlay_exclude_cidrs = "203.0.113.0/24".to_string();
+        global_ctx.set_flags(flags);
+
+        let ipv4_ret =
+            create_connector_by_url("tcp://203.0.113.10:11010", &global_ctx, IpVersion::V4).await;
+        let ipv6_ret = create_connector_by_url(
+            "tcp://[fdfe:dcba:9876::2]:11010",
+            &global_ctx,
+            IpVersion::V6,
+        )
+        .await;
+
+        assert!(matches!(
+            ipv4_ret,
+            Err(crate::common::error::Error::InvalidUrl(_))
+        ));
+        assert!(matches!(
+            ipv6_ret,
             Err(crate::common::error::Error::InvalidUrl(_))
         ));
     }

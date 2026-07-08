@@ -422,8 +422,15 @@ impl PunchSymToConeHoleClient {
             return Ok(None);
         }
 
-        let udp_array = self.prepare_udp_array().await?;
         let global_ctx = self.peer_mgr.get_global_ctx();
+        if super::common::peer_hole_punch_is_blocked(
+            &global_ctx,
+            dst_peer_id,
+            crate::tunnel::IpScheme::Udp,
+        ) {
+            anyhow::bail!("udp hole punch peer is gated by underlay breaker");
+        }
+        let udp_array = self.prepare_udp_array().await?;
         let use_stealth = should_request_udp_stealth(&global_ctx, disable_udp_stealth);
 
         let rpc_stub = self
@@ -453,6 +460,15 @@ impl PunchSymToConeHoleClient {
         let remote_mapped_addr = resp.listener_mapped_addr.ok_or(anyhow::anyhow!(
             "select_punch_listener response missing listener_mapped_addr"
         ))?;
+
+        let mut preflight = super::common::prepare_hole_punch_attempt(
+            &global_ctx,
+            remote_mapped_addr.into(),
+            dst_peer_id,
+            crate::tunnel::IpScheme::Udp,
+        )
+        .await?;
+        preflight.commit();
 
         // try direct connect first
         if self.try_direct_connect.load(Ordering::Relaxed)

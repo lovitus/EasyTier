@@ -11,8 +11,11 @@ use tokio::task::JoinSet;
 
 use crate::{
     common::{
-        PeerId, global_ctx::ProtocolLoopScope, join_joinset_background,
+        PeerId,
+        global_ctx::{ProtocolLoopScope, UnderlayBreakerKey, UnderlayBreakerScope},
+        join_joinset_background,
         stun::StunInfoCollectorTrait, transport_priority::TransportPathClass,
+        underlay_guard,
     },
     connector::udp_hole_punch::BackOff,
     peers::{
@@ -97,6 +100,34 @@ async fn try_connect_to_remote(
         "tcp hole punch server start connect loop"
     );
 
+    let global_ctx = peer_mgr.get_global_ctx();
+    let expected_peer_id = loop_blacklist.as_ref().map(|(peer_id, _)| *peer_id);
+    if is_client
+        && expected_peer_id.is_some_and(|peer_id| {
+            global_ctx.is_underlay_attempt_blocked(&[UnderlayBreakerKey::peer(
+                peer_id,
+                IpScheme::Tcp,
+                UnderlayBreakerScope::HolePunch,
+            )])
+        })
+    {
+        anyhow::bail!("tcp hole punch peer is gated by underlay breaker");
+    }
+    let mut preflight = if is_client {
+        Some(
+            underlay_guard::prepare_underlay_attempt(
+                &global_ctx,
+                a_mapped_addr,
+                IpScheme::Tcp,
+                UnderlayBreakerScope::HolePunch,
+                expected_peer_id,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     let mut connector =
         TcpTunnelConnector::new(format!("tcp://{}", a_mapped_addr).parse().unwrap());
     connector.set_bind_addrs(vec![bind_addr_for_port(
@@ -129,12 +160,19 @@ async fn try_connect_to_remote(
         }
         attempts = attempts.wrapping_add(1);
         let _g = peer_mgr.get_global_ctx().net_ns.guard();
+        if let Some(mut guard) = preflight.take() {
+            guard.commit();
+        }
         if let Ok(Ok(tunnel)) =
             tokio::time::timeout(Duration::from_secs(3), connector.connect()).await
         {
             let add_tunnel_ret = if is_client {
                 peer_mgr
-                    .add_client_tunnel_without_runtime_loop_record(tunnel, false)
+                    .add_client_tunnel_with_peer_id_hint_without_runtime_loop_record(
+                        tunnel,
+                        false,
+                        expected_peer_id,
+                    )
                     .await
                     .map(|_| ())
             } else {

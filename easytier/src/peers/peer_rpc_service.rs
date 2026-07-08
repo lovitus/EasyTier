@@ -1,7 +1,11 @@
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use crate::{
-    common::{global_ctx::ArcGlobalCtx, network::IPCollector, underlay_guard},
+    common::{
+        global_ctx::{ArcGlobalCtx, UnderlayBreakerScope},
+        network::IPCollector,
+        underlay_guard,
+    },
     proto::{
         common::Void,
         peer_rpc::{
@@ -9,7 +13,7 @@ use crate::{
         },
         rpc_types::{self, controller::BaseController},
     },
-    tunnel::udp,
+    tunnel::{IpScheme, udp},
 };
 
 const MAX_UDP_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
@@ -144,6 +148,33 @@ fn connector_addrs_from_request(
     Ok((listener_port, deduped, req.preferred_src_ipv6))
 }
 
+async fn sanitize_hole_punch_connector_addrs(
+    global_ctx: &ArcGlobalCtx,
+    connector_addrs: Vec<SocketAddr>,
+) -> Vec<SocketAddr> {
+    let mut allowed = Vec::with_capacity(connector_addrs.len());
+    for connector_addr in connector_addrs {
+        match underlay_guard::validate_underlay_candidate(
+            global_ctx,
+            connector_addr,
+            IpScheme::Udp,
+            UnderlayBreakerScope::HolePunch,
+        )
+        .await
+        {
+            Ok(()) => allowed.push(connector_addr),
+            Err(error) => {
+                tracing::debug!(
+                    ?connector_addr,
+                    ?error,
+                    "skip guarded udp hole-punch connector address"
+                );
+            }
+        }
+    }
+    allowed
+}
+
 #[derive(Clone)]
 pub struct DirectConnectorManagerRpcServer {
     // TODO: this only cache for one src peer, should make it global
@@ -185,8 +216,18 @@ impl DirectConnectorRpc for DirectConnectorManagerRpcServer {
     ) -> rpc_types::error::Result<Void> {
         let (listener_port, connector_addrs, preferred_src_ipv6) =
             connector_addrs_from_request(req)?;
+        let connector_addrs =
+            sanitize_hole_punch_connector_addrs(&self.global_ctx, connector_addrs).await;
         let preferred_src_ipv6 =
             local_preferred_src_ipv6(&self.global_ctx, preferred_src_ipv6).await;
+
+        if connector_addrs.is_empty() {
+            tracing::warn!(
+                listener_port,
+                "skip udp hole punch because all connector addresses were guarded"
+            );
+            return Ok(Default::default());
+        }
 
         tracing::info!(
             ?connector_addrs,
@@ -236,6 +277,7 @@ mod tests {
         common::global_ctx::tests::get_mock_global_ctx,
         peers::peer_rpc_service::{
             connector_addrs_from_request, remove_easytier_managed_ipv6s, sanitize_get_ip_list,
+            sanitize_hole_punch_connector_addrs,
         },
         proto::peer_rpc::{GetIpListResponse, SendUdpHolePunchPacketRequest},
     };
@@ -397,5 +439,39 @@ mod tests {
         });
 
         assert!(ret.is_err());
+    }
+
+    #[tokio::test]
+    async fn hole_punch_connector_addr_sanitizer_skips_guarded_addrs() {
+        let global_ctx = get_mock_global_ctx();
+        let mut flags = global_ctx.get_flags();
+        flags.underlay_candidate_guard = true;
+        flags.underlay_exclude_cidrs.clear();
+        global_ctx.set_flags(flags);
+
+        let addrs = vec![
+            "198.18.0.1:10001".parse().unwrap(),
+            "[fdfe:dcba:9876::1]:10002".parse().unwrap(),
+        ];
+
+        let sanitized = sanitize_hole_punch_connector_addrs(&global_ctx, addrs).await;
+
+        assert!(sanitized.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hole_punch_connector_addr_sanitizer_respects_guard_toggle() {
+        let global_ctx = get_mock_global_ctx();
+        let mut flags = global_ctx.get_flags();
+        flags.underlay_candidate_guard = false;
+        flags.underlay_exclude_cidrs =
+            crate::common::underlay_guard::DEFAULT_UNDERLAY_EXCLUDE_CIDRS.to_string();
+        global_ctx.set_flags(flags);
+
+        let addrs = vec!["198.18.0.1:10001".parse().unwrap()];
+
+        let sanitized = sanitize_hole_punch_connector_addrs(&global_ctx, addrs.clone()).await;
+
+        assert_eq!(sanitized, addrs);
     }
 }

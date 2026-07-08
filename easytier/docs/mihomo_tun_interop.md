@@ -113,23 +113,48 @@ socket marks and policy routing; macOS and Windows require different interface
 binding or system-extension semantics.
 
 This fork ships a smaller fail-safe guard instead. It is enabled by default and
-applies only to underlay candidate sanitization:
+applies only to underlay candidate sanitization plus a local runtime breaker:
 
 - `--underlay-candidate-guard` defaults to `true`.
-- `--underlay-exclude-cidrs` defaults to
-  `198.18.0.0/15,fdfe:dcba:9876::/48,192.19.0.0/24`.
+- The built-in fake-IP base set is
+  `198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,192.19.0.0/24`, covering common
+  Mihomo/sing-box/Clash/V2Ray/Xray/Surge fake-IP pools.
+- `--underlay-exclude-cidrs` is an additive user list. Clearing it disables
+  only user-added CIDRs, not the built-in base set, runtime EasyTier virtual IP
+  filtering, or the older EasyTier-managed IPv6 filtering.
 - GUI exposes the same setting as **Underlay Candidate Sanitization** plus a
   single editable CIDR list.
 - The guard filters local IP advertisement, direct candidate expansion, IPv6
   hole-punch candidates, direct UDP route-source validation before hole-punch
-  RPCs, and connector bind-source lists.
+  RPCs, inbound hole-punch RPC connector addresses, generic connector
+  destination/source addresses, and connector bind-source lists.
+- Generic connector and direct validation use a temporary connected UDP socket
+  to discover the system-selected source IP. A target IP or source IP matching
+  the built-in, user, or runtime guard is rejected for that candidate.
+- If the source IP does not match a CIDR guard but maps to a suspicious
+  `utun`/`tun`/`tap`/`wintun`/point-to-point interface, v1 records only a
+  warning and a bounded soft strike. It does not hard reject and does not trip
+  the breaker.
+- The internal breaker stores at most 4096 keys, either
+  `Endpoint(remote_addr, scheme, scope)` or `Peer(peer_id, scheme, scope)`.
+  Three hard strikes in 30 seconds block the key for 300 seconds, with repeated
+  triggers backing off up to 1800 seconds.
+- Hard strikes are limited to high-confidence signals: guard hard hits,
+  handshake peer mismatch for a known expected peer, and the existing self-loop
+  detection. Prepare timeout, ACL/Policy denial, destination refusal, and normal
+  fast failures only log diagnostics.
+- Peer and Endpoint breaker keys are acquired atomically with one lease, so
+  mismatched TTLs cannot consume each other's half-open attempt. A cancelled
+  preflight rolls back only its own lease; the lease is committed immediately
+  before the first real connection or hole-punch side effect.
+- After TTL expiry, only one half-open attempt per key set is released. Direct,
+  generic, and TCP/UDP hole-punch keys clear only after the authenticated
+  PeerConn receives its first pong; a handshake alone never clears a breaker.
 - A guarded public IPv4 UDP direct candidate is skipped fail-closed. It is not
   retried through the generic direct UDP fallback path.
-- Clearing `underlay_exclude_cidrs` disables configured CIDR filtering only.
-  Runtime EasyTier virtual-address filtering remains active while the guard is
-  enabled.
 - Setting `underlay_candidate_guard=false` bypasses these new sanitization hooks
-  and keeps only the older EasyTier-managed IPv6 filtering.
+  and breaker behavior: no breaker gate, no hard/soft strike, and no TTL. It
+  keeps only the older EasyTier-managed IPv6 filtering.
 
 Listeners may still bind to `0.0.0.0`; the guard filters what EasyTier
 advertises or dials as underlay candidates. It does not change PeerManager,

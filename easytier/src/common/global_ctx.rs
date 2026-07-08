@@ -43,6 +43,13 @@ pub type NetworkIdentity = crate::common::config::NetworkIdentity;
 const PROTOCOL_LOOP_TRACKED_SCHEMES: usize = 8;
 const PROTOCOL_LOOP_SCOPE_COUNT: usize = 2;
 const PROTOCOL_LOOP_STATE_SLOTS: usize = PROTOCOL_LOOP_TRACKED_SCHEMES * PROTOCOL_LOOP_SCOPE_COUNT;
+const UNDERLAY_BREAKER_CAPACITY: usize = 4096;
+const UNDERLAY_BREAKER_STRIKE_THRESHOLD: u8 = 3;
+const UNDERLAY_BREAKER_STRIKE_WINDOW_SECS: u64 = 30;
+const UNDERLAY_BREAKER_INITIAL_TTL_SECS: u64 = 300;
+const UNDERLAY_BREAKER_MAX_TTL_SECS: u64 = 1800;
+const UNDERLAY_BREAKER_SOFT_TTL_SECS: u64 = 300;
+const UNDERLAY_BREAKER_HALF_OPEN_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolLoopScope {
@@ -64,6 +71,160 @@ struct ProtocolLoopSuppressionSlot {
     strike_count: u8,
     first_hit_at_secs: u64,
     suppressed_until_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnderlayBreakerScope {
+    Direct,
+    HolePunch,
+    Generic,
+    ProxyPrepare,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum UnderlayBreakerKey {
+    Endpoint {
+        remote_addr: SocketAddr,
+        scheme: IpScheme,
+        scope: UnderlayBreakerScope,
+    },
+    Peer {
+        peer_id: PeerId,
+        scheme: IpScheme,
+        scope: UnderlayBreakerScope,
+    },
+}
+
+impl UnderlayBreakerKey {
+    pub fn endpoint(
+        remote_addr: SocketAddr,
+        scheme: IpScheme,
+        scope: UnderlayBreakerScope,
+    ) -> Self {
+        Self::Endpoint {
+            remote_addr,
+            scheme,
+            scope,
+        }
+    }
+
+    pub fn peer(peer_id: PeerId, scheme: IpScheme, scope: UnderlayBreakerScope) -> Self {
+        Self::Peer {
+            peer_id,
+            scheme,
+            scope,
+        }
+    }
+
+    fn remote_addr(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Endpoint { remote_addr, .. } => Some(*remote_addr),
+            Self::Peer { .. } => None,
+        }
+    }
+
+    fn peer_id(&self) -> Option<PeerId> {
+        match self {
+            Self::Endpoint { .. } => None,
+            Self::Peer { peer_id, .. } => Some(*peer_id),
+        }
+    }
+
+    fn scheme(&self) -> IpScheme {
+        match self {
+            Self::Endpoint { scheme, .. } | Self::Peer { scheme, .. } => *scheme,
+        }
+    }
+
+    fn scope(&self) -> UnderlayBreakerScope {
+        match self {
+            Self::Endpoint { scope, .. } | Self::Peer { scope, .. } => *scope,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnderlayBreakerStrikeKind {
+    Hard,
+    Soft,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct UnderlayBreakerTrace {
+    pub expected_peer_id: Option<PeerId>,
+    pub actual_peer_id: Option<PeerId>,
+    pub local_ip: Option<IpAddr>,
+    pub ifname: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct UnderlayBreakerEntry {
+    hard_strikes: u8,
+    soft_strikes: u16,
+    first_hard_at_secs: u64,
+    blocked_until_secs: u64,
+    backoff_secs: u64,
+    half_open: bool,
+    half_open_at_secs: u64,
+    half_open_lease_id: Option<u64>,
+    updated_at_secs: u64,
+}
+
+#[derive(Debug, Default)]
+struct UnderlayBreakerState {
+    entries: HashMap<UnderlayBreakerKey, UnderlayBreakerEntry>,
+    next_lease_id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnderlayBreakerGateError {
+    pub key: UnderlayBreakerKey,
+}
+
+impl std::fmt::Display for UnderlayBreakerGateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "underlay breaker gated key {:?}", self.key)
+    }
+}
+
+impl std::error::Error for UnderlayBreakerGateError {}
+
+#[derive(Debug, Clone)]
+pub struct UnderlayAttemptContext {
+    endpoint_key: UnderlayBreakerKey,
+    peer_key: Option<UnderlayBreakerKey>,
+}
+
+impl UnderlayAttemptContext {
+    pub fn new(
+        remote_addr: SocketAddr,
+        scheme: IpScheme,
+        scope: UnderlayBreakerScope,
+        peer_id_hint: Option<PeerId>,
+    ) -> Self {
+        Self {
+            endpoint_key: UnderlayBreakerKey::endpoint(remote_addr, scheme, scope),
+            peer_key: peer_id_hint.map(|peer_id| UnderlayBreakerKey::peer(peer_id, scheme, scope)),
+        }
+    }
+
+    pub fn set_peer_id_if_missing(&mut self, peer_id: PeerId) {
+        if self.peer_key.is_none() {
+            self.peer_key = Some(UnderlayBreakerKey::peer(
+                peer_id,
+                self.endpoint_key.scheme(),
+                self.endpoint_key.scope(),
+            ));
+        }
+    }
+
+    pub fn endpoint_key(&self) -> &UnderlayBreakerKey {
+        &self.endpoint_key
+    }
+
+    pub fn peer_key(&self) -> Option<&UnderlayBreakerKey> {
+        self.peer_key.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -252,6 +413,7 @@ pub struct GlobalCtx {
 
     flags: ArcSwap<Flags>,
     protocol_loop_suppression: Mutex<[ProtocolLoopSuppressionSlot; PROTOCOL_LOOP_STATE_SLOTS]>,
+    underlay_breaker: Mutex<UnderlayBreakerState>,
 
     // Runtime/base advertised feature flags before config-owned fields are
     // overlaid by set_flags. Keep this separate so config patches do not erase
@@ -287,6 +449,50 @@ impl std::fmt::Debug for GlobalCtx {
 }
 
 pub type ArcGlobalCtx = std::sync::Arc<GlobalCtx>;
+
+#[derive(Debug)]
+pub struct UnderlayPreflightGuard {
+    global_ctx: ArcGlobalCtx,
+    lease_id: u64,
+    acquired_half_open_keys: Vec<UnderlayBreakerKey>,
+    committed: bool,
+}
+
+impl UnderlayPreflightGuard {
+    fn new(
+        global_ctx: ArcGlobalCtx,
+        lease_id: u64,
+        acquired_half_open_keys: Vec<UnderlayBreakerKey>,
+    ) -> Self {
+        Self {
+            global_ctx,
+            lease_id,
+            acquired_half_open_keys,
+            committed: false,
+        }
+    }
+
+    pub fn commit(&mut self) {
+        debug_assert!(!self.committed, "underlay preflight guard committed twice");
+        self.committed = true;
+    }
+
+    #[cfg(test)]
+    fn lease_id(&self) -> u64 {
+        self.lease_id
+    }
+}
+
+impl Drop for UnderlayPreflightGuard {
+    fn drop(&mut self) {
+        if !self.committed && self.lease_id != 0 {
+            self.global_ctx.rollback_underlay_preflight(
+                self.lease_id,
+                &self.acquired_half_open_keys,
+            );
+        }
+    }
+}
 
 impl GlobalCtx {
     const PROTOCOL_LOOP_STRIKE_THRESHOLD: u8 = 2;
@@ -434,6 +640,7 @@ impl GlobalCtx {
             protocol_loop_suppression: Mutex::new(
                 [ProtocolLoopSuppressionSlot::default(); PROTOCOL_LOOP_STATE_SLOTS],
             ),
+            underlay_breaker: Mutex::new(UnderlayBreakerState::default()),
 
             base_feature_flags: ArcSwap::new(Arc::new(base_feature_flags)),
 
@@ -802,6 +1009,449 @@ impl GlobalCtx {
         self.is_protocol_loop_suppressed_at(scheme, scope, now_secs)
     }
 
+    fn underlay_breaker_enabled(&self) -> bool {
+        self.get_flags().underlay_candidate_guard
+    }
+
+    fn prune_underlay_breaker_locked(
+        entries: &mut HashMap<UnderlayBreakerKey, UnderlayBreakerEntry>,
+        now_secs: u64,
+    ) {
+        entries.retain(|_, entry| {
+            if entry.blocked_until_secs != 0 {
+                if now_secs <= entry.blocked_until_secs {
+                    return true;
+                }
+                if now_secs.saturating_sub(entry.blocked_until_secs)
+                    <= UNDERLAY_BREAKER_MAX_TTL_SECS
+                {
+                    return true;
+                }
+                if entry.half_open
+                    && now_secs.saturating_sub(entry.half_open_at_secs)
+                        <= UNDERLAY_BREAKER_HALF_OPEN_TIMEOUT_SECS
+                {
+                    return true;
+                }
+            }
+
+            if entry.first_hard_at_secs != 0
+                && now_secs.saturating_sub(entry.first_hard_at_secs)
+                    <= UNDERLAY_BREAKER_STRIKE_WINDOW_SECS
+            {
+                return true;
+            }
+
+            entry.soft_strikes != 0
+                && now_secs.saturating_sub(entry.updated_at_secs) <= UNDERLAY_BREAKER_SOFT_TTL_SECS
+        });
+    }
+
+    fn evict_underlay_breaker_if_full(
+        entries: &mut HashMap<UnderlayBreakerKey, UnderlayBreakerEntry>,
+    ) {
+        if entries.len() < UNDERLAY_BREAKER_CAPACITY {
+            return;
+        }
+
+        let Some(oldest_key) = entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.updated_at_secs)
+            .map(|(key, _)| key.clone())
+        else {
+            return;
+        };
+        entries.remove(&oldest_key);
+    }
+
+    fn block_underlay_breaker_entry(entry: &mut UnderlayBreakerEntry, now_secs: u64) -> u64 {
+        let ttl = if entry.backoff_secs == 0 {
+            UNDERLAY_BREAKER_INITIAL_TTL_SECS
+        } else {
+            entry
+                .backoff_secs
+                .saturating_mul(2)
+                .min(UNDERLAY_BREAKER_MAX_TTL_SECS)
+        };
+        entry.backoff_secs = ttl;
+        entry.blocked_until_secs = now_secs.saturating_add(ttl);
+        entry.hard_strikes = 0;
+        entry.first_hard_at_secs = 0;
+        entry.half_open = false;
+        entry.half_open_at_secs = 0;
+        entry.half_open_lease_id = None;
+        entry.updated_at_secs = now_secs;
+        ttl
+    }
+
+    fn log_underlay_breaker_event(
+        key: &UnderlayBreakerKey,
+        reason: &str,
+        strike_kind: Option<UnderlayBreakerStrikeKind>,
+        ttl: Option<u64>,
+        half_open: bool,
+        trace: Option<&UnderlayBreakerTrace>,
+        warn: bool,
+        message: &'static str,
+    ) {
+        let trace = trace.cloned().unwrap_or_default();
+        if warn {
+            tracing::warn!(
+                ?key,
+                peer_id = ?key.peer_id(),
+                expected_peer_id = ?trace.expected_peer_id,
+                actual_peer_id = ?trace.actual_peer_id,
+                remote_addr = ?key.remote_addr(),
+                scheme = ?key.scheme(),
+                scope = ?key.scope(),
+                reason,
+                ?strike_kind,
+                ?ttl,
+                local_ip = ?trace.local_ip,
+                ifname = ?trace.ifname,
+                half_open,
+                event = message,
+                "underlay breaker event"
+            );
+        } else {
+            tracing::debug!(
+                ?key,
+                peer_id = ?key.peer_id(),
+                expected_peer_id = ?trace.expected_peer_id,
+                actual_peer_id = ?trace.actual_peer_id,
+                remote_addr = ?key.remote_addr(),
+                scheme = ?key.scheme(),
+                scope = ?key.scope(),
+                reason,
+                ?strike_kind,
+                ?ttl,
+                local_ip = ?trace.local_ip,
+                ifname = ?trace.ifname,
+                half_open,
+                event = message,
+                "underlay breaker event"
+            );
+        }
+    }
+
+    fn record_underlay_breaker_strike_at(
+        &self,
+        key: UnderlayBreakerKey,
+        kind: UnderlayBreakerStrikeKind,
+        reason: &'static str,
+        trace: Option<UnderlayBreakerTrace>,
+        now_secs: u64,
+    ) -> bool {
+        if !self.underlay_breaker_enabled() {
+            return false;
+        }
+
+        let mut state = self.underlay_breaker.lock().unwrap();
+        Self::prune_underlay_breaker_locked(&mut state.entries, now_secs);
+        if !state.entries.contains_key(&key) {
+            Self::evict_underlay_breaker_if_full(&mut state.entries);
+        }
+        let entry = state.entries.entry(key.clone()).or_default();
+        entry.updated_at_secs = now_secs;
+
+        match kind {
+            UnderlayBreakerStrikeKind::Soft => {
+                entry.soft_strikes = entry.soft_strikes.saturating_add(1);
+                Self::log_underlay_breaker_event(
+                    &key,
+                    reason,
+                    Some(kind),
+                    None,
+                    entry.half_open,
+                    trace.as_ref(),
+                    false,
+                    "recorded soft underlay loopback signal",
+                );
+                false
+            }
+            UnderlayBreakerStrikeKind::Hard => {
+                if entry.half_open {
+                    let ttl = Self::block_underlay_breaker_entry(entry, now_secs);
+                    Self::log_underlay_breaker_event(
+                        &key,
+                        reason,
+                        Some(kind),
+                        Some(ttl),
+                        false,
+                        trace.as_ref(),
+                        true,
+                        "underlay breaker half-open attempt failed; re-blocking key",
+                    );
+                    return true;
+                }
+
+                if entry.first_hard_at_secs == 0
+                    || now_secs.saturating_sub(entry.first_hard_at_secs)
+                        > UNDERLAY_BREAKER_STRIKE_WINDOW_SECS
+                {
+                    entry.first_hard_at_secs = now_secs;
+                    entry.hard_strikes = 1;
+                } else {
+                    entry.hard_strikes = entry.hard_strikes.saturating_add(1);
+                }
+
+                if entry.hard_strikes >= UNDERLAY_BREAKER_STRIKE_THRESHOLD {
+                    let ttl = Self::block_underlay_breaker_entry(entry, now_secs);
+                    Self::log_underlay_breaker_event(
+                        &key,
+                        reason,
+                        Some(kind),
+                        Some(ttl),
+                        false,
+                        trace.as_ref(),
+                        true,
+                        "underlay breaker blocked key after repeated hard signals",
+                    );
+                    true
+                } else {
+                    Self::log_underlay_breaker_event(
+                        &key,
+                        reason,
+                        Some(kind),
+                        None,
+                        false,
+                        trace.as_ref(),
+                        false,
+                        "recorded hard underlay loopback signal",
+                    );
+                    false
+                }
+            }
+        }
+    }
+
+    pub fn record_underlay_breaker_strike(
+        &self,
+        key: UnderlayBreakerKey,
+        kind: UnderlayBreakerStrikeKind,
+        reason: &'static str,
+        trace: Option<UnderlayBreakerTrace>,
+    ) -> bool {
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.record_underlay_breaker_strike_at(key, kind, reason, trace, now_secs)
+    }
+
+    fn next_underlay_lease_id(state: &mut UnderlayBreakerState) -> u64 {
+        state.next_lease_id = state.next_lease_id.wrapping_add(1);
+        if state.next_lease_id == 0 {
+            state.next_lease_id = 1;
+        }
+        state.next_lease_id
+    }
+
+    fn settle_underlay_half_open_timeout(
+        key: &UnderlayBreakerKey,
+        entry: &mut UnderlayBreakerEntry,
+        now_secs: u64,
+    ) {
+        if !entry.half_open
+            || now_secs.saturating_sub(entry.half_open_at_secs)
+                <= UNDERLAY_BREAKER_HALF_OPEN_TIMEOUT_SECS
+        {
+            return;
+        }
+
+        let ttl = Self::block_underlay_breaker_entry(entry, now_secs);
+        Self::log_underlay_breaker_event(
+            key,
+            "half_open_timeout",
+            None,
+            Some(ttl),
+            false,
+            None,
+            true,
+            "underlay breaker half-open attempt timed out; re-blocking key",
+        );
+    }
+
+    fn try_begin_underlay_attempt_at(
+        self: &Arc<Self>,
+        keys: &[UnderlayBreakerKey],
+        now_secs: u64,
+    ) -> Result<UnderlayPreflightGuard, UnderlayBreakerGateError> {
+        if !self.underlay_breaker_enabled() {
+            return Ok(UnderlayPreflightGuard::new(self.clone(), 0, Vec::new()));
+        }
+
+        let mut unique_keys = Vec::with_capacity(keys.len());
+        for key in keys {
+            if !unique_keys.contains(key) {
+                unique_keys.push(key.clone());
+            }
+        }
+
+        let mut state = self.underlay_breaker.lock().unwrap();
+        for key in &unique_keys {
+            if let Some(entry) = state.entries.get_mut(key) {
+                Self::settle_underlay_half_open_timeout(key, entry, now_secs);
+            }
+        }
+        Self::prune_underlay_breaker_locked(&mut state.entries, now_secs);
+
+        for key in &unique_keys {
+            let Some(entry) = state.entries.get(key) else {
+                continue;
+            };
+            if entry.blocked_until_secs == 0 {
+                continue;
+            }
+            if now_secs < entry.blocked_until_secs || entry.half_open {
+                let reason = if entry.half_open {
+                    "half_open_in_flight"
+                } else {
+                    "breaker_ttl_active"
+                };
+                Self::log_underlay_breaker_event(
+                    key,
+                    reason,
+                    None,
+                        (now_secs < entry.blocked_until_secs)
+                            .then_some(entry.blocked_until_secs.saturating_sub(now_secs)),
+                        entry.half_open,
+                        None,
+                        false,
+                        "underlay breaker gated atomic connection attempt",
+                    );
+                    return Err(UnderlayBreakerGateError { key: key.clone() });
+            }
+        }
+
+        let lease_id = Self::next_underlay_lease_id(&mut state);
+        let mut acquired = Vec::new();
+        for key in &unique_keys {
+            let Some(entry) = state.entries.get_mut(key) else {
+                continue;
+            };
+            if entry.blocked_until_secs == 0 {
+                continue;
+            }
+            entry.half_open = true;
+            entry.half_open_at_secs = now_secs;
+            entry.half_open_lease_id = Some(lease_id);
+            entry.updated_at_secs = now_secs;
+            acquired.push(key.clone());
+            Self::log_underlay_breaker_event(
+                key,
+                "half_open_release",
+                None,
+                None,
+                true,
+                None,
+                false,
+                "underlay breaker released key in atomic half-open attempt",
+            );
+        }
+        drop(state);
+
+        Ok(UnderlayPreflightGuard::new(
+            self.clone(),
+            lease_id,
+            acquired,
+        ))
+    }
+
+    pub fn try_begin_underlay_attempt(
+        self: &Arc<Self>,
+        keys: &[UnderlayBreakerKey],
+    ) -> Result<UnderlayPreflightGuard, UnderlayBreakerGateError> {
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.try_begin_underlay_attempt_at(keys, now_secs)
+    }
+
+    #[cfg(test)]
+    fn is_underlay_breaker_gated_at(
+        self: &Arc<Self>,
+        key: &UnderlayBreakerKey,
+        now_secs: u64,
+    ) -> bool {
+        match self.try_begin_underlay_attempt_at(std::slice::from_ref(key), now_secs) {
+            Ok(mut guard) => {
+                guard.commit();
+                false
+            }
+            Err(_) => true,
+        }
+    }
+
+    pub fn is_underlay_attempt_blocked(&self, keys: &[UnderlayBreakerKey]) -> bool {
+        if !self.underlay_breaker_enabled() {
+            return false;
+        }
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut state = self.underlay_breaker.lock().unwrap();
+        for key in keys {
+            if let Some(entry) = state.entries.get_mut(key) {
+                Self::settle_underlay_half_open_timeout(key, entry, now_secs);
+            }
+        }
+        Self::prune_underlay_breaker_locked(&mut state.entries, now_secs);
+        keys.iter().any(|key| {
+            state.entries.get(key).is_some_and(|entry| {
+                entry.blocked_until_secs != 0
+                    && (now_secs < entry.blocked_until_secs || entry.half_open)
+            })
+        })
+    }
+
+    fn rollback_underlay_preflight(&self, lease_id: u64, keys: &[UnderlayBreakerKey]) {
+        let mut state = self.underlay_breaker.lock().unwrap();
+        for key in keys {
+            let Some(entry) = state.entries.get_mut(key) else {
+                continue;
+            };
+            if entry.half_open_lease_id != Some(lease_id) {
+                continue;
+            }
+            entry.half_open = false;
+            entry.half_open_at_secs = 0;
+            entry.half_open_lease_id = None;
+            Self::log_underlay_breaker_event(
+                key,
+                "preflight_cancelled",
+                None,
+                None,
+                false,
+                None,
+                false,
+                "underlay breaker rolled back cancelled preflight lease",
+            );
+        }
+    }
+
+    pub fn clear_underlay_breaker(&self, key: &UnderlayBreakerKey, reason: &'static str) {
+        if !self.underlay_breaker_enabled() {
+            return;
+        }
+
+        let mut state = self.underlay_breaker.lock().unwrap();
+        if state.entries.remove(key).is_some() {
+            Self::log_underlay_breaker_event(
+                key,
+                reason,
+                None,
+                None,
+                false,
+                None,
+                false,
+                "underlay breaker cleared key after successful connection",
+            );
+        }
+    }
+
     pub fn flags_arc(&self) -> Arc<Flags> {
         self.flags.load_full()
     }
@@ -1058,13 +1708,44 @@ impl GlobalCtx {
             is_udp
         );
 
-        if dst_is_local_et_ip || dst_is_local_phy_ip {
-            // if is local ip, make sure the port is not one of the listening ports
-            self.is_port_in_running_listeners(dst_addr.port(), is_udp)
-                || (!is_udp && protected_port::is_protected_tcp_port(dst_addr.port()))
-        } else {
-            false
+        if !dst_is_local_et_ip && !dst_is_local_phy_ip {
+            return false;
         }
+
+        // Always block our own internal listeners/RPC port to avoid proxy
+        // loops back into EasyTier's own control plane.
+        if self.is_port_in_running_listeners(dst_addr.port(), is_udp)
+            || (!is_udp && protected_port::is_protected_tcp_port(dst_addr.port()))
+        {
+            return true;
+        }
+
+        // A destination that equals our own EasyTier virtual/leased address
+        // (not just any local physical interface) can only be a legitimate
+        // proxy target when it points at one of our own advertised listeners,
+        // which is already handled above. Any other locally-bound port at
+        // that exact address belongs to an unrelated process on this host
+        // (for example a system-wide TUN/proxy tool such as Mihomo/Clash that
+        // accepts connections on every local address via a wildcard bind).
+        // Proxying into it would leak tunneled traffic into a foreign local
+        // service and can create a feedback loop between the two processes,
+        // so fail closed instead of silently connecting. This intentionally
+        // does not apply to `dst_is_local_phy_ip`, since proxying to a real
+        // service bound on this host's physical LAN address is the normal
+        // `proxy_cidrs` exit-node use case.
+        dst_is_local_et_ip && is_local_port_occupied(dst_addr, is_udp)
+    }
+}
+
+/// Returns true if some socket on this host is already bound to `dst_addr`,
+/// detected by attempting to bind the exact address ourselves. This works
+/// identically across platforms and does not require enumerating other
+/// processes' sockets.
+fn is_local_port_occupied(dst_addr: &SocketAddr, is_udp: bool) -> bool {
+    if is_udp {
+        std::net::UdpSocket::bind(dst_addr).is_err()
+    } else {
+        std::net::TcpListener::bind(dst_addr).is_err()
     }
 }
 
@@ -1084,7 +1765,7 @@ pub mod tests {
     #[tokio::test]
     async fn test_global_ctx() {
         let config = TomlConfigLoader::default();
-        let global_ctx = GlobalCtx::new(config);
+        let global_ctx = Arc::new(GlobalCtx::new(config));
 
         let mut subscriber = global_ctx.subscribe();
         let peer_id = new_peer_id();
@@ -1176,7 +1857,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn proxy_capabilities_follow_compiled_features() {
-        let global_ctx = GlobalCtx::new(TomlConfigLoader::default());
+        let global_ctx = Arc::new(GlobalCtx::new(TomlConfigLoader::default()));
         let feature_flags = global_ctx.get_feature_flags();
 
         assert_eq!(feature_flags.kcp_input, cfg!(feature = "kcp"));
@@ -1289,6 +1970,44 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn should_deny_proxy_for_third_party_listener_on_own_virtual_ip() {
+        let config = TomlConfigLoader::default();
+        let global_ctx = GlobalCtx::new(config);
+        global_ctx.set_ipv4(Some("127.0.0.1/8".parse().unwrap()));
+
+        // Simulate an unrelated local process (e.g. a system-wide TUN/proxy
+        // tool such as Mihomo/Clash) holding a listener on our own virtual
+        // IP via a wildcard bind. EasyTier never registered this port as one
+        // of its own listeners.
+        let foreign_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let foreign_addr = SocketAddr::from((
+            [127, 0, 0, 1],
+            foreign_listener.local_addr().unwrap().port(),
+        ));
+
+        assert!(global_ctx.should_deny_proxy(&foreign_addr, false));
+
+        drop(foreign_listener);
+    }
+
+    #[tokio::test]
+    async fn should_allow_proxy_for_free_port_on_own_virtual_ip() {
+        let config = TomlConfigLoader::default();
+        let global_ctx = GlobalCtx::new(config);
+        global_ctx.set_ipv4(Some("127.0.0.1/8".parse().unwrap()));
+
+        // Find an ephemeral port that is currently free, then confirm an
+        // unoccupied port on our own virtual IP is still allowed (harmless;
+        // the connect attempt would simply be refused).
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let free_port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let free_addr = SocketAddr::from(([127, 0, 0, 1], free_port));
+
+        assert!(!global_ctx.should_deny_proxy(&free_addr, false));
+    }
+
+    #[tokio::test]
     async fn virtual_ipv6_and_public_ipv6_lease_are_stored_separately() {
         let config = TomlConfigLoader::default();
         let global_ctx = GlobalCtx::new(config);
@@ -1384,6 +2103,288 @@ pub mod tests {
             ProtocolLoopScope::HolePunch,
             202,
         ));
+    }
+
+    #[tokio::test]
+    async fn underlay_breaker_requires_repeated_hard_strikes_and_half_open_is_single_flight() {
+        let config = TomlConfigLoader::default();
+        let global_ctx = Arc::new(GlobalCtx::new(config));
+        let key = UnderlayBreakerKey::endpoint(
+            "198.51.100.1:11010".parse().unwrap(),
+            IpScheme::Tcp,
+            UnderlayBreakerScope::Generic,
+        );
+
+        assert!(!global_ctx.record_underlay_breaker_strike_at(
+            key.clone(),
+            UnderlayBreakerStrikeKind::Hard,
+            "test",
+            None,
+            100
+        ));
+        assert!(!global_ctx.record_underlay_breaker_strike_at(
+            key.clone(),
+            UnderlayBreakerStrikeKind::Hard,
+            "test",
+            None,
+            110
+        ));
+        assert!(!global_ctx.is_underlay_breaker_gated_at(&key, 111));
+
+        assert!(global_ctx.record_underlay_breaker_strike_at(
+            key.clone(),
+            UnderlayBreakerStrikeKind::Hard,
+            "test",
+            None,
+            120
+        ));
+        assert!(global_ctx.is_underlay_breaker_gated_at(&key, 121));
+
+        assert!(
+            !global_ctx
+                .is_underlay_breaker_gated_at(&key, 120 + UNDERLAY_BREAKER_INITIAL_TTL_SECS + 1)
+        );
+        assert!(
+            global_ctx
+                .is_underlay_breaker_gated_at(&key, 120 + UNDERLAY_BREAKER_INITIAL_TTL_SECS + 2)
+        );
+
+        assert!(global_ctx.record_underlay_breaker_strike_at(
+            key.clone(),
+            UnderlayBreakerStrikeKind::Hard,
+            "test_half_open_failed",
+            None,
+            120 + UNDERLAY_BREAKER_INITIAL_TTL_SECS + 3
+        ));
+        assert!(
+            global_ctx
+                .is_underlay_breaker_gated_at(&key, 120 + UNDERLAY_BREAKER_INITIAL_TTL_SECS + 4)
+        );
+    }
+
+    fn block_test_underlay_key(
+        global_ctx: &ArcGlobalCtx,
+        key: &UnderlayBreakerKey,
+        first_strike_at: u64,
+    ) {
+        for offset in [0, 1, 2] {
+            global_ctx.record_underlay_breaker_strike_at(
+                key.clone(),
+                UnderlayBreakerStrikeKind::Hard,
+                "test_block",
+                None,
+                first_strike_at + offset,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn underlay_breaker_batch_gate_is_atomic_for_misaligned_ttls() {
+        let global_ctx = Arc::new(GlobalCtx::new(TomlConfigLoader::default()));
+        let peer_key = UnderlayBreakerKey::peer(
+            42,
+            IpScheme::Udp,
+            UnderlayBreakerScope::Direct,
+        );
+        let endpoint_key = UnderlayBreakerKey::endpoint(
+            "198.51.100.42:11010".parse().unwrap(),
+            IpScheme::Udp,
+            UnderlayBreakerScope::Direct,
+        );
+        block_test_underlay_key(&global_ctx, &peer_key, 100);
+        block_test_underlay_key(&global_ctx, &endpoint_key, 110);
+
+        assert!(
+            global_ctx
+                .try_begin_underlay_attempt_at(&[peer_key.clone(), endpoint_key.clone()], 403)
+                .is_err()
+        );
+        assert!(!global_ctx
+            .underlay_breaker
+            .lock()
+            .unwrap()
+            .entries
+            .get(&peer_key)
+            .unwrap()
+            .half_open);
+
+        let guard = global_ctx
+            .try_begin_underlay_attempt_at(&[peer_key.clone(), endpoint_key.clone()], 413)
+            .unwrap();
+        let lease_id = guard.lease_id();
+        let state = global_ctx.underlay_breaker.lock().unwrap();
+        assert_eq!(
+            state.entries.get(&peer_key).unwrap().half_open_lease_id,
+            Some(lease_id)
+        );
+        assert_eq!(
+            state
+                .entries
+                .get(&endpoint_key)
+                .unwrap()
+                .half_open_lease_id,
+            Some(lease_id)
+        );
+        drop(state);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn stale_underlay_preflight_guard_cannot_rollback_new_lease() {
+        let global_ctx = Arc::new(GlobalCtx::new(TomlConfigLoader::default()));
+        let key = UnderlayBreakerKey::endpoint(
+            "198.51.100.43:11010".parse().unwrap(),
+            IpScheme::Tcp,
+            UnderlayBreakerScope::Generic,
+        );
+        block_test_underlay_key(&global_ctx, &key, 100);
+        let old_guard = global_ctx
+            .try_begin_underlay_attempt_at(std::slice::from_ref(&key), 403)
+            .unwrap();
+        global_ctx.record_underlay_breaker_strike_at(
+            key.clone(),
+            UnderlayBreakerStrikeKind::Hard,
+            "test_reblock",
+            None,
+            404,
+        );
+        let new_guard = global_ctx
+            .try_begin_underlay_attempt_at(std::slice::from_ref(&key), 1005)
+            .unwrap();
+        let new_lease_id = new_guard.lease_id();
+
+        drop(old_guard);
+        assert_eq!(
+            global_ctx
+                .underlay_breaker
+                .lock()
+                .unwrap()
+                .entries
+                .get(&key)
+                .unwrap()
+                .half_open_lease_id,
+            Some(new_lease_id)
+        );
+        drop(new_guard);
+    }
+
+    #[tokio::test]
+    async fn cancelled_preflight_rolls_back_without_backoff_but_committed_timeout_reblocks() {
+        let global_ctx = Arc::new(GlobalCtx::new(TomlConfigLoader::default()));
+        let key = UnderlayBreakerKey::endpoint(
+            "198.51.100.44:11010".parse().unwrap(),
+            IpScheme::Tcp,
+            UnderlayBreakerScope::Generic,
+        );
+        block_test_underlay_key(&global_ctx, &key, 100);
+
+        let cancelled = global_ctx
+            .try_begin_underlay_attempt_at(std::slice::from_ref(&key), 403)
+            .unwrap();
+        drop(cancelled);
+        {
+            let state = global_ctx.underlay_breaker.lock().unwrap();
+            let entry = state.entries.get(&key).unwrap();
+            assert!(!entry.half_open);
+            assert_eq!(entry.backoff_secs, UNDERLAY_BREAKER_INITIAL_TTL_SECS);
+        }
+
+        let mut committed = global_ctx
+            .try_begin_underlay_attempt_at(std::slice::from_ref(&key), 403)
+            .unwrap();
+        committed.commit();
+        drop(committed);
+        assert!(
+            global_ctx
+                .try_begin_underlay_attempt_at(std::slice::from_ref(&key), 435)
+                .is_err()
+        );
+        let state = global_ctx.underlay_breaker.lock().unwrap();
+        let entry = state.entries.get(&key).unwrap();
+        assert_eq!(entry.backoff_secs, 600);
+        assert!(!entry.half_open);
+    }
+
+    #[tokio::test]
+    async fn underlay_breaker_soft_strike_does_not_gate() {
+        let config = TomlConfigLoader::default();
+        let global_ctx = Arc::new(GlobalCtx::new(config));
+        let key = UnderlayBreakerKey::endpoint(
+            "198.51.100.2:11010".parse().unwrap(),
+            IpScheme::Udp,
+            UnderlayBreakerScope::Direct,
+        );
+
+        for now in 100..110 {
+            assert!(!global_ctx.record_underlay_breaker_strike_at(
+                key.clone(),
+                UnderlayBreakerStrikeKind::Soft,
+                "test_soft",
+                None,
+                now
+            ));
+        }
+        assert!(!global_ctx.is_underlay_breaker_gated_at(&key, 111));
+    }
+
+    #[tokio::test]
+    async fn underlay_breaker_is_disabled_by_guard_flag() {
+        let config = TomlConfigLoader::default();
+        let global_ctx = Arc::new(GlobalCtx::new(config));
+        let mut flags = global_ctx.get_flags();
+        flags.underlay_candidate_guard = false;
+        global_ctx.set_flags(flags);
+        let key = UnderlayBreakerKey::endpoint(
+            "198.51.100.3:11010".parse().unwrap(),
+            IpScheme::Tcp,
+            UnderlayBreakerScope::Generic,
+        );
+
+        assert!(!global_ctx.record_underlay_breaker_strike_at(
+            key.clone(),
+            UnderlayBreakerStrikeKind::Hard,
+            "test_disabled",
+            None,
+            100
+        ));
+        assert!(!global_ctx.is_underlay_breaker_gated_at(&key, 101));
+        assert!(global_ctx
+            .underlay_breaker
+            .lock()
+            .unwrap()
+            .entries
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn underlay_breaker_capacity_is_bounded() {
+        let config = TomlConfigLoader::default();
+        let global_ctx = Arc::new(GlobalCtx::new(config));
+
+        for idx in 0..(UNDERLAY_BREAKER_CAPACITY + 16) {
+            let key = UnderlayBreakerKey::endpoint(
+                SocketAddr::from(([198, 51, (idx / 256) as u8, (idx % 256) as u8], 11010)),
+                IpScheme::Tcp,
+                UnderlayBreakerScope::Generic,
+            );
+            global_ctx.record_underlay_breaker_strike_at(
+                key,
+                UnderlayBreakerStrikeKind::Soft,
+                "test_capacity",
+                None,
+                idx as u64,
+            );
+        }
+
+        assert!(
+            global_ctx
+                .underlay_breaker
+                .lock()
+                .unwrap()
+                .entries
+                .len()
+                <= UNDERLAY_BREAKER_CAPACITY
+        );
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@ use hotpath::instant::Instant;
 use std::collections::{BTreeSet, HashMap};
 use std::{
     fmt::Debug,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{Arc, Weak, atomic::AtomicBool},
     time::{Duration, SystemTime},
 };
@@ -26,7 +26,11 @@ use crate::{
         compressor::{Compressor as _, DefaultCompressor},
         constants::EASYTIER_VERSION,
         error::Error,
-        global_ctx::{ArcGlobalCtx, GlobalCtxEvent, NetworkIdentity, ProtocolLoopScope},
+        global_ctx::{
+            ArcGlobalCtx, GlobalCtxEvent, NetworkIdentity, ProtocolLoopScope,
+            UnderlayAttemptContext, UnderlayBreakerKey, UnderlayBreakerScope,
+            UnderlayBreakerStrikeKind, UnderlayBreakerTrace,
+        },
         network::IPCollector,
         shrink_dashmap,
         stats_manager::{CounterHandle, LabelSet, LabelType, MetricName},
@@ -751,6 +755,24 @@ impl PeerManager {
             tunnel,
             is_directly_connected,
             peer_id_hint,
+            UnderlayBreakerScope::Generic,
+            true,
+        )
+        .await
+    }
+
+    pub(crate) async fn add_client_tunnel_with_peer_id_hint_scoped(
+        &self,
+        tunnel: Box<dyn Tunnel>,
+        is_directly_connected: bool,
+        peer_id_hint: Option<PeerId>,
+        scope: UnderlayBreakerScope,
+    ) -> Result<(PeerId, PeerConnId), Error> {
+        self.add_client_tunnel_with_peer_id_hint_inner(
+            tunnel,
+            is_directly_connected,
+            peer_id_hint,
+            scope,
             true,
         )
         .await
@@ -765,8 +787,14 @@ impl PeerManager {
         // old scheme-global suppression path in GlobalCtx. Keep the old
         // record_runtime_loop=true path for direct-connect and for callers that
         // explicitly still want the global kill switch semantics.
-        self.add_client_tunnel_with_peer_id_hint_inner(tunnel, is_directly_connected, None, false)
-            .await
+        self.add_client_tunnel_with_peer_id_hint_inner(
+            tunnel,
+            is_directly_connected,
+            None,
+            UnderlayBreakerScope::HolePunch,
+            false,
+        )
+        .await
     }
 
     pub(crate) async fn add_client_tunnel_with_peer_id_hint_without_runtime_loop_record(
@@ -779,6 +807,7 @@ impl PeerManager {
             tunnel,
             is_directly_connected,
             peer_id_hint,
+            UnderlayBreakerScope::HolePunch,
             false,
         )
         .await
@@ -789,9 +818,12 @@ impl PeerManager {
         tunnel: Box<dyn Tunnel>,
         is_directly_connected: bool,
         peer_id_hint: Option<PeerId>,
+        scope: UnderlayBreakerScope,
         record_runtime_loop: bool,
     ) -> Result<(PeerId, PeerConnId), Error> {
         let tunnel_info = tunnel.info();
+        let mut underlay_context =
+            Self::underlay_attempt_context_from_tunnel_info(tunnel_info.as_ref(), scope, peer_id_hint);
         let mut peer = PeerConn::new_with_peer_id_hint(
             self.my_peer_id,
             self.global_ctx.clone(),
@@ -799,8 +831,14 @@ impl PeerManager {
             peer_id_hint,
             self.peer_session_store.clone(),
         );
+        peer.set_underlay_attempt_context(underlay_context.clone());
         peer.set_is_hole_punched(!is_directly_connected);
         if let Err(err) = peer.do_handshake_as_client().await {
+            self.record_underlay_self_loop(
+                underlay_context.as_ref(),
+                peer_id_hint,
+                &err,
+            );
             if record_runtime_loop {
                 self.record_runtime_loop_protocol_from_tunnel_info(
                     tunnel_info.as_ref(),
@@ -816,6 +854,10 @@ impl PeerManager {
         peer.set_transport_path_class(transport_path);
         let conn_id = peer.get_conn_id();
         let peer_id = peer.get_peer_id();
+        if let Some(context) = underlay_context.as_mut() {
+            context.set_peer_id_if_missing(peer_id);
+        }
+        peer.set_underlay_attempt_context(underlay_context);
         if peer.get_network_identity().network_name
             == self.global_ctx.get_network_identity().network_name
         {
@@ -833,6 +875,13 @@ impl PeerManager {
         } else {
             self.foreign_network_client.get_peer_map().has_peer(peer_id)
         }
+    }
+
+    pub fn invalidate_peer_default_conn(&self, peer_id: PeerId) {
+        self.peers.invalidate_peer_default_conn(peer_id);
+        self.foreign_network_client
+            .get_peer_map()
+            .invalidate_peer_default_conn(peer_id);
     }
 
     pub fn best_transport_preference_key(&self, peer_id: PeerId) -> Option<PreferenceKey> {
@@ -895,6 +944,25 @@ impl PeerManager {
         let t = self.connect_tunnel(connector).await?;
         self.add_client_tunnel_with_peer_id_hint(t, true, peer_id_hint)
             .await
+    }
+
+    pub(crate) async fn try_direct_connect_with_peer_id_hint_scoped<C>(
+        &self,
+        connector: C,
+        peer_id_hint: Option<PeerId>,
+        scope: UnderlayBreakerScope,
+    ) -> Result<(PeerId, PeerConnId), Error>
+    where
+        C: TunnelConnector + Debug,
+    {
+        let tunnel = self.connect_tunnel(connector).await?;
+        self.add_client_tunnel_with_peer_id_hint_scoped(
+            tunnel,
+            true,
+            peer_id_hint,
+            scope,
+        )
+        .await
     }
 
     pub(crate) async fn connect_tunnel<C>(&self, mut connector: C) -> Result<Box<dyn Tunnel>, Error>
@@ -967,6 +1035,69 @@ impl PeerManager {
         self.global_ctx.record_protocol_self_loop(scheme, scope);
     }
 
+    fn underlay_endpoint_from_tunnel_info(
+        tunnel_info: Option<&TunnelInfo>,
+    ) -> Option<(SocketAddr, IpScheme)> {
+        let tunnel_info = tunnel_info?;
+        let scheme = IpScheme::from_tunnel_type(&tunnel_info.tunnel_type)?;
+        let url: url::Url = tunnel_info.effective_remote_addr()?.clone().into();
+        let addr = url
+            .socket_addrs(|| Some(scheme.default_port()))
+            .ok()?
+            .first()
+            .copied()?;
+        Some((addr, scheme))
+    }
+
+    fn underlay_attempt_context_from_tunnel_info(
+        tunnel_info: Option<&TunnelInfo>,
+        scope: UnderlayBreakerScope,
+        peer_id_hint: Option<PeerId>,
+    ) -> Option<UnderlayAttemptContext> {
+        let Some((remote_addr, scheme)) = Self::underlay_endpoint_from_tunnel_info(tunnel_info)
+        else {
+            return None;
+        };
+        Some(UnderlayAttemptContext::new(
+            remote_addr,
+            scheme,
+            scope,
+            peer_id_hint,
+        ))
+    }
+
+    fn record_underlay_self_loop(
+        &self,
+        context: Option<&UnderlayAttemptContext>,
+        expected_peer_id: Option<PeerId>,
+        err: &Error,
+    ) {
+        if !err.is_self_loop_signal() {
+            return;
+        }
+        let Some(context) = context else {
+            return;
+        };
+
+        let key = expected_peer_id
+            .and_then(|_| context.peer_key().cloned())
+            .unwrap_or_else(|| context.endpoint_key().clone());
+        let blocked = self.global_ctx.record_underlay_breaker_strike(
+            key.clone(),
+            UnderlayBreakerStrikeKind::Hard,
+            "handshake_self_loop",
+            Some(UnderlayBreakerTrace {
+                expected_peer_id,
+                ..Default::default()
+            }),
+        );
+        if blocked
+            && let UnderlayBreakerKey::Peer { peer_id, .. } = key
+        {
+            self.invalidate_peer_default_conn(peer_id);
+        }
+    }
+
     fn release_reserved_peer_id(&self, network_name: &str) {
         self.reserved_my_peer_id_map.remove(network_name);
         shrink_dashmap(&self.reserved_my_peer_id_map, None);
@@ -978,7 +1109,7 @@ impl PeerManager {
         tunnel: Box<dyn Tunnel>,
         is_directly_connected: bool,
     ) -> Result<(), Error> {
-        self.add_tunnel_as_server_inner(tunnel, is_directly_connected, true)
+        self.add_tunnel_as_server_inner(tunnel, is_directly_connected, None, true)
             .await
     }
 
@@ -990,7 +1121,12 @@ impl PeerManager {
         // Companion to add_client_tunnel_without_runtime_loop_record(): used by
         // hole-punch responders so a self-loop only feeds local/peer-scoped
         // blacklists instead of escalating into scheme-global suppression.
-        self.add_tunnel_as_server_inner(tunnel, is_directly_connected, false)
+        self.add_tunnel_as_server_inner(
+            tunnel,
+            is_directly_connected,
+            Some(UnderlayBreakerScope::HolePunch),
+            false,
+        )
             .await
     }
 
@@ -998,11 +1134,17 @@ impl PeerManager {
         &self,
         tunnel: Box<dyn Tunnel>,
         is_directly_connected: bool,
+        attempt_scope: Option<UnderlayBreakerScope>,
         record_runtime_loop: bool,
     ) -> Result<(), Error> {
         tracing::info!("add tunnel as server start");
         self.check_remote_addr_not_from_virtual_network(&tunnel)?;
         let tunnel_info = tunnel.info();
+        let error_context = Self::underlay_attempt_context_from_tunnel_info(
+            tunnel_info.as_ref(),
+            attempt_scope.unwrap_or(UnderlayBreakerScope::Generic),
+            None,
+        );
 
         let mut conn = PeerConn::new(
             self.my_peer_id,
@@ -1010,6 +1152,9 @@ impl PeerManager {
             tunnel,
             self.peer_session_store.clone(),
         );
+        if attempt_scope.is_some() {
+            conn.set_underlay_attempt_context(error_context.clone());
+        }
         let mut reserved_peer_id_network_name = None;
         let handshake_ret = conn.do_handshake_as_server_ext(|peer, network_name:&str| {
             if network_name
@@ -1041,6 +1186,7 @@ impl PeerManager {
         .await;
 
         if let Err(err) = handshake_ret {
+            self.record_underlay_self_loop(error_context.as_ref(), None, &err);
             if record_runtime_loop {
                 self.record_runtime_loop_protocol_from_tunnel_info(
                     tunnel_info.as_ref(),
@@ -1078,6 +1224,8 @@ impl PeerManager {
         }
 
         conn.set_is_hole_punched(!is_directly_connected);
+        let connected_peer_id = conn.get_peer_id();
+        conn.complete_underlay_attempt_peer(connected_peer_id);
         let transport_path = self
             .classify_transport_path(tunnel_info.as_ref(), is_directly_connected)
             .await;
@@ -1100,7 +1248,6 @@ impl PeerManager {
         }
 
         self.release_reserved_peer_id(&peer_network_name);
-
         tracing::info!("add tunnel as server done");
         Ok(())
     }
