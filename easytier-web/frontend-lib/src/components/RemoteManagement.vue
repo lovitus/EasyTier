@@ -79,6 +79,32 @@ const currentNetworkControl = {
     })
 }
 
+function errorDetail(error: any): string {
+    if (typeof error === 'string') {
+        return error;
+    }
+    if (error instanceof Error) {
+        return error.message;
+    }
+    return JSON.stringify(error?.response?.data ?? error);
+}
+
+async function validateNetworkConfigOrWarn(config: NetworkTypes.NetworkConfig): Promise<boolean> {
+    try {
+        await props.api.validate_config(config);
+        return true;
+    } catch (error: any) {
+        console.error(error);
+        toast.add({
+            severity: 'error',
+            summary: 'Invalid config',
+            detail: 'Failed to validate network config: ' + errorDetail(error),
+            life: 10000,
+        });
+        return false;
+    }
+}
+
 const resetNetworkInfoRetention = (clearCurrent = false) => {
     networkInfoRequestEpoch += 1;
     networkInfoEmptyGrace = 0;
@@ -250,6 +276,10 @@ const saveAndRunNewNetwork = async (config?: NetworkTypes.NetworkConfig) => {
         cfg.instance_id = targetInstanceId;
     }
 
+    if (!(await validateNetworkConfigOrWarn(cfg))) {
+        return;
+    }
+
     try {
         if (networkIsDisabled.value) {
             await props.api.save_config(cfg);
@@ -266,7 +296,7 @@ const saveAndRunNewNetwork = async (config?: NetworkTypes.NetworkConfig) => {
         await loadCurrentNetworkInfo();
     } catch (e: any) {
         console.error(e);
-        toast.add({ severity: 'error', summary: 'Error', detail: 'Failed to run network, error: ' + JSON.stringify(e.response?.data ?? e), life: 2000 });
+        toast.add({ severity: 'error', summary: 'Error', detail: 'Failed to run network, error: ' + errorDetail(e), life: 10000 });
         return;
     }
 
@@ -278,7 +308,16 @@ const saveNetworkConfig = async () => {
     if (!currentNetworkConfig.value) {
         return;
     }
-    await props.api.save_config(currentNetworkConfig.value);
+    if (!(await validateNetworkConfigOrWarn(currentNetworkConfig.value))) {
+        return;
+    }
+    try {
+        await props.api.save_config(currentNetworkConfig.value);
+    } catch (e: any) {
+        console.error(e);
+        toast.add({ severity: 'error', summary: 'Error', detail: 'Failed to save config, error: ' + errorDetail(e), life: 10000 });
+        return;
+    }
 
     delete networkMetaCache.value[currentNetworkConfig.value.instance_id];
     await loadNetworkMetas([currentNetworkConfig.value.instance_id]);

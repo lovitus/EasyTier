@@ -822,8 +822,11 @@ impl PeerManager {
         record_runtime_loop: bool,
     ) -> Result<(PeerId, PeerConnId), Error> {
         let tunnel_info = tunnel.info();
-        let mut underlay_context =
-            Self::underlay_attempt_context_from_tunnel_info(tunnel_info.as_ref(), scope, peer_id_hint);
+        let mut underlay_context = Self::underlay_attempt_context_from_tunnel_info(
+            tunnel_info.as_ref(),
+            scope,
+            peer_id_hint,
+        );
         let mut peer = PeerConn::new_with_peer_id_hint(
             self.my_peer_id,
             self.global_ctx.clone(),
@@ -834,11 +837,7 @@ impl PeerManager {
         peer.set_underlay_attempt_context(underlay_context.clone());
         peer.set_is_hole_punched(!is_directly_connected);
         if let Err(err) = peer.do_handshake_as_client().await {
-            self.record_underlay_self_loop(
-                underlay_context.as_ref(),
-                peer_id_hint,
-                &err,
-            );
+            self.record_underlay_self_loop(underlay_context.as_ref(), peer_id_hint, &err);
             if record_runtime_loop {
                 self.record_runtime_loop_protocol_from_tunnel_info(
                     tunnel_info.as_ref(),
@@ -956,13 +955,8 @@ impl PeerManager {
         C: TunnelConnector + Debug,
     {
         let tunnel = self.connect_tunnel(connector).await?;
-        self.add_client_tunnel_with_peer_id_hint_scoped(
-            tunnel,
-            true,
-            peer_id_hint,
-            scope,
-        )
-        .await
+        self.add_client_tunnel_with_peer_id_hint_scoped(tunnel, true, peer_id_hint, scope)
+            .await
     }
 
     pub(crate) async fn connect_tunnel<C>(&self, mut connector: C) -> Result<Box<dyn Tunnel>, Error>
@@ -1091,9 +1085,7 @@ impl PeerManager {
                 ..Default::default()
             }),
         );
-        if blocked
-            && let UnderlayBreakerKey::Peer { peer_id, .. } = key
-        {
+        if blocked && let UnderlayBreakerKey::Peer { peer_id, .. } = key {
             self.invalidate_peer_default_conn(peer_id);
         }
     }
@@ -1127,7 +1119,7 @@ impl PeerManager {
             Some(UnderlayBreakerScope::HolePunch),
             false,
         )
-            .await
+        .await
     }
 
     async fn add_tunnel_as_server_inner(

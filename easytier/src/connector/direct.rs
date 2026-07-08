@@ -44,15 +44,13 @@ use crate::{
         },
         rpc_types::controller::BaseController,
     },
-    tunnel::{
-        IpVersion, TunnelConnector, common::bind, matches_protocol, udp::UdpTunnelConnector,
-    },
+    tunnel::{IpVersion, TunnelConnector, common::bind, matches_protocol, udp::UdpTunnelConnector},
     use_global_var,
 };
 
 use super::{
-    create_connector_by_url_with_scope, should_background_p2p_with_peer,
-    should_try_p2p_with_peer, udp_hole_punch,
+    create_connector_by_url_with_scope, should_background_p2p_with_peer, should_try_p2p_with_peer,
+    udp_hole_punch,
 };
 use crate::tunnel::{FromUrl, IpScheme, TunnelScheme, matches_scheme};
 use anyhow::Context;
@@ -687,8 +685,13 @@ impl DirectConnectorManagerData {
                     connector.commit_preflight();
                     resolve_public_ipv4_connect_result(
                         &remote_url,
-                        self.connect_to_public_ipv4(dst_peer_id, &remote_url, remote_addr, stealth_mode)
-                            .await,
+                        self.connect_to_public_ipv4(
+                            dst_peer_id,
+                            &remote_url,
+                            remote_addr,
+                            stealth_mode,
+                        )
+                        .await,
                         || {
                             self.try_direct_connect_with_peer_id_hint_timeout(
                                 connector,
@@ -819,9 +822,24 @@ impl DirectConnectorManagerData {
 
     fn is_lan_candidate(ip: IpAddr, local_networks: &[IpNetwork]) -> bool {
         match ip {
-            IpAddr::V4(ip) if ip.is_link_local() => true,
-            IpAddr::V6(ip) if ip.is_unicast_link_local() => true,
-            _ => local_networks.iter().any(|network| network.contains(ip)),
+            IpAddr::V4(ip) if ip.is_link_local() => local_networks
+                .iter()
+                .any(|network| network.contains(IpAddr::V4(ip))),
+            IpAddr::V6(ip) if ip.is_unicast_link_local() => local_networks
+                .iter()
+                .any(|network| network.contains(IpAddr::V6(ip))),
+            // Public on-link prefixes are common on VPS providers (for example
+            // two hosts in the same /48). Treating those as LAN lets a public
+            // IPv6 TCP/WS candidate suppress WAN QUIC/FakeTCP, which violates
+            // the user's global transport preference. LAN here means local
+            // non-public address space only.
+            IpAddr::V4(ip) if ip.is_private() => local_networks
+                .iter()
+                .any(|network| network.contains(IpAddr::V4(ip))),
+            IpAddr::V6(ip) if ip.is_unique_local() => local_networks
+                .iter()
+                .any(|network| network.contains(IpAddr::V6(ip))),
+            _ => false,
         }
     }
 
@@ -1853,7 +1871,11 @@ mod tests {
     fn direct_candidates_are_classified_after_address_resolution() {
         let local_networks = [
             "192.168.50.10/24".parse().unwrap(),
+            "169.254.10.1/24".parse().unwrap(),
             "fd00:50::10/64".parse().unwrap(),
+            "fe80::1/64".parse().unwrap(),
+            "203.0.113.10/24".parse().unwrap(),
+            "2001:db8:50::10/64".parse().unwrap(),
         ];
 
         assert!(DirectConnectorManagerData::is_lan_candidate(
@@ -1873,7 +1895,23 @@ mod tests {
             &local_networks
         ));
         assert!(!DirectConnectorManagerData::is_lan_candidate(
+            "169.254.200.2".parse().unwrap(),
+            &local_networks
+        ));
+        assert!(!DirectConnectorManagerData::is_lan_candidate(
+            "fe80:1::2".parse().unwrap(),
+            &local_networks
+        ));
+        assert!(!DirectConnectorManagerData::is_lan_candidate(
             "198.51.100.7".parse().unwrap(),
+            &local_networks
+        ));
+        assert!(!DirectConnectorManagerData::is_lan_candidate(
+            "203.0.113.99".parse().unwrap(),
+            &local_networks
+        ));
+        assert!(!DirectConnectorManagerData::is_lan_candidate(
+            "2001:db8:50::99".parse().unwrap(),
             &local_networks
         ));
     }

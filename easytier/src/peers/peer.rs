@@ -27,6 +27,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 type ArcPeerConn = Arc<PeerConn>;
 type ConnMap = Arc<DashMap<PeerConnId, ArcPeerConn>>;
+const TRANSPORT_PRIORITY_RTT_ABSOLUTE_SLACK_US: u64 = 2_000;
 
 #[derive(Debug, Clone, Copy)]
 struct ConnSelectionCandidate {
@@ -52,13 +53,19 @@ fn select_conn_index(
         .filter(|candidate| candidate.has_latency_sample)
         .map(|candidate| candidate.latency_us)
         .min();
+    let max_eligible_latency = min_measured_latency.map(|min_latency| {
+        min_latency
+            .saturating_mul(5)
+            .saturating_div(4)
+            .max(min_latency.saturating_add(TRANSPORT_PRIORITY_RTT_ABSOLUTE_SLACK_US))
+    });
     candidates
         .iter()
         .enumerate()
         .filter(|(_, candidate)| {
-            min_measured_latency.is_none()
+            max_eligible_latency.is_none()
                 || (candidate.has_latency_sample
-                    && candidate.latency_us <= min_measured_latency.unwrap().saturating_mul(5) / 4)
+                    && candidate.latency_us <= max_eligible_latency.unwrap())
         })
         .min_by_key(|(_, candidate)| {
             (
@@ -198,8 +205,18 @@ impl Peer {
         let conn_pubkey = conn_info.noise_remote_static_pubkey.clone();
         {
             let mut peer_pubkey = self.peer_public_key.write();
-            if let Some(existing_pubkey) = peer_pubkey.as_ref() {
-                if existing_pubkey != &conn_pubkey {
+            if conn_pubkey.is_empty() {
+                if peer_pubkey
+                    .as_ref()
+                    .is_some_and(|existing_pubkey| !existing_pubkey.is_empty())
+                {
+                    return Err(Error::SecretKeyError(format!(
+                        "peer public key missing after authenticated peer was learned. peer_id: {}",
+                        self.peer_node_id,
+                    )));
+                }
+            } else if let Some(existing_pubkey) = peer_pubkey.as_ref() {
+                if !existing_pubkey.is_empty() && existing_pubkey != &conn_pubkey {
                     return Err(Error::SecretKeyError(format!(
                         "peer public key mismatch. peer_id: {}, existing_len: {}, new_len: {}",
                         self.peer_node_id,
@@ -207,6 +224,7 @@ impl Peer {
                         conn_pubkey.len()
                     )));
                 }
+                *peer_pubkey = Some(conn_pubkey);
             } else {
                 *peer_pubkey = Some(conn_pubkey);
             }
@@ -484,17 +502,39 @@ mod tests {
         let quic = PreferenceKey::new(TransportPathClass::Wan, &order, "quic");
 
         let within = [
-            selection_candidate(tcp, 100, true, 1),
-            selection_candidate(quic, 125, true, 2),
+            selection_candidate(tcp, 100_000, true, 1),
+            selection_candidate(quic, 125_000, true, 2),
         ];
         assert_eq!(select_conn_index(&within, true), Some(1));
 
         let outside = [
-            selection_candidate(tcp, 100, true, 1),
-            selection_candidate(quic, 126, true, 2),
+            selection_candidate(tcp, 100_000, true, 1),
+            selection_candidate(quic, 126_000, true, 2),
         ];
         assert_eq!(select_conn_index(&outside, true), Some(0));
         assert_eq!(select_conn_index(&within, false), Some(0));
+    }
+
+    #[test]
+    fn transport_preference_allows_small_absolute_rtt_delta() {
+        let order = ["quic", "tcp"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let tcp = PreferenceKey::new(TransportPathClass::Wan, &order, "tcp");
+        let quic = PreferenceKey::new(TransportPathClass::Wan, &order, "quic");
+
+        let sub_millisecond = [
+            selection_candidate(tcp, 350, true, 1),
+            selection_candidate(quic, 900, true, 2),
+        ];
+        assert_eq!(select_conn_index(&sub_millisecond, true), Some(1));
+
+        let wan_scale_outside = [
+            selection_candidate(tcp, 100_000, true, 1),
+            selection_candidate(quic, 126_000, true, 2),
+        ];
+        assert_eq!(select_conn_index(&wan_scale_outside, true), Some(0));
     }
 
     #[test]
@@ -790,5 +830,88 @@ mod tests {
         assert_eq!(peer.get_peer_public_key(), Some(pubkey_1));
         let ret = peer.add_peer_conn(client_conn_2).await;
         assert!(ret.is_err());
+    }
+
+    #[tokio::test]
+    async fn peer_conn_empty_public_key_does_not_block_later_authenticated_conn() {
+        let (packet_send, _packet_recv) = create_packet_recv_chan();
+        let local_peer_id = new_peer_id();
+        let remote_peer_id = new_peer_id();
+        let peer = Peer::new(remote_peer_id, packet_send, get_mock_global_ctx());
+        let ps = Arc::new(PeerSessionStore::new());
+
+        let (plain_client_tunnel, plain_server_tunnel) = create_ring_tunnel_pair();
+        let plain_client_ctx = get_mock_global_ctx();
+        let plain_server_ctx = get_mock_global_ctx();
+        plain_client_ctx
+            .config
+            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+        plain_server_ctx
+            .config
+            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+        let mut plain_client_conn = PeerConn::new(
+            local_peer_id,
+            plain_client_ctx,
+            Box::new(plain_client_tunnel),
+            ps.clone(),
+        );
+        let mut plain_server_conn = PeerConn::new(
+            remote_peer_id,
+            plain_server_ctx,
+            Box::new(plain_server_tunnel),
+            ps.clone(),
+        );
+        let (plain_client_ret, plain_server_ret) = tokio::join!(
+            plain_client_conn.do_handshake_as_client(),
+            plain_server_conn.do_handshake_as_server()
+        );
+        plain_client_ret.unwrap();
+        plain_server_ret.unwrap();
+        assert!(
+            plain_client_conn
+                .get_conn_info()
+                .noise_remote_static_pubkey
+                .is_empty()
+        );
+
+        let (secure_client_tunnel, secure_server_tunnel) = create_ring_tunnel_pair();
+        let secure_client_ctx = get_mock_global_ctx();
+        let secure_server_ctx = get_mock_global_ctx();
+        secure_client_ctx
+            .config
+            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+        secure_server_ctx
+            .config
+            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+        set_secure_mode_cfg(&secure_client_ctx, true);
+        set_secure_mode_cfg(&secure_server_ctx, true);
+        let mut secure_client_conn = PeerConn::new(
+            local_peer_id,
+            secure_client_ctx,
+            Box::new(secure_client_tunnel),
+            Arc::new(PeerSessionStore::new()),
+        );
+        let mut secure_server_conn = PeerConn::new(
+            remote_peer_id,
+            secure_server_ctx,
+            Box::new(secure_server_tunnel),
+            Arc::new(PeerSessionStore::new()),
+        );
+        let (secure_client_ret, secure_server_ret) = tokio::join!(
+            secure_client_conn.do_handshake_as_client(),
+            secure_server_conn.do_handshake_as_server()
+        );
+        secure_client_ret.unwrap();
+        secure_server_ret.unwrap();
+        let secure_pubkey = secure_client_conn
+            .get_conn_info()
+            .noise_remote_static_pubkey
+            .clone();
+        assert_eq!(secure_pubkey.len(), 32);
+
+        peer.add_peer_conn(plain_client_conn).await.unwrap();
+        assert_eq!(peer.get_peer_public_key(), None);
+        peer.add_peer_conn(secure_client_conn).await.unwrap();
+        assert_eq!(peer.get_peer_public_key(), Some(secure_pubkey));
     }
 }

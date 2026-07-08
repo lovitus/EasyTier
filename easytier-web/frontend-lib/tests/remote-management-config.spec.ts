@@ -308,7 +308,7 @@ describe('RemoteManagement config save', () => {
       run_network: vi.fn(),
       save_config: vi.fn(async () => undefined),
       update_network_instance_state: vi.fn(),
-      validate_config: vi.fn(),
+      validate_config: vi.fn(async () => ({ toml_config: '' })),
     }
 
     const wrapper = mount(RemoteManagement, {
@@ -335,12 +335,70 @@ describe('RemoteManagement config save', () => {
       await saveButton.trigger('click')
       await flushPromises()
 
+      expect(api.validate_config).toHaveBeenCalledOnce()
       expect(api.save_config).toHaveBeenCalledOnce()
       const savedConfig = api.save_config.mock.calls[0][0] as NetworkConfig
 
       for (const field of BOOLEAN_CONFIG_FIELDS) {
         expect(savedConfig[field], `${field} should be saved`).toBe(expectedFlags[field])
       }
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('shows validation failure and does not save invalid config', async () => {
+    const config = makeFlagConfig()
+    const api = {
+      delete_network: vi.fn(),
+      generate_config: vi.fn(),
+      get_network_config: vi.fn(async () => cloneConfig(config)),
+      get_network_info: vi.fn(),
+      get_network_metas: vi.fn(async (instanceIds: string[]) => ({
+        metas: Object.fromEntries(instanceIds.map((id) => [id, {
+          config_permission: 0xffffffff,
+          inst_id: INSTANCE_UUID,
+          instance_name: 'mesh-save',
+          network_name: 'mesh-save',
+          source: 2,
+        }])),
+      })),
+      list_network_instance_ids: vi.fn(async () => ({
+        disabled_inst_ids: [INSTANCE_UUID],
+        running_inst_ids: [],
+      })),
+      parse_config: vi.fn(),
+      run_network: vi.fn(),
+      save_config: vi.fn(),
+      update_network_instance_state: vi.fn(),
+      validate_config: vi.fn(async () => {
+        throw new Error('failed to parse transport_priority')
+      }),
+    }
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: true,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+
+      await wrapper.find('button[data-label="web.device_management.save_config"]').trigger('click')
+      await flushPromises()
+
+      expect(api.validate_config).toHaveBeenCalledOnce()
+      expect(api.save_config).not.toHaveBeenCalled()
+      expect(api.update_network_instance_state).not.toHaveBeenCalled()
     } finally {
       wrapper.unmount()
     }

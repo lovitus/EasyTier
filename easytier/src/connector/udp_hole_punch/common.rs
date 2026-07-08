@@ -20,7 +20,9 @@ use crate::{
         global_ctx::{
             ArcGlobalCtx, UnderlayBreakerKey, UnderlayBreakerScope, UnderlayPreflightGuard,
         },
-        join_joinset_background, netns::NetNS, underlay_guard, upnp,
+        join_joinset_background,
+        netns::NetNS,
+        underlay_guard, upnp,
     },
     peers::peer_manager::PeerManager,
     proto::common::NatType,

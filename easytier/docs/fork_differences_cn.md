@@ -14,6 +14,8 @@ Stealth、Proxy、回退和 rollout 细节仍然以
 [mihomo_tun_interop_cn.md](mihomo_tun_interop_cn.md)。
 2026-07-08 的远端功能和性能验证报告记录在
 [performance_validation_2026_07_08.md](performance_validation_2026_07_08.md)。
+2026-07-09 的 direct 传输优先级、WAN/LAN 识别和 breaker 复核记录在
+[transport_priority_breaker_validation_2026_07_09.md](transport_priority_breaker_validation_2026_07_09.md)。
 Stealth/Secure 后续问题见
 [known_bugs/stealth_secure_known_bugs.md](known_bugs/stealth_secure_known_bugs.md)。
 v2.6.9 发布说明见 [release_notes/v2.6.9.md](release_notes/v2.6.9.md)。
@@ -64,6 +66,8 @@ v2.6.9 发布说明见 [release_notes/v2.6.9.md](release_notes/v2.6.9.md)。
 - 支持 `udp`、`tcp`、`faketcp`、`quic`、`wg`、`ws`、`wss` 的多传输 stealth。
 - 新增 `transport_priority`，可按 `global`、`wan`、`lan` 和精确虚拟 IP 规则重排
   direct-connect 底层协议顺序。
+- 修正 direct-connect 的 WAN/LAN 候选分类：公网 IPv4/IPv6 不再因为处于本机接口前缀内
+  就被当成 LAN；link-local 只有匹配本机 link-local 网段时才进入 LAN bucket。
 - 新增 `disable_legacy_udp_hole_punch`，用于拒绝未携带 stealth 偏好的旧版 UDP 打洞
   RPC。
 - 在原有 QUIC/KCP Proxy 基础上新增 readiness ACK、分类 fallback reason 和按传输维度
@@ -151,7 +155,8 @@ v2.6.9 发布说明见 [release_notes/v2.6.9.md](release_notes/v2.6.9.md)。
 - 一旦设置 `--transport-priority`，`default_protocol` 对 direct-connect 就只剩兼容兜底
   含义，不应再把两者理解为共同控制同一路径。
 - 数据面协议偏好受延迟约束：Peer 会先排除 RTT 超过最低 RTT 125% 的连接，然后才在
-  合格集合里按偏好顺序选择。
+  合格集合里按偏好顺序选择；亚毫秒链路会额外允许一个很小的绝对 RTT slack，避免
+  0.x ms 级别差异让 QUIC/FakeTCP 永远无法进入合格集合。
 - `--underlay-candidate-guard` 是 candidate 净化，不是进程级强制绕过
   Mihomo/Clash/sing-box TUN。它过滤的是 EasyTier 对外通告和主动拨打的 underlay
   candidate；listener 仍可绑定 `0.0.0.0`。命中 guard 的公网 IPv4 UDP 直连候选会

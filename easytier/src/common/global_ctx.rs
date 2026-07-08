@@ -44,11 +44,11 @@ const PROTOCOL_LOOP_TRACKED_SCHEMES: usize = 8;
 const PROTOCOL_LOOP_SCOPE_COUNT: usize = 2;
 const PROTOCOL_LOOP_STATE_SLOTS: usize = PROTOCOL_LOOP_TRACKED_SCHEMES * PROTOCOL_LOOP_SCOPE_COUNT;
 const UNDERLAY_BREAKER_CAPACITY: usize = 4096;
-const UNDERLAY_BREAKER_STRIKE_THRESHOLD: u8 = 3;
-const UNDERLAY_BREAKER_STRIKE_WINDOW_SECS: u64 = 30;
-const UNDERLAY_BREAKER_INITIAL_TTL_SECS: u64 = 300;
-const UNDERLAY_BREAKER_MAX_TTL_SECS: u64 = 1800;
-const UNDERLAY_BREAKER_SOFT_TTL_SECS: u64 = 300;
+const UNDERLAY_BREAKER_STRIKE_THRESHOLD: u8 = 100;
+const UNDERLAY_BREAKER_STRIKE_WINDOW_SECS: u64 = 10;
+const UNDERLAY_BREAKER_INITIAL_TTL_SECS: u64 = 30;
+const UNDERLAY_BREAKER_MAX_TTL_SECS: u64 = 300;
+const UNDERLAY_BREAKER_SOFT_TTL_SECS: u64 = 30;
 const UNDERLAY_BREAKER_HALF_OPEN_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,10 +486,8 @@ impl UnderlayPreflightGuard {
 impl Drop for UnderlayPreflightGuard {
     fn drop(&mut self) {
         if !self.committed && self.lease_id != 0 {
-            self.global_ctx.rollback_underlay_preflight(
-                self.lease_id,
-                &self.acquired_half_open_keys,
-            );
+            self.global_ctx
+                .rollback_underlay_preflight(self.lease_id, &self.acquired_half_open_keys);
         }
     }
 }
@@ -1313,14 +1311,14 @@ impl GlobalCtx {
                     key,
                     reason,
                     None,
-                        (now_secs < entry.blocked_until_secs)
-                            .then_some(entry.blocked_until_secs.saturating_sub(now_secs)),
-                        entry.half_open,
-                        None,
-                        false,
-                        "underlay breaker gated atomic connection attempt",
-                    );
-                    return Err(UnderlayBreakerGateError { key: key.clone() });
+                    (now_secs < entry.blocked_until_secs)
+                        .then_some(entry.blocked_until_secs.saturating_sub(now_secs)),
+                    entry.half_open,
+                    None,
+                    false,
+                    "underlay breaker gated atomic connection attempt",
+                );
+                return Err(UnderlayBreakerGateError { key: key.clone() });
             }
         }
 
@@ -2115,51 +2113,52 @@ pub mod tests {
             UnderlayBreakerScope::Generic,
         );
 
-        assert!(!global_ctx.record_underlay_breaker_strike_at(
-            key.clone(),
-            UnderlayBreakerStrikeKind::Hard,
-            "test",
-            None,
-            100
-        ));
-        assert!(!global_ctx.record_underlay_breaker_strike_at(
-            key.clone(),
-            UnderlayBreakerStrikeKind::Hard,
-            "test",
-            None,
-            110
-        ));
-        assert!(!global_ctx.is_underlay_breaker_gated_at(&key, 111));
+        // Fire threshold-1 strikes at the same instant; none should trigger yet.
+        for _ in 0..(UNDERLAY_BREAKER_STRIKE_THRESHOLD - 1) {
+            assert!(!global_ctx.record_underlay_breaker_strike_at(
+                key.clone(),
+                UnderlayBreakerStrikeKind::Hard,
+                "test",
+                None,
+                100
+            ));
+        }
+        assert!(!global_ctx.is_underlay_breaker_gated_at(&key, 100));
 
+        // The threshold-th strike triggers the breaker.
+        let trigger_time = 100;
         assert!(global_ctx.record_underlay_breaker_strike_at(
             key.clone(),
             UnderlayBreakerStrikeKind::Hard,
             "test",
             None,
-            120
+            trigger_time
         ));
-        assert!(global_ctx.is_underlay_breaker_gated_at(&key, 121));
+        assert!(global_ctx.is_underlay_breaker_gated_at(&key, trigger_time + 1));
 
-        assert!(
-            !global_ctx
-                .is_underlay_breaker_gated_at(&key, 120 + UNDERLAY_BREAKER_INITIAL_TTL_SECS + 1)
-        );
-        assert!(
-            global_ctx
-                .is_underlay_breaker_gated_at(&key, 120 + UNDERLAY_BREAKER_INITIAL_TTL_SECS + 2)
-        );
+        // After the initial TTL expires the half-open probe is allowed.
+        assert!(!global_ctx.is_underlay_breaker_gated_at(
+            &key,
+            trigger_time + UNDERLAY_BREAKER_INITIAL_TTL_SECS + 1
+        ));
+        // The half-open probe itself gates further attempts.
+        assert!(global_ctx.is_underlay_breaker_gated_at(
+            &key,
+            trigger_time + UNDERLAY_BREAKER_INITIAL_TTL_SECS + 2
+        ));
 
+        // A failure during half-open re-blocks the key.
         assert!(global_ctx.record_underlay_breaker_strike_at(
             key.clone(),
             UnderlayBreakerStrikeKind::Hard,
             "test_half_open_failed",
             None,
-            120 + UNDERLAY_BREAKER_INITIAL_TTL_SECS + 3
+            trigger_time + UNDERLAY_BREAKER_INITIAL_TTL_SECS + 3
         ));
-        assert!(
-            global_ctx
-                .is_underlay_breaker_gated_at(&key, 120 + UNDERLAY_BREAKER_INITIAL_TTL_SECS + 4)
-        );
+        assert!(global_ctx.is_underlay_breaker_gated_at(
+            &key,
+            trigger_time + UNDERLAY_BREAKER_INITIAL_TTL_SECS + 4
+        ));
     }
 
     fn block_test_underlay_key(
@@ -2167,13 +2166,14 @@ pub mod tests {
         key: &UnderlayBreakerKey,
         first_strike_at: u64,
     ) {
-        for offset in [0, 1, 2] {
+        // All strikes at the same instant — mirrors a real loopback storm.
+        for _ in 0..u64::from(UNDERLAY_BREAKER_STRIKE_THRESHOLD) {
             global_ctx.record_underlay_breaker_strike_at(
                 key.clone(),
                 UnderlayBreakerStrikeKind::Hard,
                 "test_block",
                 None,
-                first_strike_at + offset,
+                first_strike_at,
             );
         }
     }
@@ -2181,35 +2181,49 @@ pub mod tests {
     #[tokio::test]
     async fn underlay_breaker_batch_gate_is_atomic_for_misaligned_ttls() {
         let global_ctx = Arc::new(GlobalCtx::new(TomlConfigLoader::default()));
-        let peer_key = UnderlayBreakerKey::peer(
-            42,
-            IpScheme::Udp,
-            UnderlayBreakerScope::Direct,
-        );
+        let peer_key = UnderlayBreakerKey::peer(42, IpScheme::Udp, UnderlayBreakerScope::Direct);
         let endpoint_key = UnderlayBreakerKey::endpoint(
             "198.51.100.42:11010".parse().unwrap(),
             IpScheme::Udp,
             UnderlayBreakerScope::Direct,
         );
         block_test_underlay_key(&global_ctx, &peer_key, 100);
-        block_test_underlay_key(&global_ctx, &endpoint_key, 110);
+        // Stagger the endpoint block so its TTL expires later than the peer key.
+        let endpoint_block_start = 100 + UNDERLAY_BREAKER_INITIAL_TTL_SECS / 2;
+        block_test_underlay_key(&global_ctx, &endpoint_key, endpoint_block_start);
+
+        // Pick a time when peer_key TTL has expired but endpoint_key TTL has not.
+        let peer_blocked_until = 100 + UNDERLAY_BREAKER_INITIAL_TTL_SECS;
+        let endpoint_blocked_until = endpoint_block_start + UNDERLAY_BREAKER_INITIAL_TTL_SECS;
+        let between_time = peer_blocked_until + 1;
+        assert!(
+            between_time < endpoint_blocked_until,
+            "test requires staggered TTLs"
+        );
 
         assert!(
             global_ctx
-                .try_begin_underlay_attempt_at(&[peer_key.clone(), endpoint_key.clone()], 403)
+                .try_begin_underlay_attempt_at(
+                    &[peer_key.clone(), endpoint_key.clone()],
+                    between_time
+                )
                 .is_err()
         );
-        assert!(!global_ctx
-            .underlay_breaker
-            .lock()
-            .unwrap()
-            .entries
-            .get(&peer_key)
-            .unwrap()
-            .half_open);
+        assert!(
+            !global_ctx
+                .underlay_breaker
+                .lock()
+                .unwrap()
+                .entries
+                .get(&peer_key)
+                .unwrap()
+                .half_open
+        );
 
+        // After both TTLs expire, the atomic half-open probe should succeed.
+        let both_expired = endpoint_blocked_until + 1;
         let guard = global_ctx
-            .try_begin_underlay_attempt_at(&[peer_key.clone(), endpoint_key.clone()], 413)
+            .try_begin_underlay_attempt_at(&[peer_key.clone(), endpoint_key.clone()], both_expired)
             .unwrap();
         let lease_id = guard.lease_id();
         let state = global_ctx.underlay_breaker.lock().unwrap();
@@ -2218,11 +2232,7 @@ pub mod tests {
             Some(lease_id)
         );
         assert_eq!(
-            state
-                .entries
-                .get(&endpoint_key)
-                .unwrap()
-                .half_open_lease_id,
+            state.entries.get(&endpoint_key).unwrap().half_open_lease_id,
             Some(lease_id)
         );
         drop(state);
@@ -2238,18 +2248,20 @@ pub mod tests {
             UnderlayBreakerScope::Generic,
         );
         block_test_underlay_key(&global_ctx, &key, 100);
+        let blocked_until = 100 + UNDERLAY_BREAKER_INITIAL_TTL_SECS;
         let old_guard = global_ctx
-            .try_begin_underlay_attempt_at(std::slice::from_ref(&key), 403)
+            .try_begin_underlay_attempt_at(std::slice::from_ref(&key), blocked_until + 1)
             .unwrap();
         global_ctx.record_underlay_breaker_strike_at(
             key.clone(),
             UnderlayBreakerStrikeKind::Hard,
             "test_reblock",
             None,
-            404,
+            blocked_until + 2,
         );
+        let reblocked_until = blocked_until + 2 + UNDERLAY_BREAKER_INITIAL_TTL_SECS * 2;
         let new_guard = global_ctx
-            .try_begin_underlay_attempt_at(std::slice::from_ref(&key), 1005)
+            .try_begin_underlay_attempt_at(std::slice::from_ref(&key), reblocked_until + 1)
             .unwrap();
         let new_lease_id = new_guard.lease_id();
 
@@ -2277,9 +2289,10 @@ pub mod tests {
             UnderlayBreakerScope::Generic,
         );
         block_test_underlay_key(&global_ctx, &key, 100);
+        let blocked_until = 100 + UNDERLAY_BREAKER_INITIAL_TTL_SECS;
 
         let cancelled = global_ctx
-            .try_begin_underlay_attempt_at(std::slice::from_ref(&key), 403)
+            .try_begin_underlay_attempt_at(std::slice::from_ref(&key), blocked_until + 1)
             .unwrap();
         drop(cancelled);
         {
@@ -2290,18 +2303,18 @@ pub mod tests {
         }
 
         let mut committed = global_ctx
-            .try_begin_underlay_attempt_at(std::slice::from_ref(&key), 403)
+            .try_begin_underlay_attempt_at(std::slice::from_ref(&key), blocked_until + 1)
             .unwrap();
         committed.commit();
         drop(committed);
         assert!(
             global_ctx
-                .try_begin_underlay_attempt_at(std::slice::from_ref(&key), 435)
+                .try_begin_underlay_attempt_at(std::slice::from_ref(&key), blocked_until + 2)
                 .is_err()
         );
         let state = global_ctx.underlay_breaker.lock().unwrap();
         let entry = state.entries.get(&key).unwrap();
-        assert_eq!(entry.backoff_secs, 600);
+        assert_eq!(entry.backoff_secs, UNDERLAY_BREAKER_INITIAL_TTL_SECS * 2);
         assert!(!entry.half_open);
     }
 
@@ -2348,12 +2361,14 @@ pub mod tests {
             100
         ));
         assert!(!global_ctx.is_underlay_breaker_gated_at(&key, 101));
-        assert!(global_ctx
-            .underlay_breaker
-            .lock()
-            .unwrap()
-            .entries
-            .is_empty());
+        assert!(
+            global_ctx
+                .underlay_breaker
+                .lock()
+                .unwrap()
+                .entries
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -2377,13 +2392,7 @@ pub mod tests {
         }
 
         assert!(
-            global_ctx
-                .underlay_breaker
-                .lock()
-                .unwrap()
-                .entries
-                .len()
-                <= UNDERLAY_BREAKER_CAPACITY
+            global_ctx.underlay_breaker.lock().unwrap().entries.len() <= UNDERLAY_BREAKER_CAPACITY
         );
     }
 

@@ -320,10 +320,8 @@ impl PeerConnPinger {
                 loss_rate_stats_1.record_latency(0);
                 if !breaker_cleared_after_pong {
                     if let Some(context) = self.underlay_attempt_context.as_ref() {
-                        self.global_ctx.clear_underlay_breaker(
-                            context.endpoint_key(),
-                            "peer_pong_success",
-                        );
+                        self.global_ctx
+                            .clear_underlay_breaker(context.endpoint_key(), "peer_pong_success");
                         if let Some(peer_key) = context.peer_key() {
                             self.global_ctx
                                 .clear_underlay_breaker(peer_key, "peer_pong_success");

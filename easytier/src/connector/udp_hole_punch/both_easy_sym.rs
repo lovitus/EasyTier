@@ -230,10 +230,8 @@ impl PunchBothEasySymHoleClient {
         ) {
             anyhow::bail!("udp hole punch peer is gated by underlay breaker");
         }
-        let udp_array = UdpSocketArray::new(
-            UDP_ARRAY_SIZE_FOR_BOTH_EASY_SYM,
-            global_ctx.net_ns.clone(),
-        );
+        let udp_array =
+            UdpSocketArray::new(UDP_ARRAY_SIZE_FOR_BOTH_EASY_SYM, global_ctx.net_ns.clone());
         udp_array.start().await?;
 
         let use_stealth = should_request_udp_stealth(&global_ctx, disable_udp_stealth);

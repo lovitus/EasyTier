@@ -16,6 +16,9 @@ CPU spikes and reproduction steps for Mihomo/Clash/sing-box TUN coexistence are
 documented in [mihomo_tun_interop.md](mihomo_tun_interop.md).
 The 2026-07-08 remote validation report is recorded in
 [performance_validation_2026_07_08.md](performance_validation_2026_07_08.md).
+The 2026-07-09 direct transport priority, WAN/LAN classification, and breaker
+validation is recorded in
+[transport_priority_breaker_validation_2026_07_09.md](transport_priority_breaker_validation_2026_07_09.md).
 Known Stealth/Secure follow-up items are tracked in
 [known_bugs/stealth_secure_known_bugs.md](known_bugs/stealth_secure_known_bugs.md).
 The v2.6.9 release notes are in
@@ -78,6 +81,10 @@ The v2.6.9 release notes are in
   `wss`.
 - `transport_priority` for direct-connect underlay ordering with `global`,
   `wan`, `lan`, and exact virtual-IP scopes.
+- Fixed direct-connect WAN/LAN candidate classification: public IPv4/IPv6
+  candidates no longer become LAN solely because they are on-link, and
+  link-local candidates must match a local link-local network before receiving
+  LAN priority.
 - `disable_legacy_udp_hole_punch` to reject old UDP hole-punch RPCs that do not
   carry a stealth preference.
 - Readiness ACK, classified fallback reasons, and per-transport health tracking
@@ -185,7 +192,9 @@ execution path.
   co-control the same path.
 - Data-plane transport preference is bounded by latency. A preferred live
   connection is selected only after the peer filters out connections whose RTT
-  is greater than 125% of the lowest RTT connection.
+  is greater than 125% of the lowest RTT connection. Sub-millisecond links also
+  receive a small absolute RTT slack so 0.x ms differences do not permanently
+  exclude QUIC/FakeTCP from the eligible set.
 - `--underlay-candidate-guard` is candidate sanitization, not a process-level
   bypass of Mihomo/Clash/sing-box TUN. It filters what EasyTier advertises or
   dials as underlay candidates; listeners may still bind `0.0.0.0`. A guarded

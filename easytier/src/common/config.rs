@@ -138,6 +138,27 @@ fn flags_diff_from_default(flags: &Flags) -> serde_json::Map<String, serde_json:
         .collect()
 }
 
+const ALWAYS_DUMP_RUNTIME_FLAG_FIELDS: &[&str] = &[
+    "stealth_mode",
+    "stealth_window_secs",
+    "stealth_protocols",
+    "transport_priority",
+    "underlay_candidate_guard",
+    "underlay_exclude_cidrs",
+];
+
+fn flags_for_dump(flags: &Flags) -> serde_json::Map<String, serde_json::Value> {
+    let mut diff = flags_diff_from_default(flags);
+    let current_message = flags_to_dynamic_message(flags);
+    let current_map = flags_to_full_json_map(&current_message);
+    for key in ALWAYS_DUMP_RUNTIME_FLAG_FIELDS {
+        if let Some(value) = current_map.get(*key) {
+            diff.insert((*key).to_string(), value.clone());
+        }
+    }
+    diff
+}
+
 fn mapped_listener_allows_implicit_port(url: &url::Url) -> bool {
     TunnelScheme::try_from(url)
         .ok()
@@ -1345,7 +1366,7 @@ impl ConfigLoader for TomlConfigLoader {
     fn dump(&self) -> String {
         let mut config = self.config.lock().unwrap().clone();
         Self::normalize_config_source(&mut config);
-        config.flags = Some(flags_diff_from_default(&self.get_flags()));
+        config.flags = Some(flags_for_dump(&self.get_flags()));
         if config.stun_servers == Some(StunInfoCollector::get_default_servers()) {
             config.stun_servers = None;
         }
@@ -1897,6 +1918,21 @@ socket_mark = 66
         assert_eq!(reloaded_flags.relay_network_whitelist, "");
         assert_eq!(reloaded_flags.mtu, 0);
         assert_eq!(reloaded_flags.socket_mark, Some(0));
+    }
+
+    #[test]
+    fn dump_always_shows_runtime_guard_and_priority_flags() {
+        let cfg = TomlConfigLoader::default();
+        let dumped = cfg.dump();
+
+        assert!(dumped.contains("stealth_mode = true"));
+        assert!(dumped.contains("stealth_window_secs = 0"));
+        assert!(dumped.contains("stealth_protocols = \"udp,tcp,faketcp,quic,wg,ws,wss\""));
+        assert!(dumped.contains("transport_priority = \"global:quic,faketcp,ws,wg,udp,tcp\""));
+        assert!(dumped.contains("underlay_candidate_guard = true"));
+        assert!(dumped.contains(
+            "underlay_exclude_cidrs = \"198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,192.19.0.0/24\""
+        ));
     }
 
     #[test]
