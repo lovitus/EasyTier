@@ -1048,10 +1048,7 @@ impl PeerManager {
         scope: UnderlayBreakerScope,
         peer_id_hint: Option<PeerId>,
     ) -> Option<UnderlayAttemptContext> {
-        let Some((remote_addr, scheme)) = Self::underlay_endpoint_from_tunnel_info(tunnel_info)
-        else {
-            return None;
-        };
+        let (remote_addr, scheme) = Self::underlay_endpoint_from_tunnel_info(tunnel_info)?;
         Some(UnderlayAttemptContext::new(
             remote_addr,
             scheme,

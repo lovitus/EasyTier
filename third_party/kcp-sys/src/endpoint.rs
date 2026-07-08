@@ -59,6 +59,14 @@ impl From<&KcpPacket> for ConnId {
 }
 
 impl ConnId {
+    pub fn src_session_id(&self) -> u32 {
+        self.src_session_id
+    }
+
+    pub fn dst_session_id(&self) -> u32 {
+        self.dst_session_id
+    }
+
     fn fill_packet_header(&self, packet: &mut KcpPacket) {
         packet
             .mut_header()

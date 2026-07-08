@@ -785,18 +785,18 @@ impl VirtualNic {
                     let dev = self.create_tun(true).await?;
                     let tunnel = self.finish_tun_device(dev).await?;
                     self.pending_backend = Some(NicBackend::Tun);
-                    return Ok(tunnel);
+                    Ok(tunnel)
                 }
                 NicBackend::Veth => {
                     let tunnel = self.create_veth_dev().await?;
                     self.pending_backend = Some(NicBackend::Veth);
-                    return Ok(tunnel);
+                    Ok(tunnel)
                 }
                 NicBackend::Auto => match self.create_tun(false).await {
                     Ok(dev) => {
                         let tunnel = self.finish_tun_device(dev).await?;
                         self.pending_backend = Some(NicBackend::Tun);
-                        return Ok(tunnel);
+                        Ok(tunnel)
                     }
                     Err(tun_error) if Self::tun_create_allows_auto_fallback(&tun_error) => {
                         tracing::warn!(
@@ -806,17 +806,15 @@ impl VirtualNic {
                         match self.create_veth_dev().await {
                             Ok(tunnel) => {
                                 self.pending_backend = Some(NicBackend::Veth);
-                                return Ok(tunnel);
+                                Ok(tunnel)
                             }
-                            Err(veth_error) => {
-                                return Err(anyhow::anyhow!(
-                                    "both NIC backends failed; tun: {tun_error}; veth: {veth_error}"
-                                )
-                                .into());
-                            }
+                            Err(veth_error) => Err(anyhow::anyhow!(
+                                "both NIC backends failed; tun: {tun_error}; veth: {veth_error}"
+                            )
+                            .into()),
                         }
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => Err(error),
                 },
             }
         }

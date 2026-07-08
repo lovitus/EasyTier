@@ -9,18 +9,18 @@ GUI/CLI 默认 Stealth、派生 secure、显式 secure、KCP/SOCKS 和 Mihomo TU
 - 代码线：`releases/v2.6.8`
 - 被测提交：`514b8260 fix: harden underlay loopback guard [skip ci]`
 - 二进制：`easytier-core 2.6.8`
-- 服务端：`root@192.168.2.160`
-- 客户端：`root@192.168.1.38`
+- 服务端：远端 Linux 测试节点 A
+- 客户端：远端 Linux 测试节点 B
 - 链路：同 LAN，物理 HTTP baseline 约 `117.07 MB/s`
 - 测试约束：不在维护者本机编译；临时 EasyTier 网络名均使用 `codex_perf_*` /
   `stealth-*`，测试结束后清理临时进程和监听端口。
 
-2.160 上存在一组早前 namespace/bridge 实验接口，例如 `br_a`、`veth_ns_*`、
+测试节点 A 上存在一组早前 namespace/bridge 实验接口，例如 `br_a`、`veth_ns_*`、
 `veth_net_*`。它们不是本次 EasyTier 性能测试进程残留，验证过程中没有自动删除。
 
 ## 2. 吞吐对照
 
-测试方式：在 2.160 上启动 HTTP 文件服务，1.38 通过 EasyTier TUN 地址下载文件。
+测试方式：在测试节点 A 上启动 HTTP 文件服务，测试节点 B 通过 EasyTier TUN 地址下载文件。
 除特别说明外，underlay 使用 `tcp://`。
 
 | 模式 | 256 MiB x3 平均 | 512 MiB 单次 | 结论 |
@@ -124,7 +124,7 @@ listener strict anti-legacy 语义不完整”处理。
 
 - 混合 peer 版本包括 `2.6.4`、`2.6.6`、`2.6.8`。
 - 多个远端虚拟 IP ICMP 无丢包、无 DUP。
-- 远端 SOCKS `10.44.0.9:14445` 可访问外网。
+- 远端 SOCKS 服务可访问外网。
 - 临时 KCP-only 节点经 KCP Proxy 完成小文件传输，Proxy 表显示 `Kcp`。
 - KCP-only 小规模结果约 `3.9 MB/s`，测试后临时 peer 和 Proxy entry 可清理。
 

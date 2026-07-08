@@ -1029,11 +1029,12 @@ impl IfConfiguerTrait for VethIfConfiguer {
         self.ensure_name(name)?;
         set_link(&self.state.netlink, self.state.main_index, Some(up), None)?;
         let was_up = self.state.link_up.swap(up, Ordering::AcqRel);
-        if up && !was_up {
-            if let Err(error) = self.remove_automatic_link_local().await {
-                self.state.link_up.store(false, Ordering::Release);
-                return Err(error);
-            }
+        if up
+            && !was_up
+            && let Err(error) = self.remove_automatic_link_local().await
+        {
+            self.state.link_up.store(false, Ordering::Release);
+            return Err(error);
         }
         Ok(())
     }
@@ -1496,7 +1497,7 @@ impl VethStream {
         for index in 0..count as usize {
             let message = &self.batch.messages[index];
             let frame_len = message.msg_len as usize;
-            if self.batch.addresses[index].sll_pkttype == libc::PACKET_OUTGOING as u8
+            if self.batch.addresses[index].sll_pkttype == libc::PACKET_OUTGOING
                 || message.msg_hdr.msg_flags & libc::MSG_TRUNC != 0
                 || frame_len > frame_capacity
                 || frame_len < ETH_HEADER_LEN

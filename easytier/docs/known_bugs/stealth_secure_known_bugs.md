@@ -15,7 +15,7 @@
 --stealth-protocols tcp
 ```
 
-在 `192.168.2.160 <-> 192.168.1.38` 同 LAN TCP underlay 测试中：
+在两台远端 Linux 测试节点的同 LAN TCP underlay 测试中：
 
 | 模式 | 512 MiB 下载速度 |
 | --- | ---: |

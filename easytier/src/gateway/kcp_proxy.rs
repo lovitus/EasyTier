@@ -410,6 +410,7 @@ impl KcpProxyDst {
         proxy_entries: Arc<DashMap<ConnId, TcpProxyEntry>>,
         cidr_set: Arc<CidrSet>,
         route: Arc<dyn crate::peers::route_trait::Route + Send + Sync + 'static>,
+        my_peer_id: PeerId,
     ) -> Result<()> {
         let mut conn_data = kcp_stream.conn_data().clone();
         let parsed_conn_data = KcpConnData::decode(&mut conn_data)
@@ -457,7 +458,12 @@ impl KcpProxyDst {
             route.get_peer_groups_by_ip(&dst_ip)
         );
 
-        if global_ctx.should_deny_proxy(&dst_socket, false) {
+        let deny_local_virtual_occupied = kcp_stream.conn_id().src_session_id() == my_peer_id;
+        if global_ctx.should_deny_proxy_with_local_virtual_occupied_guard(
+            &dst_socket,
+            false,
+            deny_local_virtual_occupied,
+        ) {
             if ack_requested {
                 write_proxy_prepare_ack(&mut kcp_stream, ProxyPrepareAckStatus::PolicyDenied)
                     .await?;
@@ -565,6 +571,7 @@ impl KcpProxyDst {
         let proxy_entries = self.proxy_entries.clone();
         let cidr_set = self.cidr_set.clone();
         let route = Arc::new(self.peer_manager.get_route());
+        let my_peer_id = self.peer_manager.my_peer_id();
         self.tasks.spawn(async move {
             while let Ok(conn) = kcp_endpoint.accept().await {
                 let stream = KcpStream::new(&kcp_endpoint, conn)
@@ -582,6 +589,7 @@ impl KcpProxyDst {
                         proxy_entries,
                         cidr_set,
                         route,
+                        my_peer_id,
                     )
                     .await;
                 });

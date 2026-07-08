@@ -157,6 +157,11 @@ pub struct UnderlayBreakerTrace {
     pub ifname: Option<String>,
 }
 
+struct UnderlayBreakerLog {
+    warn: bool,
+    message: &'static str,
+}
+
 #[derive(Debug, Clone, Default)]
 struct UnderlayBreakerEntry {
     hard_strikes: u8,
@@ -1089,11 +1094,10 @@ impl GlobalCtx {
         ttl: Option<u64>,
         half_open: bool,
         trace: Option<&UnderlayBreakerTrace>,
-        warn: bool,
-        message: &'static str,
+        log: UnderlayBreakerLog,
     ) {
         let trace = trace.cloned().unwrap_or_default();
-        if warn {
+        if log.warn {
             tracing::warn!(
                 ?key,
                 peer_id = ?key.peer_id(),
@@ -1108,7 +1112,7 @@ impl GlobalCtx {
                 local_ip = ?trace.local_ip,
                 ifname = ?trace.ifname,
                 half_open,
-                event = message,
+                event = log.message,
                 "underlay breaker event"
             );
         } else {
@@ -1126,7 +1130,7 @@ impl GlobalCtx {
                 local_ip = ?trace.local_ip,
                 ifname = ?trace.ifname,
                 half_open,
-                event = message,
+                event = log.message,
                 "underlay breaker event"
             );
         }
@@ -1162,8 +1166,10 @@ impl GlobalCtx {
                     None,
                     entry.half_open,
                     trace.as_ref(),
-                    false,
-                    "recorded soft underlay loopback signal",
+                    UnderlayBreakerLog {
+                        warn: false,
+                        message: "recorded soft underlay loopback signal",
+                    },
                 );
                 false
             }
@@ -1177,8 +1183,10 @@ impl GlobalCtx {
                         Some(ttl),
                         false,
                         trace.as_ref(),
-                        true,
-                        "underlay breaker half-open attempt failed; re-blocking key",
+                        UnderlayBreakerLog {
+                            warn: true,
+                            message: "underlay breaker half-open attempt failed; re-blocking key",
+                        },
                     );
                     return true;
                 }
@@ -1202,8 +1210,10 @@ impl GlobalCtx {
                         Some(ttl),
                         false,
                         trace.as_ref(),
-                        true,
-                        "underlay breaker blocked key after repeated hard signals",
+                        UnderlayBreakerLog {
+                            warn: true,
+                            message: "underlay breaker blocked key after repeated hard signals",
+                        },
                     );
                     true
                 } else {
@@ -1214,8 +1224,10 @@ impl GlobalCtx {
                         None,
                         false,
                         trace.as_ref(),
-                        false,
-                        "recorded hard underlay loopback signal",
+                        UnderlayBreakerLog {
+                            warn: false,
+                            message: "recorded hard underlay loopback signal",
+                        },
                     );
                     false
                 }
@@ -1265,8 +1277,10 @@ impl GlobalCtx {
             Some(ttl),
             false,
             None,
-            true,
-            "underlay breaker half-open attempt timed out; re-blocking key",
+            UnderlayBreakerLog {
+                warn: true,
+                message: "underlay breaker half-open attempt timed out; re-blocking key",
+            },
         );
     }
 
@@ -1315,8 +1329,10 @@ impl GlobalCtx {
                         .then_some(entry.blocked_until_secs.saturating_sub(now_secs)),
                     entry.half_open,
                     None,
-                    false,
-                    "underlay breaker gated atomic connection attempt",
+                    UnderlayBreakerLog {
+                        warn: false,
+                        message: "underlay breaker gated atomic connection attempt",
+                    },
                 );
                 return Err(UnderlayBreakerGateError { key: key.clone() });
             }
@@ -1343,8 +1359,10 @@ impl GlobalCtx {
                 None,
                 true,
                 None,
-                false,
-                "underlay breaker released key in atomic half-open attempt",
+                UnderlayBreakerLog {
+                    warn: false,
+                    message: "underlay breaker released key in atomic half-open attempt",
+                },
             );
         }
         drop(state);
@@ -1424,8 +1442,10 @@ impl GlobalCtx {
                 None,
                 false,
                 None,
-                false,
-                "underlay breaker rolled back cancelled preflight lease",
+                UnderlayBreakerLog {
+                    warn: false,
+                    message: "underlay breaker rolled back cancelled preflight lease",
+                },
             );
         }
     }
@@ -1444,8 +1464,10 @@ impl GlobalCtx {
                 None,
                 false,
                 None,
-                false,
-                "underlay breaker cleared key after successful connection",
+                UnderlayBreakerLog {
+                    warn: false,
+                    message: "underlay breaker cleared key after successful connection",
+                },
             );
         }
     }
@@ -1688,6 +1710,16 @@ impl GlobalCtx {
 
     #[tracing::instrument(ret, skip(self))]
     pub fn should_deny_proxy(&self, dst_addr: &SocketAddr, is_udp: bool) -> bool {
+        self.should_deny_proxy_with_local_virtual_occupied_guard(dst_addr, is_udp, true)
+    }
+
+    #[tracing::instrument(ret, skip(self))]
+    pub fn should_deny_proxy_with_local_virtual_occupied_guard(
+        &self,
+        dst_addr: &SocketAddr,
+        is_udp: bool,
+        deny_local_virtual_occupied: bool,
+    ) -> bool {
         let _g = self.net_ns.guard();
         let ip = dst_addr.ip();
         // first check if ip is an EasyTier-managed local address
@@ -1731,7 +1763,9 @@ impl GlobalCtx {
         // does not apply to `dst_is_local_phy_ip`, since proxying to a real
         // service bound on this host's physical LAN address is the normal
         // `proxy_cidrs` exit-node use case.
-        dst_is_local_et_ip && is_local_port_occupied(dst_addr, is_udp)
+        deny_local_virtual_occupied
+            && dst_is_local_et_ip
+            && is_local_port_occupied(dst_addr, is_udp)
     }
 }
 
@@ -1740,10 +1774,15 @@ impl GlobalCtx {
 /// identically across platforms and does not require enumerating other
 /// processes' sockets.
 fn is_local_port_occupied(dst_addr: &SocketAddr, is_udp: bool) -> bool {
-    if is_udp {
-        std::net::UdpSocket::bind(dst_addr).is_err()
+    let bind_result = if is_udp {
+        std::net::UdpSocket::bind(dst_addr).map(|_| ())
     } else {
-        std::net::TcpListener::bind(dst_addr).is_err()
+        std::net::TcpListener::bind(dst_addr).map(|_| ())
+    };
+    match bind_result {
+        Ok(()) => false,
+        Err(err) if err.kind() == std::io::ErrorKind::AddrNotAvailable => false,
+        Err(_) => true,
     }
 }
 
@@ -1984,6 +2023,13 @@ pub mod tests {
         ));
 
         assert!(global_ctx.should_deny_proxy(&foreign_addr, false));
+        assert!(
+            !global_ctx.should_deny_proxy_with_local_virtual_occupied_guard(
+                &foreign_addr,
+                false,
+                false
+            )
+        );
 
         drop(foreign_listener);
     }
@@ -2312,6 +2358,20 @@ pub mod tests {
                 .try_begin_underlay_attempt_at(std::slice::from_ref(&key), blocked_until + 2)
                 .is_err()
         );
+        {
+            let state = global_ctx.underlay_breaker.lock().unwrap();
+            let entry = state.entries.get(&key).unwrap();
+            assert_eq!(entry.backoff_secs, UNDERLAY_BREAKER_INITIAL_TTL_SECS);
+            assert!(entry.half_open);
+        }
+        assert!(
+            global_ctx
+                .try_begin_underlay_attempt_at(
+                    std::slice::from_ref(&key),
+                    blocked_until + UNDERLAY_BREAKER_HALF_OPEN_TIMEOUT_SECS + 2
+                )
+                .is_err()
+        );
         let state = global_ctx.underlay_breaker.lock().unwrap();
         let entry = state.entries.get(&key).unwrap();
         assert_eq!(entry.backoff_secs, UNDERLAY_BREAKER_INITIAL_TTL_SECS * 2);
@@ -2459,7 +2519,7 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn set_flags_uses_reconciled_runtime_flags() {
+    async fn set_flags_marks_runtime_stealth_change_explicit() {
         let config = TomlConfigLoader::default();
         config.set_secure_mode(Some(SecureModeConfig {
             enabled: true,
@@ -2476,8 +2536,8 @@ pub mod tests {
         flags.stealth_mode = true;
         global_ctx.set_flags(flags);
 
-        assert!(!global_ctx.get_flags().stealth_mode);
-        assert!(!global_ctx.get_feature_flags().stealth_supported);
+        assert!(global_ctx.get_flags().stealth_mode);
+        assert!(global_ctx.get_feature_flags().stealth_supported);
     }
 
     pub fn get_mock_global_ctx_with_network(

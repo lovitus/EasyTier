@@ -1226,6 +1226,13 @@ impl ConfigLoader for TomlConfigLoader {
 
     fn set_flags(&self, mut flags: Flags) {
         let mut config = self.config.lock().unwrap();
+        if config
+            .flags_struct
+            .as_ref()
+            .is_some_and(|current| current.stealth_mode != flags.stealth_mode)
+        {
+            config.stealth_mode_explicit = true;
+        }
         if config.secure_mode.is_some() && !config.stealth_mode_explicit {
             flags.stealth_mode = false;
         }
@@ -1331,10 +1338,11 @@ impl ConfigLoader for TomlConfigLoader {
     fn set_secure_mode(&self, secure_mode: Option<SecureModeConfig>) {
         let mut config = self.config.lock().unwrap();
         config.secure_mode = secure_mode;
-        if config.secure_mode.is_some() && !config.stealth_mode_explicit {
-            if let Some(flags) = config.flags_struct.as_mut() {
-                flags.stealth_mode = false;
-            }
+        if config.secure_mode.is_some()
+            && !config.stealth_mode_explicit
+            && let Some(flags) = config.flags_struct.as_mut()
+        {
+            flags.stealth_mode = false;
         }
     }
 

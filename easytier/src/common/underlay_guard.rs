@@ -22,8 +22,9 @@ pub const DEFAULT_UNDERLAY_EXCLUDE_CIDRS: &str =
     "198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,192.19.0.0/24";
 pub const BUILTIN_UNDERLAY_GUARD_CIDRS: &str = DEFAULT_UNDERLAY_EXCLUDE_CIDRS;
 
-static PARSED_CIDR_CACHE: LazyLock<Mutex<Option<(String, Arc<Vec<cidr::IpCidr>>)>>> =
-    LazyLock::new(|| Mutex::new(None));
+type ParsedCidrCache = Option<(String, Arc<Vec<cidr::IpCidr>>)>;
+
+static PARSED_CIDR_CACHE: LazyLock<Mutex<ParsedCidrCache>> = LazyLock::new(|| Mutex::new(None));
 static BUILTIN_CIDRS: LazyLock<Vec<cidr::IpCidr>> = LazyLock::new(|| {
     parse_exclude_cidrs(BUILTIN_UNDERLAY_GUARD_CIDRS)
         .expect("built-in underlay guard CIDRs must be valid")

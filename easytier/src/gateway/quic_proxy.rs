@@ -648,6 +648,7 @@ struct QuicStreamContext {
     global_ctx: ArcGlobalCtx,
     proxy_entries: Arc<DashMap<(StreamId, StreamId), TcpProxyEntry>>,
     cidr_set: Arc<CidrSet>,
+    my_peer_id: PeerId,
     #[derivative(Debug = "ignore")]
     route: Arc<dyn crate::peers::route_trait::Route + Send + Sync + 'static>,
 }
@@ -659,6 +660,7 @@ impl QuicStreamContext {
             global_ctx: global_ctx.clone(),
             proxy_entries: Arc::new(DashMap::new()),
             cidr_set: Arc::new(CidrSet::new(global_ctx.clone())),
+            my_peer_id: peer_mgr.my_peer_id(),
             route: Arc::new(peer_mgr.get_route()),
         }
     }
@@ -695,6 +697,9 @@ impl QuicStreamReceiver {
                         }
                     };
 
+                    let remote_peer_id = QuicAddr::try_from(connection.remote_address())
+                        .ok()
+                        .map(|addr| addr.peer_id);
                     let ctx = self.ctx.clone();
                     self.tasks.spawn(async move {
                         let mut tasks = JoinSet::new();
@@ -718,7 +723,7 @@ impl QuicStreamReceiver {
 
                                     let ctx = ctx.clone();
                                     tasks.spawn(async move {
-                                        match Self::establish_stream(stream, ctx).await {
+                                        match Self::establish_stream(stream, ctx, remote_peer_id).await {
                                             Ok(transfer_fut) => {
                                                 if let Err(e) = transfer_fut.await {
                                                     warn!("quic stream transfer error: {:?}", e);
@@ -774,6 +779,7 @@ impl QuicStreamReceiver {
     async fn establish_stream(
         mut stream: QuicStream,
         ctx: Arc<QuicStreamContext>,
+        remote_peer_id: Option<PeerId>,
     ) -> Result<impl Future<Output = crate::common::error::Result<()>>, Error> {
         let conn_data = Self::read_stream_header(&mut stream).await?;
         let conn_data_parsed = QuicConnData::decode(conn_data.as_ref())
@@ -826,7 +832,12 @@ impl QuicStreamReceiver {
         );
 
         let global_ctx = ctx.global_ctx.clone();
-        if global_ctx.should_deny_proxy(&dst_socket, false) {
+        let deny_local_virtual_occupied = remote_peer_id == Some(ctx.my_peer_id);
+        if global_ctx.should_deny_proxy_with_local_virtual_occupied_guard(
+            &dst_socket,
+            false,
+            deny_local_virtual_occupied,
+        ) {
             if ack_requested {
                 write_proxy_prepare_ack(stream.writer_mut(), ProxyPrepareAckStatus::PolicyDenied)
                     .await?;

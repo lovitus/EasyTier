@@ -92,6 +92,29 @@ aggressive first-line failover mechanism. The high-confidence signals remain
 scoped by Endpoint or Peer plus protocol and scope; soft source-interface signals
 do not gate traffic.
 
+### KCP/QUIC Proxy To Local Virtual-IP Listeners
+
+A separate proxy regression was found during the same validation pass. When a
+remote peer used KCP or QUIC proxy to reach a service bound to this node's
+EasyTier virtual IP, the responder applied the local "occupied virtual-IP port"
+guard before considering the request origin. That incorrectly returned a policy
+denial for legitimate remote traffic to a local virtual-IP listener.
+
+The fix keeps the original loopback protection for self-originated traffic, but
+disables only the final occupied-port guard for remote-origin KCP/QUIC proxy
+requests. All other proxy denial checks remain in place, including EasyTier
+internal listener/RPC protection and local physical-address safeguards.
+
+The full port-forward matrix passed after this change:
+
+- KCP enabled and disabled on source/destination combinations.
+- Relay KCP enabled and disabled combinations.
+- Small-buffer forwarding cases.
+- Local virtual-IP listener destinations.
+
+This fix does not change SOCKS KCP-only behavior, Proxy failover ordering, wire
+format, or listener configuration.
+
 ### Remaining Non-Blocking Observations
 
 - QUIC and FakeTCP are currently advertised as IPv4 unspecified listeners in the
@@ -124,6 +147,12 @@ cargo test -p easytier direct_candidates_are_classified_after_address_resolution
 cargo test -p easytier transport_preference --lib -- --nocapture
 cargo test -p easytier underlay_breaker --lib -- --nocapture
 cargo test -p easytier peer_conn_empty_public_key_does_not_block_later_authenticated_conn --lib -- --nocapture
+cargo test -p easytier tests::three_node::port_forward_test --features full -- --nocapture --test-threads=1
+cargo test -p easytier common::global_ctx::tests --features full -- --nocapture --test-threads=1
+cargo test -p easytier tests::three_node::wg_stealth_three_node_carries_phase2_tcp --features full -- --nocapture --test-threads=1
+cargo test -p easytier tests::three_node::ws_and_wss_stealth_three_node_carry_phase2_tcp --features full -- --nocapture --test-threads=1
+cargo test -p easytier tests::three_node::quic_proxy --features full -- --nocapture --test-threads=1
+cargo test -p easytier tests::three_node::quic_stealth --features full -- --nocapture --test-threads=1
 cargo check -p easytier --lib
 cargo build -p easytier --bin easytier-core --bin easytier-cli --release --target x86_64-unknown-linux-musl
 ```
@@ -142,6 +171,9 @@ selection issues:
   the 125% relative window is too narrow.
 - Plain or legacy connections with an empty secure public key no longer block a
   later authenticated connection from the same peer.
+- Remote-origin KCP/QUIC proxy can reach services bound to the destination
+  node's EasyTier virtual IP without disabling the self-loop occupied-port guard
+  for local-origin traffic.
 
 The remaining QUIC/FakeTCP IPv6 listener-advertisement limitation and transient
 session invalidation should be treated as separate follow-up items.
