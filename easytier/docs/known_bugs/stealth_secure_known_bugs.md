@@ -1,6 +1,6 @@
 # Stealth / Secure 已知问题
 
-本文记录当前 `releases/v2.6.8` 代码线在 Stealth 与显式 `secure_mode` 组合上的已知问题。
+本文记录当前 `releases/v2.6.9` 代码线在 Stealth 与显式 `secure_mode` 组合上的已知问题。
 结论来自 2026-07-08 的远端验证、实机观察和当前代码路径审计。
 
 ## 1. 显式 secure + Stealth 吞吐明显下降

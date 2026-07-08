@@ -148,8 +148,8 @@ proxy, and rollout details remain in
 [performance_validation_2026_07_08.md](easytier/docs/performance_validation_2026_07_08.md);
 known Stealth/Secure follow-up items are tracked in
 [stealth_secure_known_bugs.md](easytier/docs/known_bugs/stealth_secure_known_bugs.md).
-The v2.6.8 release notes, including the explicit secure + Stealth performance
-warning, are in [release_notes/v2.6.8.md](easytier/docs/release_notes/v2.6.8.md).
+The v2.6.9 release notes, including the explicit secure + Stealth performance
+warning, are in [release_notes/v2.6.9.md](easytier/docs/release_notes/v2.6.9.md).
 
 ### Common Configuration Pitfalls
 

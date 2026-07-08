@@ -18,8 +18,8 @@ The 2026-07-08 remote validation report is recorded in
 [performance_validation_2026_07_08.md](performance_validation_2026_07_08.md).
 Known Stealth/Secure follow-up items are tracked in
 [known_bugs/stealth_secure_known_bugs.md](known_bugs/stealth_secure_known_bugs.md).
-The v2.6.8 release notes are in
-[release_notes/v2.6.8.md](release_notes/v2.6.8.md).
+The v2.6.9 release notes are in
+[release_notes/v2.6.9.md](release_notes/v2.6.9.md).
 
 ## 1. Problems Fixed In This Fork
 

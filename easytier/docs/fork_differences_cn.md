@@ -16,7 +16,7 @@ Stealth、Proxy、回退和 rollout 细节仍然以
 [performance_validation_2026_07_08.md](performance_validation_2026_07_08.md)。
 Stealth/Secure 后续问题见
 [known_bugs/stealth_secure_known_bugs.md](known_bugs/stealth_secure_known_bugs.md)。
-v2.6.8 发布说明见 [release_notes/v2.6.8.md](release_notes/v2.6.8.md)。
+v2.6.9 发布说明见 [release_notes/v2.6.9.md](release_notes/v2.6.9.md)。
 
 ## 1. 这个 Fork 修复了什么
 

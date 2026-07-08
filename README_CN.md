@@ -138,8 +138,8 @@ rollout 细节仍以 [兼容性说明](easytier/docs/udp_stealth_compatibility.m
 [performance_validation_2026_07_08.md](easytier/docs/performance_validation_2026_07_08.md)；
 Stealth/Secure 后续问题见
 [stealth_secure_known_bugs.md](easytier/docs/known_bugs/stealth_secure_known_bugs.md)。
-v2.6.8 发布说明和显式 secure + Stealth 性能警告见
-[release_notes/v2.6.8.md](easytier/docs/release_notes/v2.6.8.md)。
+v2.6.9 发布说明和显式 secure + Stealth 性能警告见
+[release_notes/v2.6.9.md](easytier/docs/release_notes/v2.6.9.md)。
 
 ### 常见配置坑点
 

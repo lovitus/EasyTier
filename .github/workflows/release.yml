@@ -6,7 +6,7 @@ on:
       version:
         description: 'Version for this release'
         type: string
-        default: 'v2.6.8'
+        default: 'v2.6.9'
         required: true
       make_latest:
         description: 'Mark this release as latest'
@@ -181,7 +181,8 @@ jobs:
           prerelease: false
           make_latest: ${{ inputs.make_latest }}
           target_commitish: ${{ github.sha }}
-          generate_release_notes: true
+          body_path: ./easytier/docs/release_notes/${{ inputs.version }}.md
+          generate_release_notes: false
           fail_on_unmatched_files: true
           files: |
             ./zipped_assets/*
