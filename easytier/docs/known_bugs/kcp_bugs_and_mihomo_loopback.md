@@ -100,6 +100,36 @@ Mihomo 捕获 underlay
 - 需要稳定运行时，避免在 Mihomo/Clash/sing-box TUN 开启状态下做 KCP-only 或高并发 SOCKS KCP 压测。
 - 优先使用 QUIC 或 Native 路径；如果必须使用 SOCKS，避免把 SOCKS chain 设计成经同一个 overlay 反复回到本机或同一下一跳。该规避会牺牲 no-TUN / smoltcp SOCKS 性能，不应视为最终修复。
 - 确认 `underlay_candidate_guard=true`。默认 fake-IP base set 已内置；如果使用了其他 fake-IP 网段，再追加到 `underlay_exclude_cidrs`。
+- 与 sing-box/Mihomo/Clash/NekoBox/Throne 等系统 TUN 代理工具共存时，必须在代理/TUN
+  配置里排除 EasyTier 进程；只靠 EasyTier 内置 guard 不能保证所有系统 socket 都绕过
+  对方 TUN。Mihomo/Clash 风格规则至少包含：
+
+  ```yaml
+  - PROCESS-NAME,io.tailscale.ipn.macsys.network-extension,DIRECT
+  - PROCESS-NAME,tailscaled,DIRECT
+  - PROCESS-NAME,tailscaled.exe,DIRECT
+  - PROCESS-NAME,tailscale,DIRECT
+  - PROCESS-NAME,tailscale.exe,DIRECT
+  - PROCESS-NAME,easytier-gui,DIRECT
+  - PROCESS-NAME,easytier-gui.exe,DIRECT
+  - PROCESS-NAME,easytier-core,DIRECT
+  - PROCESS-NAME,easytier-core.exe,DIRECT
+  - PROCESS-NAME-REGEX,(?i)^easytier(?:[-_.].*)?$,DIRECT
+  - PROCESS-NAME,easytier-*,DIRECT
+  - PROCESS-NAME,easytier-cli,DIRECT
+  - PROCESS-NAME,easytier-cli.exe,DIRECT
+  ```
+
+  `PROCESS-NAME,easytier-*` 依赖客户端通配支持；精确进程名和 regex 规则不能省。规则列表
+  底部、最终 `MATCH`/兜底规则之前，还应直连 Tailscale 和 EasyTier 虚拟网段：
+
+  ```yaml
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,10.44.0.0/16,DIRECT,no-resolve
+  ```
+
+  如果 EasyTier 虚拟网段不是 `10.44.0.0/16`，替换为实际网段。sing-box、NekoBox、
+  Throne 等客户端使用等价的 process bypass / route-exclude 机制。
 - 触发高 CPU 后，重启 EasyTier 主实例和 Mihomo 可以释放当前循环状态；这只是恢复手段，不是修复。
 
 **修复顺序**

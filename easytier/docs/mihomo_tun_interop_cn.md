@@ -157,11 +157,41 @@ ip -s link
 1. 在 Mihomo/sing-box 的 TUN 层排除 EasyTier 进程或 EasyTier underlay 目标地址。
    仅写 `DIRECT` 规则不一定足够，因为数据包仍可能先进入 TUN；需要使用对应实现提供的
    route/process bypass、route-exclude 或等价能力。
-2. 避免把 EasyTier SOCKS/Mihomo SOCKS 入口绑定到 EasyTier 虚拟 IP。优先绑定
+2. 对 Mihomo/Clash 这类规则列表，至少把 EasyTier 以及常一起使用的 Tailscale 进程规则
+   放在通用代理规则之前：
+
+   ```yaml
+   - PROCESS-NAME,io.tailscale.ipn.macsys.network-extension,DIRECT
+   - PROCESS-NAME,tailscaled,DIRECT
+   - PROCESS-NAME,tailscaled.exe,DIRECT
+   - PROCESS-NAME,tailscale,DIRECT
+   - PROCESS-NAME,tailscale.exe,DIRECT
+   - PROCESS-NAME,easytier-gui,DIRECT
+   - PROCESS-NAME,easytier-gui.exe,DIRECT
+   - PROCESS-NAME,easytier-core,DIRECT
+   - PROCESS-NAME,easytier-core.exe,DIRECT
+   - PROCESS-NAME-REGEX,(?i)^easytier(?:[-_.].*)?$,DIRECT
+   - PROCESS-NAME,easytier-*,DIRECT
+   - PROCESS-NAME,easytier-cli,DIRECT
+   - PROCESS-NAME,easytier-cli.exe,DIRECT
+   ```
+
+   `PROCESS-NAME,easytier-*` 是否生效取决于客户端是否支持通配，不要只依赖这一条；精确
+   进程名和 regex 规则都应保留。规则列表底部、最终 `MATCH`/兜底规则之前，还应直连
+   Tailscale CGNAT 和 EasyTier 虚拟网段：
+
+   ```yaml
+   - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+   - IP-CIDR,10.44.0.0/16,DIRECT,no-resolve
+   ```
+
+   如果 EasyTier 虚拟网段不是 `10.44.0.0/16`，替换为实际网段。sing-box、NekoBox、
+   Throne 等客户端使用等价的 process bypass 和 route-exclude 配置。
+3. 避免把 EasyTier SOCKS/Mihomo SOCKS 入口绑定到 EasyTier 虚拟 IP。优先绑定
    `127.0.0.1`，并避免代理链从 overlay 地址重新进入本机代理入口。
-3. 压测 QUIC/KCP/Proxy Failover 时，先临时关闭系统 TUN 或确认 EasyTier underlay
+4. 压测 QUIC/KCP/Proxy Failover 时，先临时关闭系统 TUN 或确认 EasyTier underlay
    真实走物理网卡。
-4. 触发高 CPU 后，重启 EasyTier core 和 Mihomo 可以释放当前循环状态；这只是恢复手段，
+5. 触发高 CPU 后，重启 EasyTier core 和 Mihomo 可以释放当前循环状态；这只是恢复手段，
    不是根治。
 
 ## EasyTier 侧内置 Guard

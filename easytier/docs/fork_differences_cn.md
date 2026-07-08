@@ -12,6 +12,11 @@ Stealth、Proxy、回退和 rollout 细节仍然以
 [udp_stealth_compatibility.md](udp_stealth_compatibility.md) 为准。
 与 Mihomo/Clash/sing-box TUN 共存时的 CPU 异常和复现步骤见
 [mihomo_tun_interop_cn.md](mihomo_tun_interop_cn.md)。
+2026-07-08 的远端功能和性能验证报告记录在
+[performance_validation_2026_07_08.md](performance_validation_2026_07_08.md)。
+Stealth/Secure 后续问题见
+[known_bugs/stealth_secure_known_bugs.md](known_bugs/stealth_secure_known_bugs.md)。
+v2.6.8 发布说明见 [release_notes/v2.6.8.md](release_notes/v2.6.8.md)。
 
 ## 1. 这个 Fork 修复了什么
 
@@ -80,7 +85,9 @@ Stealth、Proxy、回退和 rollout 细节仍然以
 这些差异是运维和升级时必须知道的：
 
 - 固定的 stealth `udp://` listener 不接受 legacy plain SYN 探测；旧节点主动拨 strict
-  stealth listener 时会被静默丢弃，这是设计上的 anti-probe 取舍。
+  UDP stealth listener 时会被静默丢弃，这是设计上的 anti-probe 取舍。
+  TCP strict listener 当前在一个同 secret 混合场景下不够严格，详见
+  [known_bugs/stealth_secure_known_bugs.md](known_bugs/stealth_secure_known_bugs.md)。
 - 默认 `stealth_protocols` 已列出所有支持的传输。显式把它设为空字符串时，才是
   “只保护 UDP”的兼容发布覆盖。
 - `stealth_window_secs` 是网络级参数；`0` 等价于 60 秒，同一网络中所有 stealth 节点
@@ -157,6 +164,11 @@ Stealth、Proxy、回退和 rollout 细节仍然以
 - 运行期派生的 Stealth 密钥不会作为 RoutePeerInfo 的 `noise_static_pubkey` 发布，也不会
   启用全局 RelayPeerMap/PeerManager secure relay/session 语义；这些路径仍只跟随显式
   `secure_mode`。
+- 远端验证和代码路径审计确认派生 secure 会进入 Stealth-protected PeerConn
+  secure-session 路径；不能因为吞吐接近 plain TCP 就理解成“没有加密”，也不能把它理解成
+  显式全局 `secure_mode`。
+- `secure_mode=true + stealth_mode=true` 在已测 TCP underlay 路径上存在已知吞吐回归；
+  plain Stealth 和单独显式 secure 在 2026-07-08 验证中没有同类回归。
 - 当前 GUI 只编辑 Stealth；显式 `secure_mode` 仍属于 CLI/TOML/RPC 高级配置。后续 GUI
   入口计划见 [todo/gui_global_secure_identity.md](todo/gui_global_secure_identity.md)。
 - 自定义 `--stealth-window-secs` 时，同一网络内所有 stealth 节点必须使用相同有效值。

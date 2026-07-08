@@ -134,6 +134,12 @@ cargo install --git https://github.com/EasyTier/EasyTier.git easytier
 完整清单、配置示例和兼容边界见
 [fork 差异与配置说明](easytier/docs/fork_differences_cn.md)。Stealth、Proxy、回退和
 rollout 细节仍以 [兼容性说明](easytier/docs/udp_stealth_compatibility.md) 为准。
+2026-07-08 的远端验证报告记录在
+[performance_validation_2026_07_08.md](easytier/docs/performance_validation_2026_07_08.md)；
+Stealth/Secure 后续问题见
+[stealth_secure_known_bugs.md](easytier/docs/known_bugs/stealth_secure_known_bugs.md)。
+v2.6.8 发布说明和显式 secure + Stealth 性能警告见
+[release_notes/v2.6.8.md](easytier/docs/release_notes/v2.6.8.md)。
 
 ### 常见配置坑点
 
@@ -147,6 +153,11 @@ rollout 细节仍以 [兼容性说明](easytier/docs/udp_stealth_compatibility.m
 - `--stealth-mode` 只有在 `network_secret` 非空时才真正生效；未显式配置
   `secure_mode` 时，认证密钥只在运行期派生，不会写回 TOML/RPC。密钥为空时只会告警并
   继续走 plain。
+- `stealth_mode=true` 加运行期派生 secure 已确认会进入 Stealth-protected PeerConn
+  secure session 路径，但它不等同于显式全局 `secure_mode`。比较安全语义和性能时应先看
+  验证报告。
+- `secure_mode=true + stealth_mode=true` 在已测 TCP underlay 路径上存在明确吞吐回归；
+  这是独立于 plain Stealth 和显式 secure 的 known bug。
 - 已有配置如果已经包含显式 `[secure_mode]` 段，但没有再显式写
   `stealth_mode=true`，仍会保持旧版 plain 行为。
 - `--disable-legacy-udp-hole-punch` 即使在 UDP stealth 未生效时，也仍会拒绝没有
@@ -154,8 +165,37 @@ rollout 细节仍以 [兼容性说明](easytier/docs/udp_stealth_compatibility.m
 - `--nic-backend tun|veth|auto` 只属于 CLI，默认仍为 `tun`。`auto` 只在 TUN
   设备创建失败时回退；MTU、地址或路由配置失败仍是硬错误。`veth/auto` 与
   `--no-tun` 冲突。
-- EasyTier 与 Mihomo/Clash/sing-box TUN 同时运行时，需要确认 EasyTier underlay
-  目标没有被系统 TUN 捕获。仅写代理规则 `DIRECT` 不一定能绕过 TUN；详见
+- EasyTier 与 sing-box/Mihomo/Clash/NekoBox/Throne 等系统 TUN 代理工具同时运行时，
+  必须把 EasyTier 进程从代理/TUN 路径排除。仅写代理规则 `DIRECT` 不一定能绕过
+  TUN；如果工具提供 process/route bypass、route-exclude 或等价能力，应优先使用。
+  至少把下面规则放在通用代理规则之前：
+
+  ```yaml
+  - PROCESS-NAME,io.tailscale.ipn.macsys.network-extension,DIRECT
+  - PROCESS-NAME,tailscaled,DIRECT
+  - PROCESS-NAME,tailscaled.exe,DIRECT
+  - PROCESS-NAME,tailscale,DIRECT
+  - PROCESS-NAME,tailscale.exe,DIRECT
+  - PROCESS-NAME,easytier-gui,DIRECT
+  - PROCESS-NAME,easytier-gui.exe,DIRECT
+  - PROCESS-NAME,easytier-core,DIRECT
+  - PROCESS-NAME,easytier-core.exe,DIRECT
+  - PROCESS-NAME-REGEX,(?i)^easytier(?:[-_.].*)?$,DIRECT
+  - PROCESS-NAME,easytier-*,DIRECT
+  - PROCESS-NAME,easytier-cli,DIRECT
+  - PROCESS-NAME,easytier-cli.exe,DIRECT
+  ```
+
+  `PROCESS-NAME,easytier-*` 是否生效取决于客户端是否支持进程名通配；不要只依赖这一条，
+  保留精确进程名和 regex 规则。规则列表底部、最终 `MATCH`/兜底规则之前，还应把
+  Tailscale 和 EasyTier 虚拟网段设为直连：
+
+  ```yaml
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,10.44.0.0/16,DIRECT,no-resolve
+  ```
+
+  如果 EasyTier 虚拟网段不是 `10.44.0.0/16`，替换为实际网段。详见
   [Mihomo TUN 共存风险](easytier/docs/mihomo_tun_interop_cn.md)。
 - `--underlay-candidate-guard` 过滤的是 EasyTier 对外通告/主动拨打的 underlay
   candidate，以及相关 bind-source 与 direct-UDP 路由源校验。命中 guard 的公网
@@ -288,9 +328,11 @@ sudo easytier-core -i 10.144.144.2 -p udp://第一个节点的公网IP:11010
 
 注意：开启 `--stealth-mode` 后，固定 `udp://` listener 不再接受 plain SYN 探测。
 新节点主动连接 legacy 端点时可用独立尝试回退 plain，但 legacy 节点主动连接 strict
-stealth listener 仍会被静默丢弃。默认 `--stealth-protocols` 已列出所有支持的传输；
+UDP stealth listener 仍会被静默丢弃。默认 `--stealth-protocols` 已列出所有支持的传输；
 显式清空该值才是“仅保护 UDP”的兼容覆盖。详见
-[stealth 兼容性说明](easytier/docs/udp_stealth_compatibility.md)。
+[stealth 兼容性说明](easytier/docs/udp_stealth_compatibility.md)。当前验证发现 TCP
+Stealth listener 在一个同 secret 混合场景下仍接受 plain 客户端，限制见
+[Stealth/Secure 已知问题](easytier/docs/known_bugs/stealth_secure_known_bugs.md)。
 
 3. 验证连接：
 

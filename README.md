@@ -143,7 +143,13 @@ to enable, read this first:
 Start with [fork differences and configuration notes](easytier/docs/fork_differences.md)
 for the full change list, examples, and compatibility boundaries. Stealth,
 proxy, and rollout details remain in
-[the compatibility notes](easytier/docs/udp_stealth_compatibility.md).
+[the compatibility notes](easytier/docs/udp_stealth_compatibility.md). The
+2026-07-08 remote validation report is recorded in
+[performance_validation_2026_07_08.md](easytier/docs/performance_validation_2026_07_08.md);
+known Stealth/Secure follow-up items are tracked in
+[stealth_secure_known_bugs.md](easytier/docs/known_bugs/stealth_secure_known_bugs.md).
+The v2.6.8 release notes, including the explicit secure + Stealth performance
+warning, are in [release_notes/v2.6.8.md](easytier/docs/release_notes/v2.6.8.md).
 
 ### Common Configuration Pitfalls
 
@@ -159,6 +165,13 @@ proxy, and rollout details remain in
   If no explicit `secure_mode` exists, the authentication keypair is derived at
   runtime and is not written back to TOML/RPC. An empty secret warns and stays
   plain.
+- `stealth_mode=true` with runtime-derived secure mode has been validated to
+  use the Stealth-protected PeerConn secure session path, but it is not the same
+  as explicit global `secure_mode`. See the validation report before comparing
+  security and performance modes.
+- `secure_mode=true + stealth_mode=true` currently has a known throughput
+  regression on the tested TCP underlay path. It is tracked separately from
+  plain Stealth and explicit secure mode.
 - Existing configs that already contain an explicit `[secure_mode]` section keep
   legacy plain behavior unless `stealth_mode=true` is also set explicitly.
 - `--disable-legacy-udp-hole-punch` still rejects legacy UDP hole-punch
@@ -166,10 +179,40 @@ proxy, and rollout details remain in
 - `--nic-backend tun|veth|auto` is CLI-only and defaults to `tun`. `auto`
   falls back only when the TUN device cannot be created; later MTU, address, or
   route errors remain fatal. `veth`/`auto` conflict with `--no-tun`.
-- When EasyTier coexists with Mihomo/Clash/sing-box TUN, verify that EasyTier
-  underlay destinations are not captured by the system TUN. A proxy `DIRECT`
-  rule may still pass packets through the TUN first; see
-  [Mihomo TUN interoperability risk](easytier/docs/mihomo_tun_interop.md).
+- When EasyTier coexists with sing-box/Mihomo/Clash/NekoBox/Throne or other
+  system TUN proxy tools, exclude EasyTier processes from the proxy/TUN path.
+  A proxy `DIRECT` rule may still pass packets through the TUN first, so use the
+  tool's process/route bypass when available. At minimum, put these process
+  rules before generic proxy rules:
+
+  ```yaml
+  - PROCESS-NAME,io.tailscale.ipn.macsys.network-extension,DIRECT
+  - PROCESS-NAME,tailscaled,DIRECT
+  - PROCESS-NAME,tailscaled.exe,DIRECT
+  - PROCESS-NAME,tailscale,DIRECT
+  - PROCESS-NAME,tailscale.exe,DIRECT
+  - PROCESS-NAME,easytier-gui,DIRECT
+  - PROCESS-NAME,easytier-gui.exe,DIRECT
+  - PROCESS-NAME,easytier-core,DIRECT
+  - PROCESS-NAME,easytier-core.exe,DIRECT
+  - PROCESS-NAME-REGEX,(?i)^easytier(?:[-_.].*)?$,DIRECT
+  - PROCESS-NAME,easytier-*,DIRECT
+  - PROCESS-NAME,easytier-cli,DIRECT
+  - PROCESS-NAME,easytier-cli.exe,DIRECT
+  ```
+
+  `PROCESS-NAME,easytier-*` is only useful in clients that support wildcard
+  process matching; keep the exact names and regex rules. Near the end of the
+  rule list, but before the final `MATCH`/fallback rule, also direct Tailscale
+  and the EasyTier virtual CIDR:
+
+  ```yaml
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,10.44.0.0/16,DIRECT,no-resolve
+  ```
+
+  Replace `10.44.0.0/16` with the actual EasyTier virtual network if changed.
+  See [Mihomo TUN interoperability risk](easytier/docs/mihomo_tun_interop.md).
 - `--underlay-candidate-guard` sanitizes advertised/dialed underlay candidates
   plus related bind-source and direct-UDP route-source checks. Guarded public
   IPv4 UDP direct candidates are skipped fail-closed instead of retrying
@@ -316,10 +359,13 @@ sudo easytier-core -i 10.144.144.2 -p udp://FIRST_NODE_PUBLIC_IP:11010
 
 Note: when `--stealth-mode` is enabled, a fixed `udp://` listener no longer accepts
 plain SYN probes. A new node dialing a legacy endpoint can retry plain on a fresh
-attempt, but a legacy node dialing a strict stealth listener is still silently
-dropped. The default `--stealth-protocols` lists all supported transports; an
+attempt, but a legacy node dialing a strict UDP stealth listener is still
+silently dropped. The default `--stealth-protocols` lists all supported transports; an
 explicitly empty value is a compatibility override that protects UDP only. See
 [stealth compatibility notes](easytier/docs/udp_stealth_compatibility.md).
+Current validation found that TCP Stealth listeners still accept same-secret
+plain clients in one mixed-mode scenario; track that limitation in
+[Stealth/Secure known bugs](easytier/docs/known_bugs/stealth_secure_known_bugs.md).
 
 3. Verify Connection:
 

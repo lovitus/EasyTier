@@ -97,6 +97,37 @@ SYN selector state; Mihomo TUN captures EasyTier's underlay sockets.
 - Exclude the EasyTier process or EasyTier underlay destinations at the TUN
   bypass/route-exclude layer. A plain `DIRECT` rule may still pass packets
   through the TUN first, so it may not be enough.
+- For Mihomo/Clash-style rule lists, put EasyTier and commonly co-installed
+  Tailscale process bypass rules before generic proxy rules:
+
+  ```yaml
+  - PROCESS-NAME,io.tailscale.ipn.macsys.network-extension,DIRECT
+  - PROCESS-NAME,tailscaled,DIRECT
+  - PROCESS-NAME,tailscaled.exe,DIRECT
+  - PROCESS-NAME,tailscale,DIRECT
+  - PROCESS-NAME,tailscale.exe,DIRECT
+  - PROCESS-NAME,easytier-gui,DIRECT
+  - PROCESS-NAME,easytier-gui.exe,DIRECT
+  - PROCESS-NAME,easytier-core,DIRECT
+  - PROCESS-NAME,easytier-core.exe,DIRECT
+  - PROCESS-NAME-REGEX,(?i)^easytier(?:[-_.].*)?$,DIRECT
+  - PROCESS-NAME,easytier-*,DIRECT
+  - PROCESS-NAME,easytier-cli,DIRECT
+  - PROCESS-NAME,easytier-cli.exe,DIRECT
+  ```
+
+  `PROCESS-NAME,easytier-*` depends on client wildcard support; keep the exact
+  names and regex rule. Before the final `MATCH`/fallback rule, also direct the
+  Tailscale CGNAT range and the EasyTier virtual CIDR:
+
+  ```yaml
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,10.44.0.0/16,DIRECT,no-resolve
+  ```
+
+  Replace `10.44.0.0/16` if your EasyTier virtual network is different. For
+  sing-box, NekoBox, Throne, or other clients, use equivalent process bypass and
+  route-exclude settings.
 - Do not bind local SOCKS/proxy-chain entry points to the EasyTier virtual IP.
   Prefer `127.0.0.1` and avoid sending overlay traffic back into a local proxy
   entry point.

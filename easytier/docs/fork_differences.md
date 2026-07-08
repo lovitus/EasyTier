@@ -14,6 +14,12 @@ Detailed stealth rollout notes still live in
 [udp_stealth_compatibility.md](udp_stealth_compatibility.md).
 CPU spikes and reproduction steps for Mihomo/Clash/sing-box TUN coexistence are
 documented in [mihomo_tun_interop.md](mihomo_tun_interop.md).
+The 2026-07-08 remote validation report is recorded in
+[performance_validation_2026_07_08.md](performance_validation_2026_07_08.md).
+Known Stealth/Secure follow-up items are tracked in
+[known_bugs/stealth_secure_known_bugs.md](known_bugs/stealth_secure_known_bugs.md).
+The v2.6.8 release notes are in
+[release_notes/v2.6.8.md](release_notes/v2.6.8.md).
 
 ## 1. Problems Fixed In This Fork
 
@@ -97,7 +103,10 @@ These are intentional differences from upstream behavior and need to be visible
 to operators:
 
 - A fixed stealth `udp://` listener does not accept legacy plain SYN probes.
-  Legacy nodes dialing a strict stealth listener are silently dropped by design.
+  Legacy nodes dialing a strict UDP stealth listener are silently dropped by design.
+  TCP strict listener behavior is currently less strict in one same-secret
+  mixed-mode scenario; see
+  [known_bugs/stealth_secure_known_bugs.md](known_bugs/stealth_secure_known_bugs.md).
 - The default `stealth_protocols` lists all supported transports. Explicitly
   setting it to an empty string is the rollout-compatible override that keeps
   UDP-only stealth behavior.
@@ -191,6 +200,13 @@ execution path.
 - Runtime-derived Stealth keys are not published as RoutePeerInfo
   `noise_static_pubkey` and do not enable global RelayPeerMap/PeerManager secure
   relay/session semantics. Those paths remain tied to explicit `secure_mode`.
+- Remote validation and code-path review confirmed that derived secure enters
+  the Stealth-protected PeerConn secure-session path. It should not be
+  interpreted as global explicit secure mode just because throughput is close to
+  plain TCP.
+- `secure_mode=true + stealth_mode=true` has a known throughput regression on
+  the tested TCP underlay path. Plain Stealth and explicit secure mode alone did
+  not show the same regression in the 2026-07-08 validation.
 - The current GUI edits Stealth only. Explicit `secure_mode` remains an advanced
   CLI/TOML/RPC setting; the planned GUI entry is tracked in
   [todo/gui_global_secure_identity.md](todo/gui_global_secure_identity.md).
