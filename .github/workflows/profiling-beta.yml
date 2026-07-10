@@ -1,0 +1,149 @@
+name: EasyTier Linux Profiling Beta
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/profiling-beta
+
+permissions:
+  contents: write
+
+concurrency:
+  group: easytier-linux-profiling-beta
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-musl
+  CARGO_PROFILE_RELEASE_DEBUG: "2"
+  CARGO_PROFILE_RELEASE_STRIP: none
+  RUSTFLAGS: -C force-frame-pointers=yes -C link-arg=-Wl,--build-id=sha1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build symbolized Linux profiling binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Prepare build environment
+        uses: ./.github/actions/prepare-build
+        with:
+          target: ${{ env.TARGET }}
+          gui: false
+          pnpm: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: profiling-beta
+          shared-key: linux-x86_64-musl
+          cache-targets: false
+
+      - name: Build optimized binaries with symbols
+        run: |
+          set -euo pipefail
+          cargo build \
+            --locked \
+            --release \
+            --target "$TARGET" \
+            --package easytier \
+            --bin easytier-core \
+            --bin easytier-cli \
+            --features jemalloc
+
+      - name: Verify profiling metadata
+        run: |
+          set -euo pipefail
+          core="target/$TARGET/release/easytier-core"
+          cli="target/$TARGET/release/easytier-cli"
+
+          file "$core" "$cli" | tee profiling-file-info.txt
+          readelf -n "$core" > profiling-build-id.txt
+          readelf -S "$core" > profiling-sections.txt
+          nm -n "$core" > profiling-symbols.txt
+
+          grep -q "not stripped" profiling-file-info.txt
+          grep -q "Build ID:" profiling-build-id.txt
+          grep -qE '\.debug_info|\.debug_line' profiling-sections.txt
+          test -s profiling-symbols.txt
+
+      - name: Package profiling bundle
+        run: |
+          set -euo pipefail
+          bundle="easytier-profiling-beta-linux-x86_64-musl"
+          mkdir -p "staging/$bundle" artifacts
+
+          cp "target/$TARGET/release/easytier-core" "staging/$bundle/"
+          cp "target/$TARGET/release/easytier-cli" "staging/$bundle/"
+          cp profiling-file-info.txt profiling-build-id.txt profiling-sections.txt \
+            "staging/$bundle/"
+
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "ref=$GITHUB_REF_NAME"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_number=$GITHUB_RUN_NUMBER"
+            echo "target=$TARGET"
+            rustc -Vv
+            cargo -V
+          } > "staging/$bundle/BUILD_INFO.txt"
+
+          (
+            cd "staging/$bundle"
+            sha256sum easytier-core easytier-cli > SHA256SUMS.txt
+          )
+
+          tar -C staging -czf "artifacts/$bundle.tar.gz" "$bundle"
+          sha256sum "artifacts/$bundle.tar.gz" > artifacts/SHA256SUMS.txt
+
+          {
+            echo "EasyTier rolling profiling beta"
+            echo
+            echo "Commit: $GITHUB_SHA"
+            echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "Target: $TARGET"
+            echo
+            echo "This is an optimized, unstripped profiling build with DWARF and frame pointers."
+            echo "It is not a production release."
+          } > artifacts/RELEASE_NOTES.txt
+
+          ls -lh artifacts
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: easytier-profiling-beta-linux-x86_64-musl
+          if-no-files-found: error
+          retention-days: 14
+          path: artifacts/*
+
+      - name: Roll profiling beta prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: profiling-beta
+        run: |
+          set -euo pipefail
+
+          gh release delete "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --yes 2>/dev/null || true
+          git push origin ":refs/tags/$TAG" 2>/dev/null || true
+          git tag -f "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG" --force
+
+          gh release create "$TAG" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "EasyTier Profiling Beta #$GITHUB_RUN_NUMBER" \
+            --notes-file artifacts/RELEASE_NOTES.txt \
+            --prerelease \
+            --latest=false
