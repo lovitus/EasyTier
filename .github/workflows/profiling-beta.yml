@@ -103,7 +103,10 @@ jobs:
           )
 
           tar -C staging -czf "artifacts/$bundle.tar.gz" "$bundle"
-          sha256sum "artifacts/$bundle.tar.gz" > artifacts/SHA256SUMS.txt
+          (
+            cd artifacts
+            sha256sum "$bundle.tar.gz" > SHA256SUMS.txt
+          )
 
           {
             echo "EasyTier rolling profiling beta"
