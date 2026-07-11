@@ -21,11 +21,12 @@ use std::{
     collections::HashSet,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use atomic_shim::AtomicU64;
 #[cfg(feature = "stealth-aead")]
 use std::sync::atomic::AtomicBool;
 
