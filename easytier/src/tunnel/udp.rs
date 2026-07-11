@@ -678,14 +678,20 @@ impl UdpTunnelListenerData {
         if !self.stealth.is_enabled() {
             return false;
         }
-        // open_datagram_in_place handles ALL key phases (outer AEAD in-place,
-        // outer legacy allocating, gate allocating). On success, plaintext is
-        // at buffer start with returned length.
-        if let Some(pt_len) = self
+        let outer_aead_match = self
             .sock_map
             .get(&addr)
-            .and_then(|conn| conn.stealth.open_datagram_in_place(&mut raw[..]))
-        {
+            .and_then(|conn| conn.stealth.matches_outer_aead_nonce(&raw));
+
+        // A mismatched AEAD nonce prefix cannot belong to this phase-2
+        // session. Skip the destructive in-place open so a new gate-key SYN
+        // can replace a stale connection that still owns the same address.
+        let outer_open = (outer_aead_match != Some(false)).then(|| {
+            self.sock_map
+                .get(&addr)
+                .and_then(|conn| conn.stealth.open_datagram_in_place(&mut raw[..]))
+        });
+        if let Some(Some(pt_len)) = outer_open {
             raw.truncate(pt_len);
             match get_zcpacket_from_buf(raw, false) {
                 Ok(zc)
@@ -707,10 +713,33 @@ impl UdpTunnelListenerData {
             return true;
         }
 
-        // Stealth open failed. If buffer was corrupted by AEAD open_in_place,
-        // cleartext parsing will naturally fail (invalid header). If gate path
-        // failed (legacy open doesn't modify input), buffer is intact and
-        // cleartext fallback can work for duplicate SYN.
+        // A matching AEAD nonce that fails authentication leaves the buffer in
+        // an unspecified state. Never feed it to another decoder.
+        if outer_aead_match == Some(true) {
+            return true;
+        }
+
+        if let Some(gate_plaintext) = self
+            .sock_map
+            .get(&addr)
+            .and_then(|conn| conn.stealth.open_gate_datagram(&raw))
+        {
+            match get_zcpacket_from_buf(BytesMut::from(gate_plaintext.as_slice()), false) {
+                Ok(zc)
+                    if zc
+                        .udp_tunnel_header()
+                        .is_some_and(|header| header.msg_type == UdpPacketType::Syn as u8) =>
+                {
+                    self.do_forward_one_packet_to_conn(zc, addr);
+                }
+                Ok(_) => tracing::trace!(?addr, "udp drop gate-key non-syn on phase-2 conn"),
+                Err(e) => tracing::trace!(?e, ?addr, "udp gate fallback parse error"),
+            }
+            return true;
+        }
+
+        // Outer and gate open failed without mutating the buffer. The only
+        // remaining compatibility path is a cleartext duplicate SYN.
         match get_zcpacket_from_buf(raw, false) {
             Ok(zc_packet) => {
                 if !Self::allow_cleartext_fallback_for_established_addr(&zc_packet) {
@@ -1800,8 +1829,8 @@ mod tests {
             .unwrap()
             .unwrap();
         let first_listener_state = tunnel_stealth_state(first.as_ref());
-        first_listener_state.set_outer_key_from_handshake_hash(b"phase2");
-        first_gate.set_outer_key_from_handshake_hash(b"phase2");
+        first_listener_state.set_outer_key_with_cipher(b"phase2", Some("aes-256-gcm"));
+        first_gate.set_outer_key_with_cipher(b"phase2", Some("aes-256-gcm"));
         let (mut first_recv, _first_send) = first.split();
 
         let outer_data = first_gate

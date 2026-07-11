@@ -1720,11 +1720,11 @@ enabled = true
     #[test]
     fn programmatic_flags_keep_legacy_explicit_secure_compatibility() {
         let config = TomlConfigLoader::default();
+        config.set_flags(gen_default_flags());
         config.set_secure_mode(Some(SecureModeConfig {
             enabled: true,
             ..Default::default()
         }));
-        config.set_flags(gen_default_flags());
 
         assert!(!config.get_flags().stealth_mode);
     }

@@ -752,6 +752,30 @@ impl OuterSessionState {
         }
     }
 
+    /// Classify an established AEAD datagram without attempting decryption.
+    ///
+    /// AEAD nonces carry a per-session salt in their first four bytes. A
+    /// mismatch means the packet cannot belong to the current outer session,
+    /// so listener code can safely try the gate-key reconnect path without
+    /// first corrupting the buffer through a failed in-place open.
+    pub(crate) fn matches_outer_aead_nonce(&self, buf: &[u8]) -> Option<bool> {
+        #[cfg(feature = "stealth-aead")]
+        {
+            if !matches!(*self.key_phase.read().unwrap(), OuterKeyPhase::Outer(_, _))
+                || self.outer_cipher.read().unwrap().is_none()
+            {
+                return None;
+            }
+            let prefix: [u8; 4] = buf.get(..4)?.try_into().ok()?;
+            return Some(u32::from_be_bytes(prefix) == self.nonce_salt.load(Ordering::Acquire));
+        }
+        #[cfg(not(feature = "stealth-aead"))]
+        {
+            let _ = buf;
+            None
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn set_outer_key_age_for_test(&self, age: Duration) {
         let mut phase = self.key_phase.write().unwrap();
