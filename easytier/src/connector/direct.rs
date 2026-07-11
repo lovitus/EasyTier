@@ -61,6 +61,7 @@ use url::Host;
 
 pub const DIRECT_CONNECTOR_SERVICE_ID: u32 = 1;
 pub const DIRECT_CONNECTOR_BLACKLIST_TIMEOUT_SEC: u64 = 300;
+const DIRECT_CONNECTOR_FAILURE_COOLDOWN_SEC: u64 = 30;
 const MAX_IPV6_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
 
 static TESTING: AtomicBool = AtomicBool::new(false);
@@ -388,11 +389,19 @@ impl DirectConnectorManagerData {
         }
     }
 
-    fn blacklist_direct_target(&self, dst_peer_id: PeerId, addr: &str) {
+    fn blacklist_direct_target_for(&self, dst_peer_id: PeerId, addr: &str, timeout_secs: u64) {
         self.dst_listener_blacklist.insert(
             DstListenerUrlBlackListItem(dst_peer_id, addr.to_owned()),
             (),
-            std::time::Duration::from_secs(DIRECT_CONNECTOR_BLACKLIST_TIMEOUT_SEC),
+            std::time::Duration::from_secs(timeout_secs),
+        );
+    }
+
+    fn blacklist_loop_target(&self, dst_peer_id: PeerId, addr: &str) {
+        self.blacklist_direct_target_for(
+            dst_peer_id,
+            addr,
+            DIRECT_CONNECTOR_BLACKLIST_TIMEOUT_SEC,
         );
     }
 
@@ -790,7 +799,7 @@ impl DirectConnectorManagerData {
                 .as_ref()
                 .is_err_and(DirectConnectAttemptError::is_self_loop_signal)
             {
-                self.blacklist_direct_target(dst_peer_id, &addr);
+                self.blacklist_loop_target(dst_peer_id, &addr);
                 return Err(ret.unwrap_err().into_error());
             }
 
@@ -814,7 +823,13 @@ impl DirectConnectorManagerData {
                 backoff_idx += 1;
                 continue;
             } else {
-                self.blacklist_direct_target(dst_peer_id, &addr);
+                // Ordinary reachability failures must be retried soon enough to restore a
+                // preferred transport. Self-loop signals retain the longer safety timeout.
+                self.blacklist_direct_target_for(
+                    dst_peer_id,
+                    &addr,
+                    DIRECT_CONNECTOR_FAILURE_COOLDOWN_SEC,
+                );
                 return Err(ret.unwrap_err().into_error());
             }
         }
