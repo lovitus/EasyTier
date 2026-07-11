@@ -3161,7 +3161,7 @@ pub mod tests {
 
             // R2: Direct stealth outer encryption micro-bench (gate vs outer phase)
             {
-                use crate::tunnel::stealth::{self, OuterSessionState};
+                use crate::tunnel::stealth::OuterSessionState;
 
                 let secret = "bench-secret";
                 let state = OuterSessionState::new(secret.as_bytes().to_vec(), 10);
@@ -3173,7 +3173,7 @@ pub mod tests {
                 {
                     let start = std::time::Instant::now();
                     for _ in 0..iterations {
-                        let sealed = state.seal_gate_datagram(&payload).unwrap();
+                        let _sealed = state.seal_gate_datagram(&payload).unwrap();
                     }
                     let elapsed = start.elapsed();
                     let mbps = iterations * 1400 * 8 / elapsed.as_micros().max(1) as u64;
@@ -3188,7 +3188,7 @@ pub mod tests {
 
                     let start = std::time::Instant::now();
                     for _ in 0..iterations {
-                        let sealed = state.seal_datagram(&payload).unwrap();
+                        let _sealed = state.seal_datagram(&payload).unwrap();
                     }
                     let elapsed = start.elapsed();
                     let mbps = iterations * 1400 * 8 / elapsed.as_micros().max(1) as u64;
