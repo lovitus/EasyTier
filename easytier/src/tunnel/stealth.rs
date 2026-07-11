@@ -826,6 +826,8 @@ impl OuterSessionState {
                 nonce_counter: AtomicU64::new(0),
                 nonce_salt: AtomicU32::new(0),
                 #[cfg(feature = "stealth-aead")]
+                outer_aead_enabled: AtomicBool::new(false),
+                #[cfg(feature = "stealth-aead")]
                 outer_cipher: RwLock::new(None),
                 #[cfg(feature = "stealth-aead")]
                 cipher_suite: RwLock::new(self.cipher_suite.read().unwrap().clone()),
