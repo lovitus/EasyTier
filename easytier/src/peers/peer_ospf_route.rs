@@ -2091,6 +2091,23 @@ impl SyncRouteSession {
         self.need_sync_initiator_info.store(true, Ordering::Relaxed);
     }
 
+    fn update_dst_initiator_flag(&self, is_initiator: bool) {
+        if is_initiator && self.we_are_initiator.load(Ordering::Relaxed) {
+            // Both peers can select each other after a new direct connection appears.
+            // Resolve only this pairwise conflict; filtering all candidates by peer ID
+            // would disconnect valid non-complete OSPF topologies.
+            if self.my_peer_id < self.dst_peer_id {
+                self.dst_is_initiator.store(false, Ordering::Relaxed);
+            } else {
+                self.dst_is_initiator.store(true, Ordering::Relaxed);
+                self.update_initiator_flag(false);
+            }
+            return;
+        }
+
+        self.dst_is_initiator.store(is_initiator, Ordering::Relaxed);
+    }
+
     fn has_initiator_responsibility(&self) -> bool {
         self.dst_is_initiator.load(Ordering::Relaxed)
             || self.we_are_initiator.load(Ordering::Relaxed)
@@ -3163,9 +3180,7 @@ impl PeerRouteServiceImpl {
                 } else {
                     session.rpc_tx_count.fetch_add(1, Ordering::Relaxed);
 
-                    session
-                        .dst_is_initiator
-                        .store(resp.is_initiator, Ordering::Relaxed);
+                    session.update_dst_initiator_flag(resp.is_initiator);
 
                     session.update_dst_session_id(resp.session_id);
 
@@ -3721,9 +3736,7 @@ impl RouteSessionManager {
             service_impl.route_table
         );
 
-        session
-            .dst_is_initiator
-            .store(is_initiator, Ordering::Relaxed);
+        session.update_dst_initiator_flag(is_initiator);
         let is_initiator = session.we_are_initiator.load(Ordering::Relaxed);
         let session_id = session.my_session_id.load(Ordering::Relaxed);
 
@@ -4354,6 +4367,33 @@ mod tests {
         assert!(session.need_sync_initiator_info.load(Ordering::Acquire));
         assert!(session.has_initiator_responsibility());
         assert_eq!(session.initiator_sync_in_flight.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn simultaneous_initiators_use_peer_id_to_resolve_only_the_pair() {
+        let lower = SyncRouteSession::new(1, 2);
+        lower.we_are_initiator.store(true, Ordering::Relaxed);
+        lower.update_dst_initiator_flag(true);
+        assert!(lower.we_are_initiator.load(Ordering::Relaxed));
+        assert!(!lower.dst_is_initiator.load(Ordering::Relaxed));
+
+        let higher = SyncRouteSession::new(2, 1);
+        higher.we_are_initiator.store(true, Ordering::Relaxed);
+        higher.update_dst_initiator_flag(true);
+        assert!(!higher.we_are_initiator.load(Ordering::Relaxed));
+        assert!(higher.dst_is_initiator.load(Ordering::Relaxed));
+        assert!(higher.need_sync_initiator_info.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn dst_initiator_update_preserves_non_conflicting_state() {
+        let session = SyncRouteSession::new(1, 2);
+        session.update_dst_initiator_flag(true);
+        assert!(!session.we_are_initiator.load(Ordering::Relaxed));
+        assert!(session.dst_is_initiator.load(Ordering::Relaxed));
+
+        session.update_dst_initiator_flag(false);
+        assert!(!session.dst_is_initiator.load(Ordering::Relaxed));
     }
 
     struct AuthOnlyInterface {

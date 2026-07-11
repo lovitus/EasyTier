@@ -3253,8 +3253,8 @@ pub mod tests {
             while let Some(Ok(p)) = r.next().await {
                 count += p.payload_len() as u64;
                 let elapsed_sec = now.elapsed().as_secs();
-                if elapsed_sec > 0 {
-                    bps_clone.store(count / elapsed_sec, std::sync::atomic::Ordering::Relaxed);
+                if let Some(rate) = count.checked_div(elapsed_sec) {
+                    bps_clone.store(rate, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         });

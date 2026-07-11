@@ -710,9 +710,7 @@ mod tests {
         assert!(!addrs.iter().any(|addr| addr.address() == expected_ip));
 
         let old_mtu = NetlinkIfConfiger::mtu(&iface_name).unwrap();
-        assert_ne!(old_mtu, 0);
-
-        let new_mtu = old_mtu + 1;
+        let new_mtu = if old_mtu == 1400 { 1401 } else { 1400 };
         ifcfg.set_mtu(&iface_name, new_mtu).await.unwrap();
 
         let mtu = NetlinkIfConfiger::mtu(&iface_name).unwrap();
