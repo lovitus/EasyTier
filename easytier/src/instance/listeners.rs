@@ -5,6 +5,12 @@ use std::{
     sync::{Arc, Weak},
 };
 
+#[cfg(feature = "quic")]
+use std::collections::HashSet;
+
+#[cfg(feature = "quic")]
+use crate::tunnel::quic::QuicBindMode;
+
 use anyhow::Context;
 use async_trait::async_trait;
 use tokio::task::JoinSet;
@@ -88,23 +94,7 @@ pub fn create_listener_by_url(
                 l.boxed()
             }
             #[cfg(feature = "quic")]
-            IpScheme::Quic => {
-                // QUIC reads socket_mark from global_ctx in QuicEndpointManager
-                let mut listener =
-                    tunnel::quic::QuicTunnelListener::new(l.clone(), global_ctx.clone());
-                let flags = global_ctx.get_flags();
-                let enabled = crate::common::stealth_registry::protocol_enabled(
-                    &flags,
-                    crate::common::stealth_registry::StealthProtocol::Quic,
-                );
-                listener.set_stealth(crate::tunnel::stealth::build_outer_session(
-                    global_ctx.get_network_identity().network_secret.as_deref(),
-                    enabled,
-                    global_ctx.is_secure_mode_enabled(),
-                    flags.stealth_window_secs,
-                ));
-                listener.boxed()
-            }
+            IpScheme::Quic => create_quic_listener(l, global_ctx, None),
             #[cfg(feature = "websocket")]
             IpScheme::Ws | IpScheme::Wss => {
                 let mut l = tunnel::websocket::WsTunnelListener::new(l.clone());
@@ -147,6 +137,36 @@ pub fn create_listener_by_url(
     })
 }
 
+#[cfg(feature = "quic")]
+fn create_quic_listener(
+    l: &url::Url,
+    global_ctx: ArcGlobalCtx,
+    bind_mode: Option<QuicBindMode>,
+) -> Box<dyn TunnelListener> {
+    // QUIC reads socket_mark from global_ctx in QuicEndpointManager.
+    let mut listener = if let Some(bind_mode) = bind_mode {
+        tunnel::quic::QuicTunnelListener::new_with_bind_mode(
+            l.clone(),
+            global_ctx.clone(),
+            bind_mode,
+        )
+    } else {
+        tunnel::quic::QuicTunnelListener::new(l.clone(), global_ctx.clone())
+    };
+    let flags = global_ctx.get_flags();
+    let enabled = crate::common::stealth_registry::protocol_enabled(
+        &flags,
+        crate::common::stealth_registry::StealthProtocol::Quic,
+    );
+    listener.set_stealth(crate::tunnel::stealth::build_outer_session(
+        global_ctx.get_network_identity().network_secret.as_deref(),
+        enabled,
+        global_ctx.is_secure_mode_enabled(),
+        flags.stealth_window_secs,
+    ));
+    listener.boxed()
+}
+
 pub fn is_url_host_ipv6(l: &url::Url) -> bool {
     l.host_str().is_some_and(|h| h.contains(':'))
 }
@@ -156,6 +176,67 @@ pub fn is_url_host_unspecified(l: &url::Url) -> bool {
         ip.is_unspecified()
     } else {
         false
+    }
+}
+
+#[cfg(feature = "quic")]
+#[derive(Default)]
+struct QuicListenerIndex {
+    ipv4_ports: HashSet<u16>,
+    ipv4_unspecified_ports: HashSet<u16>,
+    ipv6_ports: HashSet<u16>,
+}
+
+#[cfg(feature = "quic")]
+impl QuicListenerIndex {
+    fn from_listeners(listeners: &[url::Url]) -> Self {
+        let mut index = Self::default();
+        for listener in listeners
+            .iter()
+            .filter(|listener| listener.scheme() == "quic")
+        {
+            let Some(port) = listener.port() else {
+                continue;
+            };
+            match listener.host() {
+                Some(url::Host::Ipv4(ip)) => {
+                    index.ipv4_ports.insert(port);
+                    if ip.is_unspecified() {
+                        index.ipv4_unspecified_ports.insert(port);
+                    }
+                }
+                Some(url::Host::Ipv6(_)) => {
+                    index.ipv6_ports.insert(port);
+                }
+                Some(url::Host::Domain(_)) | None => {}
+            }
+        }
+        index
+    }
+
+    fn bind_mode(&self, listener: &url::Url) -> Option<QuicBindMode> {
+        let port = listener.port()?;
+        match listener.host()? {
+            url::Host::Ipv4(_) => Some(QuicBindMode::V4Only),
+            url::Host::Ipv6(ip)
+                if ip.is_unspecified() && port != 0 && self.ipv4_ports.contains(&port) =>
+            {
+                Some(QuicBindMode::V6Only)
+            }
+            url::Host::Ipv6(ip) if ip.is_unspecified() => Some(QuicBindMode::DualStack),
+            url::Host::Ipv6(_) => Some(QuicBindMode::V6Only),
+            url::Host::Domain(_) => None,
+        }
+    }
+
+    fn needs_ipv6_companion(&self, listener: &url::Url, enable_ipv6: bool) -> bool {
+        if !enable_ipv6 || listener.scheme() != "quic" {
+            return false;
+        }
+        let Some(port) = listener.port() else {
+            return false;
+        };
+        port != 0 && self.ipv4_unspecified_ports.contains(&port) && !self.ipv6_ports.contains(&port)
     }
 }
 
@@ -214,7 +295,12 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
         )
         .await?;
 
-        for l in self.global_ctx.config.get_listener_uris().iter() {
+        let configured_listeners = self.global_ctx.config.get_listener_uris();
+        #[cfg(feature = "quic")]
+        let quic_index = QuicListenerIndex::from_listeners(&configured_listeners);
+        let enable_ipv6 = self.global_ctx.config.get_flags().enable_ipv6;
+
+        for l in configured_listeners.iter() {
             let l = l.clone();
             let Ok(_) = create_listener_by_url(&l, self.global_ctx.clone()) else {
                 let msg = format!("failed to get listener by url: {}, maybe not supported", l);
@@ -225,17 +311,58 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
             let ctx = self.global_ctx.clone();
 
             let listener = l.clone();
+            #[cfg(feature = "quic")]
+            let quic_bind_mode = quic_index.bind_mode(&listener);
             self.add_listener(
-                move || create_listener_by_url(&listener, ctx.clone()).unwrap(),
+                move || {
+                    #[cfg(feature = "quic")]
+                    if listener.scheme() == "quic" {
+                        return create_quic_listener(&listener, ctx.clone(), quic_bind_mode);
+                    }
+                    create_listener_by_url(&listener, ctx.clone()).unwrap()
+                },
                 true,
             )
             .await?;
 
-            if self.global_ctx.config.get_flags().enable_ipv6
+            #[cfg(feature = "quic")]
+            let add_quic_ipv6_companion = quic_index.needs_ipv6_companion(&l, enable_ipv6);
+            #[cfg(not(feature = "quic"))]
+            let add_quic_ipv6_companion = false;
+
+            if l.scheme() == "quic" && enable_ipv6 && is_url_host_unspecified(&l) {
+                if l.port() == Some(0) {
+                    tracing::warn!(
+                        listener = %l,
+                        "automatic QUIC IPv6 companion requires a nonzero port"
+                    );
+                } else if add_quic_ipv6_companion {
+                    let mut ipv6_listener = l.clone();
+                    ipv6_listener
+                        .set_host(Some("[::]"))
+                        .with_context(|| format!("failed to set ipv6 host for listener: {}", l))?;
+                    let ctx = self.global_ctx.clone();
+                    self.add_listener(
+                        move || {
+                            #[cfg(feature = "quic")]
+                            {
+                                return create_quic_listener(
+                                    &ipv6_listener,
+                                    ctx.clone(),
+                                    Some(QuicBindMode::V6Only),
+                                );
+                            }
+                            #[allow(unreachable_code)]
+                            create_listener_by_url(&ipv6_listener, ctx.clone()).unwrap()
+                        },
+                        false,
+                    )
+                    .await?;
+                }
+            } else if enable_ipv6
                 && !is_url_host_ipv6(&l)
                 && is_url_host_unspecified(&l)
-                // quic enables dual-stack by default, may conflict with v4 listener
-                && l.scheme() != "quic" && l.scheme() != "faketcp"
+                && l.scheme() != "faketcp"
             {
                 let mut ipv6_listener = l.clone();
                 ipv6_listener
@@ -379,6 +506,36 @@ mod tests {
     };
 
     use super::*;
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn quic_listener_index_is_literal_only_and_port_aware() {
+        let listeners = vec![
+            "quic://0.0.0.0:21012".parse().unwrap(),
+            "quic://[::]:21012".parse().unwrap(),
+            "quic://0.0.0.0:21013".parse().unwrap(),
+            "quic://0.0.0.0:0".parse().unwrap(),
+            "quic://example.com:21014".parse().unwrap(),
+        ];
+        let index = QuicListenerIndex::from_listeners(&listeners);
+
+        assert_eq!(index.bind_mode(&listeners[0]), Some(QuicBindMode::V4Only));
+        assert_eq!(index.bind_mode(&listeners[1]), Some(QuicBindMode::V6Only));
+        assert!(!index.needs_ipv6_companion(&listeners[0], true));
+        assert!(index.needs_ipv6_companion(&listeners[2], true));
+        assert!(!index.needs_ipv6_companion(&listeners[3], true));
+        assert_eq!(index.bind_mode(&listeners[4]), None);
+        assert!(!index.needs_ipv6_companion(&listeners[4], true));
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn standalone_ipv6_unspecified_quic_listener_remains_dual_stack() {
+        let listener: url::Url = "quic://[::]:21015".parse().unwrap();
+        let index = QuicListenerIndex::from_listeners(std::slice::from_ref(&listener));
+
+        assert_eq!(index.bind_mode(&listener), Some(QuicBindMode::DualStack));
+    }
 
     #[derive(Debug)]
     struct MockListenerHandler {}

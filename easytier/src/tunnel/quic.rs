@@ -904,6 +904,34 @@ pub struct QuicEndpointManager {
     both: RwPool<Endpoint>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QuicBindMode {
+    V4Only,
+    V6Only,
+    DualStack,
+}
+
+impl QuicBindMode {
+    fn dual_stack(self) -> bool {
+        matches!(self, Self::DualStack)
+    }
+
+    fn validate_address_family(self, addr: SocketAddr) -> Result<(), TunnelError> {
+        let valid = match self {
+            Self::V4Only => addr.is_ipv4(),
+            Self::V6Only => addr.is_ipv6(),
+            Self::DualStack => addr.ip() == Ipv6Addr::UNSPECIFIED,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(TunnelError::InternalError(format!(
+                "QUIC bind mode {self:?} does not match listen address {addr}"
+            )))
+        }
+    }
+}
+
 static QUIC_ENDPOINT_MANAGER: OnceLock<QuicEndpointManager> = OnceLock::new();
 
 type QuicStealthEndpoint = (
@@ -959,6 +987,42 @@ impl QuicEndpointManager {
     ) -> Result<Endpoint, TunnelError> {
         Self::try_create_with_stealth(addr, dual_stack, socket_mark, None)
             .map(|(endpoint, _, _)| endpoint)
+    }
+
+    fn validate_server_bind(
+        endpoint: &Endpoint,
+        requested: SocketAddr,
+        bind_mode: QuicBindMode,
+    ) -> Result<(), TunnelError> {
+        let actual = match endpoint.local_addr() {
+            Ok(actual) => actual,
+            Err(error) => {
+                endpoint.close(0u32.into(), b"invalid server bind");
+                return Err(error.into());
+            }
+        };
+        let port_matches = if requested.port() == 0 {
+            actual.port() != 0
+        } else {
+            actual.port() == requested.port()
+        };
+        let ip_matches = if requested.ip().is_unspecified() {
+            match bind_mode {
+                QuicBindMode::V4Only => actual.is_ipv4(),
+                QuicBindMode::V6Only | QuicBindMode::DualStack => actual.is_ipv6(),
+            }
+        } else {
+            actual.ip() == requested.ip()
+        };
+
+        if port_matches && ip_matches {
+            return Ok(());
+        }
+
+        endpoint.close(0u32.into(), b"invalid server bind");
+        Err(TunnelError::InternalError(format!(
+            "QUIC server bind mismatch: requested={requested}, actual={actual}, mode={bind_mode:?}"
+        )))
     }
 
     fn create<F>(
@@ -1046,12 +1110,13 @@ impl QuicEndpointManager {
     fn server(
         global_ctx: &ArcGlobalCtx,
         addr: SocketAddr,
+        bind_mode: QuicBindMode,
         stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
     ) -> Result<(Endpoint, Option<Arc<QuicStealthSocket>>), TunnelError> {
         let mgr = Self::load(global_ctx);
         let socket_mark = global_ctx.config.get_flags().socket_mark;
-
-        let dual_stack = addr.ip() == Ipv6Addr::UNSPECIFIED && mgr.both.is_enabled();
+        bind_mode.validate_address_family(addr)?;
+        let dual_stack = bind_mode.dual_stack();
 
         if stealth.is_enabled() {
             let (endpoint, stealth_socket, _) = Self::try_create_with_stealth(
@@ -1060,24 +1125,19 @@ impl QuicEndpointManager {
                 socket_mark,
                 Some((stealth, None)),
             )?;
+            Self::validate_server_bind(&endpoint, addr, bind_mode)?;
             endpoint.set_server_config(Some(stealth_server_config()));
             return Ok((endpoint, stealth_socket));
         }
 
-        let (pool, endpoint) = mgr.create(socket_mark, |mgr| {
-            let dual_stack = addr.ip() == Ipv6Addr::UNSPECIFIED && mgr.both.is_enabled();
-            let pool = if addr.is_ipv4() {
-                &mgr.ipv4
-            } else if dual_stack {
-                &mgr.both
-            } else {
-                &mgr.ipv6
-            };
-            (pool, Some((addr, dual_stack)))
-        })?;
-
-        let endpoint = endpoint.expect("server endpoint creation should not return None");
+        let endpoint = Self::try_create(addr, dual_stack, socket_mark)?;
+        Self::validate_server_bind(&endpoint, addr, bind_mode)?;
         endpoint.set_server_config(Some(server_config()));
+        let pool = match bind_mode {
+            QuicBindMode::V4Only => &mgr.ipv4,
+            QuicBindMode::V6Only => &mgr.ipv6,
+            QuicBindMode::DualStack => &mgr.both,
+        };
         pool.push(endpoint.clone());
 
         Ok((endpoint, None))
@@ -1243,16 +1303,40 @@ pub struct QuicTunnelListener {
     endpoint: Option<Endpoint>,
     stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
     stealth_socket: Option<Arc<QuicStealthSocket>>,
+    bind_mode: Option<QuicBindMode>,
 }
 
 impl QuicTunnelListener {
     pub fn new(addr: url::Url, global_ctx: ArcGlobalCtx) -> Self {
+        let bind_mode = addr.host().and_then(|host| match host {
+            url::Host::Ipv4(_) => Some(QuicBindMode::V4Only),
+            url::Host::Ipv6(ip) if ip.is_unspecified() => Some(QuicBindMode::DualStack),
+            url::Host::Ipv6(_) => Some(QuicBindMode::V6Only),
+            url::Host::Domain(_) => None,
+        });
+        Self::new_inner(addr, global_ctx, bind_mode)
+    }
+
+    pub(crate) fn new_with_bind_mode(
+        addr: url::Url,
+        global_ctx: ArcGlobalCtx,
+        bind_mode: QuicBindMode,
+    ) -> Self {
+        Self::new_inner(addr, global_ctx, Some(bind_mode))
+    }
+
+    fn new_inner(
+        addr: url::Url,
+        global_ctx: ArcGlobalCtx,
+        bind_mode: Option<QuicBindMode>,
+    ) -> Self {
         QuicTunnelListener {
             addr,
             global_ctx,
             endpoint: None,
             stealth: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
             stealth_socket: None,
+            bind_mode,
         }
     }
 
@@ -1332,13 +1416,21 @@ impl Drop for QuicTunnelListener {
 impl TunnelListener for QuicTunnelListener {
     async fn listen(&mut self) -> Result<(), TunnelError> {
         let addr = SocketAddr::from_url(self.addr.clone(), IpVersion::Both).await?;
+        let bind_mode = self.bind_mode.unwrap_or_else(|| {
+            if addr.is_ipv4() {
+                QuicBindMode::V4Only
+            } else {
+                QuicBindMode::V6Only
+            }
+        });
         let (endpoint, stealth_socket) =
-            QuicEndpointManager::server(&self.global_ctx, addr, self.stealth.clone())?;
+            QuicEndpointManager::server(&self.global_ctx, addr, bind_mode, self.stealth.clone())?;
         self.addr
             .set_port(Some(endpoint.local_addr()?.port()))
             .unwrap();
         self.endpoint = Some(endpoint);
         self.stealth_socket = stealth_socket;
+        self.bind_mode = Some(bind_mode);
 
         Ok(())
     }
@@ -1542,6 +1634,73 @@ mod tests {
             Err(ConnectError::EndpointStopping)
         ));
         (endpoint, local_addr)
+    }
+
+    #[test]
+    fn quic_bind_mode_requires_matching_address_family() {
+        assert!(
+            QuicBindMode::V4Only
+                .validate_address_family("0.0.0.0:11012".parse().unwrap())
+                .is_ok()
+        );
+        assert!(
+            QuicBindMode::V6Only
+                .validate_address_family("[::1]:11012".parse().unwrap())
+                .is_ok()
+        );
+        assert!(
+            QuicBindMode::DualStack
+                .validate_address_family("[::]:11012".parse().unwrap())
+                .is_ok()
+        );
+        assert!(
+            QuicBindMode::DualStack
+                .validate_address_family("[::1]:11012".parse().unwrap())
+                .is_err()
+        );
+        assert!(
+            QuicBindMode::V6Only
+                .validate_address_family("0.0.0.0:11012".parse().unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn strict_server_bind_validation_rejects_wrong_family_and_port() {
+        RUNTIME.block_on(async {
+            let endpoint =
+                QuicEndpointManager::try_create((Ipv4Addr::LOCALHOST, 0).into(), false, None)
+                    .unwrap();
+            let actual = endpoint.local_addr().unwrap();
+            let wrong_family = SocketAddr::from((Ipv6Addr::LOCALHOST, actual.port()));
+            assert!(
+                QuicEndpointManager::validate_server_bind(
+                    &endpoint,
+                    wrong_family,
+                    QuicBindMode::V6Only,
+                )
+                .is_err()
+            );
+
+            let endpoint =
+                QuicEndpointManager::try_create((Ipv4Addr::LOCALHOST, 0).into(), false, None)
+                    .unwrap();
+            let actual = endpoint.local_addr().unwrap();
+            let wrong_port_number = if actual.port() == u16::MAX {
+                actual.port() - 1
+            } else {
+                actual.port() + 1
+            };
+            let wrong_port = SocketAddr::from((Ipv4Addr::LOCALHOST, wrong_port_number));
+            assert!(
+                QuicEndpointManager::validate_server_bind(
+                    &endpoint,
+                    wrong_port,
+                    QuicBindMode::V4Only,
+                )
+                .is_err()
+            );
+        });
     }
 
     #[test]
