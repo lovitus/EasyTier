@@ -138,7 +138,7 @@ rollout 细节仍以 [兼容性说明](easytier/docs/udp_stealth_compatibility.m
 [performance_validation_2026_07_08.md](easytier/docs/performance_validation_2026_07_08.md)；
 Stealth/Secure 后续问题见
 [stealth_secure_known_bugs.md](easytier/docs/known_bugs/stealth_secure_known_bugs.md)。
-v2.6.9 发布说明和显式 secure + Stealth 性能警告见
+v2.6.9 发布说明及 Secure/Stealth 性能与故障切换取舍见
 [release_notes/v2.6.9.md](easytier/docs/release_notes/v2.6.9.md)。
 
 ### 常见配置坑点
@@ -156,8 +156,8 @@ v2.6.9 发布说明和显式 secure + Stealth 性能警告见
 - `stealth_mode=true` 加运行期派生 secure 已确认会进入 Stealth-protected PeerConn
   secure session 路径，但它不等同于显式全局 `secure_mode`。比较安全语义和性能时应先看
   验证报告。
-- `secure_mode=true + stealth_mode=true` 在已测 TCP underlay 路径上存在明确吞吐回归；
-  这是独立于 plain Stealth 和显式 secure 的 known bug。
+- 最终候选中，显式 `secure_mode + stealth_mode` 比派生 Stealth 慢，但没有复现历史候选
+  接近 10 倍的下降；relay/foreign-network profiling 仍作为 known bug 后续跟踪。
 - 已有配置如果已经包含显式 `[secure_mode]` 段，但没有再显式写
   `stealth_mode=true`，仍会保持旧版 plain 行为。
 - `--disable-legacy-udp-hole-punch` 即使在 UDP stealth 未生效时，也仍会拒绝没有

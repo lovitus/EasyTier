@@ -148,8 +148,8 @@ proxy, and rollout details remain in
 [performance_validation_2026_07_08.md](easytier/docs/performance_validation_2026_07_08.md);
 known Stealth/Secure follow-up items are tracked in
 [stealth_secure_known_bugs.md](easytier/docs/known_bugs/stealth_secure_known_bugs.md).
-The v2.6.9 release notes, including the explicit secure + Stealth performance
-warning, are in [release_notes/v2.6.9.md](easytier/docs/release_notes/v2.6.9.md).
+The v2.6.9 release notes, including Secure/Stealth performance and failover
+tradeoffs, are in [release_notes/v2.6.9.md](easytier/docs/release_notes/v2.6.9.md).
 
 ### Common Configuration Pitfalls
 
@@ -169,9 +169,9 @@ warning, are in [release_notes/v2.6.9.md](easytier/docs/release_notes/v2.6.9.md)
   use the Stealth-protected PeerConn secure session path, but it is not the same
   as explicit global `secure_mode`. See the validation report before comparing
   security and performance modes.
-- `secure_mode=true + stealth_mode=true` currently has a known throughput
-  regression on the tested TCP underlay path. It is tracked separately from
-  plain Stealth and explicit secure mode.
+- Explicit `secure_mode + stealth_mode` measured below derived Stealth in the
+  final candidate, but the historical near-10x regression was not reproduced.
+  Relay/foreign-network profiling remains a known follow-up item.
 - Existing configs that already contain an explicit `[secure_mode]` section keep
   legacy plain behavior unless `stealth_mode=true` is also set explicitly.
 - `--disable-legacy-udp-hole-punch` still rejects legacy UDP hole-punch
