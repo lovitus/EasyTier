@@ -211,9 +211,11 @@ impl Sink<ZCPacket> for LinuxTunOffloadSink {
 
 pub(crate) fn create(
     name: Option<&str>,
-    mtu: u16,
+    mtu: u32,
     configure_up: bool,
 ) -> io::Result<(String, LinuxTunOffloadStream, LinuxTunOffloadSink)> {
+    let mtu = u16::try_from(mtu)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "TUN MTU exceeds u16"))?;
     let mut builder = tun_rs::DeviceBuilder::new()
         .mtu(mtu)
         .enable(configure_up)

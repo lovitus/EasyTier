@@ -1154,7 +1154,7 @@ impl NicCtx {
         Ok(())
     }
 
-    fn do_forward_peers_to_nic(&mut self, mut sink: Pin<Box<dyn ZCPacketSink>>) {
+    fn do_forward_peers_to_nic(&mut self, sink: Pin<Box<dyn ZCPacketSink>>) {
         self.do_forward_peers_to_nic_with_mode(sink, false);
     }
 
