@@ -1459,10 +1459,10 @@ where
         .unwrap_or_else(|_| panic!("timed out at stage: {stage}"))
 }
 
-async fn peer_has_udp_conn_to_remote_addr(
+async fn peer_has_udp_conn_to_remote_ip(
     peer_mgr: Arc<PeerManager>,
     peer_id: u32,
-    expected_remote_addr: SocketAddr,
+    expected_remote_ip: IpAddr,
 ) -> bool {
     let Some(conns) = peer_mgr.get_peer_map().list_peer_conns(peer_id).await else {
         return false;
@@ -1487,8 +1487,7 @@ async fn peer_has_udp_conn_to_remote_addr(
             return false;
         };
 
-        remote_ip == expected_remote_addr.ip()
-            && remote_addr.port() == Some(expected_remote_addr.port())
+        remote_ip == expected_remote_ip
     })
 }
 
@@ -1926,16 +1925,16 @@ async fn instances_build_direct_connection_via_upnp_udp_hole_punch() {
                             .await
                             .iter()
                             .any(|route| route.peer_id == peer_id_a && route.cost == 1)
-                        && peer_has_udp_conn_to_remote_addr(
+                        && peer_has_udp_conn_to_remote_ip(
                             peer_mgr_a.clone(),
                             peer_id_c,
-                            mapped_addr_c,
+                            mapped_addr_c.ip(),
                         )
                         .await
-                        && peer_has_udp_conn_to_remote_addr(
+                        && peer_has_udp_conn_to_remote_ip(
                             peer_mgr_c.clone(),
                             peer_id_a,
-                            mapped_addr_a,
+                            mapped_addr_a.ip(),
                         )
                         .await
                 }

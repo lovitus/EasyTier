@@ -236,7 +236,7 @@ impl NetlinkIfConfiger {
             ifr.ifr_ifru.ifru_mtu = value;
 
             // 使用ioctl获取MTU
-            if ioctl(dummy_socket.as_raw_fd(), op.try_into().unwrap(), &ifr) != 0 {
+            if ioctl(dummy_socket.as_raw_fd(), op.try_into().unwrap(), &mut ifr) != 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
         }
@@ -294,7 +294,7 @@ impl NetlinkIfConfiger {
         let socket = dummy_socket()?;
 
         unsafe {
-            if ioctl(socket.as_raw_fd(), op.try_into().unwrap(), &req) != 0 {
+            if ioctl(socket.as_raw_fd(), op.try_into().unwrap(), &mut req) != 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
             Ok(InterfaceFlags::from_bits_truncate(
