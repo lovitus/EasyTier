@@ -398,11 +398,7 @@ impl DirectConnectorManagerData {
     }
 
     fn blacklist_loop_target(&self, dst_peer_id: PeerId, addr: &str) {
-        self.blacklist_direct_target_for(
-            dst_peer_id,
-            addr,
-            DIRECT_CONNECTOR_BLACKLIST_TIMEOUT_SEC,
-        );
+        self.blacklist_direct_target_for(dst_peer_id, addr, DIRECT_CONNECTOR_BLACKLIST_TIMEOUT_SEC);
     }
 
     fn preference_satisfied(&self, dst_peer_id: PeerId, target: PreferenceKey) -> bool {
