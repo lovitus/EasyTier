@@ -246,6 +246,7 @@ pub struct VirtualNic {
     ifname: Option<String>,
     ifcfg: Arc<dyn IfConfiguerTrait + Send + Sync + 'static>,
     pending_backend: Option<NicBackend>,
+    tun_offload_enabled: bool,
 }
 
 impl Drop for VirtualNic {
@@ -281,6 +282,7 @@ impl VirtualNic {
             ifname: None,
             ifcfg: Arc::new(IfConfiger {}),
             pending_backend: None,
+            tun_offload_enabled: false,
         }
     }
 
@@ -739,6 +741,39 @@ impl VirtualNic {
     }
 
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    async fn create_preferred_tun(&mut self, configure_up: bool) -> Result<Box<dyn Tunnel>, Error> {
+        let flags = self.global_ctx.config.get_flags();
+        let mut mtu = flags.mtu;
+        if flags.enable_encryption {
+            mtu -= 20;
+        }
+        let name = (!flags.dev_name.is_empty()).then_some(flags.dev_name.as_str());
+        let offload_result = {
+            let _guard = self.global_ctx.net_ns.guard();
+            super::linux_tun_offload::create(name, mtu, configure_up)
+        };
+
+        match offload_result {
+            Ok((ifname, stream, sink)) => {
+                self.ifcfg.wait_interface_show(&ifname).await?;
+                self.ifname = Some(ifname);
+                self.tun_offload_enabled = true;
+                tracing::info!("Linux TUN GSO/GRO offload enabled");
+                Ok(Box::new(TunnelWrapper::new(stream, sink, None)))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "Linux TUN offload unavailable; falling back to legacy TUN"
+                );
+                self.tun_offload_enabled = false;
+                let dev = self.create_tun(configure_up).await?;
+                self.finish_tun_device(dev).await
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     fn tun_create_allows_auto_fallback(error: &Error) -> bool {
         let Error::TunError(tun::Error::Io(error)) = error else {
             return false;
@@ -782,8 +817,7 @@ impl VirtualNic {
                 .unwrap_or_else(|| self.global_ctx.requested_nic_backend());
             match requested {
                 NicBackend::Tun => {
-                    let dev = self.create_tun(true).await?;
-                    let tunnel = self.finish_tun_device(dev).await?;
+                    let tunnel = self.create_preferred_tun(true).await?;
                     self.pending_backend = Some(NicBackend::Tun);
                     Ok(tunnel)
                 }
@@ -792,9 +826,8 @@ impl VirtualNic {
                     self.pending_backend = Some(NicBackend::Veth);
                     Ok(tunnel)
                 }
-                NicBackend::Auto => match self.create_tun(false).await {
-                    Ok(dev) => {
-                        let tunnel = self.finish_tun_device(dev).await?;
+                NicBackend::Auto => match self.create_preferred_tun(false).await {
+                    Ok(tunnel) => {
                         self.pending_backend = Some(NicBackend::Tun);
                         Ok(tunnel)
                     }
@@ -1122,6 +1155,14 @@ impl NicCtx {
     }
 
     fn do_forward_peers_to_nic(&mut self, mut sink: Pin<Box<dyn ZCPacketSink>>) {
+        self.do_forward_peers_to_nic_with_mode(sink, false);
+    }
+
+    fn do_forward_peers_to_nic_with_mode(
+        &mut self,
+        mut sink: Pin<Box<dyn ZCPacketSink>>,
+        offload: bool,
+    ) {
         let channel = self.peer_packet_receiver.clone();
         let close_notifier = self.close_notifier.clone();
         self.tasks.spawn(async move {
@@ -1132,7 +1173,25 @@ impl NicCtx {
                     "[USER_PACKET] forward packet from peers to nic. packet: {:?}",
                     packet
                 );
-                let ret = sink.send(packet).await;
+                let ret = if offload {
+                    let mut result = sink.feed(packet).await;
+                    let mut count = 1usize;
+                    while result.is_ok() && count < 64 {
+                        match channel.try_recv() {
+                            Ok(packet) => {
+                                result = sink.feed(packet).await;
+                                count += 1;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if result.is_ok() {
+                        result = sink.flush().await;
+                    }
+                    result
+                } else {
+                    sink.send(packet).await
+                };
                 if ret.is_err() {
                     tracing::error!(?ret, "do_forward_tunnel_to_nic sink error");
                 }
@@ -1522,13 +1581,14 @@ impl NicCtx {
 
         let mut nic = self.nic.lock().await;
         nic.commit_backend()?;
+        let tun_offload_enabled = nic.tun_offload_enabled;
         self.global_ctx
             .issue_event(GlobalCtxEvent::TunDeviceReady(nic.ifname().to_string()));
         drop(nic);
 
         let (stream, sink) = tunnel.split();
         self.do_forward_nic_to_peers_task(stream)?;
-        self.do_forward_peers_to_nic(sink);
+        self.do_forward_peers_to_nic_with_mode(sink, tun_offload_enabled);
 
         Ok(())
     }

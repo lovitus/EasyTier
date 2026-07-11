@@ -14,5 +14,8 @@ pub mod virtual_nic;
 #[cfg(all(target_os = "linux", not(target_env = "ohos"), feature = "tun"))]
 mod linux_veth;
 
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), feature = "tun"))]
+mod linux_tun_offload;
+
 #[cfg(any(windows, test))]
 pub(crate) mod windows_udp_broadcast;
