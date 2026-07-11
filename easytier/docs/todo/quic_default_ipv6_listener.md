@@ -1,6 +1,6 @@
 # QUIC Default IPv6 Listener Plan
 
-Status: pending implementation and cross-platform validation.
+Status: implemented and validated for the v2.6.10 release candidate.
 
 ## Goal
 
