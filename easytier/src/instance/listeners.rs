@@ -198,17 +198,20 @@ impl QuicListenerIndex {
             let Some(port) = listener.port() else {
                 continue;
             };
-            match listener.host() {
-                Some(url::Host::Ipv4(ip)) => {
+            match listener
+                .host_str()
+                .and_then(|host| host.parse::<IpAddr>().ok())
+            {
+                Some(IpAddr::V4(ip)) => {
                     index.ipv4_ports.insert(port);
                     if ip.is_unspecified() {
                         index.ipv4_unspecified_ports.insert(port);
                     }
                 }
-                Some(url::Host::Ipv6(_)) => {
+                Some(IpAddr::V6(_)) => {
                     index.ipv6_ports.insert(port);
                 }
-                Some(url::Host::Domain(_)) | None => {}
+                None => {}
             }
         }
         index
@@ -216,16 +219,15 @@ impl QuicListenerIndex {
 
     fn bind_mode(&self, listener: &url::Url) -> Option<QuicBindMode> {
         let port = listener.port()?;
-        match listener.host()? {
-            url::Host::Ipv4(_) => Some(QuicBindMode::V4Only),
-            url::Host::Ipv6(ip)
+        match listener.host_str()?.parse::<IpAddr>().ok()? {
+            IpAddr::V4(_) => Some(QuicBindMode::V4Only),
+            IpAddr::V6(ip)
                 if ip.is_unspecified() && port != 0 && self.ipv4_ports.contains(&port) =>
             {
                 Some(QuicBindMode::V6Only)
             }
-            url::Host::Ipv6(ip) if ip.is_unspecified() => Some(QuicBindMode::DualStack),
-            url::Host::Ipv6(_) => Some(QuicBindMode::V6Only),
-            url::Host::Domain(_) => None,
+            IpAddr::V6(ip) if ip.is_unspecified() => Some(QuicBindMode::DualStack),
+            IpAddr::V6(_) => Some(QuicBindMode::V6Only),
         }
     }
 
