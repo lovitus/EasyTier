@@ -95,7 +95,7 @@ export async function saveNetworkConfig(cfg: NetworkConfig) {
 }
 
 export async function validateConfig(cfg: NetworkConfig) {
-  return await invoke<ValidateConfigResponse>('validate_config', { cfg: NetworkTypes.toBackendNetworkConfig(cfg) })
+  return await invoke<ValidateConfigResponse>('validate_config', { config: NetworkTypes.toBackendNetworkConfig(cfg) })
 }
 
 export async function getConfig(instanceId: string) {
