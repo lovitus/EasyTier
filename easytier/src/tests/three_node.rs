@@ -80,6 +80,9 @@ pub fn get_inst_config(
     config.set_netns(ns.map(|s| s.to_owned()));
     config.set_ipv4(Some(ipv4.parse().unwrap()));
     config.set_ipv6(Some(ipv6.parse().unwrap()));
+    let mut flags = config.get_flags();
+    flags.stealth_mode = false;
+    config.set_flags(flags);
     config.set_listeners(vec![
         "tcp://0.0.0.0:11010".parse().unwrap(),
         "udp://0.0.0.0:11010".parse().unwrap(),

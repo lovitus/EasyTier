@@ -20,8 +20,8 @@
 use std::{
     collections::HashSet,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc, Mutex, RwLock,
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -39,7 +39,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// stream cipher, dramatically reducing CPU usage on the data hot path.
 #[cfg(feature = "stealth-aead")]
 mod aead {
-    use ring::aead::{self, LessSafeKey, UnboundKey, AES_256_GCM, CHACHA20_POLY1305};
+    use ring::aead::{self, AES_256_GCM, CHACHA20_POLY1305, LessSafeKey, UnboundKey};
     use std::fmt;
 
     pub const NONCE_LEN: usize = 12;
@@ -675,7 +675,8 @@ impl OuterSessionState {
             if let Some(suite) = outer_cipher_suite {
                 if let Some(cipher) = aead::build(suite, &key) {
                     let salt = derive_nonce_salt(handshake_hash);
-                    self.nonce_salt.store(u32::from_be_bytes(salt), Ordering::Release);
+                    self.nonce_salt
+                        .store(u32::from_be_bytes(salt), Ordering::Release);
                     *self.outer_cipher.write().unwrap() = Some(cipher);
                     *self.cipher_suite.write().unwrap() = Some(suite.to_string());
                 }
@@ -721,7 +722,8 @@ impl OuterSessionState {
             if let Some(suite) = outer_cipher_suite {
                 if let Some(cipher) = aead::build(suite, &key) {
                     let salt = derive_nonce_salt(handshake_hash);
-                    self.nonce_salt.store(u32::from_be_bytes(salt), Ordering::Release);
+                    self.nonce_salt
+                        .store(u32::from_be_bytes(salt), Ordering::Release);
                     *self.outer_cipher.write().unwrap() = Some(cipher);
                     *self.cipher_suite.write().unwrap() = Some(suite.to_string());
                 }
@@ -792,7 +794,10 @@ impl OuterSessionState {
                 fork_with_outer_key: std::sync::atomic::AtomicBool::new(false),
             });
             #[cfg(test)]
-            if self.fork_with_outer_key.load(std::sync::atomic::Ordering::Relaxed) {
+            if self
+                .fork_with_outer_key
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 fork.set_outer_key_with_cipher(&[0xABu8; 32], Some("aes-256-gcm"));
             }
             fork
@@ -805,7 +810,8 @@ impl OuterSessionState {
     /// during the grace period.
     #[cfg(test)]
     pub fn enable_outer_key_fork_for_test(&self) {
-        self.fork_with_outer_key.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.fork_with_outer_key
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

@@ -379,14 +379,11 @@ impl PeerConn {
         let secure_mode_cfg = global_ctx.get_secure_mode_for_tunnel(stealth_protected);
         let connection_local_peer_session =
             global_ctx.is_derived_secure_mode_active_for_tunnel(stealth_protected);
-        let peer_session_payload_encryption = secure_mode_cfg
-            .as_ref()
-            .is_some_and(|cfg| cfg.enabled)
-            && !connection_local_peer_session;
-        let session_filter = PeerSessionTunnelFilter::new_with_peer(
-            my_peer_id,
-            peer_session_payload_encryption,
-        );
+        let peer_session_payload_encryption =
+            secure_mode_cfg.as_ref().is_some_and(|cfg| cfg.enabled)
+                && !connection_local_peer_session;
+        let session_filter =
+            PeerSessionTunnelFilter::new_with_peer(my_peer_id, peer_session_payload_encryption);
 
         let peer_conn_tunnel_filter = StatsRecorderTunnelFilter::new();
         let throughput = peer_conn_tunnel_filter.filter_output();
@@ -992,7 +989,9 @@ impl PeerConn {
             a_conn_id: Some(a_conn_id.into()),
             client_encryption_algorithm: self.my_encrypt_algo.clone(),
             #[cfg(feature = "stealth-aead")]
-            outer_cipher_suite: Some(crate::tunnel::stealth::preferred_outer_cipher_suite().to_string()),
+            outer_cipher_suite: Some(
+                crate::tunnel::stealth::preferred_outer_cipher_suite().to_string(),
+            ),
             #[cfg(not(feature = "stealth-aead"))]
             outer_cipher_suite: None,
         };
@@ -1068,8 +1067,7 @@ impl PeerConn {
             secret_proof_32,
             secret_digest: secret_digest.clone(),
         };
-        *self.negotiated_outer_cipher_suite.lock().unwrap() =
-            negotiated_outer_cipher_suite.clone();
+        *self.negotiated_outer_cipher_suite.lock().unwrap() = negotiated_outer_cipher_suite.clone();
 
         self.send_noise_msg(
             msg3_pb,
@@ -1808,8 +1806,8 @@ impl Drop for PeerConn {
 
 #[cfg(test)]
 pub mod tests {
-    use std::{sync::Arc, time::Duration};
     use std::sync::atomic::AtomicU64;
+    use std::{sync::Arc, time::Duration};
 
     use rand::rngs::OsRng;
 
@@ -2011,10 +2009,30 @@ pub mod tests {
         assert!(!client_a.session_filter.enabled);
         assert!(!server_a.session_filter.enabled);
 
-        let client_session_a = client_a.noise_handshake_result.as_ref().unwrap().session.clone();
-        let client_session_b = client_b.noise_handshake_result.as_ref().unwrap().session.clone();
-        let server_session_a = server_a.noise_handshake_result.as_ref().unwrap().session.clone();
-        let server_session_b = server_b.noise_handshake_result.as_ref().unwrap().session.clone();
+        let client_session_a = client_a
+            .noise_handshake_result
+            .as_ref()
+            .unwrap()
+            .session
+            .clone();
+        let client_session_b = client_b
+            .noise_handshake_result
+            .as_ref()
+            .unwrap()
+            .session
+            .clone();
+        let server_session_a = server_a
+            .noise_handshake_result
+            .as_ref()
+            .unwrap()
+            .session
+            .clone();
+        let server_session_b = server_b
+            .noise_handshake_result
+            .as_ref()
+            .unwrap()
+            .session
+            .clone();
 
         assert!(!Arc::ptr_eq(&client_session_a, &client_session_b));
         assert!(!Arc::ptr_eq(&server_session_a, &server_session_b));
@@ -3013,13 +3031,13 @@ pub mod tests {
     #[test]
     #[ignore]
     fn quic_secure_mode_bench() {
-        use crate::tunnel::quic::{QuicTunnelConnector, QuicTunnelListener};
-        use crate::tunnel::stealth;
-        use crate::tunnel::filter::{TunnelFilterChain, TunnelWithFilter};
         use crate::tunnel::common::tests::_tunnel_bench;
+        use crate::tunnel::filter::{TunnelFilterChain, TunnelWithFilter};
+        use crate::tunnel::quic::{QuicTunnelConnector, QuicTunnelListener};
         use crate::tunnel::ring::create_ring_tunnel_pair;
-        use tokio::runtime::{Builder, Runtime};
+        use crate::tunnel::stealth;
         use std::sync::LazyLock;
+        use tokio::runtime::{Builder, Runtime};
 
         static BENCH_RUNTIME: LazyLock<Runtime> =
             LazyLock::new(|| Builder::new_multi_thread().enable_all().build().unwrap());
@@ -3188,19 +3206,29 @@ pub mod tests {
         L: TunnelListener + Send + Sync + 'static,
         C: TunnelConnector + Send + Sync + 'static,
     {
-        use crate::tunnel::filter::{TunnelFilterChain, TunnelWithFilter, EmptyFilter};
+        use crate::tunnel::filter::{EmptyFilter, TunnelFilterChain, TunnelWithFilter};
         use std::time::Instant;
 
         listener.listen().await.unwrap();
 
         let root_key = PeerSession::new_root_key();
         let sender_session = Arc::new(PeerSession::new(
-            1, root_key.clone(), 1, 0,
-            "aes-256-gcm".to_string(), "aes-256-gcm".to_string(), None,
+            1,
+            root_key.clone(),
+            1,
+            0,
+            "aes-256-gcm".to_string(),
+            "aes-256-gcm".to_string(),
+            None,
         ));
         let receiver_session = Arc::new(PeerSession::new(
-            2, root_key, 1, 0,
-            "aes-256-gcm".to_string(), "aes-256-gcm".to_string(), None,
+            2,
+            root_key,
+            1,
+            0,
+            "aes-256-gcm".to_string(),
+            "aes-256-gcm".to_string(),
+            None,
         ));
 
         let c_filter = PeerSessionTunnelFilter::new_with_peer(1, true);
@@ -3226,10 +3254,7 @@ pub mod tests {
                 count += p.payload_len() as u64;
                 let elapsed_sec = now.elapsed().as_secs();
                 if elapsed_sec > 0 {
-                    bps_clone.store(
-                        count / elapsed_sec,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                    bps_clone.store(count / elapsed_sec, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         });

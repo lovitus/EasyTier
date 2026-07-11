@@ -687,15 +687,16 @@ mod tests {
     #[serial_test::serial]
     #[tokio::test]
     async fn addr_test() {
-        let _prepare_env = PrepareEnv::new();
+        let iface_name = test_iface_name("addr");
+        let _link = ScopedDummyLink::new(&iface_name);
         let ifcfg = NetlinkIfConfiger {};
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         ifcfg
-            .add_ipv4_ip(DUMMY_IFACE_NAME, "10.44.44.4".parse().unwrap(), 24)
+            .add_ipv4_ip(&iface_name, "10.44.44.4".parse().unwrap(), 24)
             .await
             .unwrap();
 
-        let addrs = NetlinkIfConfiger::list_addresses(DUMMY_IFACE_NAME).unwrap();
+        let addrs = NetlinkIfConfiger::list_addresses(&iface_name).unwrap();
         assert_eq!(addrs.len(), 1);
         assert_eq!(
             addrs[0].address(),
@@ -703,26 +704,22 @@ mod tests {
         );
         assert_eq!(addrs[0].network_length(), 24);
 
-        NetlinkIfConfiger::remove_one_ip(DUMMY_IFACE_NAME, "10.44.44.4".parse().unwrap(), 24)
-            .unwrap();
+        NetlinkIfConfiger::remove_one_ip(&iface_name, "10.44.44.4".parse().unwrap(), 24).unwrap();
 
-        let addrs = NetlinkIfConfiger::list_addresses(DUMMY_IFACE_NAME).unwrap();
+        let addrs = NetlinkIfConfiger::list_addresses(&iface_name).unwrap();
         assert_eq!(addrs.len(), 0);
 
-        let old_mtu = NetlinkIfConfiger::mtu(DUMMY_IFACE_NAME).unwrap();
+        let old_mtu = NetlinkIfConfiger::mtu(&iface_name).unwrap();
         assert_ne!(old_mtu, 0);
 
         let new_mtu = old_mtu + 1;
-        ifcfg.set_mtu(DUMMY_IFACE_NAME, new_mtu).await.unwrap();
+        ifcfg.set_mtu(&iface_name, new_mtu).await.unwrap();
 
-        let mtu = NetlinkIfConfiger::mtu(DUMMY_IFACE_NAME).unwrap();
+        let mtu = NetlinkIfConfiger::mtu(&iface_name).unwrap();
         assert_eq!(mtu, new_mtu);
 
-        ifcfg
-            .set_link_status(DUMMY_IFACE_NAME, false)
-            .await
-            .unwrap();
-        ifcfg.set_link_status(DUMMY_IFACE_NAME, true).await.unwrap();
+        ifcfg.set_link_status(&iface_name, false).await.unwrap();
+        ifcfg.set_link_status(&iface_name, true).await.unwrap();
     }
 
     #[serial_test::serial]

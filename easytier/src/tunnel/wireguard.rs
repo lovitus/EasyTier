@@ -93,19 +93,18 @@ impl WgStealthSession {
             Some(elapsed) if elapsed >= WG_STEALTH_OUTER_SEND_DELAY => {
                 self.state.open_datagram_in_place(buf)
             }
-            Some(elapsed) => {
-                self.state
-                    .open_datagram(buf)
-                    .or_else(|| {
-                        (elapsed <= WG_STEALTH_GATE_RECV_GRACE)
-                            .then(|| self.state.open_gate_datagram(buf))
-                            .flatten()
-                    })
-                    .map(|pt| {
-                        buf[..pt.len()].copy_from_slice(&pt);
-                        pt.len()
-                    })
-            }
+            Some(elapsed) => self
+                .state
+                .open_datagram(buf)
+                .or_else(|| {
+                    (elapsed <= WG_STEALTH_GATE_RECV_GRACE)
+                        .then(|| self.state.open_gate_datagram(buf))
+                        .flatten()
+                })
+                .map(|pt| {
+                    buf[..pt.len()].copy_from_slice(&pt);
+                    pt.len()
+                }),
             None => self.state.open_datagram_in_place(buf),
         }
     }
@@ -960,7 +959,9 @@ impl WgTunnelConnector {
                 } else {
                     n
                 };
-                let _ = data.handle_one_packet_from_peer(&mut sink, &buf[..pt_len]).await;
+                let _ = data
+                    .handle_one_packet_from_peer(&mut sink, &buf[..pt_len])
+                    .await;
             }
         });
 

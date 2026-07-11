@@ -344,7 +344,9 @@ impl RelayPeerMap {
             a_conn_id: Some(a_conn_id.into()),
             client_encryption_algorithm: self.global_ctx.get_flags().encryption_algorithm.clone(),
             #[cfg(feature = "stealth-aead")]
-            outer_cipher_suite: Some(crate::tunnel::stealth::preferred_outer_cipher_suite().to_string()),
+            outer_cipher_suite: Some(
+                crate::tunnel::stealth::preferred_outer_cipher_suite().to_string(),
+            ),
             #[cfg(not(feature = "stealth-aead"))]
             outer_cipher_suite: None,
         };

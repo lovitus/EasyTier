@@ -380,19 +380,18 @@ impl QuicStealthSession {
             Some(elapsed) if elapsed >= QUIC_STEALTH_OUTER_SEND_DELAY => {
                 self.state.open_datagram_in_place(buf)
             }
-            Some(elapsed) => {
-                self.state
-                    .open_datagram(buf)
-                    .or_else(|| {
-                        (elapsed <= QUIC_STEALTH_GATE_RECV_GRACE)
-                            .then(|| self.state.open_gate_datagram(buf))
-                            .flatten()
-                    })
-                    .map(|pt| {
-                        buf[..pt.len()].copy_from_slice(&pt);
-                        pt.len()
-                    })
-            }
+            Some(elapsed) => self
+                .state
+                .open_datagram(buf)
+                .or_else(|| {
+                    (elapsed <= QUIC_STEALTH_GATE_RECV_GRACE)
+                        .then(|| self.state.open_gate_datagram(buf))
+                        .flatten()
+                })
+                .map(|pt| {
+                    buf[..pt.len()].copy_from_slice(&pt);
+                    pt.len()
+                }),
             None => self.state.open_datagram_in_place(buf),
         }
     }
@@ -569,7 +568,9 @@ impl QuicStealthSocket {
         if let Some(session) = self.session(addr) {
             let pt_len = session.open_in_place(buf)?;
             if session.state.outer_key().is_some()
-                && session.outer_elapsed().map_or(true, |e| e > QUIC_STEALTH_GATE_RECV_GRACE)
+                && session
+                    .outer_elapsed()
+                    .map_or(true, |e| e > QUIC_STEALTH_GATE_RECV_GRACE)
                 && Self::is_quic_initial(&buf[..pt_len])
             {
                 return None;
@@ -1224,11 +1225,7 @@ impl QuicEndpointManager {
 
 struct ConnWrapper {
     conn: Connection,
-    stealth_cleanup: Option<(
-        Arc<QuicStealthSocket>,
-        SocketAddr,
-        Arc<QuicStealthSession>,
-    )>,
+    stealth_cleanup: Option<(Arc<QuicStealthSocket>, SocketAddr, Arc<QuicStealthSession>)>,
 }
 
 impl Drop for ConnWrapper {
@@ -1287,14 +1284,13 @@ impl QuicTunnelListener {
             .as_ref()
             .map(|session| session.state.clone());
 
-        let stealth_cleanup =
-            if let (Some(socket), Some(session)) =
-                (&self.stealth_socket, &connection_stealth_session)
-            {
-                Some((socket.clone(), remote_addr, session.clone()))
-            } else {
-                None
-            };
+        let stealth_cleanup = if let (Some(socket), Some(session)) =
+            (&self.stealth_socket, &connection_stealth_session)
+        {
+            Some((socket.clone(), remote_addr, session.clone()))
+        } else {
+            None
+        };
         let arc_conn = Arc::new(ConnWrapper {
             conn,
             stealth_cleanup,
