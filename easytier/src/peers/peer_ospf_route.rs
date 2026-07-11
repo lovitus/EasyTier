@@ -1919,6 +1919,7 @@ struct SyncRouteSession {
     dst_is_initiator: AtomicBool,
 
     need_sync_initiator_info: AtomicBool,
+    initiator_sync_in_flight: AtomicU32,
 
     rpc_tx_count: AtomicU32,
     rpc_rx_count: AtomicU32,
@@ -1949,6 +1950,7 @@ impl SyncRouteSession {
             dst_is_initiator: AtomicBool::new(false),
 
             need_sync_initiator_info: AtomicBool::new(false),
+            initiator_sync_in_flight: AtomicU32::new(0),
 
             rpc_tx_count: AtomicU32::new(0),
             rpc_rx_count: AtomicU32::new(0),
@@ -2089,6 +2091,13 @@ impl SyncRouteSession {
         self.need_sync_initiator_info.store(true, Ordering::Relaxed);
     }
 
+    fn has_initiator_responsibility(&self) -> bool {
+        self.dst_is_initiator.load(Ordering::Relaxed)
+            || self.we_are_initiator.load(Ordering::Relaxed)
+            || self.need_sync_initiator_info.load(Ordering::Relaxed)
+            || self.initiator_sync_in_flight.load(Ordering::Acquire) != 0
+    }
+
     // return whether session id is updated
     fn update_dst_session_id(&self, session_id: SessionId) {
         if session_id != self.dst_session_id.load(Ordering::Relaxed) {
@@ -2131,16 +2140,40 @@ impl SyncRouteSession {
 
     fn short_debug_string(&self) -> String {
         format!(
-            "session_dst_peer: {:?}, my_session_id: {:?}, dst_session_id: {:?}, we_are_initiator: {:?}, dst_is_initiator: {:?}, rpc_tx_count: {:?}, rpc_rx_count: {:?}, task: {:?}",
+            "session_dst_peer: {:?}, my_session_id: {:?}, dst_session_id: {:?}, we_are_initiator: {:?}, dst_is_initiator: {:?}, initiator_sync_in_flight: {:?}, rpc_tx_count: {:?}, rpc_rx_count: {:?}, task: {:?}",
             self.dst_peer_id,
             self.my_session_id,
             self.dst_session_id,
             self.we_are_initiator,
             self.dst_is_initiator,
+            self.initiator_sync_in_flight,
             self.rpc_tx_count,
             self.rpc_rx_count,
             self.task
         )
+    }
+}
+
+struct InitiatorSyncGuard {
+    session: Arc<SyncRouteSession>,
+}
+
+impl InitiatorSyncGuard {
+    fn new(session: Arc<SyncRouteSession>) -> Self {
+        session
+            .initiator_sync_in_flight
+            .fetch_add(1, Ordering::AcqRel);
+        Self { session }
+    }
+}
+
+impl Drop for InitiatorSyncGuard {
+    fn drop(&mut self) {
+        let previous = self
+            .session
+            .initiator_sync_in_flight
+            .fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "initiator sync counter underflow");
     }
 }
 
@@ -3053,9 +3086,11 @@ impl PeerRouteServiceImpl {
             session
         );
 
-        session
+        let syncs_initiator = session
             .need_sync_initiator_info
-            .store(false, Ordering::Relaxed);
+            .swap(false, Ordering::AcqRel);
+        let _initiator_sync_guard =
+            syncs_initiator.then(|| InitiatorSyncGuard::new(session.clone()));
 
         let rpc_stub = peer_rpc
             .rpc_client()
@@ -3471,11 +3506,7 @@ impl RouteSessionManager {
             // clear sessions that are neither dst_initiator or we_are_initiator.
             for peer_id in session_peers.iter() {
                 if let Some(session) = service_impl.get_session(*peer_id) {
-                    if (session.dst_is_initiator.load(Ordering::Relaxed)
-                        || session.we_are_initiator.load(Ordering::Relaxed)
-                        || session.need_sync_initiator_info.load(Ordering::Relaxed))
-                        && session.task.is_running()
-                    {
+                    if session.has_initiator_responsibility() && session.task.is_running() {
                         continue;
                     }
                     let _ = self.stop_session(*peer_id);
@@ -4255,7 +4286,8 @@ mod tests {
     };
 
     use super::{
-        NextHopInfo, PeerRoute, REMOVE_DEAD_PEER_INFO_AFTER, RouteConnInfo, SyncRouteSession,
+        InitiatorSyncGuard, NextHopInfo, PeerRoute, REMOVE_DEAD_PEER_INFO_AFTER, RouteConnInfo,
+        SyncRouteSession,
     };
     use crate::proto::common::TimestampExt;
     use crate::{
@@ -4288,6 +4320,41 @@ mod tests {
     };
     use base64::Engine as _;
     use base64::prelude::BASE64_STANDARD;
+
+    #[test]
+    fn initiator_sync_guard_tracks_overlapping_syncs() {
+        let session = Arc::new(SyncRouteSession::new(1, 2));
+        let first = InitiatorSyncGuard::new(session.clone());
+        let second = InitiatorSyncGuard::new(session.clone());
+
+        assert!(session.has_initiator_responsibility());
+        assert_eq!(session.initiator_sync_in_flight.load(Ordering::Acquire), 2);
+        drop(first);
+        assert_eq!(session.initiator_sync_in_flight.load(Ordering::Acquire), 1);
+        drop(second);
+        assert_eq!(session.initiator_sync_in_flight.load(Ordering::Acquire), 0);
+        assert!(!session.has_initiator_responsibility());
+    }
+
+    #[test]
+    fn extracting_initiator_sync_does_not_consume_a_new_update() {
+        let session = Arc::new(SyncRouteSession::new(1, 2));
+        session.update_initiator_flag(true);
+
+        assert!(
+            session
+                .need_sync_initiator_info
+                .swap(false, Ordering::AcqRel)
+        );
+        let guard = InitiatorSyncGuard::new(session.clone());
+
+        session.update_initiator_flag(false);
+        drop(guard);
+
+        assert!(session.need_sync_initiator_info.load(Ordering::Acquire));
+        assert!(session.has_initiator_responsibility());
+        assert_eq!(session.initiator_sync_in_flight.load(Ordering::Acquire), 0);
+    }
 
     struct AuthOnlyInterface {
         my_peer_id: PeerId,
