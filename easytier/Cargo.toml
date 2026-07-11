@@ -361,6 +361,7 @@ default = [
     "faketcp",
     "magic-dns",
     "zstd",
+    "stealth-aead",
 ]
 full = [
     "websocket",
@@ -375,8 +376,10 @@ full = [
     "faketcp",
     "magic-dns",
     "zstd",
+    "stealth-aead",
 ]
 wireguard = ["dep:boringtun", "dep:ring"]
+stealth-aead = ["dep:ring"]
 quic = ["dep:quinn", "dep:quinn-proto", "dep:seahash", "dep:rustls", "dep:rcgen"]
 kcp = ["dep:kcp-sys"]
 mimalloc = ["dep:mimalloc"]

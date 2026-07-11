@@ -40,6 +40,10 @@ impl SessionKey {
             peer_id,
         }
     }
+
+    pub fn peer_id(&self) -> PeerId {
+        self.peer_id
+    }
 }
 
 #[derive(Clone)]

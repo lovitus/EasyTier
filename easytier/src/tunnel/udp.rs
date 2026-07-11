@@ -671,21 +671,23 @@ impl UdpTunnelListenerData {
     }
 
     /// Open a stealth-sealed data datagram from an already-established
-    /// connection and route it. Returns `true` only when the datagram was
-    /// opened and handled here. A gate-key fallback is accepted only for SYN,
-    /// allowing same-address reconnect without reopening the phase-2 data path.
-    fn try_forward_sealed_data(&self, raw: &BytesMut, addr: SocketAddr) -> bool {
+    /// connection and route it. Returns `true` when the datagram was handled
+    /// (either as a sealed packet, a gate-key fallback, or a cleartext fallback).
+    /// Uses in-place decryption to avoid heap allocations on the hot path.
+    fn try_forward_sealed_data(&self, mut raw: BytesMut, addr: SocketAddr) -> bool {
         if !self.stealth.is_enabled() {
             return false;
         }
-        // Look up the per-connection state without holding the map guard across
-        // the re-borrow below (avoids a DashMap shard self-deadlock).
-        let opened = self
+        // open_datagram_in_place handles ALL key phases (outer AEAD in-place,
+        // outer legacy allocating, gate allocating). On success, plaintext is
+        // at buffer start with returned length.
+        if let Some(pt_len) = self
             .sock_map
             .get(&addr)
-            .and_then(|conn| conn.stealth.open_datagram(raw));
-        if let Some(plaintext) = opened {
-            match get_zcpacket_from_buf(BytesMut::from(&plaintext[..]), false) {
+            .and_then(|conn| conn.stealth.open_datagram_in_place(&mut raw[..]))
+        {
+            raw.truncate(pt_len);
+            match get_zcpacket_from_buf(raw, false) {
                 Ok(zc)
                     if zc
                         .udp_tunnel_header()
@@ -705,23 +707,27 @@ impl UdpTunnelListenerData {
             return true;
         }
 
-        let Some(plaintext) = self.stealth.open_gate_datagram(raw) else {
-            return false;
-        };
-        match get_zcpacket_from_buf(BytesMut::from(&plaintext[..]), false) {
-            Ok(zc)
-                if zc
-                    .udp_tunnel_header()
-                    .is_some_and(|header| header.msg_type == UdpPacketType::Syn as u8) =>
-            {
-                self.do_forward_one_packet_to_conn(zc, addr);
+        // Stealth open failed. If buffer was corrupted by AEAD open_in_place,
+        // cleartext parsing will naturally fail (invalid header). If gate path
+        // failed (legacy open doesn't modify input), buffer is intact and
+        // cleartext fallback can work for duplicate SYN.
+        match get_zcpacket_from_buf(raw, false) {
+            Ok(zc_packet) => {
+                if !Self::allow_cleartext_fallback_for_established_addr(&zc_packet) {
+                    tracing::trace!(
+                        ?addr,
+                        "udp drop cleartext non-syn datagram on established stealth conn"
+                    );
+                    return true;
+                }
+                self.do_forward_one_packet_to_conn(zc_packet, addr);
+                true
             }
-            Ok(zc) => {
-                tracing::trace!(?addr, ?zc, "udp drop gate-key non-SYN after phase2");
+            Err(e) => {
+                tracing::trace!(?e, ?addr, "udp cleartext fallback parse error");
+                true
             }
-            Err(e) => tracing::trace!(?e, "udp gate fallback parse error"),
         }
-        true
     }
 
     /// Once a stealth UDP connection exists for `addr`, the only cleartext
@@ -751,21 +757,8 @@ impl UdpTunnelListenerData {
             let raw = buf.split();
             let addr_has_conn = self.stealth.is_enabled() && self.sock_map.contains_key(&addr);
             if addr_has_conn {
-                if self.try_forward_sealed_data(&raw, addr) {
+                if self.try_forward_sealed_data(raw, addr) {
                     continue;
-                }
-                match get_zcpacket_from_buf(raw, false) {
-                    Ok(zc_packet) => {
-                        if !Self::allow_cleartext_fallback_for_established_addr(&zc_packet) {
-                            tracing::trace!(
-                                ?addr,
-                                "udp drop cleartext non-syn datagram on established stealth conn"
-                            );
-                            continue;
-                        }
-                        self.do_forward_one_packet_to_conn(zc_packet, addr);
-                    }
-                    Err(e) => tracing::trace!(?e, ?addr, "udp cleartext fallback parse error"),
                 }
             } else {
                 match get_zcpacket_from_buf(raw, !self.stealth.is_enabled()) {
@@ -1208,12 +1201,15 @@ impl UdpTunnelConnector {
                         break;
                     }
                 };
-                let raw = buf.split();
+                let mut raw = buf.split();
                 // Stealth: data datagrams are sealed under the per-connection
                 // outer key; open before parsing the tunnel header.
                 let parsed = if recv_stealth.is_enabled() {
-                    match recv_stealth.open_datagram(&raw) {
-                        Some(pt) => get_zcpacket_from_buf(BytesMut::from(&pt[..]), false),
+                    match recv_stealth.open_datagram_in_place(&mut raw[..]) {
+                        Some(pt_len) => {
+                            raw.truncate(pt_len);
+                            get_zcpacket_from_buf(raw, false)
+                        }
                         None => {
                             tracing::trace!(?addr, "udp connector drop unopenable datagram");
                             continue;

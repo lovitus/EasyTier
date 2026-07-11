@@ -197,23 +197,24 @@ async fn map_from_ws_message(
         return Some(Err(TunnelError::InvalidPacket(msg)));
     }
 
-    let payload = msg.into_payload();
-    let plaintext = if stealth.is_enabled() {
-        match stealth.open_datagram(payload.as_bytes()) {
-            Some(plaintext) => plaintext,
-            None => {
-                return Some(Err(TunnelError::InvalidPacket(
-                    "invalid WS stealth record".into(),
-                )));
+    if stealth.is_enabled() {
+        let mut buf = BytesMut::from(msg.into_payload());
+        match stealth.open_datagram_in_place(&mut buf[..]) {
+            Some(pt_len) => {
+                buf.truncate(pt_len);
+                Some(Ok(ZCPacket::new_from_buf(buf, ZCPacketType::DummyTunnel)))
             }
+            None => Some(Err(TunnelError::InvalidPacket(
+                "invalid WS stealth record".into(),
+            ))),
         }
     } else {
-        payload.as_bytes().to_vec()
-    };
-    Some(Ok(ZCPacket::new_from_buf(
-        BytesMut::from(plaintext.as_slice()),
-        ZCPacketType::DummyTunnel,
-    )))
+        let payload = msg.into_payload();
+        Some(Ok(ZCPacket::new_from_buf(
+            BytesMut::from(payload.as_bytes()),
+            ZCPacketType::DummyTunnel,
+        )))
+    }
 }
 
 static TRUSTED_PROXIES: LazyLock<Vec<IpNetwork>> = LazyLock::new(|| {

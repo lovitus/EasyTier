@@ -17,15 +17,19 @@ use tokio::{io::AsyncReadExt, net::TcpStream};
 use crate::tunnel::{
     FromUrl, IpVersion, SinkError, SinkItem, StreamItem, Tunnel, TunnelConnector, TunnelError,
     TunnelInfo, TunnelListener,
-    common::{StealthFramedReader, StealthTcpZCPacketToBytes, TunnelWrapper, ZCPacketToBytes},
+    common::{StealthTcpZCPacketToBytes, TunnelWrapper, ZCPacketToBytes},
     fake_tcp::netfilter::create_tun,
-    packet_def::{PEER_MANAGER_HEADER_SIZE, TCP_TUNNEL_HEADER_SIZE, ZCPacket, ZCPacketType},
+    packet_def::{
+        PEER_MANAGER_HEADER_SIZE, PacketType, TCP_TUNNEL_HEADER_SIZE, TCPTunnelHeader, ZCPacket,
+        ZCPacketType,
+    },
 };
 
 use futures::Future;
 use tokio_util::task::AbortOnDropHandle;
 
 use dashmap::DashMap;
+use zerocopy::FromBytes as _;
 
 struct IpToIfNameCache {
     ip_to_ifname: DashMap<IpAddr, (String, Option<MacAddr>)>,
@@ -698,6 +702,12 @@ enum FakeTcpStreamState {
     Closed,
 }
 
+enum FakeTcpStealthExtract {
+    NeedMore,
+    Packet(StreamItem),
+    DroppedStaleGateControl,
+}
+
 struct FakeTcpStream {
     socket: Arc<stack::Socket>,
     state: FakeTcpStreamState,
@@ -728,6 +738,88 @@ impl FakeTcpStream {
             handshake_duplicate,
         }
     }
+
+    fn is_noise_handshake_packet(plaintext: &[u8]) -> bool {
+        if plaintext.len() < TCP_TUNNEL_HEADER_SIZE + PEER_MANAGER_HEADER_SIZE {
+            return false;
+        }
+
+        let packet = ZCPacket::new_from_buf(BytesMut::from(plaintext), ZCPacketType::TCP);
+        packet.peer_manager_header().is_some_and(|hdr| {
+            hdr.packet_type == PacketType::NoiseHandshakeMsg1 as u8
+                || hdr.packet_type == PacketType::NoiseHandshakeMsg2 as u8
+                || hdr.packet_type == PacketType::NoiseHandshakeMsg3 as u8
+        })
+    }
+
+    fn extract_stealth_packet(
+        buf: &mut BytesMut,
+        max_packet_size: usize,
+        stealth: &crate::tunnel::stealth::OuterSessionState,
+    ) -> FakeTcpStealthExtract {
+        if buf.len() < TCP_TUNNEL_HEADER_SIZE {
+            return FakeTcpStealthExtract::NeedMore;
+        }
+
+        let header = TCPTunnelHeader::ref_from_prefix(&buf[..]).unwrap();
+        let sealed_len = header.len.get() as usize;
+        if sealed_len > max_packet_size + crate::tunnel::stealth::OUTER_OVERHEAD {
+            return FakeTcpStealthExtract::Packet(Err(TunnelError::InvalidPacket(
+                "sealed TCP record is too long".to_string(),
+            )));
+        }
+
+        if buf.len() < TCP_TUNNEL_HEADER_SIZE + sealed_len {
+            return FakeTcpStealthExtract::NeedMore;
+        }
+
+        let record = buf.split_to(TCP_TUNNEL_HEADER_SIZE + sealed_len);
+        let sealed = &record[TCP_TUNNEL_HEADER_SIZE..];
+        if let Some(plaintext) = stealth.open_datagram(sealed) {
+            if plaintext.len() < TCP_TUNNEL_HEADER_SIZE + PEER_MANAGER_HEADER_SIZE {
+                return FakeTcpStealthExtract::Packet(Err(TunnelError::InvalidPacket(
+                    "opened TCP record is too short".to_string(),
+                )));
+            }
+
+            return FakeTcpStealthExtract::Packet(Ok(ZCPacket::new_from_buf(
+                BytesMut::from(plaintext.as_slice()),
+                ZCPacketType::TCP,
+            )));
+        }
+
+        if let Some(plaintext) = stealth.open_gate_datagram(sealed) {
+            let packet_type = if plaintext.len()
+                >= TCP_TUNNEL_HEADER_SIZE + PEER_MANAGER_HEADER_SIZE
+            {
+                let packet =
+                    ZCPacket::new_from_buf(BytesMut::from(plaintext.as_slice()), ZCPacketType::TCP);
+                packet.peer_manager_header().map(|hdr| hdr.packet_type)
+            } else {
+                None
+            };
+            if Self::is_noise_handshake_packet(&plaintext) {
+                tracing::debug!("dropped stale FakeTCP gate-key Noise handshake duplicate");
+                return FakeTcpStealthExtract::DroppedStaleGateControl;
+            }
+            tracing::debug!(
+                sealed_len,
+                plaintext_len = plaintext.len(),
+                ?packet_type,
+                "FakeTCP stale gate-key record is not a Noise handshake duplicate"
+            );
+        } else {
+            tracing::debug!(
+                sealed_len,
+                record_prefix = ?&sealed[..sealed.len().min(8)],
+                "FakeTCP stealth record failed both outer-key and gate-key authentication"
+            );
+        }
+
+        FakeTcpStealthExtract::Packet(Err(TunnelError::InvalidPacket(
+            "TCP stealth authentication failed".to_string(),
+        )))
+    }
 }
 
 impl Stream for FakeTcpStream {
@@ -751,15 +843,16 @@ impl Stream for FakeTcpStream {
                             }
                         }
                     }
-                    if let Some(packet) =
-                        StealthFramedReader::<tokio::io::Empty>::extract_one_packet(
-                            &mut buf,
-                            2000,
-                            s.stealth.as_ref(),
-                        )
-                    {
-                        s.state = FakeTcpStreamState::ConsumingBuf(buf);
-                        return Poll::Ready(Some(packet));
+                    match Self::extract_stealth_packet(&mut buf, 2000, s.stealth.as_ref()) {
+                        FakeTcpStealthExtract::Packet(packet) => {
+                            s.state = FakeTcpStreamState::ConsumingBuf(buf);
+                            return Poll::Ready(Some(packet));
+                        }
+                        FakeTcpStealthExtract::DroppedStaleGateControl => {
+                            s.state = FakeTcpStreamState::ConsumingBuf(buf);
+                            continue;
+                        }
+                        FakeTcpStealthExtract::NeedMore => {}
                     }
 
                     let socket = s.socket.clone();

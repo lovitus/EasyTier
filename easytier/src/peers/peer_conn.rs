@@ -102,6 +102,7 @@ struct NoiseHandshakeResult {
 
     my_encrypt_algo: String,
     remote_encrypt_algo: String,
+    outer_cipher_suite: Option<String>,
 }
 
 #[derive(Clone)]
@@ -300,9 +301,11 @@ pub struct PeerConn {
     global_ctx: ArcGlobalCtx,
 
     secure_mode_cfg: Option<SecureModeConfig>,
+    connection_local_peer_session: bool,
     session_filter: PeerSessionTunnelFilter,
     noise_handshake_result: Option<NoiseHandshakeResult>,
     outer_session_state: Option<Arc<OuterSessionState>>,
+    negotiated_outer_cipher_suite: StdMutex<Option<String>>,
 
     tunnel: Arc<Mutex<Box<dyn Any + Send + 'static>>>,
     sink: MpscTunnelSender,
@@ -370,17 +373,19 @@ impl PeerConn {
         let tunnel_info = tunnel.info();
         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
 
-        let secure_mode_cfg = global_ctx.get_secure_mode_for_tunnel(
-            outer_session_state
-                .as_ref()
-                .is_some_and(|state| state.is_enabled()),
-        );
+        let stealth_protected = outer_session_state
+            .as_ref()
+            .is_some_and(|state| state.is_enabled());
+        let secure_mode_cfg = global_ctx.get_secure_mode_for_tunnel(stealth_protected);
+        let connection_local_peer_session =
+            global_ctx.is_derived_secure_mode_active_for_tunnel(stealth_protected);
+        let peer_session_payload_encryption = secure_mode_cfg
+            .as_ref()
+            .is_some_and(|cfg| cfg.enabled)
+            && !connection_local_peer_session;
         let session_filter = PeerSessionTunnelFilter::new_with_peer(
             my_peer_id,
-            secure_mode_cfg
-                .as_ref()
-                .map(|cfg| cfg.enabled)
-                .unwrap_or(false),
+            peer_session_payload_encryption,
         );
 
         let peer_conn_tunnel_filter = StatsRecorderTunnelFilter::new();
@@ -402,9 +407,11 @@ impl PeerConn {
             global_ctx,
 
             secure_mode_cfg,
+            connection_local_peer_session,
             session_filter,
             noise_handshake_result: None,
             outer_session_state,
+            negotiated_outer_cipher_suite: StdMutex::new(None),
 
             tunnel: Arc::new(hotpath::mutex!(tokio::sync::Mutex::new(Box::new(
                 guard!([mut mpsc_tunnel] mpsc_tunnel.close()),
@@ -438,6 +445,97 @@ impl PeerConn {
 
     fn get_peer_session_store(&self) -> &Arc<PeerSessionStore> {
         &self.peer_session_store
+    }
+
+    fn existing_session_generation(&self, key: &SessionKey) -> Option<u32> {
+        if self.connection_local_peer_session {
+            None
+        } else {
+            self.get_peer_session_store()
+                .get(key)
+                .map(|session| session.session_generation())
+        }
+    }
+
+    fn upsert_responder_session(
+        &self,
+        key: &SessionKey,
+        a_session_generation: Option<u32>,
+        send_algorithm: String,
+        recv_algorithm: String,
+        peer_static_pubkey: Option<[u8; 32]>,
+    ) -> Result<UpsertResponderSessionReturn, anyhow::Error> {
+        if !self.connection_local_peer_session {
+            return self.get_peer_session_store().upsert_responder_session(
+                key,
+                a_session_generation,
+                send_algorithm,
+                recv_algorithm,
+                peer_static_pubkey,
+            );
+        }
+
+        let root_key = PeerSession::new_root_key();
+        let session_generation = 1u32;
+        let initial_epoch = 0u32;
+        let session = Arc::new(PeerSession::new(
+            key.peer_id(),
+            root_key,
+            session_generation,
+            initial_epoch,
+            send_algorithm,
+            recv_algorithm,
+            peer_static_pubkey,
+        ));
+        Ok(UpsertResponderSessionReturn {
+            session,
+            action: PeerSessionAction::Create,
+            session_generation,
+            root_key: Some(root_key),
+            initial_epoch,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_initiator_session_action(
+        &self,
+        key: &SessionKey,
+        action: PeerSessionAction,
+        b_session_generation: u32,
+        root_key_32: Option<[u8; 32]>,
+        initial_epoch: u32,
+        send_algorithm: String,
+        recv_algorithm: String,
+        peer_static_pubkey: Option<[u8; 32]>,
+    ) -> Result<Arc<PeerSession>, anyhow::Error> {
+        if !self.connection_local_peer_session {
+            return self.get_peer_session_store().apply_initiator_action(
+                key,
+                action,
+                b_session_generation,
+                root_key_32,
+                initial_epoch,
+                send_algorithm,
+                recv_algorithm,
+                peer_static_pubkey,
+            );
+        }
+
+        if matches!(action, PeerSessionAction::Join) {
+            return Err(anyhow::anyhow!(
+                "connection-local peer session cannot join a global session"
+            ));
+        }
+        let root_key = root_key_32.ok_or_else(|| anyhow::anyhow!("missing root_key"))?;
+        Ok(Arc::new(PeerSession::new(
+            key.peer_id(),
+            root_key,
+            b_session_generation,
+            initial_epoch,
+            send_algorithm,
+            recv_algorithm,
+            peer_static_pubkey,
+        )))
     }
 
     pub fn is_secure_mode_enabled(&self) -> bool {
@@ -739,7 +837,13 @@ impl PeerConn {
         if packet_type as u8 == PacketType::NoiseHandshakeMsg3 as u8
             && let Some(state) = self.outer_session_state.as_ref()
         {
-            state.promote_outer_key_after_next_seal(hs.get_handshake_hash());
+            state.promote_outer_key_with_cipher(
+                hs.get_handshake_hash(),
+                self.negotiated_outer_cipher_suite
+                    .lock()
+                    .unwrap()
+                    .as_deref(),
+            );
         }
         let mut pkt = ZCPacket::new_with_payload(&msg[..msg_len]);
         pkt.fill_peer_manager_hdr(self.my_peer_id, remote_peer_id, packet_type as u8);
@@ -873,13 +977,12 @@ impl PeerConn {
         let (local_private_key, local_static_pubkey) = self.get_keypair()?;
 
         let network = self.global_ctx.get_network_identity();
-        let a_session_generation = self
-            .peer_id_hint
-            .and_then(|peer_id| {
-                self.get_peer_session_store()
-                    .get(&SessionKey::new(network.network_name.clone(), peer_id))
-            })
-            .map(|s| s.session_generation());
+        let a_session_generation = self.peer_id_hint.and_then(|peer_id| {
+            self.existing_session_generation(&SessionKey::new(
+                network.network_name.clone(),
+                peer_id,
+            ))
+        });
 
         let a_conn_id = uuid::Uuid::new_v4();
         let msg1_pb = PeerConnNoiseMsg1Pb {
@@ -888,6 +991,10 @@ impl PeerConn {
             a_session_generation,
             a_conn_id: Some(a_conn_id.into()),
             client_encryption_algorithm: self.my_encrypt_algo.clone(),
+            #[cfg(feature = "stealth-aead")]
+            outer_cipher_suite: Some(crate::tunnel::stealth::preferred_outer_cipher_suite().to_string()),
+            #[cfg(not(feature = "stealth-aead"))]
+            outer_cipher_suite: None,
         };
 
         let mut hs = builder
@@ -932,6 +1039,7 @@ impl PeerConn {
             .map_err(|_| Error::WaitRespError("invalid session action".to_owned()))?;
         let remote_network_name = msg2_pb.b_network_name.clone();
         let remote_sent_secret_proof = msg2_pb.secret_proof_32.is_some();
+        let negotiated_outer_cipher_suite = msg2_pb.outer_cipher_suite.clone();
 
         if remote_network_name == network.network_name && msg2_pb.role_hint != 1 {
             return Err(Error::WaitRespError(
@@ -960,6 +1068,9 @@ impl PeerConn {
             secret_proof_32,
             secret_digest: secret_digest.clone(),
         };
+        *self.negotiated_outer_cipher_suite.lock().unwrap() =
+            negotiated_outer_cipher_suite.clone();
+
         self.send_noise_msg(
             msg3_pb,
             PacketType::NoiseHandshakeMsg3,
@@ -1020,7 +1131,7 @@ impl PeerConn {
             PeerConnSessionActionPb::Sync => PeerSessionAction::Sync,
             PeerConnSessionActionPb::Create => PeerSessionAction::Create,
         };
-        let session = self.get_peer_session_store().apply_initiator_action(
+        let session = self.apply_initiator_session_action(
             &SessionKey::new(network.network_name.clone(), remote_peer_id),
             session_action,
             msg2_pb.b_session_generation,
@@ -1046,6 +1157,7 @@ impl PeerConn {
 
             my_encrypt_algo: self.my_encrypt_algo.clone(),
             remote_encrypt_algo: msg2_pb.server_encryption_algorithm.clone(),
+            outer_cipher_suite: negotiated_outer_cipher_suite,
         })
     }
 
@@ -1164,7 +1276,7 @@ impl PeerConn {
             session_generation: b_session_generation,
             root_key: root_key_32,
             initial_epoch,
-        } = self.get_peer_session_store().upsert_responder_session(
+        } = self.upsert_responder_session(
             &SessionKey::new(remote_network_name.clone(), remote_peer_id),
             msg1_pb.a_session_generation,
             algo.clone(),
@@ -1173,6 +1285,7 @@ impl PeerConn {
         )?;
 
         let b_conn_id = uuid::Uuid::new_v4();
+        let server_outer_cipher_suite = msg1_pb.outer_cipher_suite.clone();
         let msg2_pb = PeerConnNoiseMsg2Pb {
             b_network_name: server_network_name,
             role_hint,
@@ -1188,6 +1301,7 @@ impl PeerConn {
             a_conn_id_echo: msg1_pb.a_conn_id,
             secret_proof_32,
             server_encryption_algorithm: algo,
+            outer_cipher_suite: server_outer_cipher_suite.clone(),
         };
         self.send_noise_msg(
             msg2_pb,
@@ -1281,6 +1395,7 @@ impl PeerConn {
 
             my_encrypt_algo: self.my_encrypt_algo.clone(),
             remote_encrypt_algo: msg1_pb.client_encryption_algorithm.clone(),
+            outer_cipher_suite: server_outer_cipher_suite,
         })
     }
 
@@ -1370,7 +1485,10 @@ impl PeerConn {
             self.noise_handshake_result.as_ref(),
         ) && state.is_enabled()
         {
-            state.set_outer_key_from_handshake_hash(&noise.handshake_hash);
+            state.set_outer_key_with_cipher(
+                &noise.handshake_hash,
+                noise.outer_cipher_suite.as_deref(),
+            );
         }
     }
 
@@ -1691,6 +1809,7 @@ impl Drop for PeerConn {
 #[cfg(test)]
 pub mod tests {
     use std::{sync::Arc, time::Duration};
+    use std::sync::atomic::AtomicU64;
 
     use rand::rngs::OsRng;
 
@@ -1711,6 +1830,7 @@ pub mod tests {
         ring::{RingSink, RingStream, RingTunnel, create_ring_tunnel_pair},
         udp::{UdpTunnelConnector, UdpTunnelListener},
     };
+    use futures::SinkExt;
     use tokio_util::task::AbortOnDropHandle;
 
     pub fn set_secure_mode_cfg(global_ctx: &GlobalCtx, enabled: bool) {
@@ -1805,6 +1925,109 @@ pub mod tests {
         let server_outer_key = server.outer_session_state().unwrap().outer_key();
         assert!(client_outer_key.is_some());
         assert_eq!(client_outer_key, server_outer_key);
+    }
+
+    fn attach_stealth_state(tunnel: Box<dyn Tunnel>) -> Box<dyn Tunnel> {
+        let info = tunnel.info();
+        let (stream, sink) = tunnel.split();
+        Box::new(TunnelWrapper::new_with_associate_data(
+            stream,
+            sink,
+            info,
+            Some(Box::new(crate::tunnel::stealth::build_outer_session(
+                Some("sec1"),
+                true,
+                true,
+                0,
+            ))),
+        ))
+    }
+
+    async fn handshake_derived_stealth_pair(
+        client_ctx: ArcGlobalCtx,
+        server_ctx: ArcGlobalCtx,
+        store: Arc<PeerSessionStore>,
+        client_peer_id: PeerId,
+        server_peer_id: PeerId,
+    ) -> (PeerConn, PeerConn) {
+        let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
+        let mut client = PeerConn::new(
+            client_peer_id,
+            client_ctx,
+            attach_stealth_state(client_tunnel),
+            store.clone(),
+        );
+        let mut server = PeerConn::new(
+            server_peer_id,
+            server_ctx,
+            attach_stealth_state(server_tunnel),
+            store,
+        );
+        assert!(client.connection_local_peer_session);
+        assert!(server.connection_local_peer_session);
+
+        let (client_ret, server_ret) = tokio::join!(
+            client.do_handshake_as_client(),
+            server.do_handshake_as_server()
+        );
+        client_ret.unwrap();
+        server_ret.unwrap();
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn derived_stealth_peer_sessions_are_connection_local() {
+        let client_ctx = get_mock_global_ctx();
+        let server_ctx = get_mock_global_ctx();
+        for ctx in [&client_ctx, &server_ctx] {
+            let mut flags = ctx.get_flags();
+            flags.stealth_mode = true;
+            ctx.set_flags(flags);
+            ctx.config
+                .set_network_identity(NetworkIdentity::new("net1".to_owned(), "sec1".to_owned()));
+            assert!(ctx.config.get_secure_mode().is_none());
+        }
+
+        let client_peer_id = new_peer_id();
+        let server_peer_id = new_peer_id();
+        let store = Arc::new(PeerSessionStore::new());
+        let (client_a, server_a) = handshake_derived_stealth_pair(
+            client_ctx.clone(),
+            server_ctx.clone(),
+            store.clone(),
+            client_peer_id,
+            server_peer_id,
+        )
+        .await;
+        let (client_b, server_b) = handshake_derived_stealth_pair(
+            client_ctx,
+            server_ctx,
+            store.clone(),
+            client_peer_id,
+            server_peer_id,
+        )
+        .await;
+
+        assert!(!client_a.session_filter.enabled);
+        assert!(!server_a.session_filter.enabled);
+
+        let client_session_a = client_a.noise_handshake_result.as_ref().unwrap().session.clone();
+        let client_session_b = client_b.noise_handshake_result.as_ref().unwrap().session.clone();
+        let server_session_a = server_a.noise_handshake_result.as_ref().unwrap().session.clone();
+        let server_session_b = server_b.noise_handshake_result.as_ref().unwrap().session.clone();
+
+        assert!(!Arc::ptr_eq(&client_session_a, &client_session_b));
+        assert!(!Arc::ptr_eq(&server_session_a, &server_session_b));
+        assert!(
+            store
+                .get(&SessionKey::new("net1".to_owned(), server_peer_id))
+                .is_none()
+        );
+        assert!(
+            store
+                .get(&SessionKey::new("net1".to_owned(), client_peer_id))
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -2776,5 +2999,416 @@ pub mod tests {
         // Server should reject the revoked credential
         assert!(s_ret.is_err(), "server should reject revoked credential");
         let _ = c_ret;
+    }
+
+    /// Benchmark: measure PeerSessionTunnelFilter overhead on QUIC and ring tunnels.
+    ///
+    /// Tests scenarios with proper filter chain:
+    /// - B0: QUIC plain (no stealth, no secure) — baseline QUIC throughput
+    /// - B5: QUIC + stealth outer — stealth single-layer encryption
+    /// - R0: Ring tunnel plain — in-process baseline (no network)
+    /// - R1: Ring + PeerSessionTunnelFilter — isolates filter overhead
+    ///
+    /// Run with: cargo test --release --package easytier --lib -- peers::peer_conn::tests::quic_secure_mode_bench -- --nocapture --ignored
+    #[test]
+    #[ignore]
+    fn quic_secure_mode_bench() {
+        use crate::tunnel::quic::{QuicTunnelConnector, QuicTunnelListener};
+        use crate::tunnel::stealth;
+        use crate::tunnel::filter::{TunnelFilterChain, TunnelWithFilter};
+        use crate::tunnel::common::tests::_tunnel_bench;
+        use crate::tunnel::ring::create_ring_tunnel_pair;
+        use tokio::runtime::{Builder, Runtime};
+        use std::sync::LazyLock;
+
+        static BENCH_RUNTIME: LazyLock<Runtime> =
+            LazyLock::new(|| Builder::new_multi_thread().enable_all().build().unwrap());
+
+        BENCH_RUNTIME.block_on(async {
+            // ===== QUIC scenarios using _tunnel_bench (10s each) =====
+
+            // B0: QUIC plain
+            {
+                let listener =
+                    QuicTunnelListener::new("quic://[::]:31050".parse().unwrap(), get_mock_global_ctx());
+                let connector =
+                    QuicTunnelConnector::new("quic://127.0.0.1:31050".parse().unwrap(), get_mock_global_ctx());
+                println!("\n=== B0: QUIC plain ===");
+                _tunnel_bench(listener, connector).await;
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // B5: QUIC + stealth outer (gate phase — no Noise handshake in benchmark)
+            {
+                let secret = "bench-secret";
+                let stealth_state = stealth::build_outer_session(Some(secret), true, true, 0);
+
+                let mut listener =
+                    QuicTunnelListener::new("quic://[::]:31052".parse().unwrap(), get_mock_global_ctx());
+                listener.set_stealth(stealth_state.clone());
+                let mut connector =
+                    QuicTunnelConnector::new("quic://127.0.0.1:31052".parse().unwrap(), get_mock_global_ctx());
+                connector.set_stealth_candidate(stealth_state.clone());
+                crate::tunnel::TunnelConnector::require_stealth(&mut connector);
+                println!("\n=== B5: QUIC + stealth outer (gate phase) ===");
+                _tunnel_bench(listener, connector).await;
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // B6: QUIC + stealth outer (AEAD phase)
+            // Uses fork_with_outer_key so both sides start with outer key pre-set.
+            // seal() uses gate key for first ~1s (QUIC_STEALTH_OUTER_SEND_DELAY),
+            // then switches to outer AEAD. open() tries outer first, falls back to gate.
+            // The 10s bench measures ~1s gate + ~9s AEAD.
+            {
+                let secret = "bench-secret";
+                let stealth_state = stealth::build_outer_session(Some(secret), true, true, 0);
+                stealth_state.enable_outer_key_fork_for_test();
+
+                let mut listener =
+                    QuicTunnelListener::new("quic://[::]:31054".parse().unwrap(), get_mock_global_ctx());
+                listener.set_stealth(stealth_state.clone());
+                let mut connector =
+                    QuicTunnelConnector::new("quic://127.0.0.1:31054".parse().unwrap(), get_mock_global_ctx());
+                connector.set_stealth_candidate(stealth_state.clone());
+                crate::tunnel::TunnelConnector::require_stealth(&mut connector);
+                println!("\n=== B6: QUIC + stealth outer (AEAD phase) ===");
+                _tunnel_bench(listener, connector).await;
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // B7: QUIC + stealth outer AEAD + PeerSessionTunnelFilter (S3 simulation)
+            // Full S3 data path: stealth outer AEAD encryption + PeerSession encryption.
+            {
+                let secret = "bench-secret";
+                let stealth_state = stealth::build_outer_session(Some(secret), true, true, 0);
+                stealth_state.enable_outer_key_fork_for_test();
+
+                let mut listener =
+                    QuicTunnelListener::new("quic://[::]:31056".parse().unwrap(), get_mock_global_ctx());
+                listener.set_stealth(stealth_state.clone());
+                let mut connector =
+                    QuicTunnelConnector::new("quic://127.0.0.1:31056".parse().unwrap(), get_mock_global_ctx());
+                connector.set_stealth_candidate(stealth_state.clone());
+                crate::tunnel::TunnelConnector::require_stealth(&mut connector);
+
+                println!("\n=== B7: QUIC + stealth outer (AEAD) + PeerSessionTunnelFilter (S3) ===");
+                _tunnel_bench_s3(listener, connector).await;
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // ===== Ring tunnel scenarios to isolate PeerSessionTunnelFilter overhead =====
+
+            // R0: Ring tunnel plain (in-process baseline)
+            {
+                let (client, server) = create_ring_tunnel_pair();
+                println!("\n=== R0: Ring tunnel plain ===");
+                run_ring_bench("R0 ring-plain", client, server, 1400, 100_000).await;
+            }
+
+            // R1: Ring + PeerSessionTunnelFilter
+            {
+                let (client, server) = create_ring_tunnel_pair();
+
+                let root_key = PeerSession::new_root_key();
+                let sender_session = Arc::new(PeerSession::new(
+                    1, root_key.clone(), 1, 0,
+                    "aes-256-gcm".to_string(), "aes-256-gcm".to_string(), None,
+                ));
+                let receiver_session = Arc::new(PeerSession::new(
+                    2, root_key, 1, 0,
+                    "aes-256-gcm".to_string(), "aes-256-gcm".to_string(), None,
+                ));
+
+                let c_filter = PeerSessionTunnelFilter::new_with_peer(1, true);
+                c_filter.set_peer_id(2);
+                c_filter.set_session(sender_session);
+                let c_chain = TunnelFilterChain::new(c_filter, crate::tunnel::filter::EmptyFilter);
+
+                let s_filter = PeerSessionTunnelFilter::new_with_peer(2, true);
+                s_filter.set_peer_id(1);
+                s_filter.set_session(receiver_session);
+                let s_chain = TunnelFilterChain::new(s_filter, crate::tunnel::filter::EmptyFilter);
+
+                let client = Box::new(TunnelWithFilter::new(client, c_chain));
+                let server = Box::new(TunnelWithFilter::new(server, s_chain));
+
+                println!("\n=== R1: Ring + PeerSessionTunnelFilter ===");
+                run_ring_bench("R1 ring+filter", client, server, 1400, 100_000).await;
+            }
+
+            // R2: Direct stealth outer encryption micro-bench (gate vs outer phase)
+            {
+                use crate::tunnel::stealth::{self, OuterSessionState};
+
+                let secret = "bench-secret";
+                let state = OuterSessionState::new(secret.as_bytes().to_vec(), 10);
+
+                let payload = vec![0xABu8; 1400];
+                let iterations = 100_000u64;
+
+                // Gate phase
+                {
+                    let start = std::time::Instant::now();
+                    for _ in 0..iterations {
+                        let sealed = state.seal_gate_datagram(&payload).unwrap();
+                    }
+                    let elapsed = start.elapsed();
+                    let mbps = iterations * 1400 * 8 / elapsed.as_micros().max(1) as u64;
+                    println!("[R2 gate-seal] {} iters x 1400B | time: {:.3}s | {:.2} Gbps (one-way, no recv)",
+                        iterations, elapsed.as_secs_f64(), mbps as f64 / 1000.0);
+                }
+
+                // Outer phase (AEAD)
+                {
+                    let dummy_hash = [0xABu8; 32];
+                    state.set_outer_key_with_cipher(&dummy_hash, Some("aes-256-gcm"));
+
+                    let start = std::time::Instant::now();
+                    for _ in 0..iterations {
+                        let sealed = state.seal_datagram(&payload).unwrap();
+                    }
+                    let elapsed = start.elapsed();
+                    let mbps = iterations * 1400 * 8 / elapsed.as_micros().max(1) as u64;
+                    println!("[R2 outer-seal] {} iters x 1400B | time: {:.3}s | {:.2} Gbps (one-way, no recv)",
+                        iterations, elapsed.as_secs_f64(), mbps as f64 / 1000.0);
+                }
+            }
+        });
+    }
+
+    /// S3 benchmark: like _tunnel_bench but wraps both tunnels with
+    /// PeerSessionTunnelFilter and sends packets with PeerManagerHeader.
+    async fn _tunnel_bench_s3<L, C>(mut listener: L, mut connector: C)
+    where
+        L: TunnelListener + Send + Sync + 'static,
+        C: TunnelConnector + Send + Sync + 'static,
+    {
+        use crate::tunnel::filter::{TunnelFilterChain, TunnelWithFilter, EmptyFilter};
+        use std::time::Instant;
+
+        listener.listen().await.unwrap();
+
+        let root_key = PeerSession::new_root_key();
+        let sender_session = Arc::new(PeerSession::new(
+            1, root_key.clone(), 1, 0,
+            "aes-256-gcm".to_string(), "aes-256-gcm".to_string(), None,
+        ));
+        let receiver_session = Arc::new(PeerSession::new(
+            2, root_key, 1, 0,
+            "aes-256-gcm".to_string(), "aes-256-gcm".to_string(), None,
+        ));
+
+        let c_filter = PeerSessionTunnelFilter::new_with_peer(1, true);
+        c_filter.set_peer_id(2);
+        c_filter.set_session(sender_session);
+        let c_chain = TunnelFilterChain::new(c_filter, EmptyFilter);
+
+        let s_filter = PeerSessionTunnelFilter::new_with_peer(2, true);
+        s_filter.set_peer_id(1);
+        s_filter.set_session(receiver_session);
+        let s_chain = TunnelFilterChain::new(s_filter, EmptyFilter);
+
+        let bps = Arc::new(AtomicU64::new(0));
+        let bps_clone = bps.clone();
+
+        let lis = tokio::spawn(async move {
+            let ret = listener.accept().await.unwrap();
+            let wrapped = Box::new(TunnelWithFilter::new(ret, s_chain));
+            let (mut r, _s) = wrapped.split();
+            let now = Instant::now();
+            let mut count = 0u64;
+            while let Some(Ok(p)) = r.next().await {
+                count += p.payload_len() as u64;
+                let elapsed_sec = now.elapsed().as_secs();
+                if elapsed_sec > 0 {
+                    bps_clone.store(
+                        count / elapsed_sec,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+            }
+        });
+
+        let tunnel = connector.connect().await.unwrap();
+        let wrapped = Box::new(TunnelWithFilter::new(tunnel, c_chain));
+        let (_recv, mut send) = wrapped.split();
+
+        let mut send_buf = bytes::BytesMut::new();
+        for _ in 0..64 {
+            send_buf.extend_from_slice(&rand::random::<i128>().to_le_bytes());
+        }
+
+        let now = Instant::now();
+        while now.elapsed().as_secs() < 10 {
+            let mut pkt = crate::tunnel::packet_def::ZCPacket::new_with_payload(send_buf.as_ref());
+            pkt.fill_peer_manager_hdr(1, 2, 0);
+            send.feed(pkt).await.unwrap();
+        }
+
+        send.close().await.unwrap();
+        drop(send);
+        drop(connector);
+
+        tracing::warn!("wait for recv to finish...");
+        let bps = bps.load(std::sync::atomic::Ordering::Acquire);
+        println!("bps: {}", bps);
+
+        lis.abort();
+    }
+
+    async fn run_ring_bench(
+        label: &str,
+        client_tunnel: Box<dyn Tunnel>,
+        server_tunnel: Box<dyn Tunnel>,
+        payload_size: u64,
+        total_packets: u64,
+    ) {
+        use std::time::Instant;
+
+        let recv_done = Arc::new(AtomicU64::new(0));
+        let recv_done_clone = recv_done.clone();
+
+        let lis = tokio::spawn(async move {
+            let (mut r, _s) = server_tunnel.split();
+            let mut count = 0u64;
+            while let Some(item) = r.next().await {
+                if let Ok(p) = item {
+                    count += p.payload_len() as u64;
+                    recv_done_clone.store(count, Ordering::Relaxed);
+                } else {
+                    break;
+                }
+            }
+            recv_done_clone.store(count, Ordering::Relaxed);
+        });
+
+        let (_recv, mut send) = client_tunnel.split();
+
+        let send_buf = vec![0xABu8; payload_size as usize];
+        let send_start = Instant::now();
+        for _ in 0..total_packets {
+            let mut pkt = ZCPacket::new_with_payload(&send_buf);
+            pkt.fill_peer_manager_hdr(1, 2, 0);
+            if send.feed(pkt).await.is_err() {
+                break;
+            }
+        }
+        let _ = send.close().await;
+        drop(send);
+
+        let _ = tokio::time::timeout(Duration::from_secs(60), lis).await;
+
+        let elapsed = send_start.elapsed();
+        let recv_total = recv_done.load(Ordering::Acquire) as f64;
+        let send_mbps = total_packets * payload_size * 8 / elapsed.as_micros().max(1) as u64;
+        let recv_mbps = (recv_total * 8.0 / 1_000_000.0) / elapsed.as_secs_f64().max(0.001);
+        println!(
+            "[{}] {} pkts x {}B | time: {:.3}s | send: {} Mbps | recv: {:.1} MB / {:.2} Mbps",
+            label,
+            total_packets,
+            payload_size,
+            elapsed.as_secs_f64(),
+            send_mbps,
+            recv_total / 1_000_000.0,
+            recv_mbps
+        );
+    }
+
+    /// Micro-benchmark: measure raw encrypt/decrypt overhead of PeerSession.
+    ///
+    /// Run with: cargo test --release --package easytier --lib -- peers::peer_conn::tests::peer_session_encrypt_bench -- --nocapture --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn peer_session_encrypt_bench() {
+        use std::time::Instant;
+
+        let root_key = PeerSession::new_root_key();
+        let generation = 1u32;
+        let initial_epoch = 0u32;
+
+        let sender = PeerSession::new(
+            2,
+            root_key,
+            generation,
+            initial_epoch,
+            "aes-256-gcm".to_string(),
+            "aes-256-gcm".to_string(),
+            None,
+        );
+        let receiver = PeerSession::new(
+            1,
+            root_key,
+            generation,
+            initial_epoch,
+            "aes-256-gcm".to_string(),
+            "aes-256-gcm".to_string(),
+            None,
+        );
+
+        let payload = vec![0xABu8; 1400];
+        let iterations = 100_000;
+
+        // Encrypt benchmark
+        let now = Instant::now();
+        for _ in 0..iterations {
+            let mut pkt = ZCPacket::new_with_payload(&payload);
+            pkt.fill_peer_manager_hdr(1, 2, 0);
+            sender.encrypt_payload(1, 2, &mut pkt).unwrap();
+        }
+        let encrypt_elapsed = now.elapsed();
+        let encrypt_per_pkt = encrypt_elapsed.as_nanos() as f64 / iterations as f64;
+        println!(
+            "[Encrypt] {} iterations in {:?}, {:.1} ns/packet, {:.2} Gbps equiv (1400B)",
+            iterations,
+            encrypt_elapsed,
+            encrypt_per_pkt,
+            1400.0 * 8.0 / encrypt_per_pkt
+        );
+
+        // Decrypt benchmark (pre-encrypt some packets)
+        let mut encrypted_pkts: Vec<ZCPacket> = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let mut pkt = ZCPacket::new_with_payload(&payload);
+            pkt.fill_peer_manager_hdr(1, 2, 0);
+            sender.encrypt_payload(1, 2, &mut pkt).unwrap();
+            encrypted_pkts.push(pkt);
+        }
+
+        let now = Instant::now();
+        for mut pkt in encrypted_pkts {
+            receiver.decrypt_payload(1, 2, &mut pkt).unwrap();
+        }
+        let decrypt_elapsed = now.elapsed();
+        let decrypt_per_pkt = decrypt_elapsed.as_nanos() as f64 / iterations as f64;
+        println!(
+            "[Decrypt] {} iterations in {:?}, {:.1} ns/packet, {:.2} Gbps equiv (1400B)",
+            iterations,
+            decrypt_elapsed,
+            decrypt_per_pkt,
+            1400.0 * 8.0 / decrypt_per_pkt
+        );
+
+        // Combined encrypt+decrypt
+        let now = Instant::now();
+        for _ in 0..iterations {
+            let mut pkt = ZCPacket::new_with_payload(&payload);
+            pkt.fill_peer_manager_hdr(1, 2, 0);
+            sender.encrypt_payload(1, 2, &mut pkt).unwrap();
+            receiver.decrypt_payload(1, 2, &mut pkt).unwrap();
+        }
+        let combined_elapsed = now.elapsed();
+        let combined_per_pkt = combined_elapsed.as_nanos() as f64 / iterations as f64;
+        println!(
+            "[Combined] {} iterations in {:?}, {:.1} ns/packet, {:.2} Gbps equiv (1400B)",
+            iterations,
+            combined_elapsed,
+            combined_per_pkt,
+            1400.0 * 8.0 / combined_per_pkt
+        );
     }
 }

@@ -289,6 +289,7 @@ pub fn transport_config() -> Arc<TransportConfig> {
         .initial_mtu(1200)
         .min_mtu(1200)
         .enable_segmentation_offload(true)
+        .stream_receive_window(quinn::VarInt::from_u32(8_388_608))
         .congestion_controller_factory(Arc::new(BbrConfig::default()));
 
     Arc::new(config)
@@ -364,6 +365,35 @@ impl QuicStealthSession {
                     .flatten()
             }),
             None => self.state.open_gate_datagram(sealed),
+        }
+    }
+
+    /// Open a sealed datagram in-place. On success returns plaintext length.
+    /// Buffer contains `nonce || ciphertext || tag`; on success plaintext is
+    /// moved to buffer start.
+    ///
+    /// Grace period safety: only uses in-place when `elapsed >= OUTER_SEND_DELAY`
+    /// (definite outer phase). During grace period, uses allocating path to
+    /// avoid buffer corruption from failed AEAD open_in_place.
+    fn open_in_place(&self, buf: &mut [u8]) -> Option<usize> {
+        match self.outer_elapsed() {
+            Some(elapsed) if elapsed >= QUIC_STEALTH_OUTER_SEND_DELAY => {
+                self.state.open_datagram_in_place(buf)
+            }
+            Some(elapsed) => {
+                self.state
+                    .open_datagram(buf)
+                    .or_else(|| {
+                        (elapsed <= QUIC_STEALTH_GATE_RECV_GRACE)
+                            .then(|| self.state.open_gate_datagram(buf))
+                            .flatten()
+                    })
+                    .map(|pt| {
+                        buf[..pt.len()].copy_from_slice(&pt);
+                        pt.len()
+                    })
+            }
+            None => self.state.open_datagram_in_place(buf),
         }
     }
 }
@@ -479,33 +509,29 @@ impl QuicStealthSocket {
         Some(entry.session.clone())
     }
 
+    fn remove_session_if_same(&self, addr: SocketAddr, session: &Arc<QuicStealthSession>) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(entry) = sessions.get(&addr) else {
+            return false;
+        };
+        if !Arc::ptr_eq(&entry.session, session) {
+            return false;
+        }
+        sessions.remove(&addr);
+        true
+    }
+
     fn open_from(
         &self,
         addr: SocketAddr,
         sealed: &[u8],
     ) -> Option<(Vec<u8>, Arc<QuicStealthSession>)> {
         if let Some(session) = self.session(addr) {
-            if session.state.outer_key().is_some() {
-                let candidate = Arc::new(QuicStealthSession::new(
-                    self.template.fork_for_transport_delayed_transition(),
-                ));
-                if let Some(plaintext) = candidate.open(sealed)
-                    && Self::is_quic_initial(&plaintext)
-                {
-                    if !self.accept_initial_nonce(sealed) {
-                        return None;
-                    }
-                    self.sessions.lock().unwrap().insert(
-                        addr,
-                        QuicStealthSessionEntry {
-                            session: candidate.clone(),
-                            last_seen: Instant::now(),
-                        },
-                    );
-                    return Some((plaintext, candidate));
-                }
+            let plaintext = session.open(sealed)?;
+            if session.state.outer_key().is_some() && Self::is_quic_initial(&plaintext) {
+                return None;
             }
-            return session.open(sealed).map(|plaintext| (plaintext, session));
+            return Some((plaintext, session));
         }
 
         let candidate = Arc::new(QuicStealthSession::new(
@@ -531,6 +557,53 @@ impl QuicStealthSocket {
         entry.last_seen = now;
         Some((plaintext, entry.session.clone()))
     }
+
+    /// In-place version of `open_from`. Decrypts directly in `buf` and returns
+    /// plaintext length + session. Candidate path (new connection) uses
+    /// allocating `open()` because in-place would corrupt buffer on failure.
+    fn open_in_place_from(
+        &self,
+        addr: SocketAddr,
+        buf: &mut [u8],
+    ) -> Option<(usize, Arc<QuicStealthSession>)> {
+        if let Some(session) = self.session(addr) {
+            let pt_len = session.open_in_place(buf)?;
+            if session.state.outer_key().is_some()
+                && session.outer_elapsed().map_or(true, |e| e > QUIC_STEALTH_GATE_RECV_GRACE)
+                && Self::is_quic_initial(&buf[..pt_len])
+            {
+                return None;
+            }
+            return Some((pt_len, session));
+        }
+
+        // Candidate path: rare (only first packet from new addr).
+        // Use allocating path to avoid buffer corruption on failure.
+        let candidate = Arc::new(QuicStealthSession::new(
+            self.template.fork_for_transport_delayed_transition(),
+        ));
+        let plaintext = candidate.open(buf)?;
+        if !Self::is_quic_initial(&plaintext) || !self.accept_initial_nonce(buf) {
+            return None;
+        }
+        // Copy plaintext back into buf
+        buf[..plaintext.len()].copy_from_slice(&plaintext);
+
+        let now = Instant::now();
+        let mut sessions = self.sessions.lock().unwrap();
+        Self::cleanup_locked(&mut sessions, now);
+        if !sessions.contains_key(&addr) {
+            Self::make_room_locked(&mut sessions);
+        }
+        let entry = sessions
+            .entry(addr)
+            .or_insert_with(|| QuicStealthSessionEntry {
+                session: candidate,
+                last_seen: now,
+            });
+        entry.last_seen = now;
+        Some((plaintext.len(), entry.session.clone()))
+    }
 }
 
 impl AsyncUdpSocket for QuicStealthSocket {
@@ -539,28 +612,45 @@ impl AsyncUdpSocket for QuicStealthSocket {
     }
 
     fn try_send(&self, transmit: &Transmit) -> io::Result<()> {
-        if transmit.segment_size.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "QUIC stealth socket does not support segmented transmits",
-            ));
-        }
         let session = self.session(transmit.destination).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotConnected,
                 "missing QUIC stealth session for destination",
             )
         })?;
-        let sealed = session.seal(transmit.contents).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "QUIC stealth sealing failed")
-        })?;
-        self.inner.try_send(&Transmit {
-            destination: transmit.destination,
-            ecn: transmit.ecn,
-            contents: &sealed,
-            segment_size: None,
-            src_ip: transmit.src_ip,
-        })
+
+        if let Some(seg_size) = transmit.segment_size {
+            // GSO: seal each segment independently, then batch via inner with adjusted segment size.
+            let contents = transmit.contents;
+            let sealed_seg_size = seg_size + crate::tunnel::stealth::OUTER_OVERHEAD;
+            let num_segments = contents.len() / seg_size;
+            let mut sealed = Vec::with_capacity(num_segments * sealed_seg_size);
+            for i in 0..num_segments {
+                let segment = &contents[i * seg_size..(i + 1) * seg_size];
+                let sealed_segment = session.seal(segment).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "QUIC stealth sealing failed")
+                })?;
+                sealed.extend_from_slice(&sealed_segment);
+            }
+            self.inner.try_send(&Transmit {
+                destination: transmit.destination,
+                ecn: transmit.ecn,
+                contents: &sealed,
+                segment_size: Some(sealed_seg_size),
+                src_ip: transmit.src_ip,
+            })
+        } else {
+            let sealed = session.seal(transmit.contents).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "QUIC stealth sealing failed")
+            })?;
+            self.inner.try_send(&Transmit {
+                destination: transmit.destination,
+                ecn: transmit.ecn,
+                contents: &sealed,
+                segment_size: None,
+                src_ip: transmit.src_ip,
+            })
+        }
     }
 
     fn poll_recv(
@@ -578,36 +668,45 @@ impl AsyncUdpSocket for QuicStealthSocket {
                 Poll::Ready(Ok(count)) => count,
                 other => return other,
             };
-            let mut opened = Vec::with_capacity(count);
+            let mut opened_count = 0;
             for index in 0..count {
                 let received = meta[index];
                 let stride = received.stride.max(1);
                 let mut offset = 0;
-                while offset < received.len && opened.len() < bufs.len().min(meta.len()) {
+                while offset < received.len && opened_count < bufs.len().min(meta.len()) {
                     let end = (offset + stride).min(received.len);
-                    let sealed = &bufs[index][offset..end];
-                    if let Some((plaintext, _)) = self.open_from(received.addr, sealed) {
-                        opened.push((plaintext, received));
+                    if let Some((pt_len, _)) =
+                        self.open_in_place_from(received.addr, &mut bufs[index][offset..end])
+                    {
+                        // Move plaintext to destination buffer if needed.
+                        // Single stride (most common): opened_count == index && offset == 0,
+                        // no copy needed.
+                        if opened_count == index && offset != 0 {
+                            bufs[index].copy_within(offset..offset + pt_len, 0);
+                        } else if opened_count != index {
+                            // src = bufs[index] (has plaintext at [offset..offset+pt_len])
+                            // dst = bufs[opened_count] (destination)
+                            let (left, right) = bufs.split_at_mut(opened_count.max(index));
+                            let (src, dst) = if index < opened_count {
+                                (&left[index], &mut right[0])
+                            } else {
+                                (&right[0], &mut left[opened_count])
+                            };
+                            dst[..pt_len].copy_from_slice(&src[offset..offset + pt_len]);
+                        }
+                        meta[opened_count] = RecvMeta {
+                            len: pt_len,
+                            stride: pt_len,
+                            ..received
+                        };
+                        opened_count += 1;
                     }
                     offset = end;
                 }
             }
 
-            if opened.is_empty() {
+            if opened_count == 0 {
                 continue;
-            }
-            let opened_count = opened.len();
-            for (index, (plaintext, mut received)) in opened.into_iter().enumerate() {
-                if plaintext.len() > bufs[index].len() {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "opened QUIC datagram exceeds receive buffer",
-                    )));
-                }
-                bufs[index][..plaintext.len()].copy_from_slice(&plaintext);
-                received.len = plaintext.len();
-                received.stride = plaintext.len();
-                meta[index] = received;
             }
             return Poll::Ready(Ok(opened_count));
         }
@@ -621,11 +720,11 @@ impl AsyncUdpSocket for QuicStealthSocket {
     }
 
     fn max_transmit_segments(&self) -> usize {
-        1
+        self.inner.max_transmit_segments()
     }
 
     fn max_receive_segments(&self) -> usize {
-        1
+        self.inner.max_receive_segments()
     }
 
     fn may_fragment(&self) -> bool {
@@ -1125,11 +1224,19 @@ impl QuicEndpointManager {
 
 struct ConnWrapper {
     conn: Connection,
+    stealth_cleanup: Option<(
+        Arc<QuicStealthSocket>,
+        SocketAddr,
+        Arc<QuicStealthSession>,
+    )>,
 }
 
 impl Drop for ConnWrapper {
     fn drop(&mut self) {
         self.conn.close(0u32.into(), b"done");
+        if let Some((socket, remote_addr, session)) = &self.stealth_cleanup {
+            socket.remove_session_if_same(*remote_addr, session);
+        }
     }
 }
 
@@ -1168,18 +1275,30 @@ impl QuicTunnelListener {
         let conn = conn.await.with_context(|| "accept connection failed")?;
         let remote_addr = conn.remote_address();
         let (w, r) = conn.accept_bi().await.with_context(|| "accept_bi failed")?;
-        let connection_stealth = match &self.stealth_socket {
+        let connection_stealth_session = match &self.stealth_socket {
             Some(socket) => Some(
                 socket
                     .session(remote_addr)
-                    .ok_or_else(|| anyhow::anyhow!("missing accepted QUIC stealth session"))?
-                    .state
-                    .clone(),
+                    .ok_or_else(|| anyhow::anyhow!("missing accepted QUIC stealth session"))?,
             ),
             None => None,
         };
+        let connection_stealth = connection_stealth_session
+            .as_ref()
+            .map(|session| session.state.clone());
 
-        let arc_conn = Arc::new(ConnWrapper { conn });
+        let stealth_cleanup =
+            if let (Some(socket), Some(session)) =
+                (&self.stealth_socket, &connection_stealth_session)
+            {
+                Some((socket.clone(), remote_addr, session.clone()))
+            } else {
+                None
+            };
+        let arc_conn = Arc::new(ConnWrapper {
+            conn,
+            stealth_cleanup,
+        });
 
         let info = TunnelInfo {
             tunnel_type: "quic".to_owned(),
@@ -1355,7 +1474,10 @@ impl TunnelConnector for QuicTunnelConnector {
             ),
         };
 
-        let arc_conn = Arc::new(ConnWrapper { conn: connection });
+        let arc_conn = Arc::new(ConnWrapper {
+            conn: connection,
+            stealth_cleanup: None,
+        });
         Ok(Box::new(TunnelWrapper::new_with_associate_data(
             FramedReader::new_with_associate_data(r, 4500, Some(Box::new(arc_conn.clone()))),
             FramedWriter::new_with_associate_data(w, Some(Box::new(arc_conn))),
@@ -1530,7 +1652,7 @@ mod tests {
     }
 
     #[test]
-    fn quic_stealth_socket_only_reopens_gate_for_new_initial() {
+    fn quic_stealth_socket_does_not_replace_live_phase2_session() {
         RUNTIME.block_on(async {
             let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
             udp.set_nonblocking(true).unwrap();
@@ -1544,6 +1666,14 @@ mod tests {
             let first = sender.seal_gate_datagram(&initial).unwrap();
             let (_, old_session) = socket.open_from(remote, &first).unwrap();
             old_session.state.set_outer_key_from_handshake_hash(b"old");
+
+            let reconnect_during_grace = sender.seal_gate_datagram(&initial).unwrap();
+            assert!(
+                socket.open_from(remote, &reconnect_during_grace).is_none(),
+                "gate-key Initial reused a live phase-2 QUIC session during grace"
+            );
+            assert!(Arc::ptr_eq(&socket.session(remote).unwrap(), &old_session));
+
             old_session.state.set_outer_key_age_for_test(
                 QUIC_STEALTH_GATE_RECV_GRACE + Duration::from_millis(1),
             );
@@ -1557,6 +1687,13 @@ mod tests {
             );
 
             let reconnect = sender.seal_gate_datagram(&initial).unwrap();
+            assert!(
+                socket.open_from(remote, &reconnect).is_none(),
+                "gate-key Initial replaced a live phase-2 QUIC session"
+            );
+            assert!(Arc::ptr_eq(&socket.session(remote).unwrap(), &old_session));
+
+            assert!(socket.remove_session_if_same(remote, &old_session));
             let (_, new_session) = socket.open_from(remote, &reconnect).unwrap();
             assert!(!Arc::ptr_eq(&old_session, &new_session));
 

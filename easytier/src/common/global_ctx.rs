@@ -884,6 +884,12 @@ impl GlobalCtx {
             .flatten()
     }
 
+    pub fn is_derived_secure_mode_active_for_tunnel(&self, stealth_protected: bool) -> bool {
+        stealth_protected
+            && self.config.get_secure_mode().is_none()
+            && self.get_effective_secure_mode().is_some()
+    }
+
     pub fn is_explicit_secure_mode_enabled(&self) -> bool {
         self.config
             .get_secure_mode()

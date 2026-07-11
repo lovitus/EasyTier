@@ -19,7 +19,10 @@
 
 use std::{
     collections::HashSet,
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicU32, AtomicU64, Ordering},
+        Arc, Mutex, RwLock,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -28,6 +31,154 @@ use rand::RngCore as _;
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// AEAD cipher support for stealth outer encryption.
+///
+/// When the `stealth-aead` feature is enabled, the outer encryption layer can
+/// use AES-256-GCM or ChaCha20-Poly1305 instead of the legacy HMAC-SHA256
+/// stream cipher, dramatically reducing CPU usage on the data hot path.
+#[cfg(feature = "stealth-aead")]
+mod aead {
+    use ring::aead::{self, LessSafeKey, UnboundKey, AES_256_GCM, CHACHA20_POLY1305};
+    use std::fmt;
+
+    pub const NONCE_LEN: usize = 12;
+    pub const TAG_LEN: usize = 16;
+
+    pub enum OuterCipher {
+        Aes256Gcm(LessSafeKey),
+        ChaCha20Poly1305(LessSafeKey),
+    }
+
+    impl fmt::Debug for OuterCipher {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            match self {
+                Self::Aes256Gcm(_) => write!(f, "OuterCipher::Aes256Gcm"),
+                Self::ChaCha20Poly1305(_) => write!(f, "OuterCipher::ChaCha20Poly1305"),
+            }
+        }
+    }
+
+    /// Build an AEAD cipher from a negotiated suite name and 32-byte key.
+    /// Returns `None` if the suite name is unrecognized.
+    pub fn build(suite: &str, key: &[u8; 32]) -> Option<OuterCipher> {
+        match suite {
+            "aes-256-gcm" => {
+                let unbound = UnboundKey::new(&AES_256_GCM, key).ok()?;
+                Some(OuterCipher::Aes256Gcm(LessSafeKey::new(unbound)))
+            }
+            "chacha20-poly1305" => {
+                let unbound = UnboundKey::new(&CHACHA20_POLY1305, key).ok()?;
+                Some(OuterCipher::ChaCha20Poly1305(LessSafeKey::new(unbound)))
+            }
+            _ => None,
+        }
+    }
+
+    /// Seal `plaintext` under the AEAD cipher, producing `nonce || ciphertext || tag`.
+    pub fn seal(cipher: &OuterCipher, plaintext: &[u8], nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
+        let key = match cipher {
+            OuterCipher::Aes256Gcm(k) | OuterCipher::ChaCha20Poly1305(k) => k,
+        };
+        let ring_nonce = aead::Nonce::assume_unique_for_key(*nonce);
+        let mut out = Vec::with_capacity(NONCE_LEN + plaintext.len() + TAG_LEN);
+        out.extend_from_slice(nonce);
+        out.extend_from_slice(plaintext);
+        let tag = key
+            .seal_in_place_separate_tag(ring_nonce, aead::Aad::empty(), &mut out[NONCE_LEN..])
+            .expect("seal_in_place_separate_tag");
+        out.extend_from_slice(tag.as_ref());
+        out
+    }
+
+    /// Open a buffer produced by [`seal`]. Returns the plaintext, or `None` on
+    /// verification failure or malformed input.
+    pub fn open(cipher: &OuterCipher, buf: &[u8]) -> Option<Vec<u8>> {
+        if buf.len() < NONCE_LEN + TAG_LEN {
+            return None;
+        }
+        let key = match cipher {
+            OuterCipher::Aes256Gcm(k) | OuterCipher::ChaCha20Poly1305(k) => k,
+        };
+        let nonce: [u8; NONCE_LEN] = buf[..NONCE_LEN].try_into().ok()?;
+        let ring_nonce = aead::Nonce::assume_unique_for_key(nonce);
+        let mut data = buf[NONCE_LEN..].to_vec();
+        let plaintext_len = key
+            .open_in_place(ring_nonce, aead::Aad::empty(), &mut data)
+            .ok()?
+            .len();
+        data.truncate(plaintext_len);
+        Some(data)
+    }
+
+    /// Open a sealed buffer in-place. Buffer contains `nonce || ciphertext || tag`.
+    /// On success, plaintext is moved to buffer start and its length is returned.
+    /// On failure, buffer is left in unspecified state (per ring's open_in_place contract).
+    #[cfg(feature = "stealth-aead")]
+    pub fn open_in_place_mut(cipher: &OuterCipher, buf: &mut [u8]) -> Option<usize> {
+        if buf.len() < NONCE_LEN + TAG_LEN {
+            return None;
+        }
+        let key = match cipher {
+            OuterCipher::Aes256Gcm(k) | OuterCipher::ChaCha20Poly1305(k) => k,
+        };
+        let nonce: [u8; NONCE_LEN] = buf[..NONCE_LEN].try_into().ok()?;
+        let ring_nonce = aead::Nonce::assume_unique_for_key(nonce);
+        let plaintext_len = key
+            .open_in_place(ring_nonce, aead::Aad::empty(), &mut buf[NONCE_LEN..])
+            .ok()?
+            .len();
+        buf.copy_within(NONCE_LEN..NONCE_LEN + plaintext_len, 0);
+        Some(plaintext_len)
+    }
+
+    /// Choose the preferred AEAD cipher suite based on CPU capabilities.
+    /// AES-256-GCM when AES hardware acceleration is available, otherwise
+    /// ChaCha20-Poly1305 which is fast in software.
+    pub fn preferred_cipher_suite() -> &'static str {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("aes") {
+                return "aes-256-gcm";
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("aes") {
+                return "aes-256-gcm";
+            }
+        }
+        "chacha20-poly1305"
+    }
+}
+
+/// Generate the next 12-byte nonce from an atomic counter and per-connection salt.
+#[cfg(feature = "stealth-aead")]
+fn next_nonce(counter: &AtomicU64, salt: &AtomicU32) -> [u8; aead::NONCE_LEN] {
+    let c = counter.fetch_add(1, Ordering::Relaxed);
+    let s = salt.load(Ordering::Relaxed).to_be_bytes();
+    let mut nonce = [0u8; aead::NONCE_LEN];
+    nonce[..8].copy_from_slice(&c.to_be_bytes());
+    nonce[8..].copy_from_slice(&s);
+    nonce
+}
+
+/// Derive a 4-byte per-connection nonce salt from the handshake hash.
+#[cfg(feature = "stealth-aead")]
+fn derive_nonce_salt(handshake_hash: &[u8]) -> [u8; 4] {
+    let okm = hkdf_sha256(handshake_hash, b"et-outer-nonce-salt");
+    let mut salt = [0u8; 4];
+    salt.copy_from_slice(&okm[..4]);
+    salt
+}
+
+/// Returns the preferred AEAD cipher suite name for the current CPU.
+/// AES-256-GCM when AES hardware acceleration is available, otherwise
+/// ChaCha20-Poly1305. Returns None when the `stealth-aead` feature is disabled.
+#[cfg(feature = "stealth-aead")]
+pub fn preferred_outer_cipher_suite() -> &'static str {
+    aead::preferred_cipher_suite()
+}
 
 /// Default rolling window (seconds) for the phase-1 gate key. The receiver
 /// accepts the current and previous window to tolerate clock skew.
@@ -389,6 +540,14 @@ pub struct OuterSessionState {
     network_secret: Vec<u8>,
     transition_mode: OuterTransitionMode,
     key_phase: RwLock<OuterKeyPhase>,
+    nonce_counter: AtomicU64,
+    nonce_salt: AtomicU32,
+    #[cfg(feature = "stealth-aead")]
+    outer_cipher: RwLock<Option<aead::OuterCipher>>,
+    #[cfg(feature = "stealth-aead")]
+    cipher_suite: RwLock<Option<String>>,
+    #[cfg(test)]
+    fork_with_outer_key: std::sync::atomic::AtomicBool,
 }
 
 pub struct OuterSessionAssociation {
@@ -434,6 +593,14 @@ impl OuterSessionState {
             network_secret,
             transition_mode: OuterTransitionMode::NextSeal,
             key_phase: RwLock::new(OuterKeyPhase::Gate),
+            nonce_counter: AtomicU64::new(0),
+            nonce_salt: AtomicU32::new(0),
+            #[cfg(feature = "stealth-aead")]
+            outer_cipher: RwLock::new(None),
+            #[cfg(feature = "stealth-aead")]
+            cipher_suite: RwLock::new(None),
+            #[cfg(test)]
+            fork_with_outer_key: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -446,6 +613,14 @@ impl OuterSessionState {
             network_secret: Vec::new(),
             transition_mode: OuterTransitionMode::NextSeal,
             key_phase: RwLock::new(OuterKeyPhase::Gate),
+            nonce_counter: AtomicU64::new(0),
+            nonce_salt: AtomicU32::new(0),
+            #[cfg(feature = "stealth-aead")]
+            outer_cipher: RwLock::new(None),
+            #[cfg(feature = "stealth-aead")]
+            cipher_suite: RwLock::new(None),
+            #[cfg(test)]
+            fork_with_outer_key: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -474,18 +649,57 @@ impl OuterSessionState {
     /// Phase-2: install the connection-level outer key derived from the Noise
     /// handshake hash. Idempotent and safe to call from `PeerConn`.
     pub fn set_outer_key_from_handshake_hash(&self, handshake_hash: &[u8]) {
+        self.set_outer_key_with_cipher(handshake_hash, None);
+    }
+
+    /// Phase-2: install the outer key with a negotiated AEAD cipher suite.
+    /// When `outer_cipher_suite` is `Some`, an AEAD cipher is built and stored
+    /// alongside the key phase; subsequent `seal_datagram`/`open_datagram` calls
+    /// use the AEAD fast path instead of legacy HMAC-SHA256.
+    pub fn set_outer_key_with_cipher(
+        &self,
+        handshake_hash: &[u8],
+        outer_cipher_suite: Option<&str>,
+    ) {
         let key = derive_outer_key(handshake_hash);
         let mut phase = self.key_phase.write().unwrap();
         if matches!(*phase, OuterKeyPhase::Outer(current, _) if current == key) {
             return;
         }
+
+        // Write nonce_salt and outer_cipher BEFORE setting key_phase to Outer.
+        // This ensures any thread that sees Outer already has the cipher available.
+        // Gate path (current phase) never reads outer_cipher, so early write is safe.
+        #[cfg(feature = "stealth-aead")]
+        {
+            if let Some(suite) = outer_cipher_suite {
+                if let Some(cipher) = aead::build(suite, &key) {
+                    let salt = derive_nonce_salt(handshake_hash);
+                    self.nonce_salt.store(u32::from_be_bytes(salt), Ordering::Release);
+                    *self.outer_cipher.write().unwrap() = Some(cipher);
+                    *self.cipher_suite.write().unwrap() = Some(suite.to_string());
+                }
+            }
+        }
+
         *phase = OuterKeyPhase::Outer(key, Instant::now());
+        drop(phase);
     }
 
     /// Keep the next outbound datagram on the gate key, then atomically promote
     /// subsequent traffic to the phase-2 key. The Noise initiator uses this for
     /// msg3 because queueing the packet does not mean UDP has sealed it yet.
     pub fn promote_outer_key_after_next_seal(&self, handshake_hash: &[u8]) {
+        self.promote_outer_key_with_cipher(handshake_hash, None);
+    }
+
+    /// Like [`promote_outer_key_after_next_seal`] but also installs an AEAD
+    /// cipher when a cipher suite is negotiated.
+    pub fn promote_outer_key_with_cipher(
+        &self,
+        handshake_hash: &[u8],
+        outer_cipher_suite: Option<&str>,
+    ) {
         if !self.enabled {
             return;
         }
@@ -498,10 +712,27 @@ impl OuterSessionState {
         ) {
             return;
         }
+
+        // Write nonce_salt and outer_cipher BEFORE setting key_phase.
+        // Same rationale as set_outer_key_with_cipher: any thread that sees
+        // the new phase must already see the cipher.
+        #[cfg(feature = "stealth-aead")]
+        {
+            if let Some(suite) = outer_cipher_suite {
+                if let Some(cipher) = aead::build(suite, &key) {
+                    let salt = derive_nonce_salt(handshake_hash);
+                    self.nonce_salt.store(u32::from_be_bytes(salt), Ordering::Release);
+                    *self.outer_cipher.write().unwrap() = Some(cipher);
+                    *self.cipher_suite.write().unwrap() = Some(suite.to_string());
+                }
+            }
+        }
+
         *phase = match self.transition_mode {
             OuterTransitionMode::NextSeal => OuterKeyPhase::PromoteAfterNextSeal(key),
             OuterTransitionMode::TransportDelayed => OuterKeyPhase::Outer(key, Instant::now()),
         };
+        drop(phase);
     }
 
     /// The current phase-2 outer key, if Noise has completed.
@@ -545,14 +776,36 @@ impl OuterSessionState {
         if !self.enabled {
             Arc::new(Self::disabled())
         } else {
-            Arc::new(Self {
+            let fork = Arc::new(Self {
                 enabled: true,
                 window_secs: self.window_secs,
                 network_secret: self.network_secret.clone(),
                 transition_mode: OuterTransitionMode::TransportDelayed,
                 key_phase: RwLock::new(OuterKeyPhase::Gate),
-            })
+                nonce_counter: AtomicU64::new(0),
+                nonce_salt: AtomicU32::new(0),
+                #[cfg(feature = "stealth-aead")]
+                outer_cipher: RwLock::new(None),
+                #[cfg(feature = "stealth-aead")]
+                cipher_suite: RwLock::new(self.cipher_suite.read().unwrap().clone()),
+                #[cfg(test)]
+                fork_with_outer_key: std::sync::atomic::AtomicBool::new(false),
+            });
+            #[cfg(test)]
+            if self.fork_with_outer_key.load(std::sync::atomic::Ordering::Relaxed) {
+                fork.set_outer_key_with_cipher(&[0xABu8; 32], Some("aes-256-gcm"));
+            }
+            fork
         }
+    }
+
+    /// Test-only: make forked sessions start with outer key already set.
+    /// The QUIC handshake still works because seal() uses gate phase for the
+    /// first QUIC_STEALTH_OUTER_SEND_DELAY, and open() falls back to gate
+    /// during the grace period.
+    #[cfg(test)]
+    pub fn enable_outer_key_fork_for_test(&self) {
+        self.fork_with_outer_key.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -850,10 +1103,31 @@ impl OuterSessionState {
     /// Seal an outbound datagram with the phase-2 outer key if available, else
     /// the current phase-1 gate key (used while the Noise handshake is still in
     /// flight). Returns `None` when stealth is disabled.
+    ///
+    /// Fast path: when the key phase is `Outer` and an AEAD cipher is installed,
+    /// only read locks are acquired and a counter-based nonce is used.
     pub fn seal_datagram(&self, plaintext: &[u8]) -> Option<Vec<u8>> {
         if !self.enabled {
             return None;
         }
+        // Fast path: read lock only.
+        {
+            let phase = self.key_phase.read().unwrap();
+            if let OuterKeyPhase::Outer(key, _) = *phase {
+                drop(phase);
+                #[cfg(feature = "stealth-aead")]
+                {
+                    let cipher = self.outer_cipher.read().unwrap();
+                    if let Some(ref c) = *cipher {
+                        let nonce = next_nonce(&self.nonce_counter, &self.nonce_salt);
+                        return Some(aead::seal(c, plaintext, &nonce));
+                    }
+                }
+                // No AEAD cipher: fall back to legacy seal.
+                return Some(seal(&key, plaintext));
+            }
+        }
+        // Slow path: write lock (Gate → PromoteAfterNextSeal → Outer transition).
         let mut phase = self.key_phase.write().unwrap();
         let key = match *phase {
             OuterKeyPhase::Gate => derive_gate_key(
@@ -880,7 +1154,16 @@ impl OuterSessionState {
             return None;
         }
         match *self.key_phase.read().unwrap() {
-            OuterKeyPhase::Outer(key, _) => return open(&key, buf),
+            OuterKeyPhase::Outer(key, _) => {
+                #[cfg(feature = "stealth-aead")]
+                {
+                    let cipher = self.outer_cipher.read().unwrap();
+                    if let Some(ref c) = *cipher {
+                        return aead::open(c, buf);
+                    }
+                }
+                return open(&key, buf);
+            }
             OuterKeyPhase::Gate | OuterKeyPhase::PromoteAfterNextSeal(_) => {}
         }
         let cur = window_for(now_secs(), self.window_secs);
@@ -908,6 +1191,46 @@ impl OuterSessionState {
             }
         }
         None
+    }
+
+    /// Open a sealed datagram in-place. On success returns plaintext length.
+    /// Caller truncates buffer to that length. On failure returns None (drop packet).
+    ///
+    /// Handles ALL key phases internally:
+    /// - Outer + AEAD: zero-alloc in-place (hot path)
+    /// - Outer + legacy: allocating `open()` + copy back
+    /// - Gate / PromoteAfterNextSeal: allocating `open()` with 2 window keys + copy back
+    pub fn open_datagram_in_place(&self, buf: &mut [u8]) -> Option<usize> {
+        if !self.enabled {
+            return None;
+        }
+        match *self.key_phase.read().unwrap() {
+            OuterKeyPhase::Outer(key, _) => {
+                #[cfg(feature = "stealth-aead")]
+                {
+                    let cipher = self.outer_cipher.read().unwrap();
+                    if let Some(ref c) = *cipher {
+                        return aead::open_in_place_mut(c, buf);
+                    }
+                }
+                let pt = open(&key, buf);
+                pt.map(|p| {
+                    buf[..p.len()].copy_from_slice(&p);
+                    p.len()
+                })
+            }
+            OuterKeyPhase::Gate | OuterKeyPhase::PromoteAfterNextSeal(_) => {
+                let cur = window_for(now_secs(), self.window_secs);
+                for window in [cur, cur.wrapping_sub(1)] {
+                    let key = derive_gate_key(&self.network_secret, window);
+                    if let Some(pt) = open(&key, buf) {
+                        buf[..pt.len()].copy_from_slice(&pt);
+                        return Some(pt.len());
+                    }
+                }
+                None
+            }
+        }
     }
 }
 

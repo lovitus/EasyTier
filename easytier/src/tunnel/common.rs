@@ -237,21 +237,22 @@ impl<R> StealthFramedReader<R> {
         if buf.len() < TCP_TUNNEL_HEADER_SIZE + sealed_len {
             return None;
         }
-        let record = buf.split_to(TCP_TUNNEL_HEADER_SIZE + sealed_len);
-        let Some(plaintext) = stealth.open_datagram(&record[TCP_TUNNEL_HEADER_SIZE..]) else {
+        let mut record = buf.split_to(TCP_TUNNEL_HEADER_SIZE + sealed_len);
+        // Split off the TCP tunnel header to get the sealed portion as its own
+        // BytesMut, then decrypt in-place.
+        let mut sealed = record.split_off(TCP_TUNNEL_HEADER_SIZE);
+        let Some(pt_len) = stealth.open_datagram_in_place(&mut sealed[..]) else {
             return Some(Err(TunnelError::InvalidPacket(
                 "TCP stealth authentication failed".to_string(),
             )));
         };
-        if plaintext.len() < TCP_TUNNEL_HEADER_SIZE + PEER_MANAGER_HEADER_SIZE {
+        sealed.truncate(pt_len);
+        if sealed.len() < TCP_TUNNEL_HEADER_SIZE + PEER_MANAGER_HEADER_SIZE {
             return Some(Err(TunnelError::InvalidPacket(
                 "opened TCP record is too short".to_string(),
             )));
         }
-        Some(Ok(ZCPacket::new_from_buf(
-            BytesMut::from(plaintext.as_slice()),
-            ZCPacketType::TCP,
-        )))
+        Some(Ok(ZCPacket::new_from_buf(sealed, ZCPacketType::TCP)))
     }
 }
 

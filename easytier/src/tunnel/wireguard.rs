@@ -80,6 +80,35 @@ impl WgStealthSession {
             None => self.state.open_gate_datagram(sealed),
         }
     }
+
+    /// Open a sealed datagram in-place. On success returns plaintext length.
+    /// Buffer contains `nonce || ciphertext || tag`; on success plaintext is
+    /// moved to buffer start.
+    ///
+    /// Grace period safety: only uses in-place when `elapsed >= OUTER_SEND_DELAY`
+    /// (definite outer phase). During grace period, uses allocating path to
+    /// avoid buffer corruption from failed AEAD open_in_place.
+    fn open_in_place(&self, buf: &mut [u8]) -> Option<usize> {
+        match self.outer_elapsed() {
+            Some(elapsed) if elapsed >= WG_STEALTH_OUTER_SEND_DELAY => {
+                self.state.open_datagram_in_place(buf)
+            }
+            Some(elapsed) => {
+                self.state
+                    .open_datagram(buf)
+                    .or_else(|| {
+                        (elapsed <= WG_STEALTH_GATE_RECV_GRACE)
+                            .then(|| self.state.open_gate_datagram(buf))
+                            .flatten()
+                    })
+                    .map(|pt| {
+                        buf[..pt.len()].copy_from_slice(&pt);
+                        pt.len()
+                    })
+            }
+            None => self.state.open_datagram_in_place(buf),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -923,13 +952,15 @@ impl WgTunnelConnector {
                         break;
                     }
                 };
-                let Some(packet) = data.stealth.as_ref().map_or_else(
-                    || Some(buf[..n].to_vec()),
-                    |stealth| stealth.open(&buf[..n]),
-                ) else {
-                    continue;
+                let pt_len = if let Some(stealth) = data.stealth.as_ref() {
+                    match stealth.open_in_place(&mut buf[..n]) {
+                        Some(len) => len,
+                        None => continue,
+                    }
+                } else {
+                    n
                 };
-                let _ = data.handle_one_packet_from_peer(&mut sink, &packet).await;
+                let _ = data.handle_one_packet_from_peer(&mut sink, &buf[..pt_len]).await;
             }
         });
 

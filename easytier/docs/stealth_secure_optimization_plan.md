@@ -82,26 +82,580 @@ AEAD 的 tag 同样是 16 字节，`seal_in_place_separate_tag` / `open_in_place
 **预期收益**：数据路径 SHA-256 从 63.7% 降到 **0%**（AEAD 彻底消除数据路径中的
 SHA-256 计算；连接建立和 gate 阶段仍有少量 SHA-256）。
 
-### P2：减少 seal()/open() 内存分配
+### P2：消除接收路径堆分配 — 全协议 in-place 解密
+
+**状态：已验证可行性，待评审。2026-07-09 端到端性能测试 + 代码审计确认。**
 
 **问题**：
-- `seal()` 返回 `Vec<u8>`，每包 1 次分配 + 2 次拷贝
-- `open()` 中 `ciphertext.to_vec()` 额外 1 次分配 + 拷贝
-- `memcpy` 占 easytier CPU 的 12.7%
+- `open_datagram` 返回 `Option<Vec<u8>>`，每个入站包 3 次堆分配 + 3 次 memcpy
+- `aead::open` 内部：`buf[NONCE_LEN..].to_vec()`（alloc 1）+ `plaintext.to_vec()`（alloc 2）
+- 调用方：`BytesMut::from(&plaintext[..])`（alloc 3）
+- 端到端验证：CPU 未跑满（82%）但吞吐比直连低 34%，典型分配器争用 stall
+- 万兆网卡下（83 万包/秒）仅分配器锁争用就会成为瓶颈
+
+**关键发现**：所有协议的接收路径都拥有 `&mut [u8]` 或可零拷贝转换为 `BytesMut` 的 buffer，
+均可在原 buffer 上原地解密，不需要分配新内存。
 
 **改动**：
-- Outer phase（热路径）：`seal_datagram` / `open_datagram` 改为 in-place 操作
-  - `seal_datagram_into(&self, plaintext: &mut Vec<u8>)`：原地扩展 nonce + tag
-  - `open_datagram_inplace(&self, buf: &mut Vec<u8>)`：原地验证 + 解密 + 截断
-  - AEAD 的 `seal_in_place_separate_tag` / `open_in_place` 天然支持 in-place
-- Gate phase（非热路径）：保留原 `seal()` / `open()` standalone 函数
-  - 因为 `open_datagram` gate 阶段尝试 2 个 window key（`stealth.rs:887-892`），
-    in-place 会在第一次失败时破坏 buffer，导致第二次尝试无法进行
-- 调用方（`tunnel/common.rs`, `tunnel/udp.rs`, `tunnel/websocket.rs`）适配新签名
 
-**文件**：`src/tunnel/stealth.rs` + 所有调用方
+#### P2.1：`aead::open` 消除第二次 `to_vec()`（2 行，零风险）
 
-**预期收益**：`memcpy` 从 12.7% 降到 ~5%，malloc/free 从 1.2% 降到 ~0.5%。
+```rust
+// src/tunnel/stealth.rs, aead::open
+
+// before:
+let mut data = buf[NONCE_LEN..].to_vec();
+let plaintext = key
+    .open_in_place(ring_nonce, aead::Aad::empty(), &mut data)
+    .ok()?;
+Some(plaintext.to_vec())
+
+// after:
+let mut data = buf[NONCE_LEN..].to_vec();
+let plaintext_len = key
+    .open_in_place(ring_nonce, aead::Aad::empty(), &mut data)
+    .ok()?
+    .len();
+data.truncate(plaintext_len);
+Some(data)
+```
+
+`open_in_place` 返回 `&[u8]` 借用 `data`，直接 `.len()` 返回 `usize`（Copy），
+借用立即释放，`data.truncate()` 可编译。语义完全等价。
+
+#### P2.2：新增 `aead::open_in_place_mut`（~15 行）
+
+```rust
+/// Open a sealed buffer in-place. Buffer contains `nonce || ciphertext || tag`.
+/// On success, plaintext is moved to buffer start and its length returned.
+/// On failure, buffer is left in unspecified state.
+#[cfg(feature = "stealth-aead")]
+pub fn open_in_place_mut(cipher: &OuterCipher, buf: &mut [u8]) -> Option<usize> {
+    if buf.len() < NONCE_LEN + TAG_LEN {
+        return None;
+    }
+    let key = match cipher {
+        OuterCipher::Aes256Gcm(k) | OuterCipher::ChaCha20Poly1305(k) => k,
+    };
+    let nonce: [u8; NONCE_LEN] = buf[..NONCE_LEN].try_into().ok()?;
+    let ring_nonce = aead::Nonce::assume_unique_for_key(nonce);
+    let plaintext_len = key
+        .open_in_place(ring_nonce, aead::Aad::empty(), &mut buf[NONCE_LEN..])
+        .ok()?
+        .len();
+    buf.copy_within(NONCE_LEN..NONCE_LEN + plaintext_len, 0);
+    Some(plaintext_len)
+}
+```
+
+`copy_within` 是 `ptr::copy` 的安全包装，处理重叠区域。plaintext 比 ciphertext+tag 短 28 字节，
+移动方向是向前（从 offset 12 到 offset 0），不会覆盖未读数据。
+
+#### P2.3：新增 `OuterSessionState::open_datagram_in_place`（~25 行）
+
+```rust
+/// Open a sealed datagram in-place. On success returns plaintext length.
+/// Caller truncates buffer to that length. On failure returns None (drop packet).
+///
+/// Handles ALL key phases internally:
+/// - Outer + AEAD: zero-alloc in-place (hot path)
+/// - Outer + legacy: allocating `open()` + copy back (cold path)
+/// - Gate / PromoteAfterNextSeal: allocating `open()` with 2 window keys + copy back
+///
+/// **安全关键**：调用方不需要 fallback。返回 `None` = 丢弃包。
+/// ring::aead::open_in_place 失败后 buffer 损坏，但调用方不再使用 buffer，
+/// 所以没有安全风险。gate/legacy 路径不调用 open_in_place，buffer 不被损坏。
+pub fn open_datagram_in_place(&self, buf: &mut [u8]) -> Option<usize> {
+    if !self.enabled {
+        return None;
+    }
+    match *self.key_phase.read().unwrap() {
+        OuterKeyPhase::Outer(key, _) => {
+            #[cfg(feature = "stealth-aead")]
+            {
+                let cipher = self.outer_cipher.read().unwrap();
+                if let Some(ref c) = *cipher {
+                    // AEAD in-place: zero alloc. Buffer may be corrupted on failure,
+                    // but caller drops the packet on None, so safe.
+                    return aead::open_in_place_mut(c, buf);
+                }
+            }
+            // Legacy outer: allocating path + copy back
+            let pt = open(&key, buf);
+            pt.map(|p| { buf[..p.len()].copy_from_slice(&p); p.len() })
+        }
+        OuterKeyPhase::Gate | OuterKeyPhase::PromoteAfterNextSeal(_) => {
+            // Gate: allocating path with 2 window keys + copy back.
+            // Cannot in-place because first window failure would corrupt buffer
+            // for second window attempt.
+            let cur = window_for(now_secs(), self.window_secs);
+            for window in [cur, cur.wrapping_sub(1)] {
+                let key = derive_gate_key(&self.network_secret, window);
+                if let Some(pt) = open(&key, buf) {
+                    buf[..pt.len()].copy_from_slice(&pt);
+                    return Some(pt.len());
+                }
+            }
+            None
+        }
+    }
+}
+```
+
+**设计决策**：`open_datagram_in_place` 内部处理所有 key phase，调用方不需要
+fallback 到 `open_datagram`。这消除了 ring buffer 损坏导致的安全风险——如果
+AEAD 认证失败，buffer 已损坏，但调用方直接丢弃包，不再使用 buffer。
+
+**分配数**：
+- Outer + AEAD（热路径）：0 次分配
+- Outer + legacy：1 次分配（`open()` 内部 `to_vec()`）
+- Gate phase：1-2 次分配（`open()` 尝试 1-2 个 window key）
+
+#### P2.4：调用方改动（6 个文件，每处 2-5 行）
+
+**UDP — `src/tunnel/udp.rs`（2 处）**：
+
+listener `try_forward_sealed_data`（line 677, 683-688）：
+
+**签名改动**：`try_forward_sealed_data` 从 `raw: &BytesMut` 改为 `raw: BytesMut`（owned），
+因为 in-place 需要可变访问，`BytesMut::clone()` 会共享 allocation 导致 copy-on-write，不是零拷贝。
+调用方（line 754）从 `self.try_forward_sealed_data(&raw, addr)` 改为 `self.try_forward_sealed_data(raw, addr)`。
+
+```rust
+// before (line 677):
+fn try_forward_sealed_data(&self, raw: &BytesMut, addr: SocketAddr) -> bool {
+    // ...
+    let opened = self.sock_map.get(&addr)
+        .and_then(|conn| conn.stealth.open_datagram(raw));
+    if let Some(plaintext) = opened {
+        match get_zcpacket_from_buf(BytesMut::from(&plaintext[..]), false) { ... }
+    }
+}
+
+// after:
+fn try_forward_sealed_data(&self, mut raw: BytesMut, addr: SocketAddr) -> bool {
+    // ...
+    // open_datagram_in_place handles ALL key phases (outer AEAD, outer legacy, gate).
+    // No caller fallback needed. Returns None = drop packet.
+    if let Some(conn) = self.sock_map.get(&addr) {
+        if let Some(pt_len) = conn.stealth.open_datagram_in_place(&mut raw) {
+            raw.truncate(pt_len);
+            match get_zcpacket_from_buf(raw, false) { ... }
+            return true;
+        }
+    }
+    // No conn for addr, or open failed (auth failure / parse error)
+    false
+}
+```
+
+调用方（line 751-756）：
+```rust
+// before:
+let raw = buf.split();
+if addr_has_conn {
+    if self.try_forward_sealed_data(&raw, addr) { continue; }
+    match get_zcpacket_from_buf(raw, false) { ... }
+}
+
+// after:
+let raw = buf.split();
+if addr_has_conn {
+    if self.try_forward_sealed_data(raw, addr) { continue; }
+    // try_forward_sealed_data consumed raw and returned false.
+    // This means stealth open failed (auth failure). Fall through to
+    // cleartext fallback parsing, but raw was moved...
+    // Problem: caller needs raw for cleartext fallback (line 757-769).
+    // Solution: try_forward_sealed_data should return Option<BytesMut>:
+    //   Some(handled) = success, raw consumed
+    //   None = failed, return raw to caller for cleartext fallback
+    match self.try_forward_sealed_data(raw, addr) {
+        Some(()) => continue,
+        None => {
+            // raw was consumed; for cleartext fallback we need a different approach.
+            // See below for refined signature.
+        }
+    }
+}
+```
+
+**签名修正**：`try_forward_sealed_data` 返回 `bool` 时调用方仍需要 `raw` 做 cleartext fallback
+（line 757-769：`allow_cleartext_fallback_for_established_addr`）。但 `raw` 被 move 后调用方
+没有了。两种处理方式：
+1. **改返回类型为 `enum { Handled, Failed(BytesMut) }`**，失败时返回 `raw` 给调用方
+2. **在 `try_forward_sealed_data` 内部处理 cleartext fallback**，调用方不需要 `raw`
+
+推荐方式 2：将 cleartext fallback 逻辑移入 `try_forward_sealed_data`，
+函数内部在 `open_datagram_in_place` 返回 `None` 后尝试 cleartext 解析。
+这样调用方只需 `if self.try_forward_sealed_data(raw, addr) { continue; }`，
+`raw` 被 move，所有处理在函数内部完成。
+
+注意：cleartext fallback 时 buffer 可能已被 `open_in_place_mut` 损坏（AEAD 认证失败场景）。
+需要在 `open_datagram_in_place` 返回 `None` 后**不使用原 buffer 做 cleartext 解析**。
+但当前 cleartext fallback 逻辑是：stealth open 失败后，尝试把 raw 当明文包解析。
+如果 buffer 已被 AEAD 部分覆盖，cleartext 解析会失败（header 不对），被丢弃。
+这和当前行为一致——当前 `open_datagram` 返回 `None` 后，`raw` 是原始密文，
+cleartext fallback 尝试解析也会失败（因为密文不是有效的 tunnel header）。
+
+**结论**：AEAD 认证失败后 buffer 损坏不影响 cleartext fallback 的正确性——
+cleartext fallback 本来就不应该成功（密文不是明文包）。但如果要严格保证，
+可以在 `try_forward_sealed_data` 内部对 cleartext fallback 使用原始 buffer 的副本。
+不过这引入分配，违背零分配目标。推荐接受当前行为：AEAD 失败后 cleartext fallback
+也会失败，包被丢弃。
+
+connector recv loop（line 1214-1216）：
+```rust
+// before:
+let parsed = if recv_stealth.is_enabled() {
+    match recv_stealth.open_datagram(&raw) {
+        Some(pt) => get_zcpacket_from_buf(BytesMut::from(&pt[..]), false),
+        None => { continue; }
+    }
+} else {
+    get_zcpacket_from_buf(raw, false)
+};
+
+// after:
+// open_datagram_in_place handles ALL key phases internally.
+// No fallback needed. None = drop packet.
+let parsed = if recv_stealth.is_enabled() {
+    match recv_stealth.open_datagram_in_place(&mut raw) {
+        Some(pt_len) => { raw.truncate(pt_len); get_zcpacket_from_buf(raw, false) }
+        None => { continue; }  // auth failure or parse error
+    }
+} else {
+    get_zcpacket_from_buf(raw, false)
+};
+```
+
+**TCP — `src/tunnel/common.rs`（1 处，line 240-254）**：
+```rust
+// before:
+let record = buf.split_to(TCP_TUNNEL_HEADER_SIZE + sealed_len);
+let Some(plaintext) = stealth.open_datagram(&record[TCP_TUNNEL_HEADER_SIZE..]) else { ... };
+Some(Ok(ZCPacket::new_from_buf(BytesMut::from(plaintext.as_slice()), ZCPacketType::TCP)))
+
+// after:
+// open_datagram_in_place handles ALL key phases internally.
+let mut record = buf.split_to(TCP_TUNNEL_HEADER_SIZE + sealed_len);
+let sealed = record.split_off(TCP_TUNNEL_HEADER_SIZE);
+match stealth.open_datagram_in_place(&mut sealed) {
+    Some(pt_len) => {
+        sealed.truncate(pt_len);
+        Some(Ok(ZCPacket::new_from_buf(sealed, ZCPacketType::TCP)))
+    }
+    None => Some(Err(TunnelError::InvalidPacket(
+        "TCP stealth authentication failed".into()))),
+}
+```
+
+**FakeTCP — `src/tunnel/fake_tcp/mod.rs`**：**不改动**。
+
+FakeTCP 有额外的 gate-key fallback 逻辑（`DroppedStaleGateControl`，line 791-816），
+用于检测和丢弃 stale Noise handshake duplicates。这需要区分"outer open 成功"和
+"gate open 成功"来做不同处理（gate 成功后要检查是否是 Noise handshake packet）。
+`open_datagram_in_place` 内部处理所有 phase 但不区分 outer/gate 成功，无法满足
+FakeTCP 的 `DroppedStaleGateControl` 需求。
+
+此外 FakeTCP 不是热路径（TCP 有 Nagle/coalescing，单次调用可能处理多个 record），
+改动风险大于收益。保留 allocating `open_datagram` + `open_gate_datagram` 路径。
+
+**WebSocket — `src/tunnel/websocket.rs`（1 处，line 200-216）**：
+```rust
+// before:
+let payload = msg.into_payload();
+let plaintext = if stealth.is_enabled() {
+    match stealth.open_datagram(payload.as_bytes()) {
+        Some(plaintext) => plaintext,
+        None => { return Some(Err(...)); }
+    }
+} else {
+    payload.as_bytes().to_vec()
+};
+Some(Ok(ZCPacket::new_from_buf(BytesMut::from(plaintext.as_slice()), ZCPacketType::DummyTunnel)))
+
+// after:
+// open_datagram_in_place handles ALL key phases internally.
+if stealth.is_enabled() {
+    let mut buf = BytesMut::from(msg.into_payload());  // zero-copy: Payload→BytesMut
+    match stealth.open_datagram_in_place(&mut buf) {
+        Some(pt_len) => {
+            buf.truncate(pt_len);
+            Some(Ok(ZCPacket::new_from_buf(buf, ZCPacketType::DummyTunnel)))
+        }
+        None => Some(Err(TunnelError::InvalidPacket("invalid WS stealth record".into()))),
+    }
+} else {
+    let payload = msg.into_payload();
+    Some(Ok(ZCPacket::new_from_buf(
+        BytesMut::from(payload.as_bytes()), ZCPacketType::DummyTunnel,
+    )))
+}
+```
+
+**`Payload` → `BytesMut` 零拷贝**：`Payload` 内部是 `Bytes`，
+`From<Payload> for BytesMut` 调用 `Bytes::into()`，当 refcount=1 时是零拷贝。
+WS 消息刚从 stream 读取，refcount=1，满足条件。
+
+**QUIC — `src/tunnel/quic.rs`（line 563-609）**：
+
+新增 `open_in_place` 方法到 `QuicStealthSocket`：
+```rust
+fn open_in_place(&self, addr: SocketAddr, buf: &mut [u8]) -> Option<(usize, Arc<QuicStealthSession>)> {
+    if let Some(session) = self.session(addr) {
+        if let Some(pt_len) = session.open_in_place(buf) {
+            if session.state.outer_key().is_some() && Self::is_quic_initial(&buf[..pt_len]) {
+                return None;
+            }
+            return Some((pt_len, session));
+        }
+        return None;
+    }
+    // Candidate path: need to try open, but in-place would corrupt buf on failure.
+    // Use allocating path for candidate (rare, only first packet).
+    let candidate = Arc::new(QuicStealthSession::new(
+        self.template.fork_for_transport_delayed_transition(),
+    ));
+    let plaintext = candidate.open(buf)?;  // allocating path
+    if !Self::is_quic_initial(&plaintext) || !self.accept_initial_nonce(buf) {
+        return None;
+    }
+    // Copy plaintext back into buf (candidate path, rare)
+    buf[..plaintext.len()].copy_from_slice(&plaintext);
+    // ... register session ...
+    Some((plaintext.len(), candidate))
+}
+```
+
+`QuicStealthSession::open_in_place`：
+
+由于 `open_datagram_in_place` 已内部处理所有 key phase（outer AEAD in-place，
+outer legacy / gate 用 allocating + copy back），`QuicStealthSession::open_in_place`
+只需直接委托：
+
+```rust
+fn open_in_place(&self, buf: &mut [u8]) -> Option<usize> {
+    // open_datagram_in_place handles ALL phases:
+    // - Outer + AEAD: zero-alloc in-place
+    // - Outer + legacy: allocating + copy back
+    // - Gate / PromoteAfterNextSeal: allocating with 2 window keys + copy back
+    // - Grace period: handled by key_phase state, not by elapsed time
+    self.state.open_datagram_in_place(buf)
+}
+```
+
+**注意**：当前 `QuicStealthSession::open` 有 grace period 逻辑——先试 `open_datagram`，
+失败后试 `open_gate_datagram`。但 `open_datagram` 在 `Outer` phase 下只试 outer key，
+不试 gate key。grace period 的 gate fallback 是通过 `open_gate_datagram` 显式调用的。
+
+`open_datagram_in_place` 内部在 `Outer` phase 下也只试 outer key（和 `open_datagram`
+一致），在 `Gate` / `PromoteAfterNextSeal` phase 下试 gate key。所以如果
+`key_phase` 是 `Outer`，`open_datagram_in_place` 不会试 gate key——和当前
+`open_datagram` 行为一致。
+
+**差异**：当前 `QuicStealthSession::open` 在 grace period（`elapsed <= GRACE`）时，
+即使 `key_phase` 是 `Outer`，也会在 `open_datagram` 失败后 fallback 到
+`open_gate_datagram`。但 `open_datagram_in_place` 在 `Outer` phase 下不会做这个 fallback。
+
+**影响分析**：grace period 的 gate fallback 是为了处理"outer key 已设置但对端仍在发
+gate-key 包"的过渡期。如果 `open_datagram_in_place` 在 `Outer` phase 下不 fallback
+到 gate key，过渡期的 gate-key 包会被丢弃。
+
+**修正**：需要在 `open_datagram_in_place` 中增加 grace period gate fallback。
+但这引入 buffer 损坏风险——AEAD `open_in_place` 失败后 buffer 已损坏。
+
+**方案**：`open_datagram_in_place` 在 `Outer` + AEAD 路径失败时返回 `None`，
+调用方（`QuicStealthSession::open_in_place`）在 grace period 内用 allocating 路径
+重试 gate key。但 buffer 已损坏，不能直接传给 `open_gate_datagram`。
+
+**最终方案**：QUIC grace period 保留 allocating 路径，不使用 in-place：
+
+```rust
+fn open_in_place(&self, buf: &mut [u8]) -> Option<usize> {
+    match self.outer_elapsed() {
+        Some(elapsed) if elapsed >= QUIC_STEALTH_OUTER_SEND_DELAY => {
+            // Definite outer phase: safe to in-place.
+            // open_datagram_in_place handles outer AEAD (in-place) and
+            // outer legacy (allocating + copy back).
+            self.state.open_datagram_in_place(buf)
+        }
+        Some(elapsed) => {
+            // Grace period: CANNOT use in-place.
+            // ring::open_in_place 失败后 buffer 损坏，gate fallback 会得到错误结果。
+            // 使用 allocating 路径，解密后 copy 回 buf。
+            self.state.open_datagram(buf)
+                .or_else(|| (elapsed <= QUIC_STEALTH_GATE_RECV_GRACE)
+                    .then(|| self.state.open_gate_datagram(buf))
+                    .flatten())
+                .map(|pt| { buf[..pt.len()].copy_from_slice(&pt); pt.len() })
+        }
+        None => {
+            // Gate only: open_datagram_in_place handles this (allocating + copy back)
+            self.state.open_datagram_in_place(buf)
+        }
+    }
+}
+```
+
+**关键安全约束**：grace period 期间不能用 in-place。`ring::aead::open_in_place` 失败后
+buffer 处于 unspecified state（可能已部分解密），再传给 `open_gate_datagram` 会得到
+错误结果。只有 `elapsed >= QUIC_STEALTH_OUTER_SEND_DELAY`（确定已进入 outer phase）
+时才使用 in-place。
+
+`poll_recv` 改动：
+```rust
+// before (line 578-608):
+let mut opened = Vec::with_capacity(count);
+for index in 0..count {
+    let sealed = &bufs[index][offset..end];
+    if let Some((plaintext, _)) = self.open_from(received.addr, sealed) {
+        opened.push((plaintext, received));
+    }
+}
+// then copy_from_slice back to bufs
+
+// after:
+let mut opened_count = 0;
+for index in 0..count {
+    let received = meta[index];
+    let stride = received.stride.max(1);
+    let mut offset = 0;
+    while offset < received.len && opened_count < bufs.len().min(meta.len()) {
+        let end = (offset + stride).min(received.len);
+        if let Some((pt_len, _)) = self.open_in_place(received.addr, &mut bufs[index][offset..end]) {
+            // Move plaintext to destination buffer
+            if opened_count != index || offset != 0 {
+                bufs[opened_count][..pt_len].copy_from_slice(&bufs[index][offset..offset + pt_len]);
+            }
+            meta[opened_count] = RecvMeta {
+                len: pt_len, stride: pt_len,
+                addr: received.addr, port: received.port,
+            };
+            opened_count += 1;
+        }
+        offset = end;
+    }
+}
+if opened_count == 0 { continue; }
+return Poll::Ready(Ok(opened_count));
+```
+
+消除 `opened: Vec<(Vec<u8>, RecvMeta)>` 中间分配。单 stride（最常见）时
+`opened_count == index && offset == 0`，不触发 copy_from_slice，为 0 memcpy。
+
+**WireGuard — `src/tunnel/wireguard.rs`（2 处）**：
+
+需新增 `WgStealthSession::open_in_place` 方法（当前只有 `open`，line 73）。
+与 `QuicStealthSession::open_in_place` 对称，包含 grace period 安全约束：
+
+```rust
+/// WgStealthSession 新增方法
+fn open_in_place(&self, buf: &mut [u8]) -> Option<usize> {
+    match self.outer_elapsed() {
+        Some(elapsed) if elapsed >= WG_STEALTH_OUTER_SEND_DELAY => {
+            // Definite outer phase: safe to in-place.
+            self.state.open_datagram_in_place(buf)
+        }
+        Some(elapsed) => {
+            // Grace period: CANNOT use in-place.
+            // ring::open_in_place 失败后 buffer 损坏，gate fallback 会得到错误结果。
+            // 使用 allocating 路径，解密后 copy 回 buf。
+            self.state.open_datagram(buf)
+                .or_else(|| (elapsed <= WG_STEALTH_GATE_RECV_GRACE)
+                    .then(|| self.state.open_gate_datagram(buf))
+                    .flatten())
+                .map(|pt| { buf[..pt.len()].copy_from_slice(&pt); pt.len() })
+        }
+        None => {
+            // Gate only: open_datagram_in_place handles gate phase internally
+            // (allocating + copy back, tries 2 window keys)
+            self.state.open_datagram_in_place(buf)
+        }
+    }
+}
+```
+
+`open_network_packet`（line 558-562）：**不改动**。
+
+此方法只在 handshake 阶段调用（line 709/712/938，用于打开 handshake response），
+不是热路径。保留 allocating `stealth.open()` 路径。
+
+recv loop（line 926-931）：
+```rust
+// before:
+let Some(packet) = data.stealth.as_ref().map_or_else(
+    || Some(buf[..n].to_vec()),
+    |stealth| stealth.open(&buf[..n]),
+) else { continue; };
+let _ = data.handle_one_packet_from_peer(&mut sink, &packet).await;
+
+// after:
+let pt_len = if let Some(stealth) = data.stealth.as_ref() {
+    match stealth.open_in_place(&mut buf[..n]) {
+        Some(len) => len,
+        None => continue,
+    }
+} else { n };
+let _ = data.handle_one_packet_from_peer(&mut sink, &buf[..pt_len]).await;
+```
+
+需确认 `handle_one_packet_from_peer` 接受 `&[u8]` 而非 `Vec<u8>`。
+
+#### P2.5：不修改的部分
+
+- `seal_datagram`：发送路径只有 1 次分配（`Vec::with_capacity`），不是瓶颈，不改
+- `seal_gate_datagram` / `open_gate_datagram`：gate phase 非热路径，不改
+- legacy `seal()` / `open()`：`stealth-aead` feature 未启用时使用，不改签名
+  （但 P2.1 的 2 行修复对 legacy `open()` 无影响，仅对 `aead::open` 生效）
+
+#### P2.6：测试计划
+
+- 单元测试：`stealth::tests` 和 `stealth::aead_tests` 全部通过（不改测试）
+- 新增单元测试：`open_in_place_mut` 正确性 + 边界条件（空 buffer、过短 buffer、tag 错误）
+- 新增单元测试：`open_datagram_in_place` 在 outer phase 成功、gate phase 返回 None
+- 端到端验证：与 P1 验证相同的测试矩阵（UDP/TCP/QUIC/WS/WG + stealth + secure + proxy）
+- 性能对比：直连 vs stealth+secure，单流和 4 并发，对比改前改后
+
+#### P2.7：风险评估
+
+| 改动 | 风险 | 说明 |
+| --- | --- | --- |
+| P2.1 `aead::open` 2 行 | 零 | 纯语义等价，`len()` 返回 Copy 类型 |
+| P2.2 `open_in_place_mut` | 低 | `copy_within` 是 stdlib 安全 API，处理重叠区域 |
+| P2.3 `open_datagram_in_place` | 低 | 内部处理所有 key phase，调用方不需 fallback |
+| UDP 调用方 | 低 | 签名从 `&BytesMut` 改为 `BytesMut`（owned），调用方 move 而非 clone |
+| TCP 调用方 | 低 | `split_off` 后 in-place，refcount=1 零拷贝 |
+| WS 调用方 | 低 | `Payload→BytesMut` 零拷贝已验证 |
+| QUIC 调用方 | 中 | GRO 多 stride 逻辑较复杂；grace period 用 allocating 路径避免 buffer 损坏 |
+| WG 调用方 | 低 | 新增 `WgStealthSession::open_in_place`，grace period 用 allocating 路径 |
+| FakeTCP | 不改动 | `DroppedStaleGateControl` 需区分 outer/gate 成功，非热路径 |
+| WG `open_network_packet` | 不改动 | 仅 handshake 阶段调用，非热路径 |
+| **grace period in-place 安全** | **关键** | `ring::open_in_place` 失败后 buffer 损坏，**只有 `elapsed >= delay` 时才 in-place**，grace period 期间用 allocating 路径 |
+
+#### P2.8：改动量统计
+
+| 文件 | 新增/改动行数 | 说明 |
+| --- | ---: | --- |
+| `src/tunnel/stealth.rs` | ~35 | P2.1 (2 行) + P2.2 (~15 行) + P2.3 (~20 行) |
+| `src/tunnel/udp.rs` | ~10 | 2 处调用点 |
+| `src/tunnel/common.rs` | ~8 | 1 处调用点 |
+| `src/tunnel/fake_tcp/mod.rs` | 0 | **不改动**：`DroppedStaleGateControl` 需区分 outer/gate |
+| `src/tunnel/websocket.rs` | ~10 | 1 处调用点 |
+| `src/tunnel/quic.rs` | ~25 | `QuicStealthSession::open_in_place` + `QuicStealthSocket::open_in_place` + `poll_recv` 改动 |
+| `src/tunnel/wireguard.rs` | ~20 | 新增 `WgStealthSession::open_in_place` (~15 行) + recv loop (5 行)；`open_network_packet` 不改动 |
+| **合计** | **~119** | |
+
+#### P2.9：预期收益
+
+| 指标 | 改前 | 改后 |
+| --- | --- | --- |
+| 入站包堆分配 | 3 次 | 0 次（全协议） |
+| 入站包 memcpy | 3 次 | 0 次（QUIC GRO 多 stride 偶尔 1 次） |
+| `memcpy` CPU 占比 | 12.7%* | < 3% |
+| malloc/free CPU 占比 | 1.2%* | ~0% |
+| 万兆网卡下分配器锁争用 | 严重 | 消除 |
+
+*profiling 数据来自 HMAC-SHA256 时代；AEAD 后 SHA-256 消除，memcpy 和分配占比会相对升高。
 
 ### P3：用计数器替代 OsRng 生成 nonce
 

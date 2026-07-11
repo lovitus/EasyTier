@@ -343,6 +343,10 @@ impl RelayPeerMap {
             a_session_generation,
             a_conn_id: Some(a_conn_id.into()),
             client_encryption_algorithm: self.global_ctx.get_flags().encryption_algorithm.clone(),
+            #[cfg(feature = "stealth-aead")]
+            outer_cipher_suite: Some(crate::tunnel::stealth::preferred_outer_cipher_suite().to_string()),
+            #[cfg(not(feature = "stealth-aead"))]
+            outer_cipher_suite: None,
         };
         let payload = msg1_pb.encode_to_vec();
         let mut out = vec![0u8; 4096];
@@ -584,6 +588,7 @@ impl RelayPeerMap {
             b_conn_id: Some(uuid::Uuid::new_v4().into()),
             a_conn_id_echo: msg1_pb.a_conn_id,
             server_encryption_algorithm: algo,
+            outer_cipher_suite: msg1_pb.outer_cipher_suite.clone(),
         };
         let payload = msg2_pb.encode_to_vec();
         let mut out = vec![0u8; 4096];
