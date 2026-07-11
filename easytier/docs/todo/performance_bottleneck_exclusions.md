@@ -163,6 +163,8 @@ TUN 读端（入向）:
 ### D1. 建立可信基线
 
 - [ ] 使用同一提交、同一配置、同一拓扑分别测 Plain、Stealth、派生 Secure、显式 Secure。
+- [x] 使用 commit `784659e8` 对 TCP Stealth off/on 完成同构三轮 A/B：中位数
+  1.13/1.09 Gbps，差异落在样本波动内；仍需补派生 Secure、显式 Secure 和其他协议。
 - [ ] 覆盖 TCP、UDP、QUIC、FakeTCP，以及单流、多流、小包 pps、单向和双向。
 - [ ] 每个场景至少 5 轮，记录中位数、离散度、重传、丢包和 p99 RTT。
 - [ ] debug 产物只用于正确性；性能结论使用 GitHub workflow 生成的优化产物。不得在远端手工使用 `--release`。
@@ -171,6 +173,8 @@ TUN 读端（入向）:
 ### D2. CPU 与 off-CPU profiling
 
 - [ ] 对优化产物采集 `perf record`/flamegraph，列出前 20 个符号及占比。
+- [ ] perf 结果必须同时记录 PID、线程数、进程 CPU、采样频率和总样本数；发送端仅
+  107--120 个样本的历史采集判定无效，不得据此解释热点。
 - [ ] 分线程记录 Tokio worker、TUN reader/writer、tunnel socket task 的 CPU 和上下文切换。
 - [ ] 采集 off-CPU/等待信息，区分 socket/TUN readiness、channel wait、timer 和锁等待。
 - [ ] 若符号被 strip，单独通过测试 workflow 生成带符号的优化 profiling artifact，不改变正式发布 profile。
