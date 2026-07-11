@@ -26,6 +26,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(feature = "stealth-aead")]
+use std::sync::atomic::AtomicBool;
+
 use hmac::{Hmac, Mac as _};
 use rand::RngCore as _;
 use sha2::Sha256;
@@ -543,6 +546,8 @@ pub struct OuterSessionState {
     nonce_counter: AtomicU64,
     nonce_salt: AtomicU32,
     #[cfg(feature = "stealth-aead")]
+    outer_aead_enabled: AtomicBool,
+    #[cfg(feature = "stealth-aead")]
     outer_cipher: RwLock<Option<aead::OuterCipher>>,
     #[cfg(feature = "stealth-aead")]
     cipher_suite: RwLock<Option<String>>,
@@ -596,6 +601,8 @@ impl OuterSessionState {
             nonce_counter: AtomicU64::new(0),
             nonce_salt: AtomicU32::new(0),
             #[cfg(feature = "stealth-aead")]
+            outer_aead_enabled: AtomicBool::new(false),
+            #[cfg(feature = "stealth-aead")]
             outer_cipher: RwLock::new(None),
             #[cfg(feature = "stealth-aead")]
             cipher_suite: RwLock::new(None),
@@ -615,6 +622,8 @@ impl OuterSessionState {
             key_phase: RwLock::new(OuterKeyPhase::Gate),
             nonce_counter: AtomicU64::new(0),
             nonce_salt: AtomicU32::new(0),
+            #[cfg(feature = "stealth-aead")]
+            outer_aead_enabled: AtomicBool::new(false),
             #[cfg(feature = "stealth-aead")]
             outer_cipher: RwLock::new(None),
             #[cfg(feature = "stealth-aead")]
@@ -672,6 +681,9 @@ impl OuterSessionState {
         // Gate path (current phase) never reads outer_cipher, so early write is safe.
         #[cfg(feature = "stealth-aead")]
         {
+            self.outer_aead_enabled.store(false, Ordering::Release);
+            *self.outer_cipher.write().unwrap() = None;
+            *self.cipher_suite.write().unwrap() = None;
             if let Some(suite) = outer_cipher_suite {
                 if let Some(cipher) = aead::build(suite, &key) {
                     let salt = derive_nonce_salt(handshake_hash);
@@ -679,6 +691,7 @@ impl OuterSessionState {
                         .store(u32::from_be_bytes(salt), Ordering::Release);
                     *self.outer_cipher.write().unwrap() = Some(cipher);
                     *self.cipher_suite.write().unwrap() = Some(suite.to_string());
+                    self.outer_aead_enabled.store(true, Ordering::Release);
                 }
             }
         }
@@ -719,6 +732,9 @@ impl OuterSessionState {
         // the new phase must already see the cipher.
         #[cfg(feature = "stealth-aead")]
         {
+            self.outer_aead_enabled.store(false, Ordering::Release);
+            *self.outer_cipher.write().unwrap() = None;
+            *self.cipher_suite.write().unwrap() = None;
             if let Some(suite) = outer_cipher_suite {
                 if let Some(cipher) = aead::build(suite, &key) {
                     let salt = derive_nonce_salt(handshake_hash);
@@ -726,6 +742,7 @@ impl OuterSessionState {
                         .store(u32::from_be_bytes(salt), Ordering::Release);
                     *self.outer_cipher.write().unwrap() = Some(cipher);
                     *self.cipher_suite.write().unwrap() = Some(suite.to_string());
+                    self.outer_aead_enabled.store(true, Ordering::Release);
                 }
             }
         }
@@ -761,9 +778,7 @@ impl OuterSessionState {
     pub(crate) fn matches_outer_aead_nonce(&self, buf: &[u8]) -> Option<bool> {
         #[cfg(feature = "stealth-aead")]
         {
-            if !matches!(*self.key_phase.read().unwrap(), OuterKeyPhase::Outer(_, _))
-                || self.outer_cipher.read().unwrap().is_none()
-            {
+            if !self.outer_aead_enabled.load(Ordering::Acquire) {
                 return None;
             }
             let prefix: [u8; 4] = buf.get(..4)?.try_into().ok()?;

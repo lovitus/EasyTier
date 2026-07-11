@@ -678,19 +678,19 @@ impl UdpTunnelListenerData {
         if !self.stealth.is_enabled() {
             return false;
         }
-        let outer_aead_match = self
-            .sock_map
-            .get(&addr)
-            .and_then(|conn| conn.stealth.matches_outer_aead_nonce(&raw));
+        let (outer_aead_match, outer_open) = {
+            let Some(conn) = self.sock_map.get(&addr) else {
+                return true;
+            };
+            let outer_aead_match = conn.stealth.matches_outer_aead_nonce(&raw);
 
-        // A mismatched AEAD nonce prefix cannot belong to this phase-2
-        // session. Skip the destructive in-place open so a new gate-key SYN
-        // can replace a stale connection that still owns the same address.
-        let outer_open = (outer_aead_match != Some(false)).then(|| {
-            self.sock_map
-                .get(&addr)
-                .and_then(|conn| conn.stealth.open_datagram_in_place(&mut raw[..]))
-        });
+            // A mismatched AEAD nonce prefix cannot belong to this phase-2
+            // session. Skip the destructive in-place open so a new gate-key
+            // SYN can replace a stale connection that owns the same address.
+            let outer_open = (outer_aead_match != Some(false))
+                .then(|| conn.stealth.open_datagram_in_place(&mut raw[..]));
+            (outer_aead_match, outer_open)
+        };
         if let Some(Some(pt_len)) = outer_open {
             raw.truncate(pt_len);
             match get_zcpacket_from_buf(raw, false) {
