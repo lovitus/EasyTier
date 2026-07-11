@@ -570,7 +570,7 @@ impl QuicStealthSocket {
             if session.state.outer_key().is_some()
                 && session
                     .outer_elapsed()
-                    .map_or(true, |e| e > QUIC_STEALTH_GATE_RECV_GRACE)
+                    .is_none_or(|e| e > QUIC_STEALTH_GATE_RECV_GRACE)
                 && Self::is_quic_initial(&buf[..pt_len])
             {
                 return None;

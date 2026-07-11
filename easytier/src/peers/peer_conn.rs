@@ -3134,7 +3134,7 @@ pub mod tests {
 
                 let root_key = PeerSession::new_root_key();
                 let sender_session = Arc::new(PeerSession::new(
-                    1, root_key.clone(), 1, 0,
+                    1, root_key, 1, 0,
                     "aes-256-gcm".to_string(), "aes-256-gcm".to_string(), None,
                 ));
                 let receiver_session = Arc::new(PeerSession::new(
@@ -3214,7 +3214,7 @@ pub mod tests {
         let root_key = PeerSession::new_root_key();
         let sender_session = Arc::new(PeerSession::new(
             1,
-            root_key.clone(),
+            root_key,
             1,
             0,
             "aes-256-gcm".to_string(),

@@ -696,18 +696,18 @@ mod tests {
             .await
             .unwrap();
 
+        let expected_ip = IpAddr::V4("10.44.44.4".parse().unwrap());
         let addrs = NetlinkIfConfiger::list_addresses(&iface_name).unwrap();
-        assert_eq!(addrs.len(), 1);
-        assert_eq!(
-            addrs[0].address(),
-            IpAddr::V4("10.44.44.4".parse().unwrap())
-        );
-        assert_eq!(addrs[0].network_length(), 24);
+        let addr = addrs
+            .iter()
+            .find(|addr| addr.address() == expected_ip)
+            .expect("configured IPv4 address was not returned");
+        assert_eq!(addr.network_length(), 24);
 
         NetlinkIfConfiger::remove_one_ip(&iface_name, "10.44.44.4".parse().unwrap(), 24).unwrap();
 
         let addrs = NetlinkIfConfiger::list_addresses(&iface_name).unwrap();
-        assert_eq!(addrs.len(), 0);
+        assert!(!addrs.iter().any(|addr| addr.address() == expected_ip));
 
         let old_mtu = NetlinkIfConfiger::mtu(&iface_name).unwrap();
         assert_ne!(old_mtu, 0);

@@ -684,15 +684,15 @@ impl OuterSessionState {
             self.outer_aead_enabled.store(false, Ordering::Release);
             *self.outer_cipher.write().unwrap() = None;
             *self.cipher_suite.write().unwrap() = None;
-            if let Some(suite) = outer_cipher_suite {
-                if let Some(cipher) = aead::build(suite, &key) {
-                    let salt = derive_nonce_salt(handshake_hash);
-                    self.nonce_salt
-                        .store(u32::from_be_bytes(salt), Ordering::Release);
-                    *self.outer_cipher.write().unwrap() = Some(cipher);
-                    *self.cipher_suite.write().unwrap() = Some(suite.to_string());
-                    self.outer_aead_enabled.store(true, Ordering::Release);
-                }
+            if let Some(suite) = outer_cipher_suite
+                && let Some(cipher) = aead::build(suite, &key)
+            {
+                let salt = derive_nonce_salt(handshake_hash);
+                self.nonce_salt
+                    .store(u32::from_be_bytes(salt), Ordering::Release);
+                *self.outer_cipher.write().unwrap() = Some(cipher);
+                *self.cipher_suite.write().unwrap() = Some(suite.to_string());
+                self.outer_aead_enabled.store(true, Ordering::Release);
             }
         }
 
@@ -735,15 +735,15 @@ impl OuterSessionState {
             self.outer_aead_enabled.store(false, Ordering::Release);
             *self.outer_cipher.write().unwrap() = None;
             *self.cipher_suite.write().unwrap() = None;
-            if let Some(suite) = outer_cipher_suite {
-                if let Some(cipher) = aead::build(suite, &key) {
-                    let salt = derive_nonce_salt(handshake_hash);
-                    self.nonce_salt
-                        .store(u32::from_be_bytes(salt), Ordering::Release);
-                    *self.outer_cipher.write().unwrap() = Some(cipher);
-                    *self.cipher_suite.write().unwrap() = Some(suite.to_string());
-                    self.outer_aead_enabled.store(true, Ordering::Release);
-                }
+            if let Some(suite) = outer_cipher_suite
+                && let Some(cipher) = aead::build(suite, &key)
+            {
+                let salt = derive_nonce_salt(handshake_hash);
+                self.nonce_salt
+                    .store(u32::from_be_bytes(salt), Ordering::Release);
+                *self.outer_cipher.write().unwrap() = Some(cipher);
+                *self.cipher_suite.write().unwrap() = Some(suite.to_string());
+                self.outer_aead_enabled.store(true, Ordering::Release);
             }
         }
 
@@ -771,7 +771,7 @@ impl OuterSessionState {
 
     /// Classify an established AEAD datagram without attempting decryption.
     ///
-    /// AEAD nonces carry a per-session salt in their first four bytes. A
+    /// AEAD nonces carry a per-session salt in their last four bytes. A
     /// mismatch means the packet cannot belong to the current outer session,
     /// so listener code can safely try the gate-key reconnect path without
     /// first corrupting the buffer through a failed in-place open.
@@ -781,8 +781,8 @@ impl OuterSessionState {
             if !self.outer_aead_enabled.load(Ordering::Acquire) {
                 return None;
             }
-            let prefix: [u8; 4] = buf.get(..4)?.try_into().ok()?;
-            return Some(u32::from_be_bytes(prefix) == self.nonce_salt.load(Ordering::Acquire));
+            let salt: [u8; 4] = buf.get(8..12)?.try_into().ok()?;
+            Some(u32::from_be_bytes(salt) == self.nonce_salt.load(Ordering::Acquire))
         }
         #[cfg(not(feature = "stealth-aead"))]
         {
