@@ -1,6 +1,80 @@
 # Repository Agent Instructions
 
-- Do not compile this repository on the maintainer's local machine. Use the configured remote builder at `root@192.168.2.160` when compilation is required.
+- Do not compile this repository on the maintainer's local machine.
+- The primary build-and-validation path is the rolling profiling beta workflow:
+  1. Commit the exact code and documentation snapshot to `codex/profiling-beta`.
+  2. Push the branch and let `.github/workflows/profiling-beta.yml` build the optimized, symbolized x86_64-musl bundle.
+  3. Download the `profiling-beta` release assets, verify `SHA256SUMS.txt`, `BUILD_INFO.txt`, commit SHA, build ID, symbols, and target.
+  4. Deploy that exact artifact to isolated validation hosts and run functional, performance, resource, and interoperability checks.
+  5. If validation fails, use `git revert` for the offending validation commit(s), push the revert, and let the rolling beta rebuild. Never use destructive reset to hide a failed snapshot.
+- Use the configured remote builder at `root@192.168.2.160` only when GitHub Actions is unavailable or cannot perform the required diagnostic. It is a fallback, not the default build path.
+- Builder container: `easytier-debug-builder` (image: `rust:1.95-bookworm`). Mounts: `/data/easytier-builder/workspace` → `/workspace`, `/data/easytier-builder/cargo-registry` → `/usr/local/cargo/registry`. Sync source to `/data/easytier-builder/workspace/easytier/` on the host. Build artifacts at `/workspace/target` (on 205G disk, no separate mount). If cargo needs network access (e.g. fetching crates), use SSH reverse proxy: `ssh -R 7890:127.0.0.1:7890 root@192.168.2.160`.
+- When compiling on the remote builder, explicitly use all available CPU cores by exporting `CARGO_BUILD_JOBS=$(nproc)` before `cargo build`, `cargo check`, `cargo test`, or `cargo nextest`.
+- ALWAYS wrap long-running cargo commands with `timeout` to prevent indefinite hangs from deadlocked tests or stalled builds. Use: `timeout 600 cargo check ...`, `timeout 1800 cargo build ...`, `timeout 600 cargo test ...` (per test binary), `timeout 1800 cargo test ...` (full suite). Adjust upward if needed but NEVER run cargo without a timeout on the remote builder.
+- Before starting any cargo command in the remote builder container, check that no other cargo/rustc process is already running: `ssh root@192.168.2.160 'docker exec easytier-debug-builder bash -c "pgrep -x -f \"cargo|rustc\" && echo BLOCKED || echo CLEAR"'`. If BLOCKED, investigate or kill stale processes with `pkill -9 -f "cargo|rustc"` before proceeding.
+- Manual validation builds on the remote builder must not use `--release` or release/profile optimized builds. Use dev/debug builds for all manual testing; release/profile optimized artifacts may only be produced by GitHub workflows.
+- The remote validation hosts `192.168.2.160`, `192.168.1.37`, and `192.168.1.38` run old CentOS 7 / Linux 3.10 userspace. GNU debug binaries from the builder require newer glibc and must not be used there; use non-release `--target x86_64-unknown-linux-musl` binaries for manual validation on these hosts.
+- Use `10.20.0.65` for the KR validation host. Do not write the host's public domain name in repository docs, scripts, logs, or reports.
 - For a pre-release fix on `releases/**`, include `[skip ci]` in the commit message, push the commit, and manually trigger only `.github/workflows/gui-macos-aarch64-test.yml` (`EasyTier GUI macOS ARM64 Test`).
 - Do not trigger Core, the full GUI matrix, Mobile, OHOS, the full Test workflow, tags, or Release until the maintainer explicitly confirms real-device validation.
 - After that confirmation, run the formal release workflows against the exact validated commit before starting `EasyTier Release`.
+- When starting test/validation services on remote hosts, ALWAYS specify explicit ports for ALL protocols in the `-l` listener list, not just UDP. Default ports (11010 TCP, 11011 WG/WS, 11012 QUIC/WSS, 11013 FakeTCP) will conflict with production instances. Use a port base (e.g. 21030) and allocate: UDP=base, TCP=base+1, QUIC=base+2, WG=base+3, WS=base+4. Example: `-l "udp://0.0.0.0:21030,tcp://0.0.0.0:21031,quic://0.0.0.0:21032,wg://0.0.0.0:21033,ws://0.0.0.0:21034/"`. Increment the base by 10 for each new test round.
+- When starting test/validation services on remote hosts, ALWAYS clean up old processes and TUN devices BEFORE starting new ones: `killall -9 easytier-core 2>/dev/null; ip link delete tun0 2>/dev/null; ip link delete tun1 2>/dev/null; sleep 1`. Verify no residual processes with `ps aux | grep easytier-core | grep -v grep` before starting.
+- When starting background processes via SSH, use `setsid` with `< /dev/null` to detach: `ssh root@HOST 'setsid /path/to/binary ARGS > /tmp/log 2>&1 < /dev/null &'`. NEVER use `nohup ... & sleep N` in a single SSH command — it hangs. Split start and verify into separate SSH calls.
+- ALL SSH commands to remote hosts must include keepalive options to prevent firewall/NAT idle disconnection: `ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 root@HOST '...'`. This is especially critical for commands expected to run >2 minutes (cargo build, cargo test, large file transfers).
+- NEVER pipe `docker exec` output through `tail`/`head`/`grep` in the same SSH command. Docker's stdout buffering with non-TTY pipes can block the remote process when the pipe reader closes early. Instead, redirect to a temp file first, then read it in a separate SSH call: Step 1: `ssh ... 'docker exec ... bash -c "cargo test ... > /tmp/result.txt 2>&1"'`, Step 2: `ssh ... 'docker exec ... tail -30 /tmp/result.txt'`.
+- Prefer `cargo test --no-run` followed by directly executing the test binary with `timeout`, over running `cargo test` directly. This separates compilation from execution: `ssh ... 'docker exec ... bash -c "cd /workspace/easytier && CARGO_BUILD_JOBS=\$(nproc) timeout 600 cargo test --no-run --package easytier --lib -- TEST_NAME 2>&1 | tee /tmp/build.log"'` then `ssh ... 'docker exec ... bash -c "timeout 120 /workspace/target/debug/deps/easytier-HASH TEST_NAME --nocapture 2>&1 | tee /tmp/test.log"'`.
+- Validation hosts: `192.168.1.37`, `192.168.1.38`, `192.168.2.160`, `10.20.0.65` (KR), plus two additional hosts whose names are stored locally in `.envrc.local` (excluded from git via `.git/info/exclude`). Do NOT use short names or 198.18.x.x addresses for those hosts.
+
+## Remote Cargo Fallback — Golden Pattern
+
+When and only when the GitHub workflow path is unavailable, ALL remote `cargo build` / `cargo check` / `cargo test` / `cargo nextest` commands MUST follow this pattern. Every line is mandatory — no shortcuts.
+
+```bash
+# ===== STEP 0: Pre-flight — check for stale cargo locks =====
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 root@192.168.2.160 \
+  'docker exec easytier-debug-builder bash -c "pgrep -f \"cargo|rustc\" && echo BLOCKED || echo CLEAR"'
+# If BLOCKED → investigate and clean up FIRST. Do NOT proceed.
+
+# ===== STEP 1: Build (separate from execution) =====
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 root@192.168.2.160 \
+  'docker exec easytier-debug-builder bash -c "cd /workspace/easytier && CARGO_BUILD_JOBS=\$(nproc) timeout 1800 cargo CMD ARGS > /tmp/easytier_build.log 2>&1; echo EXIT_CODE=\$?"'
+# CMD = build | check | test --no-run | nextest archive
+# timeout: 600 for check, 1800 for build/full-test-suite
+
+# ===== STEP 2: Read build result =====
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 root@192.168.2.160 \
+  'docker exec easytier-debug-builder tail -50 /tmp/easytier_build.log'
+# Check EXIT_CODE. If non-zero → fix errors and retry from Step 0.
+
+# ===== STEP 3: Run test binary directly (only if Step 1 was test --no-run) =====
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 root@192.168.2.160 \
+  'docker exec easytier-debug-builder bash -c "timeout 300 /workspace/target/debug/deps/easytier-* TEST_FILTER --nocapture > /tmp/easytier_test.log 2>&1; echo EXIT_CODE=\$?"'
+# Adjust timeout: 120 for unit tests, 300 for integration/network tests, 600 for benchmarks
+
+# ===== STEP 4: Read test result =====
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 root@192.168.2.160 \
+  'docker exec easytier-debug-builder tail -50 /tmp/easytier_test.log'
+```
+
+Key invariants:
+- NEVER combine steps into one SSH call — each step is a separate ssh invocation
+- NEVER pipe docker exec to tail/head/grep — redirect to file, then read the file
+- NEVER omit timeout — every cargo/docker exec command has a timeout
+- NEVER use `--release` for manual validation — always dev/debug builds
+- NEVER skip the pre-flight check — stale cargo processes cause silent hangs
+
+## Musl Cross-Compilation (for CentOS 7 validation hosts)
+
+When building `x86_64-unknown-linux-musl` binaries on the remote builder, three environment variables are required:
+
+```bash
+docker exec easytier-debug-builder bash -c "
+export BINDGEN_EXTRA_CLANG_ARGS=\"--sysroot=/usr/x86_64-linux-musl -I/usr/include/x86_64-linux-musl\"
+export CC_x86_64_unknown_linux_musl=musl-gcc
+cd /workspace/easytier
+CARGO_BUILD_JOBS=\$(nproc) timeout 1800 cargo build --target x86_64-unknown-linux-musl --package easytier --bin easytier-core
+"
+```
+
+These env vars are needed for any `--target x86_64-unknown-linux-musl` build (debug or release). Without them, bindgen cannot find musl headers and C compilation fails.
