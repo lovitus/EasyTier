@@ -1308,14 +1308,17 @@ pub struct QuicTunnelListener {
 
 impl QuicTunnelListener {
     pub fn new(addr: url::Url, global_ctx: ArcGlobalCtx) -> Self {
-        let bind_mode = addr
-            .host_str()
-            .and_then(|host| host.parse::<IpAddr>().ok())
-            .map(|ip| match ip {
+        let bind_mode = match addr.host() {
+            Some(url::Host::Ipv4(_)) => Some(QuicBindMode::V4Only),
+            Some(url::Host::Ipv6(ip)) if ip.is_unspecified() => Some(QuicBindMode::DualStack),
+            Some(url::Host::Ipv6(_)) => Some(QuicBindMode::V6Only),
+            Some(url::Host::Domain(host)) => host.parse::<IpAddr>().ok().map(|ip| match ip {
                 IpAddr::V4(_) => QuicBindMode::V4Only,
                 IpAddr::V6(ip) if ip.is_unspecified() => QuicBindMode::DualStack,
                 IpAddr::V6(_) => QuicBindMode::V6Only,
-            });
+            }),
+            None => None,
+        };
         Self::new_inner(addr, global_ctx, bind_mode)
     }
 

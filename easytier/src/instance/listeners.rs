@@ -172,10 +172,14 @@ pub fn is_url_host_ipv6(l: &url::Url) -> bool {
 }
 
 pub fn is_url_host_unspecified(l: &url::Url) -> bool {
-    if let Ok(ip) = IpAddr::from_str(l.host_str().unwrap_or_default()) {
-        ip.is_unspecified()
-    } else {
-        false
+    url_ip_literal(l).is_some_and(|ip| ip.is_unspecified())
+}
+
+fn url_ip_literal(l: &url::Url) -> Option<IpAddr> {
+    match l.host()? {
+        url::Host::Ipv4(ip) => Some(IpAddr::V4(ip)),
+        url::Host::Ipv6(ip) => Some(IpAddr::V6(ip)),
+        url::Host::Domain(host) => IpAddr::from_str(host).ok(),
     }
 }
 
@@ -198,10 +202,7 @@ impl QuicListenerIndex {
             let Some(port) = listener.port() else {
                 continue;
             };
-            match listener
-                .host_str()
-                .and_then(|host| host.parse::<IpAddr>().ok())
-            {
+            match url_ip_literal(listener) {
                 Some(IpAddr::V4(ip)) => {
                     index.ipv4_ports.insert(port);
                     if ip.is_unspecified() {
@@ -219,7 +220,7 @@ impl QuicListenerIndex {
 
     fn bind_mode(&self, listener: &url::Url) -> Option<QuicBindMode> {
         let port = listener.port()?;
-        match listener.host_str()?.parse::<IpAddr>().ok()? {
+        match url_ip_literal(listener)? {
             IpAddr::V4(_) => Some(QuicBindMode::V4Only),
             IpAddr::V6(ip)
                 if ip.is_unspecified() && port != 0 && self.ipv4_ports.contains(&port) =>
