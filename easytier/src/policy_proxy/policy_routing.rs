@@ -280,9 +280,9 @@ fn cleanup_stale(v4_routes: &[RouteMessage], v6_routes: &[RouteMessage]) -> anyh
     for family in [AddressFamily::Inet, AddressFamily::Inet6] {
         for rule in NetlinkIfConfiger::list_rule_messages(family)? {
             if rule.attributes.iter().any(
-                |attribute| matches!(attribute, RuleAttribute::Table(table) if table == POLICY_TABLE),
+                |attribute| matches!(attribute, RuleAttribute::Table(table) if *table == POLICY_TABLE),
             ) && rule.attributes.iter().any(
-                |attribute| matches!(attribute, RuleAttribute::Priority(priority) if priority == POLICY_RULE_PRIORITY),
+                |attribute| matches!(attribute, RuleAttribute::Priority(priority) if *priority == POLICY_RULE_PRIORITY),
             ) {
                 send_netlink_req_and_wait_one_resp(RouteNetlinkMessage::DelRule(rule), true)?;
             }
