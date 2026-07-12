@@ -40,6 +40,26 @@ const MAX_DATAGRAM_SIZE: usize = u16::MAX as usize;
 
 pub(crate) type AssociationToken = [u8; TOKEN_LEN];
 
+struct AssociationReservation {
+    associations: Arc<DashMap<AssociationToken, CancellationToken>>,
+    token: AssociationToken,
+    armed: bool,
+}
+
+impl AssociationReservation {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AssociationReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.associations.remove(&self.token);
+        }
+    }
+}
+
 pub(crate) struct MeshUdpRelayService {
     peer_mgr: Weak<PeerManager>,
     data_plane: Arc<Socks5Server>,
@@ -103,7 +123,8 @@ impl MeshUdpRelayService {
         }
 
         let cancel = CancellationToken::new();
-        let token = self.reserve_token(&cancel).await?;
+        let mut reservation = self.reserve_token(&cancel).await?;
+        let token = reservation.token;
         let setup = async {
             let (control, native_udp, upstream_relay) = open_local_socks_udp(proxy_addr).await?;
             let mesh_udp = self
@@ -116,16 +137,12 @@ impl MeshUdpRelayService {
         .await;
         let (control, native_udp, upstream_relay, mesh_udp) = match setup {
             Ok(setup) => setup,
-            Err(error) => {
-                self.associations.remove(&token);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         let relay_addr = mesh_udp.local_addr();
         let ready = encode_relay_frame(&token, &[])
             .expect("an empty policy relay readiness frame always fits");
         if let Err(error) = mesh_udp.send_to(&ready, origin_addr).await {
-            self.associations.remove(&token);
             return Err(error).context("failed to prime policy UDP relay route");
         }
         let associations = self.associations.clone();
@@ -143,6 +160,7 @@ impl MeshUdpRelayService {
             .await;
             associations.remove(&token);
         });
+        reservation.disarm();
 
         Ok(OpenPolicyUdpRelayResponse {
             token: token.to_vec(),
@@ -150,7 +168,10 @@ impl MeshUdpRelayService {
         })
     }
 
-    async fn reserve_token(&self, cancel: &CancellationToken) -> anyhow::Result<AssociationToken> {
+    async fn reserve_token(
+        &self,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<AssociationReservation> {
         let _capacity = self.capacity_lock.lock().await;
         if self.associations.len() >= ASSOCIATION_LIMIT {
             bail!("policy UDP relay association table is full");
@@ -159,7 +180,11 @@ impl MeshUdpRelayService {
             let token = rand::random::<AssociationToken>();
             if let dashmap::mapref::entry::Entry::Vacant(entry) = self.associations.entry(token) {
                 entry.insert(cancel.clone());
-                return Ok(token);
+                return Ok(AssociationReservation {
+                    associations: self.associations.clone(),
+                    token,
+                    armed: true,
+                });
             }
         }
         bail!("failed to allocate a unique policy UDP relay token")
@@ -541,6 +566,13 @@ mod tests {
         data_plane_b.run(None).await.unwrap();
         let relay_service = MeshUdpRelayService::new(&peer_b, data_plane_b);
         relay_service.register();
+        let pending = relay_service
+            .reserve_token(&CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(relay_service.associations.len(), 1);
+        drop(pending);
+        assert!(relay_service.associations.is_empty());
 
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
             .await
