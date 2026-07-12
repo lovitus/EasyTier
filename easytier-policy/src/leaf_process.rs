@@ -157,7 +157,7 @@ impl LeafProcessRuntime {
     pub async fn stop(&self) {
         let child = self.child.lock().unwrap().take();
         if let Some(mut child) = child {
-            let _ = child.start_kill();
+            let _ = child.kill().await;
             let _ = child.wait().await;
         }
         let _ = std::fs::remove_file(&self.config_path);

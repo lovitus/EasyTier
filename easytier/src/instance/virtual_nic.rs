@@ -78,21 +78,6 @@ struct PolicyActiveRuntime {
 }
 
 #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
-async fn stop_policy_runtime(active: PolicyActiveRuntime, reason: &'static str) {
-    let PolicyActiveRuntime {
-        runtime,
-        mesh_bridges,
-    } = active;
-    drop(mesh_bridges);
-    if tokio::time::timeout(Duration::from_secs(3), runtime.stop())
-        .await
-        .is_err()
-    {
-        tracing::warn!(reason, "timed out while reaping Leaf policy worker");
-    }
-}
-
-#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
 fn log_policy_drop(counter: &AtomicU64, reason: &'static str) {
     let dropped = counter.fetch_add(1, Ordering::Relaxed).saturating_add(1);
     if dropped.is_power_of_two() {
@@ -2096,9 +2081,8 @@ impl NicCtx {
                 if stopped {
                     bridge.store(None);
                     bridge_updates.send_replace(None);
-                    let stopped = active.lock().await.take();
-                    if let Some(stopped) = stopped {
-                        stop_policy_runtime(stopped, "worker_exit").await;
+                    if let Some(stopped) = active.lock().await.take() {
+                        stopped.runtime.stop().await;
                     }
                     active_since = None;
                     restart_attempts = restart_attempts.saturating_add(1);
@@ -2148,7 +2132,7 @@ impl NicCtx {
                     bridge_updates.send_replace(None);
                     let previous = active.lock().await.take();
                     if let Some(previous) = previous {
-                        stop_policy_runtime(previous, "endpoint_generation_changed").await;
+                        previous.runtime.stop().await;
                     }
                     active_since = None;
                     tracing::info!(
