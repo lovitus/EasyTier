@@ -8,7 +8,7 @@ use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::watch;
 
-use crate::endpoint::{ConnId, KcpCloseStatus, KcpEndpoint, KcpStreamOwner, KcpStreamReceiver};
+use crate::endpoint::{ConnId, KcpCloseStatus, KcpEndpoint, KcpStreamReceiver};
 
 pub struct KcpStream {
     sender: tokio_util::sync::PollSender<BytesMut>,
@@ -16,7 +16,6 @@ pub struct KcpStream {
     closed: watch::Receiver<KcpCloseStatus>,
     conn_id: ConnId,
     conn_data: Bytes,
-    owner: KcpStreamOwner,
 
     partial_recv_buf: Option<BytesMut>,
 }
@@ -33,14 +32,12 @@ impl KcpStream {
     pub fn new(endpoint: &KcpEndpoint, conn_id: ConnId) -> Option<Self> {
         let (sender, receiver, closed) = endpoint.conn_stream_parts(conn_id)?;
         let conn_data = endpoint.conn_data(&conn_id)?;
-        let owner = endpoint.stream_owner(conn_id);
         Some(Self {
             sender: tokio_util::sync::PollSender::new(sender),
             receiver,
             closed,
             conn_id,
             conn_data,
-            owner,
 
             partial_recv_buf: None,
         })
@@ -60,14 +57,8 @@ impl KcpStream {
     ) -> std::io::Result<()> {
         self.sender.close();
         match *self.closed.borrow() {
-            KcpCloseStatus::Graceful => {
-                self.owner.disarm();
-                return Ok(());
-            }
-            KcpCloseStatus::Forced => {
-                self.owner.disarm();
-                return Err(forced_close_error());
-            }
+            KcpCloseStatus::Graceful => return Ok(()),
+            KcpCloseStatus::Forced => return Err(forced_close_error()),
             KcpCloseStatus::Open => {}
         }
 
@@ -78,14 +69,8 @@ impl KcpStream {
         )
         .await
         {
-            Ok(Ok(status)) if *status == KcpCloseStatus::Graceful => {
-                self.owner.disarm();
-                Ok(())
-            }
-            Ok(Ok(_)) => {
-                self.owner.disarm();
-                Err(forced_close_error())
-            }
+            Ok(Ok(status)) if *status == KcpCloseStatus::Graceful => Ok(()),
+            Ok(Ok(_)) => Err(forced_close_error()),
             Ok(Err(_)) => Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "KCP endpoint closed before graceful shutdown completed",

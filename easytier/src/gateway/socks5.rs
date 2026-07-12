@@ -919,9 +919,6 @@ impl Socks5Server {
                         let mut net_guard = net.lock().await;
                         net_guard.take().is_some()
                     };
-                    // A later consumer must rebuild the smoltcp net even when
-                    // the instance IPv4 address itself has not changed.
-                    prev_ipv4 = None;
                     tracing::trace!(
                         had_net,
                         active_port_forwards,

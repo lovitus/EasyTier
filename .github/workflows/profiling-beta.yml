@@ -46,7 +46,7 @@ jobs:
         with:
           prefix-key: profiling-beta
           shared-key: linux-x86_64-musl
-          cache-targets: true
+          cache-targets: false
 
       - name: Build optimized binaries with symbols
         run: |

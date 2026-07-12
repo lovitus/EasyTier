@@ -5765,6 +5765,7 @@ dependencies = [
 [[package]]
 name = "netstack-smoltcp"
 version = "0.2.0"
+source = "git+https://github.com/eycorsican/netstack-smoltcp?branch=pr-16-initialize-unfilled#25e6ad4019dc74119f68a106e3eb5625b0a8c8d4"
 dependencies = [
  "etherparse 0.16.0",
  "futures",

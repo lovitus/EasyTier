@@ -481,50 +481,6 @@ fn cleanup_connection_state(data: &KcpEndpointData, conn_id: ConnId) {
     data.state_map.remove(&conn_id);
 }
 
-pub(crate) struct KcpStreamOwner {
-    data: std::sync::Weak<KcpEndpointData>,
-    output_sender: KcpPakcetSender,
-    conn_id: ConnId,
-    armed: bool,
-}
-
-impl KcpStreamOwner {
-    fn new(
-        data: std::sync::Weak<KcpEndpointData>,
-        output_sender: KcpPakcetSender,
-        conn_id: ConnId,
-    ) -> Self {
-        Self {
-            data,
-            output_sender,
-            conn_id,
-            armed: true,
-        }
-    }
-
-    pub(crate) fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for KcpStreamOwner {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        if let Some(data) = self.data.upgrade() {
-            cleanup_connection_state(&data, self.conn_id);
-        }
-        if let Err(error) = self.output_sender.try_send(make_rst_packet(self.conn_id)) {
-            tracing::debug!(
-                ?error,
-                conn_id = ?self.conn_id,
-                "failed to enqueue KCP reset while dropping stream"
-            );
-        }
-    }
-}
-
 fn cleanup_stale_connections(data: &KcpEndpointData) {
     let mut timed_out_count = 0usize;
     data.state_map.retain(|_, state| {
@@ -1018,14 +974,6 @@ impl KcpEndpoint {
         Some(state.conn_data.clone())
     }
 
-    pub(crate) fn stream_owner(&self, conn_id: ConnId) -> KcpStreamOwner {
-        KcpStreamOwner::new(
-            Arc::downgrade(&self.data),
-            self.output_sender.clone(),
-            conn_id,
-        )
-    }
-
     #[allow(dead_code)]
     pub(crate) fn stats(&self) -> KcpEndpointStats {
         KcpEndpointStats {
@@ -1406,7 +1354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_one_stream_resets_both_connection_states() {
+    async fn dropped_stream_reclaims_connection_state() {
         let (client_endpoint, server_endpoint, tasks) = prepare_test().await;
         let (connect_ret, accept_ret) = tokio::join!(
             client_endpoint.connect(std::time::Duration::from_secs(1), 1, 3, Bytes::from("conn")),
@@ -1416,21 +1364,12 @@ mod tests {
         assert_eq!(conn_id, accept_ret.unwrap());
 
         let client = KcpStream::new(&client_endpoint, conn_id).unwrap();
-        let mut server = KcpStream::new(&server_endpoint, conn_id).unwrap();
+        let server = KcpStream::new(&server_endpoint, conn_id).unwrap();
         drop(client);
-
-        let mut payload = [0u8; 1];
-        assert_eq!(
-            tokio::time::timeout(std::time::Duration::from_secs(1), server.read(&mut payload))
-                .await
-                .unwrap()
-                .unwrap(),
-            0
-        );
+        drop(server);
 
         wait_until_empty(&client_endpoint).await;
         wait_until_empty(&server_endpoint).await;
-        drop(server);
         drop(client_endpoint);
         drop(server_endpoint);
         tasks.join_all().await;
