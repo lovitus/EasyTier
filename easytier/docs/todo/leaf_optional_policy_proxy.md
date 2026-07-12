@@ -987,14 +987,6 @@ transparent proxying:
 - UDP DNS, system resolver, and DoH resolver support;
 - multiple-server selection and fallback.
 
-EasyTier's own underlay/control-plane hostname resolution is separate from
-application DNS. In policy mode, its Hickory UDP/TCP sockets must carry the
-same fwmark as underlay sockets; STUN and connector hostname lookup must use
-that marked resolver rather than libc's unmarked resolver. Do not solve this
-by bypassing every destination on port 53: that would evade Leaf's FakeDNS and
-domain-rule path. Magic DNS's exact virtual address remains classified as mesh
-traffic.
-
 This is sufficient for the first version's intelligent split:
 
 ```yaml

@@ -149,17 +149,6 @@ discard buffered bytes.
     smoltcp AsyncWrite shutdown future was never woken after FIN submission.
     The snapshot was explicitly reverted by `07f59ec2`; the next candidate
     adds the missing wake/completion transition and a focused regression test.
-12. The `66f208eb` beta passed the focused smoltcp shutdown and unilateral KCP
-    drop regressions. Real traffic confirmed that HTTP fast EOF preserves the
-    complete body, canceled hedge streams are reclaimed, and established TCP
-    winners close after the Leaf-side stream finishes. A 15-second policy-TUN
-    capture then identified the remaining periodic KCP entries as SOCKS UDP
-    ASSOCIATE controls created by EasyTier's own STUN DNS queries. STUN data
-    sockets already had `SO_MARK`, but libc/Hickory DNS sockets used before
-    those connections did not. The next candidate supplies a marked Hickory
-    runtime for EasyTier control-plane DNS and routes STUN hostname lookups
-    through it while policy mode is active. User DNS still enters Leaf, and
-    Magic DNS remains mesh-owned; no blanket port-53 bypass is added.
 
 ## Static review disposition
 
