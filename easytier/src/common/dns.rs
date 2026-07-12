@@ -1,26 +1,16 @@
-use std::{
-    future::Future,
-    io,
-    net::SocketAddr,
-    pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU32, Ordering},
-    },
-    time::Duration,
-};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::Context;
-use hickory_proto::runtime::{
-    RuntimeProvider, TokioHandle, TokioRuntimeProvider, TokioTime, iocompat::AsyncIoTokioAsStd,
-};
+use hickory_proto::runtime::TokioRuntimeProvider;
 use hickory_proto::xfer::Protocol;
-use hickory_resolver::Resolver;
 use hickory_resolver::config::{LookupIpStrategy, NameServerConfig, ResolverConfig, ResolverOpts};
-use hickory_resolver::name_server::GenericConnector;
+use hickory_resolver::name_server::{GenericConnector, TokioConnectionProvider};
 use hickory_resolver::system_conf::read_system_conf;
+use hickory_resolver::{Resolver, TokioResolver};
 use once_cell::sync::Lazy;
-use tokio::net::{TcpSocket, TcpStream, UdpSocket, lookup_host};
+use tokio::net::lookup_host;
 
 use super::error::Error;
 
@@ -38,93 +28,8 @@ pub fn get_default_resolver_config() -> ResolverConfig {
 }
 
 pub static ALLOW_USE_SYSTEM_DNS_RESOLVER: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(true));
-static CONTROL_PLANE_SOCKET_MARK: AtomicU32 = AtomicU32::new(0);
 
-#[derive(Clone, Default)]
-struct ControlPlaneRuntimeProvider(TokioRuntimeProvider);
-
-impl RuntimeProvider for ControlPlaneRuntimeProvider {
-    type Handle = TokioHandle;
-    type Timer = TokioTime;
-    type Udp = UdpSocket;
-    type Tcp = AsyncIoTokioAsStd<TcpStream>;
-
-    fn create_handle(&self) -> Self::Handle {
-        self.0.create_handle()
-    }
-
-    fn connect_tcp(
-        &self,
-        server_addr: SocketAddr,
-        bind_addr: Option<SocketAddr>,
-        wait_for: Option<Duration>,
-    ) -> Pin<Box<dyn Send + Future<Output = io::Result<Self::Tcp>>>> {
-        Box::pin(async move {
-            let socket = match server_addr {
-                SocketAddr::V4(_) => TcpSocket::new_v4(),
-                SocketAddr::V6(_) => TcpSocket::new_v6(),
-            }?;
-            apply_control_plane_mark(&socket)?;
-            if let Some(bind_addr) = bind_addr {
-                socket.bind(bind_addr)?;
-            }
-            socket.set_nodelay(true)?;
-            let wait_for = wait_for.unwrap_or(Duration::from_secs(5));
-            let stream = tokio::time::timeout(wait_for, socket.connect(server_addr))
-                .await
-                .map_err(|_| {
-                    io::Error::new(io::ErrorKind::TimedOut, "DNS TCP connect timed out")
-                })??;
-            Ok(AsyncIoTokioAsStd(stream))
-        })
-    }
-
-    fn bind_udp(
-        &self,
-        local_addr: SocketAddr,
-        _server_addr: SocketAddr,
-    ) -> Pin<Box<dyn Send + Future<Output = io::Result<Self::Udp>>>> {
-        Box::pin(async move {
-            let socket = match local_addr {
-                SocketAddr::V4(_) => socket2::Socket::new(
-                    socket2::Domain::IPV4,
-                    socket2::Type::DGRAM,
-                    Some(socket2::Protocol::UDP),
-                ),
-                SocketAddr::V6(_) => socket2::Socket::new(
-                    socket2::Domain::IPV6,
-                    socket2::Type::DGRAM,
-                    Some(socket2::Protocol::UDP),
-                ),
-            }?;
-            apply_control_plane_mark(&socket)?;
-            socket.set_nonblocking(true)?;
-            socket.bind(&local_addr.into())?;
-            UdpSocket::from_std(socket.into())
-        })
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn apply_control_plane_mark<T: std::os::fd::AsFd>(socket: &T) -> io::Result<()> {
-    let mark = CONTROL_PLANE_SOCKET_MARK.load(Ordering::Acquire);
-    if mark != 0 {
-        socket2::SockRef::from(socket).set_mark(mark)?;
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn apply_control_plane_mark<T>(_socket: &T) -> io::Result<()> {
-    Ok(())
-}
-
-pub fn set_control_plane_socket_mark(mark: Option<u32>) {
-    CONTROL_PLANE_SOCKET_MARK.store(mark.unwrap_or(0), Ordering::Release);
-    ALLOW_USE_SYSTEM_DNS_RESOLVER.store(mark.is_none(), Ordering::Release);
-}
-
-pub(crate) static RESOLVER: Lazy<Arc<Resolver<GenericConnector<ControlPlaneRuntimeProvider>>>> =
+pub static RESOLVER: Lazy<Arc<Resolver<GenericConnector<TokioRuntimeProvider>>>> =
     Lazy::new(|| {
         let system_cfg = read_system_conf();
         let mut cfg = get_default_resolver_config();
@@ -136,27 +41,10 @@ pub(crate) static RESOLVER: Lazy<Arc<Resolver<GenericConnector<ControlPlaneRunti
             opt = s.1;
         }
         opt.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
-        let provider = GenericConnector::new(ControlPlaneRuntimeProvider::default());
-        let builder = Resolver::builder_with_config(cfg, provider).with_options(opt);
+        let builder = TokioResolver::builder_with_config(cfg, TokioConnectionProvider::default())
+            .with_options(opt);
         Arc::new(builder.build())
     });
-
-pub async fn lookup_control_plane_host(host: &str) -> io::Result<Vec<SocketAddr>> {
-    if CONTROL_PLANE_SOCKET_MARK.load(Ordering::Acquire) == 0 {
-        return Ok(lookup_host(host).await?.collect());
-    }
-    let (host, port) = host
-        .rsplit_once(':')
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "host has no port"))?;
-    let port = port
-        .parse::<u16>()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    RESOLVER
-        .lookup_ip(host.trim_matches(['[', ']']))
-        .await
-        .map(|lookup| lookup.iter().map(|ip| SocketAddr::new(ip, port)).collect())
-        .map_err(io::Error::other)
-}
 
 pub async fn resolve_txt_record(domain_name: &str) -> Result<String, Error> {
     let r = RESOLVER.clone();
