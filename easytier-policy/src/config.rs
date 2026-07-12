@@ -598,9 +598,9 @@ proxies:
     via: mesh
     udp: true
   firewall:
-    type: http
+    type: socks5
     server: 192.168.1.1
-    port: 3128
+    port: 1080
 groups:
   chain:
     type: chain
@@ -647,11 +647,12 @@ rules: ["MATCH,a"]
         let source = r#"
 version: 1
 proxies:
-  http:
-    type: http
+  tcp-only:
+    type: socks5
     server: 127.0.0.1
-    port: 8080
-rules: ["NETWORK,udp,http"]
+    port: 1080
+    udp: false
+rules: ["NETWORK,udp,tcp-only"]
 "#;
         assert!(matches!(
             PolicyRevision::parse(source, Path::new(".")),
