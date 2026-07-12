@@ -234,6 +234,40 @@ mod tests {
 
     use super::*;
 
+    struct Unresolved;
+
+    impl MeshServerResolver for Unresolved {
+        fn resolve(
+            &self,
+            _proxy_name: &str,
+            _instance_id: Option<Uuid>,
+            _virtual_ip: Option<IpAddr>,
+            _port: u16,
+        ) -> Option<ResolvedMeshServer> {
+            None
+        }
+    }
+
+    struct LoopbackMesh;
+
+    impl MeshServerResolver for LoopbackMesh {
+        fn resolve(
+            &self,
+            proxy_name: &str,
+            _instance_id: Option<Uuid>,
+            _virtual_ip: Option<IpAddr>,
+            port: u16,
+        ) -> Option<ResolvedMeshServer> {
+            assert_eq!(proxy_name, "mesh");
+            assert_eq!(port, 1080);
+            Some(ResolvedMeshServer {
+                endpoint: "127.0.0.1:32100".parse().unwrap(),
+                username: "easytier".to_owned(),
+                password: "secret".to_owned(),
+            })
+        }
+    }
+
     #[test]
     fn compiles_stable_yaml_to_strict_leaf_config() {
         let dir = tempfile::tempdir().unwrap();
@@ -264,7 +298,7 @@ rules:
             &revision,
             7,
             dir.path(),
-            &|_, _, _, _| None,
+            &Unresolved,
             &["1.1.1.1".parse().unwrap()],
         )
         .unwrap();
@@ -303,7 +337,7 @@ rules: ["FINAL,mesh"]
                 &revision,
                 7,
                 Path::new("."),
-                &|_, _, _, _| None,
+                &Unresolved,
                 &["1.1.1.1".parse().unwrap()],
             ),
             Err(LeafConfigError::UnresolvedMeshProxy("mesh".to_owned()))
@@ -328,15 +362,7 @@ rules: ["FINAL,mesh"]
             &revision,
             7,
             Path::new("."),
-            &|name, _, _, port| {
-                assert_eq!(name, "mesh");
-                assert_eq!(port, 1080);
-                Some(ResolvedMeshServer {
-                    endpoint: "127.0.0.1:32100".parse().unwrap(),
-                    username: "easytier".to_owned(),
-                    password: "secret".to_owned(),
-                })
-            },
+            &LoopbackMesh,
             &["1.1.1.1".parse().unwrap()],
         )
         .unwrap();

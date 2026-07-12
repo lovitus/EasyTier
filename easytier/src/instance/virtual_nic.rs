@@ -1901,7 +1901,7 @@ impl NicCtx {
             &config.leaf_executable,
             base_dir,
             Some(&config.outbound_interface),
-            &|name, _, _, _| mesh_bridges.resolve(name),
+            mesh_bridges.as_ref(),
             revision,
         )
         .await

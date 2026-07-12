@@ -191,6 +191,18 @@ impl MeshProxyBridgeSet {
     }
 }
 
+impl easytier_policy::MeshServerResolver for MeshProxyBridgeSet {
+    fn resolve(
+        &self,
+        proxy_name: &str,
+        _instance_id: Option<uuid::Uuid>,
+        _virtual_ip: Option<IpAddr>,
+        _port: u16,
+    ) -> Option<ResolvedMeshServer> {
+        self.resolve(proxy_name)
+    }
+}
+
 impl Drop for MeshProxyBridgeSet {
     fn drop(&mut self) {
         self.cancel.cancel();

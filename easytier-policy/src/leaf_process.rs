@@ -282,6 +282,15 @@ mod tests {
 
     use super::*;
 
+    fn unresolved_mesh(
+        _proxy_name: &str,
+        _instance_id: Option<uuid::Uuid>,
+        _virtual_ip: Option<std::net::IpAddr>,
+        _port: u16,
+    ) -> Option<crate::ResolvedMeshServer> {
+        None
+    }
+
     #[tokio::test]
     async fn starts_and_stops_isolated_worker_and_removes_config() {
         let dir = tempfile::tempdir().unwrap();
@@ -297,7 +306,7 @@ mod tests {
         );
 
         let runtime =
-            LeafProcessRuntime::start(&executable, dir.path(), None, &|_, _, _, _| None, revision)
+            LeafProcessRuntime::start(&executable, dir.path(), None, &unresolved_mesh, revision)
                 .await
                 .unwrap();
         let config_path = runtime.config_path.clone();
@@ -317,7 +326,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             servers,
-            vec!["127.0.0.53".parse().unwrap(), "1.1.1.1".parse().unwrap()]
+            vec![
+                "127.0.0.53".parse::<std::net::IpAddr>().unwrap(),
+                "1.1.1.1".parse::<std::net::IpAddr>().unwrap(),
+            ]
         );
         assert!(parse_system_dns_servers("search example.test\n").is_err());
     }
