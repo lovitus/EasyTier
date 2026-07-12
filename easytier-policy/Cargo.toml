@@ -36,12 +36,17 @@ optional = true
 default-features = false
 features = [
     "config-conf",
+    "config-json",
     "inbound-tun",
     "outbound-direct",
     "outbound-drop",
     "outbound-socks",
+    "outbound-tls",
     "outbound-failover",
     "outbound-chain",
+    "ring-aead",
+    "rustls-tls",
+    "rustls-tls-ring",
 ]
 
 [dev-dependencies]
