@@ -110,9 +110,9 @@ pub enum ProxyServer {
     Address(String),
     Mesh {
         #[serde(rename = "instance-id")]
-        pub instance_id: Option<Uuid>,
+        instance_id: Option<Uuid>,
         #[serde(rename = "virtual-ip")]
-        pub virtual_ip: Option<IpAddr>,
+        virtual_ip: Option<IpAddr>,
     },
 }
 
