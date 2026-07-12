@@ -475,7 +475,6 @@ impl ZCPacketType {
 pub struct ZCPacket {
     inner: BytesMut,
     packet_type: ZCPacketType,
-    bypass_proxy_interception: bool,
 }
 
 impl ZCPacket {
@@ -491,7 +490,6 @@ impl ZCPacket {
         Self {
             inner: BytesMut::new(),
             packet_type: ZCPacketType::NIC,
-            bypass_proxy_interception: false,
         }
     }
 
@@ -499,16 +497,7 @@ impl ZCPacket {
         Self {
             inner: buf,
             packet_type,
-            bypass_proxy_interception: false,
         }
-    }
-
-    pub(crate) fn set_bypass_proxy_interception(&mut self, bypass: bool) {
-        self.bypass_proxy_interception = bypass;
-    }
-
-    pub(crate) fn bypass_proxy_interception(&self) -> bool {
-        self.bypass_proxy_interception
     }
 
     pub fn new_with_payload(payload: &[u8]) -> Self {
@@ -841,18 +830,5 @@ mod tests {
         let mut packet = ZCPacket::new_from_buf(BytesMut::from(&b"\x01"[..]), ZCPacketType::UDP);
 
         assert!(packet.mut_wg_tunnel_header().is_none());
-    }
-
-    #[test]
-    fn proxy_interception_bypass_is_local_but_survives_the_local_pipeline() {
-        let mut packet = ZCPacket::new_with_payload(b"payload");
-        packet.set_bypass_proxy_interception(true);
-
-        assert!(packet.bypass_proxy_interception());
-        assert!(packet.clone().bypass_proxy_interception());
-
-        let bytes = packet.into_bytes();
-        let restored = ZCPacket::new_from_buf(BytesMut::from(bytes.as_ref()), ZCPacketType::NIC);
-        assert!(!restored.bypass_proxy_interception());
     }
 }

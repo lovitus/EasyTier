@@ -405,9 +405,6 @@ impl<C: NatDstConnector> NicPacketFilter for TcpProxy<C> {
         zc_packet: &mut ZCPacket,
         _context: &crate::peers::NicPacketContext,
     ) -> crate::peers::NicPacketFilterAction {
-        if zc_packet.bypass_proxy_interception() {
-            return crate::peers::NicPacketFilterAction::Continue;
-        }
         let Some(my_ipv4_inet) = self.get_local_inet() else {
             return crate::peers::NicPacketFilterAction::Continue;
         };
