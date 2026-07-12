@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
-use crate::proto::common::TunnelInfo;
+use crate::{common::PeerId, proto::common::TunnelInfo};
 
 // Controller must impl clone and all cloned controllers share the same data
 pub trait Controller: Send + Sync + Clone + 'static {
@@ -28,6 +28,11 @@ pub trait Controller: Send + Sync + Clone + 'static {
         None
     }
 
+    fn set_source_peer_id(&mut self, _source_peer_id: PeerId) {}
+    fn source_peer_id(&self) -> Option<PeerId> {
+        None
+    }
+
     fn set_raw_output(&mut self, _raw_output: Bytes) {}
     fn get_raw_output(&self) -> Option<Bytes> {
         None
@@ -46,6 +51,7 @@ pub struct BaseController {
     pub trace_id: i32,
     pub raw_data: Arc<Mutex<BaseControllerRawData>>,
     pub tunnel_info: Option<TunnelInfo>,
+    pub source_peer_id: Option<PeerId>,
 }
 
 impl Controller for BaseController {
@@ -88,6 +94,14 @@ impl Controller for BaseController {
     fn set_tunnel_info(&mut self, tunnel_info: Option<TunnelInfo>) {
         self.tunnel_info = tunnel_info;
     }
+
+    fn set_source_peer_id(&mut self, source_peer_id: PeerId) {
+        self.source_peer_id = Some(source_peer_id);
+    }
+
+    fn source_peer_id(&self) -> Option<PeerId> {
+        self.source_peer_id
+    }
 }
 
 impl Default for BaseController {
@@ -100,6 +114,7 @@ impl Default for BaseController {
                 raw_output: None,
             })),
             tunnel_info: None,
+            source_peer_id: None,
         }
     }
 }

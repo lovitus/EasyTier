@@ -26,11 +26,15 @@ use crate::{
             PolicyUdpRelayRpcServer,
         },
         rpc_impl::RpcController,
-        rpc_types::{self, controller::BaseController},
+        rpc_types::{
+            self,
+            controller::{BaseController, Controller as _},
+        },
     },
 };
 
 const ASSOCIATION_LIMIT: usize = 1_024;
+const ASSOCIATION_LIMIT_PER_PEER: usize = 256;
 const ASSOCIATION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const FRAME_VERSION: u8 = 1;
@@ -41,9 +45,15 @@ const MAX_DATAGRAM_SIZE: usize = u16::MAX as usize;
 pub(crate) type AssociationToken = [u8; TOKEN_LEN];
 
 struct AssociationReservation {
-    associations: Arc<DashMap<AssociationToken, CancellationToken>>,
+    associations: Arc<DashMap<AssociationToken, AssociationOwner>>,
     token: AssociationToken,
     armed: bool,
+}
+
+#[derive(Clone)]
+struct AssociationOwner {
+    source_peer_id: PeerId,
+    cancel: CancellationToken,
 }
 
 impl AssociationReservation {
@@ -63,7 +73,7 @@ impl Drop for AssociationReservation {
 pub(crate) struct MeshUdpRelayService {
     peer_mgr: Weak<PeerManager>,
     data_plane: Arc<Socks5Server>,
-    associations: Arc<DashMap<AssociationToken, CancellationToken>>,
+    associations: Arc<DashMap<AssociationToken, AssociationOwner>>,
     capacity_lock: tokio::sync::Mutex<()>,
 }
 
@@ -93,13 +103,17 @@ impl MeshUdpRelayService {
 
     async fn open_association(
         &self,
+        source_peer_id: PeerId,
         request: OpenPolicyUdpRelayRequest,
     ) -> anyhow::Result<OpenPolicyUdpRelayResponse> {
         let peer_mgr = self
             .peer_mgr
             .upgrade()
             .context("peer manager is no longer available")?;
-        let source_ip = peer_virtual_ipv4(&peer_mgr, request.source_peer_id)
+        if request.source_peer_id != source_peer_id {
+            bail!("policy UDP relay source peer does not match the RPC caller");
+        }
+        let source_ip = peer_virtual_ipv4(&peer_mgr, source_peer_id)
             .await
             .context("requesting peer has no routed virtual IPv4 address")?;
         let proxy_addr: SocketAddr = request
@@ -123,7 +137,7 @@ impl MeshUdpRelayService {
         }
 
         let cancel = CancellationToken::new();
-        let mut reservation = self.reserve_token(&cancel).await?;
+        let mut reservation = self.reserve_token(source_peer_id, &cancel).await?;
         let token = reservation.token;
         let setup = async {
             let (control, native_udp, upstream_relay) = open_local_socks_udp(proxy_addr).await?;
@@ -140,9 +154,11 @@ impl MeshUdpRelayService {
             Err(error) => return Err(error),
         };
         let relay_addr = mesh_udp.local_addr();
-        let ready = encode_relay_frame(&token, &[])
-            .expect("an empty policy relay readiness frame always fits");
-        if let Err(error) = mesh_udp.send_to(&ready, origin_addr).await {
+        // Register the destination-side connected UDP route before returning the RPC. The
+        // one-byte payload distinguishes this disposable warmup from the empty challenge ACK.
+        let warmup = encode_relay_frame(&token, &[0])
+            .expect("the policy relay warmup frame always fits");
+        if let Err(error) = mesh_udp.send_to(&warmup, origin_addr).await {
             return Err(error).context("failed to prime policy UDP relay route");
         }
         let associations = self.associations.clone();
@@ -170,16 +186,29 @@ impl MeshUdpRelayService {
 
     async fn reserve_token(
         &self,
+        source_peer_id: PeerId,
         cancel: &CancellationToken,
     ) -> anyhow::Result<AssociationReservation> {
         let _capacity = self.capacity_lock.lock().await;
         if self.associations.len() >= ASSOCIATION_LIMIT {
             bail!("policy UDP relay association table is full");
         }
+        if self
+            .associations
+            .iter()
+            .filter(|association| association.value().source_peer_id == source_peer_id)
+            .count()
+            >= ASSOCIATION_LIMIT_PER_PEER
+        {
+            bail!("policy UDP relay association limit reached for requesting peer");
+        }
         for _ in 0..8 {
             let token = rand::random::<AssociationToken>();
             if let dashmap::mapref::entry::Entry::Vacant(entry) = self.associations.entry(token) {
-                entry.insert(cancel.clone());
+                entry.insert(AssociationOwner {
+                    source_peer_id,
+                    cancel: cancel.clone(),
+                });
                 return Ok(AssociationReservation {
                     associations: self.associations.clone(),
                     token,
@@ -194,7 +223,7 @@ impl MeshUdpRelayService {
 impl Drop for MeshUdpRelayService {
     fn drop(&mut self) {
         for association in self.associations.iter() {
-            association.value().cancel();
+            association.value().cancel.cancel();
         }
     }
 }
@@ -205,23 +234,34 @@ impl PolicyUdpRelayRpc for MeshUdpRelayService {
 
     async fn open_policy_udp_relay(
         &self,
-        _: BaseController,
+        controller: BaseController,
         request: OpenPolicyUdpRelayRequest,
     ) -> Result<OpenPolicyUdpRelayResponse, rpc_types::error::Error> {
-        self.open_association(request)
+        let source_peer_id = controller.source_peer_id().ok_or_else(|| {
+            rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                "policy UDP relay RPC has no source peer"
+            ))
+        })?;
+        self.open_association(source_peer_id, request)
             .await
             .map_err(rpc_types::error::Error::ExecutionError)
     }
 
     async fn close_policy_udp_relay(
         &self,
-        _: BaseController,
+        controller: BaseController,
         request: ClosePolicyUdpRelayRequest,
     ) -> Result<ClosePolicyUdpRelayResponse, rpc_types::error::Error> {
+        let source_peer_id = controller.source_peer_id().ok_or_else(|| {
+            rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                "policy UDP relay RPC has no source peer"
+            ))
+        })?;
         if let Ok(token) = AssociationToken::try_from(request.token.as_slice())
-            && let Some((_, cancel)) = self.associations.remove(&token)
+            && let Some(owner) = self.associations.get(&token)
+            && owner.source_peer_id == source_peer_id
         {
-            cancel.cancel();
+            owner.cancel.cancel();
         }
         Ok(ClosePolicyUdpRelayResponse {})
     }
@@ -277,15 +317,25 @@ impl RemoteUdpAssociation {
             peer_mgr: Arc::downgrade(peer_mgr),
             closed: AtomicBool::new(false),
         };
-        let mut ready = [0u8; FRAME_HEADER_LEN];
-        let readiness = tokio::time::timeout(SETUP_TIMEOUT, mesh_udp.recv_from(&mut ready)).await;
-        let valid = matches!(
-            readiness,
-            Ok(Ok((length, source)))
+        let challenge = encode_relay_frame(&association.token, &[])
+            .expect("an empty policy relay challenge always fits");
+        mesh_udp
+            .send_to(&challenge, association.relay_addr)
+            .await
+            .context("failed to prime local policy UDP relay route")?;
+        let readiness = tokio::time::timeout(SETUP_TIMEOUT, async {
+            let mut ready = [0u8; FRAME_HEADER_LEN + 1];
+            loop {
+                let (length, source) = mesh_udp.recv_from(&mut ready).await?;
                 if source == association.relay_addr
                     && decode_relay_frame(&association.token, &ready[..length]) == Some(&[][..])
-        );
-        if !valid {
+                {
+                    return Ok::<_, std::io::Error>(());
+                }
+            }
+        })
+        .await;
+        if !matches!(readiness, Ok(Ok(()))) {
             association.close().await;
             bail!("policy UDP relay returned an invalid readiness frame");
         }
@@ -414,13 +464,20 @@ async fn run_association(
             result = mesh_udp.recv_from(&mut mesh_packet) => {
                 let Ok((length, source)) = result else { break };
                 if source.ip() != IpAddr::V4(source_ip)
-                    || length <= FRAME_HEADER_LEN
+                    || length < FRAME_HEADER_LEN
                     || mesh_packet[0] != FRAME_VERSION
                     || mesh_packet[1..FRAME_HEADER_LEN] != token
                 {
                     continue;
                 }
                 if source != origin_addr {
+                    continue;
+                }
+                if length == FRAME_HEADER_LEN {
+                    if mesh_udp.send_to(&mesh_packet[..length], origin_addr).await.is_err() {
+                        break;
+                    }
+                    idle.as_mut().reset(tokio::time::Instant::now() + ASSOCIATION_IDLE_TIMEOUT);
                     continue;
                 }
                 if native_udp.send(&mesh_packet[FRAME_HEADER_LEN..length]).await.is_err() {
@@ -566,11 +623,63 @@ mod tests {
         data_plane_b.run(None).await.unwrap();
         let relay_service = MeshUdpRelayService::new(&peer_b, data_plane_b);
         relay_service.register();
+        let mut peer_reservations = Vec::with_capacity(ASSOCIATION_LIMIT_PER_PEER);
+        for _ in 0..ASSOCIATION_LIMIT_PER_PEER {
+            peer_reservations.push(
+                relay_service
+                    .reserve_token(peer_a.my_peer_id(), &CancellationToken::new())
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert!(
+            relay_service
+                .reserve_token(peer_a.my_peer_id(), &CancellationToken::new())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("requesting peer")
+        );
+        let other_peer_reservation = relay_service
+            .reserve_token(peer_b.my_peer_id(), &CancellationToken::new())
+            .await
+            .unwrap();
+        drop(other_peer_reservation);
+        drop(peer_reservations);
+        assert!(relay_service.associations.is_empty());
+
+        let mut forged_controller = BaseController::default();
+        forged_controller.set_source_peer_id(peer_a.my_peer_id());
+        let forged = relay_service
+            .open_policy_udp_relay(
+                forged_controller,
+                OpenPolicyUdpRelayRequest {
+                    source_peer_id: peer_b.my_peer_id(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(forged.to_string().contains("RPC caller"));
+
+        let pending_cancel = CancellationToken::new();
         let pending = relay_service
-            .reserve_token(&CancellationToken::new())
+            .reserve_token(peer_a.my_peer_id(), &pending_cancel)
             .await
             .unwrap();
         assert_eq!(relay_service.associations.len(), 1);
+        let mut wrong_peer_controller = BaseController::default();
+        wrong_peer_controller.set_source_peer_id(peer_b.my_peer_id());
+        relay_service
+            .close_policy_udp_relay(
+                wrong_peer_controller,
+                ClosePolicyUdpRelayRequest {
+                    token: pending.token.to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!pending_cancel.is_cancelled());
         drop(pending);
         assert!(relay_service.associations.is_empty());
 

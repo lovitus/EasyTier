@@ -80,7 +80,10 @@ jobs:
             --bin easytier-core \
             --bin easytier-cli \
             --features jemalloc,leaf-policy-proxy
-          cargo test \
+
+      - name: Verify destination-side policy UDP relay
+        run: |
+          timeout 300 cargo test \
             --locked \
             --release \
             --target "$TARGET" \
