@@ -1,4 +1,7 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::{
+    fs::{File, OpenOptions},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 
 use netlink_packet_route::{
     AddressFamily, RouteNetlinkMessage,
@@ -12,13 +15,17 @@ use netlink_packet_route::{
 use crate::common::ifcfg::netlink::{NetlinkIfConfiger, send_netlink_req_and_wait_one_resp};
 
 const POLICY_TABLE: u32 = 52_000;
+// Stay ahead of the kernel main/default rules while avoiding the common low
+// priorities used by administrators for hand-written policy routing.
 const POLICY_RULE_PRIORITY: u32 = 10_900;
 const POLICY_ROUTE_PROTOCOL: RouteProtocol = RouteProtocol::Other(99);
+const POLICY_LOCK_PATH: &str = "/run/easytier-policy-routing.lock";
 
 pub(crate) struct PolicyRoutingGuard {
     routes: Vec<RouteMessage>,
     rules: Vec<RuleMessage>,
     outbound_addresses: Vec<IpAddr>,
+    _lock: nix::fcntl::Flock<File>,
 }
 
 impl PolicyRoutingGuard {
@@ -28,6 +35,16 @@ impl PolicyRoutingGuard {
         enable_ipv6: bool,
         socket_mark: Option<u32>,
     ) -> anyhow::Result<Self> {
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(POLICY_LOCK_PATH)?;
+        let lock = nix::fcntl::Flock::lock(lock_file, nix::fcntl::FlockArg::LockExclusiveNonblock)
+            .map_err(|(_, error)| {
+                anyhow::anyhow!("policy routing is owned by another process: {error}")
+            })?;
         let socket_mark = socket_mark
             .ok_or_else(|| anyhow::anyhow!("policy mode requires an underlay socket mark"))?;
         let outbound_index = NetlinkIfConfiger::get_interface_index(outbound_interface)?;
@@ -54,6 +71,7 @@ impl PolicyRoutingGuard {
             routes: Vec::new(),
             rules: Vec::new(),
             outbound_addresses: addresses,
+            _lock: lock,
         };
         let result = (|| -> anyhow::Result<()> {
             let v4_physical = physical_routes(&v4_routes, outbound_index);
@@ -232,6 +250,8 @@ fn capture_route(destination: IpAddr, ifindex: u32) -> RouteMessage {
         .attributes
         .push(RouteAttribute::Destination(destination));
     route.attributes.push(RouteAttribute::Oif(ifindex));
+    // The /1 prefix wins over a physical /0. The high metric intentionally
+    // loses to any pre-existing route with the same prefix length.
     route.attributes.push(RouteAttribute::Priority(65_535));
     route
 }
@@ -293,19 +313,41 @@ fn cleanup_stale(v4_routes: &[RouteMessage], v6_routes: &[RouteMessage]) -> anyh
     {
         anyhow::bail!("routing table {POLICY_TABLE} is already used by another application");
     }
-    if stale.is_empty() {
-        return Ok(());
-    }
+    let mut stale_rules = Vec::new();
     for family in [AddressFamily::Inet, AddressFamily::Inet6] {
         for rule in NetlinkIfConfiger::list_rule_messages(family)? {
-            if rule.attributes.iter().any(
-                |attribute| matches!(attribute, RuleAttribute::Table(table) if *table == POLICY_TABLE),
-            ) && rule.attributes.iter().any(
-                |attribute| matches!(attribute, RuleAttribute::Priority(priority) if *priority == POLICY_RULE_PRIORITY || *priority == POLICY_RULE_PRIORITY - 1),
-            ) {
-                send_netlink_req_and_wait_one_resp(RouteNetlinkMessage::DelRule(rule), true)?;
+            let table = rule
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    RuleAttribute::Table(table) => Some(*table),
+                    _ => None,
+                });
+            let priority = rule
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    RuleAttribute::Priority(priority) => Some(*priority),
+                    _ => None,
+                });
+            let reserved_priority = priority.is_some_and(|priority| {
+                priority == POLICY_RULE_PRIORITY || priority == POLICY_RULE_PRIORITY - 1
+            });
+            if reserved_priority && table != Some(POLICY_TABLE) {
+                anyhow::bail!("ip-rule priority {} is already in use", priority.unwrap());
+            }
+            if table == Some(POLICY_TABLE) {
+                if !reserved_priority || stale.is_empty() {
+                    anyhow::bail!(
+                        "routing table {POLICY_TABLE} is already used by another application"
+                    );
+                }
+                stale_rules.push(rule);
             }
         }
+    }
+    for rule in stale_rules {
+        send_netlink_req_and_wait_one_resp(RouteNetlinkMessage::DelRule(rule), true)?;
     }
     for route in stale {
         send_netlink_req_and_wait_one_resp(RouteNetlinkMessage::DelRoute(route), true)?;
