@@ -524,8 +524,11 @@ mod tests {
         let peer_a = create_mock_peer_manager().await;
         let peer_b = create_mock_peer_manager().await;
         connect_peer_manager(peer_a.clone(), peer_b.clone()).await;
-        let ip_a: cidr::Ipv4Inet = "10.126.220.1/24".parse().unwrap();
-        let ip_b: cidr::Ipv4Inet = "10.126.220.2/24".parse().unwrap();
+        // Mock peers do not install their virtual addresses in the runner kernel. Distinct
+        // loopback addresses keep the native SOCKS side local while the data plane still routes
+        // between two different virtual peer addresses.
+        let ip_a: cidr::Ipv4Inet = "127.77.0.1/24".parse().unwrap();
+        let ip_b: cidr::Ipv4Inet = "127.77.0.2/24".parse().unwrap();
         peer_a.get_global_ctx().set_ipv4(Some(ip_a));
         peer_b.get_global_ctx().set_ipv4(Some(ip_b));
         wait_route_appear(peer_a.clone(), peer_b.clone())
@@ -544,7 +547,7 @@ mod tests {
             .unwrap();
         let proxy_port = listener.local_addr().unwrap().port();
         let fake_server = tokio::spawn(async move {
-            let (mut control, _) = listener.accept().await.unwrap();
+            let (mut control, control_source) = listener.accept().await.unwrap();
             let mut greeting = [0u8; 3];
             control.read_exact(&mut greeting).await.unwrap();
             assert_eq!(greeting, [5, 1, 0]);
@@ -559,7 +562,7 @@ mod tests {
                 .unwrap();
             let mut packet = [0u8; 256];
             let (length, source) = udp.recv_from(&mut packet).await.unwrap();
-            assert_eq!(source.ip(), IpAddr::V4(ip_b.address()));
+            assert_eq!(source.ip(), control_source.ip());
             udp.send_to(&packet[..length], source).await.unwrap();
             let mut closed = [0u8; 1];
             assert_eq!(control.read(&mut closed).await.unwrap(), 0);
