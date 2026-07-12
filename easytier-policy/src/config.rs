@@ -432,6 +432,24 @@ impl PolicyDocument {
                     reason: "expected comma-separated rule and target".to_owned(),
                 });
             }
+            let rule_type = parts[0].to_ascii_uppercase();
+            let expected_parts = match rule_type.as_str() {
+                "MATCH" | "FINAL" => 2,
+                "IP-CIDR" | "DOMAIN" | "DOMAIN-SUFFIX" | "DOMAIN-KEYWORD" | "GEOIP"
+                | "EXTERNAL" | "PORT-RANGE" | "NETWORK" | "INBOUND-TAG" | "PROCESS-NAME" => 3,
+                _ => {
+                    return Err(PolicyError::InvalidRule {
+                        index,
+                        reason: format!("unsupported rule type {}", parts[0]),
+                    });
+                }
+            };
+            if parts.len() != expected_parts {
+                return Err(PolicyError::InvalidRule {
+                    index,
+                    reason: format!("{rule_type} requires {expected_parts} fields"),
+                });
+            }
             let target = parts.last().copied().unwrap_or_default();
             if !self.actor_exists(target) {
                 return Err(PolicyError::UnknownReference {
@@ -439,7 +457,7 @@ impl PolicyDocument {
                     reference: target.to_owned(),
                 });
             }
-            let is_udp = parts[0].eq_ignore_ascii_case("NETWORK")
+            let is_udp = rule_type == "NETWORK"
                 && parts
                     .get(1)
                     .is_some_and(|value| value.eq_ignore_ascii_case("udp"));
@@ -566,6 +584,15 @@ rules: ["NETWORK,udp,http"]
         assert!(matches!(
             PolicyRevision::parse(source, Path::new(".")),
             Err(PolicyError::UdpUnsupported(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_rules_leaf_would_silently_ignore() {
+        let source = "version: 1\nrules: [\"UNKNOWN,value,DIRECT\"]\n";
+        assert!(matches!(
+            PolicyRevision::parse(source, Path::new(".")),
+            Err(PolicyError::InvalidRule { .. })
         ));
     }
 }

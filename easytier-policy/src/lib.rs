@@ -5,13 +5,15 @@
 //! runtimes attach through narrow traits in later integration layers.
 
 mod config;
+mod leaf_config;
 mod packet;
 mod supervisor;
 
 pub use config::{
-    ChainKind, PolicyDocument, PolicyError, PolicyMode, PolicyRevision, ProxyKind, ProxyVia,
-    RuleSetKind, validate_policy_file,
+    ChainKind, PolicyDocument, PolicyError, PolicyMode, PolicyRevision, ProxyKind, ProxyServer,
+    ProxyVia, RuleSetKind, validate_policy_file,
 };
+pub use leaf_config::{LeafConfigError, MeshServerResolver, compile_leaf_config};
 #[cfg(unix)]
 pub use packet::{LeafPacketBridge, LeafPacketEndpoint};
 pub use packet::{MeshRouteSnapshot, PacketClass, PacketClassifier, PacketError};
