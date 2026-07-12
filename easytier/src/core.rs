@@ -123,7 +123,11 @@ struct Cli {
     policy_config: Option<PathBuf>,
 
     #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
-    #[arg(long, env = "ET_POLICY_LEAF_EXECUTABLE", default_value = "leaf")]
+    #[arg(
+        long,
+        env = "ET_POLICY_LEAF_EXECUTABLE",
+        default_value = "easytier-leaf-worker"
+    )]
     policy_leaf_executable: PathBuf,
 
     #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]

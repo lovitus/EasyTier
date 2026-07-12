@@ -1,7 +1,8 @@
 use std::{net::IpAddr, sync::Arc};
 
 use arc_swap::ArcSwap;
-use cidr::IpCidr;
+use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
+use prefix_trie::PrefixSet;
 use thiserror::Error;
 
 const MIN_IPV4_HEADER: usize = 20;
@@ -16,6 +17,8 @@ pub enum PacketError {
     Truncated { version: u8, length: usize },
     #[error("unsupported IP version {0}")]
     UnsupportedVersion(u8),
+    #[error("malformed IPv{version} packet")]
+    Malformed { version: u8 },
     #[error("packet exceeds {MAX_PACKET_SIZE} bytes")]
     TooLarge,
     #[cfg(unix)]
@@ -32,6 +35,8 @@ pub enum PacketClass {
 #[derive(Debug, Clone, Default)]
 pub struct MeshRouteSnapshot {
     routes: Arc<[IpCidr]>,
+    ipv4: PrefixSet<Ipv4Cidr>,
+    ipv6: PrefixSet<Ipv6Cidr>,
 }
 
 impl MeshRouteSnapshot {
@@ -43,13 +48,43 @@ impl MeshRouteSnapshot {
                 .then_with(|| left.to_string().cmp(&right.to_string()))
         });
         routes.dedup();
+        let mut ipv4 = PrefixSet::new();
+        let mut ipv6 = PrefixSet::new();
+        for route in &routes {
+            match route {
+                IpCidr::V4(route) => {
+                    ipv4.insert(*route);
+                }
+                IpCidr::V6(route) => {
+                    ipv6.insert(*route);
+                }
+            }
+        }
         Self {
             routes: routes.into(),
+            ipv4,
+            ipv6,
         }
     }
 
     pub fn owns(&self, destination: IpAddr) -> bool {
-        self.routes.iter().any(|route| route.contains(&destination))
+        match destination {
+            IpAddr::V4(address) => {
+                address.is_broadcast()
+                    || address.is_multicast()
+                    || self
+                        .ipv4
+                        .get_lpm(&Ipv4Cidr::new(address, 32).expect("host prefix is valid"))
+                        .is_some()
+            }
+            IpAddr::V6(address) => {
+                address.is_multicast()
+                    || self
+                        .ipv6
+                        .get_lpm(&Ipv6Cidr::new(address, 128).expect("host prefix is valid"))
+                        .is_some()
+            }
+        }
     }
 
     pub fn routes(&self) -> &[IpCidr] {
@@ -83,6 +118,9 @@ impl PacketClassifier {
 }
 
 fn destination_ip(packet: &[u8]) -> Result<IpAddr, PacketError> {
+    if packet.len() > MAX_PACKET_SIZE {
+        return Err(PacketError::TooLarge);
+    }
     let Some(first) = packet.first() else {
         return Err(PacketError::Empty);
     };
@@ -93,6 +131,15 @@ fn destination_ip(packet: &[u8]) -> Result<IpAddr, PacketError> {
                     version: 4,
                     length: packet.len(),
                 });
+            }
+            let header_length = usize::from(packet[0] & 0x0f) * 4;
+            let total_length = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+            if header_length < MIN_IPV4_HEADER
+                || header_length > packet.len()
+                || total_length < header_length
+                || total_length > packet.len()
+            {
+                return Err(PacketError::Malformed { version: 4 });
             }
             Ok(IpAddr::V4(
                 [packet[16], packet[17], packet[18], packet[19]].into(),
@@ -237,6 +284,7 @@ mod tests {
     fn ipv4(destination: [u8; 4]) -> [u8; MIN_IPV4_HEADER] {
         let mut packet = [0u8; MIN_IPV4_HEADER];
         packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(MIN_IPV4_HEADER as u16).to_be_bytes());
         packet[16..20].copy_from_slice(&destination);
         packet
     }
@@ -281,5 +329,41 @@ mod tests {
             "10.44.0.0/16".parse().unwrap(),
         ]));
         assert_eq!(classifier.classify(&packet).unwrap(), PacketClass::Mesh);
+    }
+
+    #[test]
+    fn preserves_mesh_broadcast_and_multicast_paths() {
+        let classifier = PacketClassifier::new(MeshRouteSnapshot::default());
+        assert_eq!(
+            classifier.classify(&ipv4([255, 255, 255, 255])).unwrap(),
+            PacketClass::Mesh
+        );
+        assert_eq!(
+            classifier.classify(&ipv4([224, 0, 0, 251])).unwrap(),
+            PacketClass::Mesh
+        );
+        assert_eq!(
+            classifier
+                .classify(&ipv6(
+                    "ff02::fb".parse::<std::net::Ipv6Addr>().unwrap().octets()
+                ))
+                .unwrap(),
+            PacketClass::Mesh
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_and_oversized_packets() {
+        let classifier = PacketClassifier::new(MeshRouteSnapshot::default());
+        let mut malformed = ipv4([1, 1, 1, 1]);
+        malformed[0] = 0x44;
+        assert!(matches!(
+            classifier.classify(&malformed),
+            Err(PacketError::Malformed { version: 4 })
+        ));
+        assert!(matches!(
+            classifier.classify(&vec![0x60; MAX_PACKET_SIZE + 1]),
+            Err(PacketError::TooLarge)
+        ));
     }
 }

@@ -62,7 +62,8 @@ impl LeafProcessRuntime {
         revision: Arc<PolicyRevision>,
     ) -> Result<Arc<Self>, String> {
         let (bridge, endpoint) = LeafPacketBridge::pair().map_err(|error| error.to_string())?;
-        let config = compile_leaf_config(&revision, LEAF_TUN_FD, base_dir, resolver)
+        let dns_servers = system_dns_servers()?;
+        let config = compile_leaf_config(&revision, LEAF_TUN_FD, base_dir, resolver, &dns_servers)
             .map_err(|error| error.to_string())?;
         let config_path = std::env::temp_dir().join(format!(
             "easytier-leaf-{}-{}-{}.conf",
@@ -72,13 +73,15 @@ impl LeafProcessRuntime {
         ));
         write_private_file(&config_path, config.as_bytes()).map_err(|error| error.to_string())?;
 
-        let validation = Command::new(executable)
-            .arg("-T")
-            .arg("-c")
-            .arg(&config_path)
+        let mut validation_command = Command::new(executable);
+        validation_command.arg("-T").arg("-c").arg(&config_path);
+        if let Some(interface) = outbound_interface {
+            validation_command.arg("-b").arg(interface);
+        }
+        let validation = validation_command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .output()
             .await
             .map_err(|error| format!("failed to execute Leaf config validation: {error}"))?;
@@ -96,16 +99,19 @@ impl LeafProcessRuntime {
         command
             .arg("-c")
             .arg(&config_path)
-            .arg("--single-thread")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            // Never leave child pipes unread: Leaf's console logger writes to stdout, while worker
+            // startup errors use stderr. Inherit both so neither can deadlock on a full pipe.
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .kill_on_drop(true);
         if let Some(interface) = outbound_interface {
             command.arg("-b").arg(interface);
         }
+        let parent_pid = unsafe { libc::getpid() };
         unsafe {
             command.pre_exec(move || {
+                configure_parent_death(parent_pid)?;
                 if libc::dup2(endpoint_fd, LEAF_TUN_FD) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -156,6 +162,66 @@ impl LeafProcessRuntime {
         }
         let _ = std::fs::remove_file(&self.config_path);
     }
+
+    pub fn is_running(&self) -> bool {
+        self.child
+            .lock()
+            .unwrap()
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_parent_death(parent_pid: libc::pid_t) -> std::io::Result<()> {
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::getppid() } != parent_pid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "EasyTier parent exited while starting Leaf",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_parent_death(_parent_pid: libc::pid_t) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn system_dns_servers() -> Result<Vec<std::net::IpAddr>, String> {
+    let contents = std::fs::read_to_string("/etc/resolv.conf")
+        .map_err(|error| format!("failed to read /etc/resolv.conf: {error}"))?;
+    parse_system_dns_servers(&contents)
+}
+
+fn parse_system_dns_servers(contents: &str) -> Result<Vec<std::net::IpAddr>, String> {
+    let mut servers = Vec::new();
+    for line in contents.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        let mut fields = line.split_whitespace();
+        if fields.next() != Some("nameserver") {
+            continue;
+        }
+        let Some(address) = fields.next() else {
+            continue;
+        };
+        let Ok(address) = address.parse() else {
+            continue;
+        };
+        if !servers.contains(&address) {
+            servers.push(address);
+        }
+        if servers.len() == 4 {
+            break;
+        }
+    }
+    if servers.is_empty() {
+        return Err("/etc/resolv.conf contains no IP nameserver usable by Leaf".to_owned());
+    }
+    Ok(servers)
 }
 
 impl Drop for LeafProcessRuntime {
@@ -231,12 +297,28 @@ mod tests {
         );
 
         let runtime =
-            LeafProcessRuntime::start(&executable, dir.path(), None, &|_, _| None, revision)
+            LeafProcessRuntime::start(&executable, dir.path(), None, &|_, _, _, _| None, revision)
                 .await
                 .unwrap();
         let config_path = runtime.config_path.clone();
         assert!(config_path.exists());
+        assert!(runtime.is_running());
         runtime.stop().await;
+        assert!(!runtime.is_running());
         assert!(!config_path.exists());
+    }
+
+    #[test]
+    fn parses_bounded_system_dns_servers_without_fallback_defaults() {
+        let servers = parse_system_dns_servers(
+            "# generated\nnameserver 127.0.0.53\nnameserver invalid\n\
+             nameserver 1.1.1.1 # primary\nnameserver 127.0.0.53\n",
+        )
+        .unwrap();
+        assert_eq!(
+            servers,
+            vec!["127.0.0.53".parse().unwrap(), "1.1.1.1".parse().unwrap()]
+        );
+        assert!(parse_system_dns_servers("search example.test\n").is_err());
     }
 }

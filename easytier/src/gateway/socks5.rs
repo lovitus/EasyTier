@@ -369,6 +369,7 @@ struct Socks5AutoConnector {
     src_addr: SocketAddr,
 
     inner_connector: parking_lot::Mutex<Option<Box<dyn Any + Send>>>,
+    allow_kernel_fallback: bool,
 }
 
 #[async_trait::async_trait]
@@ -406,6 +407,12 @@ impl AsyncTcpConnector for Socks5AutoConnector {
             || dst_peers.as_ref().is_some_and(Vec::is_empty)
             || addr.ip().is_loopback()
         {
+            if !self.allow_kernel_fallback {
+                return Err(anyhow::anyhow!(
+                    "mesh-only data-plane target is not currently routable"
+                )
+                .into());
+            }
             // cannot find dst in virtual network, so try connect to dst directly
             tracing::trace!(
                 ?addr,
@@ -1046,6 +1053,7 @@ impl Socks5Server {
                                 peer_mgr: peer_manager.clone(),
                                 src_addr: addr,
                                 inner_connector: parking_lot::Mutex::new(None),
+                                allow_kernel_fallback: true,
                                 entry_count: entry_count.clone(),
                             };
                             if let Some(net) = net.lock().await.as_ref() {
@@ -1235,6 +1243,7 @@ impl Socks5Server {
                     src_addr: addr,
                     entry_count: entry_count.clone(),
                     inner_connector: parking_lot::Mutex::new(None),
+                    allow_kernel_fallback: true,
                 };
 
                 forward_tasks

@@ -59,6 +59,8 @@ pub async fn prepare_env_with_tld_dns_zone(
         &peer_mgr,
         r,
         Arc::new(Notify::new()),
+        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        std::sync::Weak::new(),
     );
     virtual_nic.run(Some(tun_ip), None).await.unwrap();
 

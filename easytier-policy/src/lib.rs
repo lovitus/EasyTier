@@ -15,7 +15,9 @@ pub use config::{
     ChainKind, PolicyDocument, PolicyError, PolicyMode, PolicyRevision, ProxyKind, ProxyServer,
     ProxyVia, RuleSetKind, validate_policy_file,
 };
-pub use leaf_config::{LeafConfigError, MeshServerResolver, compile_leaf_config};
+pub use leaf_config::{
+    LeafConfigError, MeshServerResolver, ResolvedMeshServer, compile_leaf_config,
+};
 #[cfg(unix)]
 pub use leaf_process::{LeafProcessFactory, LeafProcessRuntime};
 #[cfg(unix)]

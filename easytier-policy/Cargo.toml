@@ -18,6 +18,7 @@ leaf-worker = ["dep:leaf"]
 [dependencies]
 arc-swap = "1.7"
 cidr = "0.3"
+prefix-trie = { version = "0.7", features = ["cidr"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 sha2 = "0.10.8"

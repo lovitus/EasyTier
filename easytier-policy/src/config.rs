@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::Read as _,
     net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -12,6 +13,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const MAX_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_RULE_SET_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RULES: usize = 16_384;
 const MAX_ACTORS: usize = 1_024;
 const MAX_EXPANDED_CHAIN_ACTORS: usize = 32;
@@ -37,6 +39,8 @@ pub enum PolicyError {
     Limit { kind: &'static str, limit: usize },
     #[error("duplicate reserved actor name {0}")]
     ReservedName(String),
+    #[error("invalid actor name {0}")]
+    InvalidActorName(String),
     #[error("unknown actor reference {reference} in {owner}")]
     UnknownReference { owner: String, reference: String },
     #[error("proxy group cycle: {0}")]
@@ -106,9 +110,9 @@ pub enum ProxyServer {
     Address(String),
     Mesh {
         #[serde(rename = "instance-id")]
-        instance_id: Option<Uuid>,
+        pub instance_id: Option<Uuid>,
         #[serde(rename = "virtual-ip")]
-        virtual_ip: Option<IpAddr>,
+        pub virtual_ip: Option<IpAddr>,
     },
 }
 
@@ -252,12 +256,39 @@ impl PolicyDocument {
                     reason: "rule data must be a non-empty regular file".to_owned(),
                 });
             }
-            if let Some(expected) = &rule_set.sha256 {
-                let bytes = fs::read(&path).map_err(|error| PolicyError::InvalidRuleSet {
+            if metadata.len() > MAX_RULE_SET_BYTES {
+                return Err(PolicyError::InvalidRuleSet {
                     name: name.clone(),
-                    reason: error.to_string(),
-                })?;
-                let actual = format!("{:x}", Sha256::digest(bytes));
+                    reason: format!("rule data exceeds {MAX_RULE_SET_BYTES} bytes"),
+                });
+            }
+            if let Some(expected) = &rule_set.sha256 {
+                if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err(PolicyError::InvalidRuleSet {
+                        name: name.clone(),
+                        reason: "sha256 must contain exactly 64 hexadecimal characters".to_owned(),
+                    });
+                }
+                let mut file =
+                    fs::File::open(&path).map_err(|error| PolicyError::InvalidRuleSet {
+                        name: name.clone(),
+                        reason: error.to_string(),
+                    })?;
+                let mut digest = Sha256::new();
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    let length =
+                        file.read(&mut buffer)
+                            .map_err(|error| PolicyError::InvalidRuleSet {
+                                name: name.clone(),
+                                reason: error.to_string(),
+                            })?;
+                    if length == 0 {
+                        break;
+                    }
+                    digest.update(&buffer[..length]);
+                }
+                let actual = format!("{:x}", digest.finalize());
                 if !actual.eq_ignore_ascii_case(expected) {
                     return Err(PolicyError::InvalidRuleSet {
                         name: name.clone(),
@@ -271,6 +302,14 @@ impl PolicyDocument {
 
     fn validate_names(&self) -> Result<(), PolicyError> {
         for name in self.proxies.keys().chain(self.groups.keys()) {
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+            {
+                return Err(PolicyError::InvalidActorName(name.clone()));
+            }
             if matches!(name.as_str(), "DIRECT" | "REJECT") {
                 return Err(PolicyError::ReservedName(name.clone()));
             }
@@ -316,12 +355,38 @@ impl PolicyDocument {
                         reason: "structured mesh selector requires via: mesh".to_owned(),
                     });
                 }
+                (_, ProxyServer::Address(address))
+                    if address.is_empty()
+                        || address.len() > 253
+                        || address.bytes().any(|byte| {
+                            byte.is_ascii_whitespace() || matches!(byte, b',' | b'=' | b'#' | b';')
+                        }) =>
+                {
+                    return Err(PolicyError::InvalidServer {
+                        name: name.clone(),
+                        reason: "address contains unsupported characters".to_owned(),
+                    });
+                }
                 _ => {}
             }
             if proxy.kind == ProxyKind::Http && proxy.udp {
                 return Err(PolicyError::InvalidServer {
                     name: name.clone(),
                     reason: "HTTP CONNECT is TCP-only".to_owned(),
+                });
+            }
+            if proxy.kind == ProxyKind::Http {
+                return Err(PolicyError::InvalidServer {
+                    name: name.clone(),
+                    reason:
+                        "the pinned Leaf runtime has no HTTP CONNECT outbound; v1 requires SOCKS5"
+                            .to_owned(),
+                });
+            }
+            if proxy.via == ProxyVia::Mesh && proxy.kind != ProxyKind::Socks5 {
+                return Err(PolicyError::InvalidServer {
+                    name: name.clone(),
+                    reason: "v1 mesh transport requires a SOCKS5 actor".to_owned(),
                 });
             }
         }
@@ -426,7 +491,14 @@ impl PolicyDocument {
     fn validate_rules(&self) -> Result<(), PolicyError> {
         for (index, rule) in self.rules.iter().enumerate() {
             let parts: Vec<_> = rule.split(',').map(str::trim).collect();
-            if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
+            if parts.len() < 2
+                || parts.iter().any(|part| {
+                    part.is_empty()
+                        || part
+                            .chars()
+                            .any(|character| matches!(character, '\r' | '\n' | '=' | '#' | ';'))
+                })
+            {
                 return Err(PolicyError::InvalidRule {
                     index,
                     reason: "expected comma-separated rule and target".to_owned(),
@@ -436,7 +508,7 @@ impl PolicyDocument {
             let expected_parts = match rule_type.as_str() {
                 "MATCH" | "FINAL" => 2,
                 "IP-CIDR" | "DOMAIN" | "DOMAIN-SUFFIX" | "DOMAIN-KEYWORD" | "GEOIP"
-                | "EXTERNAL" | "PORT-RANGE" | "NETWORK" | "INBOUND-TAG" | "PROCESS-NAME" => 3,
+                | "EXTERNAL" | "PORT-RANGE" | "NETWORK" | "INBOUND-TAG" => 3,
                 _ => {
                     return Err(PolicyError::InvalidRule {
                         index,
@@ -588,10 +660,77 @@ rules: ["NETWORK,udp,http"]
     }
 
     #[test]
+    fn rejects_http_actor_over_mesh_bridge() {
+        let source = r#"
+version: 1
+proxies:
+  http:
+    type: http
+    server: { virtual-ip: 10.44.0.8 }
+    port: 8080
+    via: mesh
+rules: ["FINAL,http"]
+"#;
+        assert!(matches!(
+            PolicyRevision::parse(source, Path::new(".")),
+            Err(PolicyError::InvalidServer { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_native_http_actor_until_runtime_support_exists() {
+        let source = r#"
+version: 1
+proxies:
+  http:
+    type: http
+    server: 192.0.2.10
+    port: 8080
+    via: native
+rules: ["FINAL,http"]
+"#;
+        assert!(matches!(
+            PolicyRevision::parse(source, Path::new(".")),
+            Err(PolicyError::InvalidServer { .. })
+        ));
+    }
+
+    #[test]
     fn rejects_rules_leaf_would_silently_ignore() {
         let source = "version: 1\nrules: [\"UNKNOWN,value,DIRECT\"]\n";
         assert!(matches!(
             PolicyRevision::parse(source, Path::new(".")),
+            Err(PolicyError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_leaf_config_injection_fields() {
+        let actor = r#"
+version: 1
+proxies:
+  "bad\n[Rule]": { type: http, server: 127.0.0.1, port: 80 }
+rules: ["FINAL,REJECT"]
+"#;
+        assert!(matches!(
+            PolicyRevision::parse(actor, Path::new(".")),
+            Err(PolicyError::InvalidActorName(_))
+        ));
+
+        let address = r#"
+version: 1
+proxies:
+  bad: { type: http, server: "127.0.0.1 # DIRECT", port: 80 }
+rules: ["FINAL,bad"]
+"#;
+        assert!(matches!(
+            PolicyRevision::parse(address, Path::new(".")),
+            Err(PolicyError::InvalidServer { .. })
+        ));
+
+        let rule = "version: 1\nrules: [\"FINAL,DIRECT\\n[Proxy]\"]\n";
+        assert!(matches!(
+            PolicyRevision::parse(rule, Path::new(".")),
             Err(PolicyError::InvalidRule { .. })
         ));
     }

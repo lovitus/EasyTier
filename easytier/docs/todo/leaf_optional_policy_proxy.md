@@ -6,6 +6,64 @@
 This TODO is the design source of truth. Update it after each material design
 discussion so implementation does not depend on chat history.
 
+## Linux v1 validation snapshot
+
+The current implementation is an opt-in Linux spike behind the
+`leaf-policy-proxy` Cargo feature. It is deliberately narrower than the final
+cross-platform design below:
+
+- absence of `--policy-config` creates no Leaf process, policy task, default
+  route, packet mux, bridge, timer, or session table;
+- enabled mode requires `bind_device=true`, an explicit physical
+  `--policy-outbound-interface`, no configured instance netns, and one active
+  policy instance per process. If a process hosts additional networks, they
+  keep the ordinary NIC path rather than failing or inheriting policy routes;
+- `easytier-leaf-worker` is a pinned, separately supervised Leaf process. It
+  validates `SO_BINDTODEVICE` without sending traffic, uses at most four worker
+  threads, and is restarted at most three times per unchanged endpoint
+  generation;
+- the TUN owner classifies mesh destinations through an immutable IPv4/IPv6
+  prefix trie. Mesh packets retain the existing VirtualNic path; other packets
+  enter Leaf through a bounded Unix datagram bridge;
+- if Leaf is absent or its bounded input/output queue is full, non-mesh packets
+  are dropped while mesh packets continue. Drop logs use power-of-two rate
+  limiting;
+- every `via: mesh` actor is rewritten to an authenticated private loopback
+  SOCKS5 bridge. The bridge uses the existing EasyTier TCP/UDP data-plane API,
+  has global connection and per-second admission limits, pins UDP sources, and
+  ties UDP lifetime to both SOCKS control streams;
+- v1 actors are SOCKS5 only. Mesh actors must expose a reachable EasyTier
+  virtual IPv4 endpoint. The final proxied destination may still be a domain,
+  IPv4, or IPv6 address. The pinned Leaf runtime has no HTTP CONNECT outbound,
+  so accepting an HTTP actor would be a false capability rather than a useful
+  fallback;
+- the remote mesh SOCKS server must accept no-authentication mode. UDP rules
+  additionally require a real SOCKS5 UDP ASSOCIATE implementation on that
+  server; the existing EasyTier `--socks` remains TCP-only;
+- dynamic route changes never migrate actor sessions. A peer identity/endpoint
+  generation change closes the old TCP streams and UDP associations; new
+  sessions use the replacement. Cost/next-hop-only changes leave sessions
+  running. A policy owner refreshes route identity every five seconds because
+  the current event bus has no generic remote route-info change event;
+- generated Leaf config enables FakeDNS for domain/geosite routing, derives up
+  to four DNS server IPs from `/etc/resolv.conf`, and forces those resolver
+  sockets through Leaf DIRECT rather than libc's unbound system resolver;
+- generated fallback groups disable Leaf's hard-coded active Internet probes.
+  Fallback is passive and ordered for each new TCP stream or UDP association,
+  so an outage does not start periodic Google/1.1.1.1 probes;
+- policy YAML and local rule data are size-bounded, generated-conf delimiters
+  are rejected, optional SHA-256 verification is streamed, and rule files are
+  never downloaded automatically.
+- the sidecar receives a Linux parent-death signal, so an abrupt EasyTier kill
+  does not leave a worker, bridge FD, or policy session running;
+
+Not yet implemented in this spike: TOML/RPC/GUI/mobile envelopes, policy file
+hot reload, proxy credentials for the remote/native actor, HTTP CONNECT actor
+adaptation, a bundled exit-node SOCKS5 UDP service, instance-netns worker
+ownership, and non-Linux TUN adapters.
+These are release blockers for claiming the full plan, but they do not affect
+ordinary EasyTier builds because the feature is off by default.
+
 ## Final Operational Plan
 
 ### Runtime components

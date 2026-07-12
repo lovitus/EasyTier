@@ -399,7 +399,7 @@ websocket = [
 smoltcp = ["dep:smoltcp"]
 socks5 = ["smoltcp"]
 ffi-dataplane = ["socks5"]
-leaf-policy-proxy = ["dep:easytier-policy", "tun"]
+leaf-policy-proxy = ["dep:easytier-policy", "ffi-dataplane", "tun"]
 jemalloc = ["dep:jemallocator", "dep:jemalloc-sys"]
 jemalloc-prof = [
     "jemalloc",

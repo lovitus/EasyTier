@@ -8,6 +8,10 @@ use std::{
 
 use anyhow::Context as _;
 
+mod mesh_socks_bridge;
+
+pub(crate) use mesh_socks_bridge::{MeshProxyBridgeSet, MeshProxyTarget};
+
 #[derive(Debug, Clone)]
 pub struct PolicyProcessConfig {
     pub policy_file: PathBuf,
@@ -51,6 +55,12 @@ fn resolve_executable(executable: &Path) -> anyhow::Result<PathBuf> {
     if executable.components().count() > 1 || executable.is_absolute() {
         require_regular_file(executable, "Leaf executable")?;
         return Ok(executable.to_owned());
+    }
+    if let Some(directory) = std::env::current_exe()?.parent() {
+        let candidate = directory.join(executable);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
     for directory in std::env::split_paths(&path) {

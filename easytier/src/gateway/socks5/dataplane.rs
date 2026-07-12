@@ -308,6 +308,25 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<DataPlaneTcpStream, Error> {
+        self.data_plane_tcp_connect_inner(dst_addr, timeout, true)
+            .await
+    }
+
+    pub(crate) async fn data_plane_tcp_connect_mesh_only(
+        &self,
+        dst_addr: SocketAddr,
+        timeout: Duration,
+    ) -> Result<DataPlaneTcpStream, Error> {
+        self.data_plane_tcp_connect_inner(dst_addr, timeout, false)
+            .await
+    }
+
+    async fn data_plane_tcp_connect_inner(
+        &self,
+        dst_addr: SocketAddr,
+        timeout: Duration,
+        allow_kernel_fallback: bool,
+    ) -> Result<DataPlaneTcpStream, Error> {
         let data_plane_ref = self.acquire_data_plane_ref();
         let deadline = Instant::now() + timeout;
         let (ipv4_addr, smoltcp_net) = self.wait_data_plane_net(deadline).await?;
@@ -326,6 +345,7 @@ impl Socks5Server {
             src_addr: local_addr,
             entry_count: self.entry_count.clone(),
             inner_connector: parking_lot::Mutex::new(None),
+            allow_kernel_fallback,
         };
 
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -537,5 +557,18 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn mesh_only_connect_never_falls_back_to_kernel() {
+        let (a, _b) = setup_pair().await;
+        let result = a
+            .server
+            .data_plane_tcp_connect_mesh_only(
+                "127.0.0.1:9".parse().unwrap(),
+                Duration::from_secs(1),
+            )
+            .await;
+        assert!(result.is_err());
     }
 }

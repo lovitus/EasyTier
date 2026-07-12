@@ -2559,6 +2559,7 @@ dependencies = [
  "cidr 0.3.1",
  "leaf",
  "libc",
+ "prefix-trie",
  "serde",
  "serde_yaml",
  "sha2",
