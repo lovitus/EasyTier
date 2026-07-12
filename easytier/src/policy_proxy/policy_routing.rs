@@ -43,10 +43,9 @@ impl PolicyRoutingGuard {
         }
 
         let v4_routes = NetlinkIfConfiger::list_route_messages(AddressFamily::Inet)?;
-        let v6_routes = enable_ipv6
-            .then(|| NetlinkIfConfiger::list_route_messages(AddressFamily::Inet6))
-            .transpose()?
-            .unwrap_or_default();
+        // Always inspect IPv6 so a restart with IPv6 disabled still removes
+        // an owned table left by a previous dual-stack process crash.
+        let v6_routes = NetlinkIfConfiger::list_route_messages(AddressFamily::Inet6)?;
         cleanup_stale(&v4_routes, &v6_routes)?;
 
         let mut guard = Self {
