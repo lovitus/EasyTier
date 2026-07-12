@@ -105,8 +105,7 @@ impl MeshUdpRelayService {
         let cancel = CancellationToken::new();
         let token = self.reserve_token(&cancel).await?;
         let setup = async {
-            let local_proxy = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), proxy_addr.port());
-            let (control, native_udp, upstream_relay) = open_local_socks_udp(local_proxy).await?;
+            let (control, native_udp, upstream_relay) = open_local_socks_udp(proxy_addr).await?;
             let mesh_udp = self
                 .data_plane
                 .data_plane_udp_bind(0, SETUP_TIMEOUT)
@@ -540,7 +539,7 @@ mod tests {
         let relay_service = MeshUdpRelayService::new(&peer_b, data_plane_b);
         relay_service.register();
 
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
             .await
             .unwrap();
         let proxy_port = listener.local_addr().unwrap().port();
@@ -553,14 +552,14 @@ mod tests {
             let mut request = [0u8; 10];
             control.read_exact(&mut request).await.unwrap();
             assert_eq!(&request[..4], &[5, 3, 0, 1]);
-            let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let udp = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
             control
                 .write_all(&socks_reply_for_test(udp.local_addr().unwrap()))
                 .await
                 .unwrap();
             let mut packet = [0u8; 256];
             let (length, source) = udp.recv_from(&mut packet).await.unwrap();
-            assert_eq!(source.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+            assert_eq!(source.ip(), IpAddr::V4(ip_b.address()));
             udp.send_to(&packet[..length], source).await.unwrap();
             let mut closed = [0u8; 1];
             assert_eq!(control.read(&mut closed).await.unwrap(), 0);
