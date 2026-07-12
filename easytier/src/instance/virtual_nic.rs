@@ -1831,14 +1831,9 @@ impl NicCtx {
 
         {
             let nic = self.nic.lock().await;
-            // Two more-specific routes capture ordinary host traffic without replacing
-            // the physical default route needed by interface-bound Leaf sockets.
-            nic.add_route(Ipv4Addr::UNSPECIFIED, 1).await?;
-            nic.add_route(Ipv4Addr::new(128, 0, 0, 0), 1).await?;
+            nic.add_route(Ipv4Addr::UNSPECIFIED, 0).await?;
             if self.global_ctx.get_flags().enable_ipv6 {
-                nic.add_ipv6_route(Ipv6Addr::UNSPECIFIED, 1).await?;
-                nic.add_ipv6_route(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0), 1)
-                    .await?;
+                nic.add_ipv6_route(Ipv6Addr::UNSPECIFIED, 0).await?;
             }
         }
 
