@@ -4,7 +4,6 @@ members = [
     "easytier",
     "easytier-policy",
     "third_party/kcp-sys",
-    "third_party/netstack-smoltcp",
     "easytier-gui/src-tauri",
     "easytier-web",
     "easytier-contrib/easytier-ffi",
@@ -31,6 +30,3 @@ lto = true
 codegen-units = 1
 opt-level = 3
 strip = true
-
-[patch."https://github.com/eycorsican/netstack-smoltcp"]
-netstack-smoltcp = { path = "third_party/netstack-smoltcp" }
