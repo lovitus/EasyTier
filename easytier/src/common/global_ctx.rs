@@ -565,7 +565,7 @@ impl GlobalCtx {
 
         let (event_bus, _) = tokio::sync::broadcast::channel(16);
 
-        let stun_info_collector = StunInfoCollector::new_with_default_servers();
+        let mut stun_info_collector = StunInfoCollector::new_with_default_servers();
 
         if let Some(stun_servers) = config_fs.get_stun_servers() {
             stun_info_collector.set_stun_servers(stun_servers);
@@ -579,9 +579,9 @@ impl GlobalCtx {
             stun_info_collector.set_stun_servers_v6(StunInfoCollector::get_default_servers_v6());
         }
 
-        let stun_info_collector = Arc::new(stun_info_collector);
-
         let flags = config_fs.get_flags();
+        stun_info_collector.set_socket_mark(flags.socket_mark);
+        let stun_info_collector = Arc::new(stun_info_collector);
         let explicit_secure_mode = config_fs.get_secure_mode();
         let stealth_protocols =
             crate::common::stealth_registry::StealthProtocolSet::parse(&flags.stealth_protocols)

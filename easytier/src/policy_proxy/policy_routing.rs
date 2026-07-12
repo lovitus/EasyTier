@@ -26,7 +26,10 @@ impl PolicyRoutingGuard {
         outbound_interface: &str,
         tun_interface: &str,
         enable_ipv6: bool,
+        socket_mark: Option<u32>,
     ) -> anyhow::Result<Self> {
+        let socket_mark = socket_mark
+            .ok_or_else(|| anyhow::anyhow!("policy mode requires an underlay socket mark"))?;
         let outbound_index = NetlinkIfConfiger::get_interface_index(outbound_interface)?;
         let tun_index = NetlinkIfConfiger::get_interface_index(tun_interface)?;
         let addresses = NetlinkIfConfiger::list_addresses(outbound_interface)?
@@ -92,6 +95,10 @@ impl PolicyRoutingGuard {
                     continue;
                 }
                 guard.add_rule(source_rule(address))?;
+            }
+            guard.add_rule(mark_rule(socket_mark, AddressFamily::Inet))?;
+            if has_v6_bypass {
+                guard.add_rule(mark_rule(socket_mark, AddressFamily::Inet6))?;
             }
             guard.add_route(capture_route(IpAddr::V4(Ipv4Addr::UNSPECIFIED), tun_index))?;
             guard.add_route(capture_route(
@@ -261,6 +268,18 @@ fn source_rule(source: IpAddr) -> RuleMessage {
     rule
 }
 
+fn mark_rule(mark: u32, family: AddressFamily) -> RuleMessage {
+    let mut rule = RuleMessage::default();
+    rule.header.family = family;
+    rule.header.action = RuleAction::ToTable;
+    rule.attributes.push(RuleAttribute::FwMark(mark));
+    rule.attributes.push(RuleAttribute::FwMask(u32::MAX));
+    rule.attributes
+        .push(RuleAttribute::Priority(POLICY_RULE_PRIORITY - 1));
+    rule.attributes.push(RuleAttribute::Table(POLICY_TABLE));
+    rule
+}
+
 fn cleanup_stale(v4_routes: &[RouteMessage], v6_routes: &[RouteMessage]) -> anyhow::Result<()> {
     let stale = v4_routes
         .iter()
@@ -282,7 +301,7 @@ fn cleanup_stale(v4_routes: &[RouteMessage], v6_routes: &[RouteMessage]) -> anyh
             if rule.attributes.iter().any(
                 |attribute| matches!(attribute, RuleAttribute::Table(table) if *table == POLICY_TABLE),
             ) && rule.attributes.iter().any(
-                |attribute| matches!(attribute, RuleAttribute::Priority(priority) if *priority == POLICY_RULE_PRIORITY),
+                |attribute| matches!(attribute, RuleAttribute::Priority(priority) if *priority == POLICY_RULE_PRIORITY || *priority == POLICY_RULE_PRIORITY - 1),
             ) {
                 send_netlink_req_and_wait_one_resp(RouteNetlinkMessage::DelRule(rule), true)?;
             }

@@ -14,6 +14,8 @@ mod policy_routing;
 pub(crate) use mesh_socks_bridge::{MeshProxyBridgeSet, MeshProxyTarget};
 pub(crate) use policy_routing::PolicyRoutingGuard;
 
+pub(crate) const POLICY_SOCKET_MARK: u32 = 0x4554_5001;
+
 #[derive(Debug, Clone)]
 pub struct PolicyProcessConfig {
     pub policy_file: PathBuf,

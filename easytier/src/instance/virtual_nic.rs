@@ -1836,6 +1836,7 @@ impl NicCtx {
                 &config.outbound_interface,
                 nic.ifname(),
                 self.global_ctx.get_flags().enable_ipv6,
+                self.global_ctx.get_flags().socket_mark,
             )?
         };
 

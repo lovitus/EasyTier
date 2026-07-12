@@ -1493,7 +1493,7 @@ fn win_service_main(arg: Vec<std::ffi::OsString>) {
     win_service_event_loop(stop_notify_recv, cli, status_handle);
 }
 
-async fn run_main(cli: Cli) -> anyhow::Result<()> {
+async fn run_main(mut cli: Cli) -> anyhow::Result<()> {
     defer!(dump_profile(0););
     log::init(&cli.logging_options, true)?;
     if cli.nic_backend() != NicBackend::Tun && cli.network_options.no_tun == Some(true) {
@@ -1502,6 +1502,9 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
 
     #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
     if let Some(policy_file) = cli.policy_config.clone() {
+        if cli.network_options.socket_mark.is_none() {
+            cli.network_options.socket_mark = Some(crate::policy_proxy::POLICY_SOCKET_MARK);
+        }
         let outbound_interface = cli.policy_outbound_interface.clone().ok_or_else(|| {
             anyhow::anyhow!("--policy-config requires --policy-outbound-interface")
         })?;
