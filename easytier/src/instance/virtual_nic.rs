@@ -2105,6 +2105,7 @@ impl NicCtx {
                 }
                 if !has_active
                     && !meaningful_event
+                    && !route_refresh_due
                     && (dormant || tokio::time::Instant::now() < next_restart)
                 {
                     continue;

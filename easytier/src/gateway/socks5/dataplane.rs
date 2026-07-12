@@ -517,6 +517,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn data_plane_net_restarts_after_all_consumers_leave() {
+        let (ep_a, ep_b) = setup_pair().await;
+        let timeout = Duration::from_secs(10);
+
+        let socket_a = ep_a.server.data_plane_udp_bind(0, timeout).await.unwrap();
+        let socket_b = ep_b.server.data_plane_udp_bind(0, timeout).await.unwrap();
+        drop(socket_a);
+        drop(socket_b);
+
+        wait_for_condition(
+            || async {
+                let a_is_dormant = ep_a.server.net.lock().await.is_none();
+                let b_is_dormant = ep_b.server.net.lock().await.is_none();
+                a_is_dormant && b_is_dormant
+            },
+            timeout,
+        )
+        .await;
+
+        let mut listener = ep_b.server.data_plane_tcp_bind(0, timeout).await.unwrap();
+        let listen_addr =
+            std::net::SocketAddr::new(ep_b.ip.address().into(), listener.local_addr().port());
+        let accept = tokio::spawn(async move {
+            let (mut stream, _peer) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4];
+            stream.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"ping");
+            stream.write_all(b"pong").await.unwrap();
+            stream.flush().await.unwrap();
+        });
+
+        let mut client = ep_a
+            .server
+            .data_plane_tcp_connect(listen_addr, timeout)
+            .await
+            .unwrap();
+        client.write_all(b"ping").await.unwrap();
+        client.flush().await.unwrap();
+        let mut buf = [0u8; 4];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"pong");
+        accept.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn data_plane_udp_pingpong() {
         let (ep_a, ep_b) = setup_pair().await;
         let (server_a, a_ip, server_b, b_ip) = (ep_a.server, ep_a.ip, ep_b.server, ep_b.ip);

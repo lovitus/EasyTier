@@ -46,7 +46,7 @@ jobs:
         with:
           prefix-key: profiling-beta
           shared-key: linux-x86_64-musl
-          cache-targets: false
+          cache-targets: true
 
       - name: Build optimized binaries with symbols
         run: |
@@ -55,6 +55,16 @@ jobs:
             --locked \
             --target "$TARGET" \
             --package easytier-policy
+          cargo test \
+            --locked \
+            --target "$TARGET" \
+            --package kcp-sys \
+            dropping_one_stream_resets_both_connection_states
+          cargo test \
+            --locked \
+            --target "$TARGET" \
+            --package netstack-smoltcp \
+            shutdown_completes_when_fin_is_committed
           cargo build \
             --locked \
             --release \
