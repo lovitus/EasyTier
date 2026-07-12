@@ -33,6 +33,8 @@ mod arch;
 mod gateway;
 pub mod instance;
 mod peer_center;
+#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+pub mod policy_proxy;
 mod vpn_portal;
 
 pub mod common;

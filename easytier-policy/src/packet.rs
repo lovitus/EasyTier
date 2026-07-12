@@ -154,6 +154,20 @@ mod unix_bridge {
             Ok(())
         }
 
+        pub fn try_send_to_leaf(&self, packet: &[u8]) -> Result<(), PacketError> {
+            if packet.len() > MAX_PACKET_SIZE {
+                return Err(PacketError::TooLarge);
+            }
+            let sent = self.socket.try_send(packet)?;
+            if sent != packet.len() {
+                return Err(PacketError::Io(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "partial packet bridge write",
+                )));
+            }
+            Ok(())
+        }
+
         pub async fn recv_from_leaf(&self, packet: &mut [u8]) -> Result<usize, PacketError> {
             Ok(self.socket.recv(packet).await?)
         }

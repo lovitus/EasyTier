@@ -59,10 +59,17 @@ jobs:
             --locked \
             --release \
             --target "$TARGET" \
+            --package easytier-policy \
+            --bin easytier-leaf-worker \
+            --features leaf-worker
+          cargo build \
+            --locked \
+            --release \
+            --target "$TARGET" \
             --package easytier \
             --bin easytier-core \
             --bin easytier-cli \
-            --features jemalloc
+            --features jemalloc,leaf-policy-proxy
 
       - name: Verify profiling metadata
         run: |
@@ -88,6 +95,7 @@ jobs:
 
           cp "target/$TARGET/release/easytier-core" "staging/$bundle/"
           cp "target/$TARGET/release/easytier-cli" "staging/$bundle/"
+          cp "target/$TARGET/release/easytier-leaf-worker" "staging/$bundle/"
           cp profiling-file-info.txt profiling-build-id.txt profiling-sections.txt \
             "staging/$bundle/"
 
@@ -103,7 +111,7 @@ jobs:
 
           (
             cd "staging/$bundle"
-            sha256sum easytier-core easytier-cli > SHA256SUMS.txt
+            sha256sum easytier-core easytier-cli easytier-leaf-worker > SHA256SUMS.txt
           )
 
           tar -C staging -czf "artifacts/$bundle.tar.gz" "$bundle"

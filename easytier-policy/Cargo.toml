@@ -6,6 +6,15 @@ rust-version.workspace = true
 license = "Apache-2.0"
 publish = false
 
+[[bin]]
+name = "easytier-leaf-worker"
+path = "src/bin/easytier-leaf-worker.rs"
+required-features = ["leaf-worker"]
+
+[features]
+default = []
+leaf-worker = ["dep:leaf"]
+
 [dependencies]
 arc-swap = "1.7"
 cidr = "0.3"
@@ -19,6 +28,21 @@ uuid = { version = "1", features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(unix)'.dependencies.leaf]
+git = "https://github.com/eycorsican/leaf.git"
+rev = "1d20301570395cff1db5f3e316222b0ec3b4732e"
+optional = true
+default-features = false
+features = [
+    "config-conf",
+    "inbound-tun",
+    "outbound-direct",
+    "outbound-drop",
+    "outbound-socks",
+    "outbound-failover",
+    "outbound-chain",
+]
 
 [dev-dependencies]
 tempfile = "3"

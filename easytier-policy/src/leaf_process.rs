@@ -55,7 +55,7 @@ impl LeafProcessRuntime {
         self.bridge.clone()
     }
 
-    async fn start(
+    pub async fn start(
         executable: &Path,
         base_dir: &Path,
         outbound_interface: Option<&str>,
@@ -149,7 +149,7 @@ impl LeafProcessRuntime {
         }
     }
 
-    async fn stop(&self) {
+    pub async fn stop(&self) {
         let child = self.child.lock().unwrap().take();
         if let Some(mut child) = child {
             let _ = child.kill().await;

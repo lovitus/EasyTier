@@ -118,6 +118,18 @@ struct Cli {
     )]
     config_dir: Option<PathBuf>,
 
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[arg(long, env = "ET_POLICY_PROXY_CONFIG")]
+    policy_config: Option<PathBuf>,
+
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[arg(long, env = "ET_POLICY_LEAF_EXECUTABLE", default_value = "leaf")]
+    policy_leaf_executable: PathBuf,
+
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[arg(long, env = "ET_POLICY_OUTBOUND_INTERFACE")]
+    policy_outbound_interface: Option<String>,
+
     #[cfg(all(target_os = "linux", not(target_env = "ohos"), feature = "tun"))]
     #[arg(
         long,
@@ -1482,6 +1494,18 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     log::init(&cli.logging_options, true)?;
     if cli.nic_backend() != NicBackend::Tun && cli.network_options.no_tun == Some(true) {
         anyhow::bail!("--no-tun conflicts with --nic-backend veth/auto");
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    if let Some(policy_file) = cli.policy_config.clone() {
+        let outbound_interface = cli.policy_outbound_interface.clone().ok_or_else(|| {
+            anyhow::anyhow!("--policy-config requires --policy-outbound-interface")
+        })?;
+        crate::policy_proxy::configure(
+            policy_file,
+            cli.policy_leaf_executable.clone(),
+            outbound_interface,
+        )?;
     }
 
     let manager = Arc::new(

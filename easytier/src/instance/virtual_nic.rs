@@ -44,6 +44,19 @@ use zerocopy::{NativeEndian, NetworkEndian};
 #[cfg(target_os = "windows")]
 use crate::common::ifcfg::RegistryManager;
 
+#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+use easytier_policy::{
+    LeafPacketBridge, LeafProcessRuntime, MeshRouteSnapshot, PacketClass, PacketClassifier,
+    PolicyRuntime,
+};
+
+#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+struct PolicyNicContext {
+    runtime: Arc<LeafProcessRuntime>,
+    classifier: Arc<PacketClassifier>,
+    _lease: crate::policy_proxy::PolicyInstanceLease,
+}
+
 pin_project! {
     pub struct TunStream {
         #[pin]
@@ -966,6 +979,9 @@ pub struct NicCtx {
     nic: Arc<Mutex<VirtualNic>>,
     tasks: JoinSet<()>,
 
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    policy: Option<PolicyNicContext>,
+
     #[cfg(target_os = "windows")]
     windows_udp_broadcast_relay: Option<AbortOnDropHandle<()>>,
 }
@@ -986,6 +1002,9 @@ impl NicCtx {
 
             nic: Arc::new(Mutex::new(VirtualNic::new(global_ctx))),
             tasks: JoinSet::new(),
+
+            #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+            policy: None,
 
             #[cfg(target_os = "windows")]
             windows_udp_broadcast_relay: None,
@@ -1133,6 +1152,10 @@ impl NicCtx {
     fn do_forward_nic_to_peers_task(
         &mut self,
         mut stream: Pin<Box<dyn ZCPacketStream>>,
+        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))] policy: Option<(
+            Arc<PacketClassifier>,
+            Arc<LeafPacketBridge>,
+        )>,
     ) -> Result<(), Error> {
         // read from nic and write to corresponding tunnel
         let Some(mgr) = self.peer_mgr.upgrade() else {
@@ -1145,7 +1168,27 @@ impl NicCtx {
                     tracing::error!("read from nic failed: {:?}", ret);
                     break;
                 }
-                Self::do_forward_nic_to_peers(ret.unwrap(), mgr.as_ref()).await;
+                let ret = ret.unwrap();
+                #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+                if let Some((classifier, bridge)) = &policy {
+                    match classifier.classify(ret.payload()) {
+                        Ok(PacketClass::Policy) => {
+                            if let Err(error) = bridge.try_send_to_leaf(ret.payload()) {
+                                tracing::warn!(
+                                    ?error,
+                                    "policy packet was blocked because Leaf is unavailable"
+                                );
+                            }
+                            continue;
+                        }
+                        Ok(PacketClass::Mesh) => {}
+                        Err(error) => {
+                            tracing::warn!(?error, "dropping malformed policy TUN packet");
+                            continue;
+                        }
+                    }
+                }
+                Self::do_forward_nic_to_peers(ret, mgr.as_ref()).await;
             }
             close_notifier.notify_one();
             tracing::error!("nic closed when recving from it");
@@ -1198,6 +1241,108 @@ impl NicCtx {
             }
             close_notifier.notify_one();
             tracing::error!("nic closed when sending to it");
+        });
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    fn do_forward_peers_and_policy_to_nic(
+        &mut self,
+        mut sink: Pin<Box<dyn ZCPacketSink>>,
+        bridge: Arc<LeafPacketBridge>,
+        offload: bool,
+    ) {
+        const PEER_WRITER_CAPACITY: usize = 1024;
+        const POLICY_WRITER_CAPACITY: usize = 256;
+        const MAX_BATCH: usize = 64;
+
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(PEER_WRITER_CAPACITY);
+        let (policy_tx, mut policy_rx) = tokio::sync::mpsc::channel(POLICY_WRITER_CAPACITY);
+        let channel = self.peer_packet_receiver.clone();
+        self.tasks.spawn(async move {
+            let mut channel = channel.lock().await;
+            while let Ok(packet) = recv_packet_from_chan(&mut channel).await {
+                if peer_tx.send(packet).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        self.tasks.spawn(async move {
+            let mut packet = vec![0u8; u16::MAX as usize];
+            loop {
+                match bridge.recv_from_leaf(&mut packet).await {
+                    Ok(0) => break,
+                    Ok(length) => {
+                        match policy_tx.try_send(ZCPacket::new_with_payload(&packet[..length])) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    "dropping policy packet because TUN writer queue is full"
+                                );
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(?error, "Leaf packet bridge closed");
+                        break;
+                    }
+                }
+            }
+        });
+
+        let close_notifier = self.close_notifier.clone();
+        self.tasks.spawn(async move {
+            let mut peer_open = true;
+            let mut policy_open = true;
+            while peer_open || policy_open {
+                let packet = tokio::select! {
+                    biased;
+                    packet = peer_rx.recv(), if peer_open => {
+                        match packet {
+                            Some(packet) => Some(packet),
+                            None => { peer_open = false; None }
+                        }
+                    }
+                    packet = policy_rx.recv(), if policy_open => {
+                        match packet {
+                            Some(packet) => Some(packet),
+                            None => { policy_open = false; None }
+                        }
+                    }
+                };
+                let Some(packet) = packet else {
+                    continue;
+                };
+                let mut result = sink.feed(packet).await;
+                let mut count = 1usize;
+                while result.is_ok() && count < MAX_BATCH {
+                    match peer_rx.try_recv() {
+                        Ok(packet) => {
+                            result = sink.feed(packet).await;
+                            count += 1;
+                        }
+                        Err(_) => match policy_rx.try_recv() {
+                            Ok(packet) => {
+                                result = sink.feed(packet).await;
+                                count += 1;
+                            }
+                            Err(_) => break,
+                        },
+                    }
+                }
+                if result.is_ok() {
+                    result = sink.flush().await;
+                }
+                if let Err(error) = result {
+                    tracing::error!(?error, "policy TUN writer failed");
+                    break;
+                }
+                if !offload && count == 1 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            close_notifier.notify_one();
         });
     }
 
@@ -1455,6 +1600,16 @@ impl NicCtx {
         let global_ctx = self.global_ctx.clone();
         let nic = self.nic.clone();
         let mut event_receiver = global_ctx.subscribe();
+        let policy_owns_default_route = {
+            #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+            {
+                crate::policy_proxy::configured().is_some()
+            }
+            #[cfg(not(all(feature = "leaf-policy-proxy", target_os = "linux")))]
+            {
+                false
+            }
+        };
 
         self.tasks.spawn(async move {
             let mut current_addr = peer_mgr.get_my_public_ipv6_addr().await;
@@ -1466,9 +1621,10 @@ impl NicCtx {
                 if let Err(err) = nic.add_ipv6(addr.address(), addr.network_length() as i32).await {
                     tracing::warn!(addr = ?addr, ?err, "failed to add public ipv6 address");
                 }
-                if let Err(err) = nic
-                    .add_ipv6_route_with_cost(Ipv6Addr::UNSPECIFIED, 0, Some(5))
-                    .await
+                if !policy_owns_default_route
+                    && let Err(err) = nic
+                        .add_ipv6_route_with_cost(Ipv6Addr::UNSPECIFIED, 0, Some(5))
+                        .await
                 {
                     tracing::warn!(route = %Ipv6Addr::UNSPECIFIED, prefix = 0, ?err, "failed to add default public ipv6 route");
                 }
@@ -1496,7 +1652,9 @@ impl NicCtx {
                     tracing::warn!(?err, "failed to bring public ipv6 nic link up");
                 }
                 if let Some(old) = old {
-                    if let Err(err) = nic.remove_ipv6_route(Ipv6Addr::UNSPECIFIED, 0).await {
+                    if !policy_owns_default_route
+                        && let Err(err) = nic.remove_ipv6_route(Ipv6Addr::UNSPECIFIED, 0).await
+                    {
                         tracing::warn!(route = %Ipv6Addr::UNSPECIFIED, prefix = 0, ?err, "failed to remove default public ipv6 route");
                     }
                     if let Err(err) = nic.remove_ipv6(Some(old)).await {
@@ -1508,9 +1666,10 @@ impl NicCtx {
                     {
                         tracing::warn!(addr = ?new, ?err, "failed to add public ipv6 address");
                     }
-                    if let Err(err) = nic
-                        .add_ipv6_route_with_cost(Ipv6Addr::UNSPECIFIED, 0, Some(5))
-                        .await
+                    if !policy_owns_default_route
+                        && let Err(err) = nic
+                            .add_ipv6_route_with_cost(Ipv6Addr::UNSPECIFIED, 0, Some(5))
+                            .await
                     {
                         tracing::warn!(route = %Ipv6Addr::UNSPECIFIED, prefix = 0, ?err, "failed to add default public ipv6 route");
                     }
@@ -1519,6 +1678,191 @@ impl NicCtx {
         });
 
         Ok(())
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    async fn collect_policy_mesh_routes(
+        &self,
+        ipv4_addr: Option<cidr::Ipv4Inet>,
+        ipv6_addr: Option<cidr::Ipv6Inet>,
+    ) -> Result<MeshRouteSnapshot, Error> {
+        let Some(peer_mgr) = self.peer_mgr.upgrade() else {
+            return Err(anyhow::anyhow!("peer manager not available").into());
+        };
+        let mut routes = Vec::<cidr::IpCidr>::new();
+        if let Some(ipv4) = ipv4_addr {
+            routes.push(format!("{}/{}", ipv4.first_address(), ipv4.network_length()).parse()?);
+        }
+        if let Some(ipv6) = ipv6_addr {
+            routes.push(format!("{}/{}", ipv6.first_address(), ipv6.network_length()).parse()?);
+        }
+        let (proxy_v4, _, _) = ProxyCidrsMonitor::diff_proxy_cidrs(
+            peer_mgr.as_ref(),
+            &self.global_ctx,
+            &BTreeSet::new(),
+        )
+        .await;
+        routes.extend(proxy_v4.into_iter().map(|route| cidr::IpCidr::V4(route)));
+        routes.extend(
+            peer_mgr
+                .list_proxy_cidrs_v6()
+                .await
+                .into_iter()
+                .map(cidr::IpCidr::V6),
+        );
+        routes.extend(
+            peer_mgr
+                .list_public_ipv6_routes()
+                .await
+                .into_iter()
+                .map(|route| {
+                    cidr::IpCidr::V6(
+                        cidr::Ipv6Cidr::new(route.first_address(), route.network_length())
+                            .expect("Ipv6Inet always describes a valid network"),
+                    )
+                }),
+        );
+        Ok(MeshRouteSnapshot::new(routes))
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    async fn start_policy_proxy(
+        &mut self,
+        ipv4_addr: Option<cidr::Ipv4Inet>,
+        ipv6_addr: Option<cidr::Ipv6Inet>,
+    ) -> Result<(), Error> {
+        let Some(config) = crate::policy_proxy::configured().cloned() else {
+            return Ok(());
+        };
+        if !self.global_ctx.get_flags().bind_device {
+            return Err(anyhow::anyhow!(
+                "policy mode requires EasyTier bind_device=true to prevent underlay recursion"
+            )
+            .into());
+        }
+        let lease = crate::policy_proxy::acquire_instance()?;
+        let revision = Arc::new(easytier_policy::validate_policy_file(&config.policy_file)?);
+        let base_dir = config
+            .policy_file
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let runtime = LeafProcessRuntime::start(
+            &config.leaf_executable,
+            base_dir,
+            Some(&config.outbound_interface),
+            &|_instance_id, virtual_ip| virtual_ip,
+            revision,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+        let classifier = Arc::new(PacketClassifier::new(
+            self.collect_policy_mesh_routes(ipv4_addr, ipv6_addr)
+                .await?,
+        ));
+
+        {
+            let nic = self.nic.lock().await;
+            nic.add_route(Ipv4Addr::UNSPECIFIED, 0).await?;
+            if self.global_ctx.get_flags().enable_ipv6 {
+                nic.add_ipv6_route(Ipv6Addr::UNSPECIFIED, 0).await?;
+            }
+        }
+
+        tracing::info!(
+            revision = runtime.revision_id(),
+            policy_file = %config.policy_file.display(),
+            outbound_interface = %config.outbound_interface,
+            "transparent policy proxy is ready"
+        );
+        self.policy = Some(PolicyNicContext {
+            runtime,
+            classifier,
+            _lease: lease,
+        });
+        Ok(())
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    fn run_policy_route_updater(
+        &mut self,
+        ipv4_addr: Option<cidr::Ipv4Inet>,
+        ipv6_addr: Option<cidr::Ipv6Inet>,
+    ) {
+        let Some(policy) = self.policy.as_ref() else {
+            return;
+        };
+        let classifier = policy.classifier.clone();
+        let global_ctx = self.global_ctx.clone();
+        let peer_mgr = self.peer_mgr.clone();
+        let mut events = global_ctx.subscribe();
+        self.tasks.spawn(async move {
+            loop {
+                let event = match events.recv().await {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        events = events.resubscribe();
+                        GlobalCtxEvent::PeerAdded(0)
+                    }
+                };
+                if !matches!(
+                    event,
+                    GlobalCtxEvent::PeerAdded(_)
+                        | GlobalCtxEvent::PeerRemoved(_)
+                        | GlobalCtxEvent::ProxyCidrsUpdated(_, _)
+                        | GlobalCtxEvent::PublicIpv6RoutesUpdated(_, _)
+                        | GlobalCtxEvent::DhcpIpv4Changed(_, _)
+                        | GlobalCtxEvent::ConfigPatched(_)
+                ) {
+                    continue;
+                }
+                let Some(peer_mgr) = peer_mgr.upgrade() else {
+                    break;
+                };
+                let mut routes = Vec::<cidr::IpCidr>::new();
+                if let Some(ipv4) = global_ctx.get_ipv4().or(ipv4_addr) {
+                    if let Ok(route) =
+                        format!("{}/{}", ipv4.first_address(), ipv4.network_length()).parse()
+                    {
+                        routes.push(route);
+                    }
+                }
+                if let Some(ipv6) = global_ctx.get_ipv6().or(ipv6_addr) {
+                    if let Ok(route) =
+                        format!("{}/{}", ipv6.first_address(), ipv6.network_length()).parse()
+                    {
+                        routes.push(route);
+                    }
+                }
+                let (proxy_v4, _, _) = ProxyCidrsMonitor::diff_proxy_cidrs(
+                    peer_mgr.as_ref(),
+                    &global_ctx,
+                    &BTreeSet::new(),
+                )
+                .await;
+                routes.extend(proxy_v4.into_iter().map(cidr::IpCidr::V4));
+                routes.extend(
+                    peer_mgr
+                        .list_proxy_cidrs_v6()
+                        .await
+                        .into_iter()
+                        .map(cidr::IpCidr::V6),
+                );
+                routes.extend(
+                    peer_mgr
+                        .list_public_ipv6_routes()
+                        .await
+                        .into_iter()
+                        .map(|route| {
+                            cidr::IpCidr::V6(
+                                cidr::Ipv6Cidr::new(route.first_address(), route.network_length())
+                                    .expect("Ipv6Inet always describes a valid network"),
+                            )
+                        }),
+                );
+                classifier.replace_routes(MeshRouteSnapshot::new(routes));
+            }
+        });
     }
 
     pub async fn run(
@@ -1579,6 +1923,12 @@ impl NicCtx {
         // without recreating the NIC.
         self.run_public_ipv6_addr_updater().await?;
 
+        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        {
+            self.start_policy_proxy(ipv4_addr, ipv6_addr).await?;
+            self.run_policy_route_updater(ipv4_addr, ipv6_addr);
+        }
+
         let mut nic = self.nic.lock().await;
         nic.commit_backend()?;
         let tun_offload_enabled = nic.tun_offload_enabled;
@@ -1587,7 +1937,23 @@ impl NicCtx {
         drop(nic);
 
         let (stream, sink) = tunnel.split();
-        self.do_forward_nic_to_peers_task(stream)?;
+        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        let policy_io = self
+            .policy
+            .as_ref()
+            .map(|policy| (policy.classifier.clone(), policy.runtime.bridge()));
+        self.do_forward_nic_to_peers_task(
+            stream,
+            #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+            policy_io.clone(),
+        )?;
+        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        if let Some((_, bridge)) = policy_io {
+            self.do_forward_peers_and_policy_to_nic(sink, bridge, tun_offload_enabled);
+        } else {
+            self.do_forward_peers_to_nic_with_mode(sink, tun_offload_enabled);
+        }
+        #[cfg(not(all(feature = "leaf-policy-proxy", target_os = "linux")))]
         self.do_forward_peers_to_nic_with_mode(sink, tun_offload_enabled);
 
         Ok(())
