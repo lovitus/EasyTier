@@ -8,7 +8,7 @@ const MIN_IPV4_HEADER: usize = 20;
 const MIN_IPV6_HEADER: usize = 40;
 const MAX_PACKET_SIZE: usize = 65_535;
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum PacketError {
     #[error("empty packet")]
     Empty,
@@ -205,10 +205,10 @@ mod unix_bridge {
         async fn rejects_oversized_packet() {
             let (bridge, _endpoint) = LeafPacketBridge::pair().unwrap();
             let packet = vec![0; MAX_PACKET_SIZE + 1];
-            assert_eq!(
+            assert!(matches!(
                 bridge.send_to_leaf(&packet).await,
                 Err(PacketError::TooLarge)
-            );
+            ));
         }
     }
 }

@@ -5,7 +5,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use arc_swap::ArcSwapOption;
 use thiserror::Error;
 
 use crate::PolicyRevision;
@@ -132,7 +131,7 @@ struct SupervisorState {
 
 pub struct PolicySupervisor<F> {
     factory: F,
-    runtime: ArcSwapOption<dyn PolicyRuntime>,
+    runtime: Mutex<Option<Arc<dyn PolicyRuntime>>>,
     state: Mutex<SupervisorState>,
 }
 
@@ -140,7 +139,7 @@ impl<F: PolicyRuntimeFactory> PolicySupervisor<F> {
     pub fn new(factory: F) -> Self {
         Self {
             factory,
-            runtime: ArcSwapOption::empty(),
+            runtime: Mutex::new(None),
             state: Mutex::new(SupervisorState {
                 status: PolicyStatus::Disabled,
                 previous: None,
@@ -189,7 +188,7 @@ impl<F: PolicyRuntimeFactory> PolicySupervisor<F> {
             }
         };
 
-        let old_runtime = self.runtime.swap(Some(candidate));
+        let old_runtime = self.runtime.lock().unwrap().replace(candidate);
         {
             let mut state = self.state.lock().unwrap();
             state.previous = state.current.replace(revision.clone());
