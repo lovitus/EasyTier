@@ -81,17 +81,6 @@ jobs:
             --bin easytier-cli \
             --features jemalloc,leaf-policy-proxy
 
-      - name: Verify destination-side policy UDP relay
-        run: |
-          timeout 300 cargo test \
-            --locked \
-            --release \
-            --target "$TARGET" \
-            --package easytier \
-            --features jemalloc,leaf-policy-proxy \
-            relays_udp_from_the_destination_peer_source_identity \
-            -- --nocapture
-
       - name: Verify profiling metadata
         run: |
           set -euo pipefail

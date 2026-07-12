@@ -528,34 +528,6 @@ Consequences:
   insufficiently bound UDP ASSOCIATE implementation must not be enabled as a
   shortcut; use Leaf or another mature SOCKS5 server when UDP relay is needed.
 
-#### Mesh UDP association relay
-
-A standards-compliant SOCKS5 server commonly binds a UDP association to the
-source IP of its control TCP connection. EasyTier's TCP proxy may terminate the
-control connection on the destination peer, while raw mesh UDP retains the
-origin peer address; forwarding those two paths independently therefore fails
-against strict servers. Neither an explicit UDP endpoint in the SOCKS request
-nor a sender-only Native/KCP bypass is sufficient (both were tested and
-rejected).
-
-For a `via: mesh` actor with UDP enabled, terminate the upstream SOCKS control
-session in a private policy relay on the selected destination peer. That relay
-opens both the TCP control connection and the UDP socket locally, so the
-upstream server observes one source identity. The origin and destination policy
-relays exchange framed datagrams over ordinary EasyTier mesh L3 UDP; this does
-not add a PeerManager packet type, alter transport selection, or expose a
-system listener.
-
-The association protocol is feature-private and versioned. Creation uses the
-existing authenticated mesh RPC path and returns a random 128-bit token plus a
-virtual UDP endpoint. Every datagram carries a version and the token; the
-destination also pins the expected origin virtual IP and port. Tables are bounded,
-idle-expire, close immediately with the control stream, and release their
-data-plane UDP socket on cancellation, route generation change, or instance
-shutdown. Invalid tokens, wrong source endpoints and oversized frames are
-late datagrams are dropped without response. TCP-only actors and ordinary
-CONNECT sessions retain the current KCP-preferred bridge path.
-
 Leaf's existing external plugin loader uses a dynamic-library/FFI boundary.
 Do not use that unsafe loader inside the EasyTier process. Prefer a small
 compile-time integration that directly constructs Leaf's public outbound
@@ -567,12 +539,10 @@ does not select a physical OSPF path or underlay protocol.
 
 ### Transparent policy mode
 
-`VirtualNic` remains the sole owner of the Android `VpnService` TUN FD. The
-policy mux classifies packets read from that existing tunnel and exchanges only
-L3 packet bytes with Leaf through the same bounded packet endpoint used by the
-Linux implementation. Leaf never receives, duplicates, or closes the real
-Android TUN FD, and no second TUN or VPN service is created. Both mesh and
-policy return traffic share one serialized writer to the existing FD.
+`PolicyTunMux` is the sole owner of the Android `VpnService` TUN FD. It exposes
+two in-process packet endpoints: the existing VirtualNic side and Leaf's TUN
+backend. Both outputs share one serialized writer. Neither consumer receives or
+duplicates the raw platform FD.
 
 Inbound packet classification order is fixed:
 
@@ -635,20 +605,11 @@ traffic-leak warning; it is not the normal design.
 
 Platform expectations:
 
-- Android: `TauriVpnService` always appends its runtime `packageName` to the
-  disallowed-application set before establishing the VPN. This bypasses all
-  EasyTier and in-process Leaf underlay sockets while application traffic from
-  other UIDs still enters the VPN. Leaf's existing Android socket-protect hook
-  remains a defense-in-depth option, not a prerequisite for v1. The service
-  snapshots underlying DNS servers from
-  `ConnectivityManager.getLinkProperties(activeNetwork)` before establishing
-  the VPN and passes those addresses with the TUN attachment. Android exposes
-  no outbound-interface setting. Mesh proxy connections use the data-plane API.
+- Android: exclude/protect the EasyTier service package/UID and verify every
+  native fd before use; application traffic from other UIDs still enters the
+  VPN. Mesh proxy connections use the data-plane API.
 - Linux: use a dedicated mark plus policy rule or bind-to-device/netns strategy;
-  verify the mark survives every connector type. If exactly one usable physical
-  default-route interface exists it is selected automatically; zero or multiple
-  candidates fail with an actionable request for an explicit
-  `outbound_interface` rather than guessing.
+  verify the mark survives every connector type.
 - Windows: use the selected physical interface/route or WFP-compatible bypass
   at socket creation; do not depend only on destination routes.
 - macOS/iOS: use Network Extension flow/socket ownership and route exclusion
@@ -947,7 +908,6 @@ mode = "rule"                 # rule | global
 fail_closed = true
 policy_file = "policy.yaml"   # desktop/server
 # policy_inline = "..."       # GUI/mobile/RPC representation
-# outbound_interface = "eth0" # Linux only; optional when one default is unambiguous
 ```
 
 An exit node does not need a new EasyTier server mode. It runs any standard
@@ -965,9 +925,6 @@ Rules:
 - `fail_closed=true` is the safe default: policy-engine failure blocks policy
   traffic while mesh traffic remains available;
 - `policy_file` and `policy_inline` are mutually exclusive;
-- Android and other mobile callers never accept `outbound_interface`; Linux
-  accepts it as an override and otherwise auto-selects only an unambiguous
-  physical default-route interface;
 - relative files resolve from the main EasyTier config directory, never the
   current working directory;
 - GUI/RPC stores the same policy document as text/blob without translating the
@@ -1233,9 +1190,8 @@ Do not merge production integration until all gates pass:
   Leaf's native rule format.
 - The smallest packet-endpoint API that lets existing VirtualNic and Leaf share
   PolicyTunMux without exposing the raw TUN FD or Leaf types to EasyTier core.
-- Whether Android should additionally enable Leaf's existing per-socket
-  `VpnService.protect()` callback after package/UID exclusion has passed real
-  device loop-prevention tests.
+- Android `VpnService.protect()` coverage for every native Leaf actor and every
+  EasyTier underlay/control socket.
 - Appropriate UDP session limits for mobile and desktop profiles.
 - Whether UDP failover health checks should probe a neutral endpoint or a
   per-exit user target.

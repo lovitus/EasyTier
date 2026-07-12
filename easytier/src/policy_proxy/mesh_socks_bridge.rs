@@ -15,11 +15,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    gateway::socks5::{DataPlaneTcpStream, Socks5Server},
-    peers::peer_manager::PeerManager,
-    policy_proxy::{RemoteUdpAssociation, decode_relay_frame, encode_relay_frame},
-};
+use crate::gateway::socks5::{DataPlaneTcpStream, Socks5Server};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -107,7 +103,6 @@ impl RemoteSlot {
 impl MeshProxyBridgeSet {
     pub(crate) async fn start(
         data_plane: Arc<Socks5Server>,
-        peer_mgr: Arc<PeerManager>,
         revision: &PolicyRevision,
         resolved: &BTreeMap<String, MeshProxyTarget>,
     ) -> anyhow::Result<Self> {
@@ -149,7 +144,6 @@ impl MeshProxyBridgeSet {
         let mut listeners = Vec::with_capacity(pending.len());
         for (name, udp_enabled, password, remote, listener) in pending {
             let data_plane = data_plane.clone();
-            let peer_mgr = peer_mgr.clone();
             let listener_cancel = cancel.child_token();
             let permits = permits.clone();
             let rate_limit = rate_limit.clone();
@@ -157,7 +151,6 @@ impl MeshProxyBridgeSet {
                 run_listener(
                     listener,
                     data_plane,
-                    peer_mgr,
                     remote,
                     udp_enabled,
                     password,
@@ -223,7 +216,6 @@ impl Drop for MeshProxyBridgeSet {
 async fn run_listener(
     listener: TcpListener,
     data_plane: Arc<Socks5Server>,
-    peer_mgr: Arc<PeerManager>,
     remote: Arc<RemoteSlot>,
     udp_enabled: bool,
     password: String,
@@ -268,7 +260,6 @@ async fn run_listener(
                     tracing::debug!(proxy = %name, ?error, "failed to set loopback TCP_NODELAY");
                 }
                 let data_plane = data_plane.clone();
-                let peer_mgr = peer_mgr.clone();
                 let session_name = name.clone();
                 let password = password.clone();
                 let Some((remote, generation)) = remote.snapshot() else {
@@ -284,8 +275,7 @@ async fn run_listener(
                         client,
                         client_addr,
                         data_plane,
-                        peer_mgr,
-                        remote,
+                        remote.endpoint,
                         udp_enabled,
                         &password,
                         generation,
@@ -316,8 +306,7 @@ async fn relay_socks5(
     mut client: TcpStream,
     client_addr: SocketAddr,
     data_plane: Arc<Socks5Server>,
-    peer_mgr: Arc<PeerManager>,
-    remote: MeshProxyTarget,
+    remote: SocketAddr,
     udp_enabled: bool,
     password: &str,
     generation: CancellationToken,
@@ -326,16 +315,16 @@ async fn relay_socks5(
         _ = generation.cancelled() => anyhow::bail!("mesh proxy route generation changed"),
         result = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
             authenticate_local(&mut client, password).await?;
-            read_and_validate_socks_command(&mut client, udp_enabled).await
+            let mut upstream = connect_remote(&data_plane, remote).await?;
+            negotiate_upstream_no_auth(&mut upstream).await?;
+            let command = relay_socks_command(&mut client, &mut upstream, udp_enabled).await?;
+            Ok::<_, anyhow::Error>((command, upstream))
         }) => result??,
     };
-    let (request, command) = command;
+    let (command, mut upstream) = command;
 
     match command {
-        1 => {
-            let mut upstream = connect_remote(&data_plane, remote.endpoint).await?;
-            negotiate_upstream_no_auth(&mut upstream).await?;
-            relay_socks_connect_command(&mut client, &mut upstream, request).await?;
+        SocksCommand::Connect => {
             tokio::select! {
                 _ = generation.cancelled() => {}
                 result = tokio::io::copy_bidirectional(&mut client, &mut upstream) => {
@@ -343,16 +332,25 @@ async fn relay_socks5(
                 }
             }
         }
-        3 => {
-            let mesh_udp = data_plane.data_plane_udp_bind(0, CONNECT_TIMEOUT).await?;
-            let association =
-                RemoteUdpAssociation::open(&peer_mgr, remote.peer_id, remote.endpoint, &mesh_udp)
-                    .await?;
-            relay_socks_udp(client, client_addr.ip(), mesh_udp, association, generation).await?;
+        SocksCommand::UdpAssociate(remote_relay) => {
+            relay_socks_udp(
+                client,
+                client_addr.ip(),
+                upstream,
+                data_plane,
+                remote,
+                remote_relay,
+                generation,
+            )
+            .await?;
         }
-        _ => unreachable!("SOCKS command was validated before dispatch"),
     }
     Ok(())
+}
+
+enum SocksCommand {
+    Connect,
+    UdpAssociate(SocksAddress),
 }
 
 enum SocksAddress {
@@ -395,24 +393,11 @@ async fn negotiate_upstream_no_auth(upstream: &mut DataPlaneTcpStream) -> anyhow
     Ok(())
 }
 
-async fn relay_socks_connect_command(
+async fn relay_socks_command(
     client: &mut TcpStream,
     upstream: &mut DataPlaneTcpStream,
-    request: Vec<u8>,
-) -> anyhow::Result<()> {
-    upstream.write_all(&request).await?;
-    let (reply, code, _) = read_socks_reply(upstream).await?;
-    client.write_all(&reply).await?;
-    if code != 0 {
-        anyhow::bail!("upstream SOCKS command failed with reply {code}");
-    }
-    Ok(())
-}
-
-async fn read_and_validate_socks_command(
-    client: &mut TcpStream,
     udp_enabled: bool,
-) -> anyhow::Result<(Vec<u8>, u8)> {
+) -> anyhow::Result<SocksCommand> {
     let (request, command, _) = read_socks_request(client).await?;
     if !matches!(command, 1 | 3) {
         client
@@ -432,18 +417,43 @@ async fn read_and_validate_socks_command(
             .await?;
         anyhow::bail!("UDP ASSOCIATE is disabled for this actor");
     }
-    Ok((request, command))
+    upstream.write_all(&request).await?;
+    let (reply, code, bound) = read_socks_reply(upstream).await?;
+    if command != 3 || code != 0 {
+        client.write_all(&reply).await?;
+    }
+    if code != 0 {
+        anyhow::bail!("upstream SOCKS command failed with reply {code}");
+    }
+
+    match command {
+        1 => Ok(SocksCommand::Connect),
+        3 => Ok(SocksCommand::UdpAssociate(bound)),
+        _ => {
+            client
+                .write_all(&socks_reply(
+                    7,
+                    SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
+                ))
+                .await?;
+            anyhow::bail!("unsupported SOCKS command {command}")
+        }
+    }
 }
 
 async fn relay_socks_udp(
     mut control: TcpStream,
     client_ip: IpAddr,
-    mesh_udp: crate::gateway::socks5::DataPlaneUdpSocket,
-    association: RemoteUdpAssociation,
+    mut upstream_control: DataPlaneTcpStream,
+    data_plane: Arc<Socks5Server>,
+    remote_proxy: SocketAddr,
+    remote_relay: SocksAddress,
     generation: CancellationToken,
 ) -> anyhow::Result<()> {
+    let remote_relay = resolve_relay_address(remote_relay, remote_proxy)?;
     let local = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
     let local_addr = local.local_addr()?;
+    let mesh_udp = data_plane.data_plane_udp_bind(0, CONNECT_TIMEOUT).await?;
     control.write_all(&socks_reply(0, local_addr)).await?;
     control.flush().await?;
 
@@ -451,21 +461,26 @@ async fn relay_socks_udp(
     let mut local_packet = vec![0u8; MAX_DATAGRAM_SIZE];
     let mut remote_packet = vec![0u8; MAX_DATAGRAM_SIZE];
     let mut client_control_byte = [0u8; 1];
-    let result = loop {
+    let mut upstream_control_byte = [0u8; 1];
+    loop {
         tokio::select! {
-            _ = generation.cancelled() => break Ok(()),
+            _ = generation.cancelled() => break,
             result = control.read(&mut client_control_byte) => {
                 match result {
-                    Ok(0) => break Ok(()),
-                    Ok(_) => break Err(anyhow::anyhow!("unexpected data on SOCKS UDP control stream")),
-                    Err(error) => break Err(error.into()),
+                    Ok(0) => break,
+                    Ok(_) => anyhow::bail!("unexpected data on SOCKS UDP control stream"),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            result = upstream_control.read(&mut upstream_control_byte) => {
+                match result {
+                    Ok(0) => break,
+                    Ok(_) => anyhow::bail!("unexpected upstream SOCKS UDP control data"),
+                    Err(error) => return Err(error.into()),
                 }
             }
             result = local.recv_from(&mut local_packet) => {
-                let (length, source) = match result {
-                    Ok(value) => value,
-                    Err(error) => break Err(error.into()),
-                };
+                let (length, source) = result?;
                 if source.ip() != client_ip || !source.ip().is_loopback() {
                     tracing::warn!(%source, "dropping SOCKS UDP datagram from unexpected source");
                     continue;
@@ -477,35 +492,37 @@ async fn relay_socks_udp(
                 } else {
                     client_endpoint = Some(source);
                 }
-                let Some(frame) = encode_relay_frame(&association.token, &local_packet[..length]) else {
-                    continue;
-                };
-                if let Err(error) = mesh_udp.send_to(&frame, association.relay_addr).await {
-                    break Err(error.into());
-                }
+                mesh_udp.send_to(&local_packet[..length], remote_relay).await?;
             }
             result = mesh_udp.recv_from(&mut remote_packet) => {
-                let (length, source) = match result {
-                    Ok(value) => value,
-                    Err(error) => break Err(error.into()),
-                };
-                if source != association.relay_addr {
-                    tracing::warn!(%source, relay = %association.relay_addr, "dropping SOCKS UDP datagram from unexpected relay");
+                let (length, source) = result?;
+                if source != remote_relay {
+                    tracing::warn!(%source, %remote_relay, "dropping SOCKS UDP datagram from unexpected relay");
                     continue;
                 }
-                let Some(payload) = decode_relay_frame(&association.token, &remote_packet[..length]) else {
-                    continue;
-                };
-                if let Some(client_endpoint) = client_endpoint
-                    && let Err(error) = local.send_to(payload, client_endpoint).await
-                {
-                    break Err(error.into());
+                if let Some(client_endpoint) = client_endpoint {
+                    local.send_to(&remote_packet[..length], client_endpoint).await?;
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn resolve_relay_address(
+    address: SocksAddress,
+    remote_proxy: SocketAddr,
+) -> anyhow::Result<SocketAddr> {
+    let port = match address {
+        SocksAddress::Ip(address) => address.port(),
+        SocksAddress::Domain(port) => port,
     };
-    association.close().await;
-    result
+    if port == 0 {
+        anyhow::bail!("upstream SOCKS UDP relay returned port 0");
+    }
+    // Keep UDP on the same exact mesh endpoint as the SOCKS control stream. Resolving or using a
+    // different BND.ADDR here could silently turn `via: mesh` into a native local route.
+    Ok(SocketAddr::new(remote_proxy.ip(), port))
 }
 
 async fn read_socks_greeting<R: tokio::io::AsyncRead + Unpin>(
@@ -705,6 +722,22 @@ mod tests {
         client.read_exact(&mut reply).await.unwrap();
         assert_eq!(reply, [1, 1]);
         assert!(auth.await.unwrap().is_err());
+    }
+
+    #[test]
+    fn udp_relay_is_pinned_to_mesh_proxy_ip() {
+        let proxy: SocketAddr = "10.44.0.8:1080".parse().unwrap();
+        let advertised: SocketAddr = "192.168.50.8:53000".parse().unwrap();
+        assert_eq!(
+            resolve_relay_address(SocksAddress::Ip(advertised), proxy).unwrap(),
+            "10.44.0.8:53000".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_zero_udp_relay_port() {
+        let proxy: SocketAddr = "10.44.0.8:1080".parse().unwrap();
+        assert!(resolve_relay_address(SocksAddress::Domain(0), proxy).is_err());
     }
 
     #[test]

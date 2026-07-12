@@ -345,28 +345,6 @@ message ProxyPrepareAck {
   ProxyPrepareAckStatus status = 1;
 }
 
-message OpenPolicyUdpRelayRequest {
-  uint32 source_peer_id = 1;
-  common.SocketAddr proxy_addr = 2;
-  common.SocketAddr origin_addr = 3;
-}
-
-message OpenPolicyUdpRelayResponse {
-  bytes token = 1;
-  common.SocketAddr relay_addr = 2;
-}
-
-message ClosePolicyUdpRelayRequest { bytes token = 1; }
-
-message ClosePolicyUdpRelayResponse {}
-
-service PolicyUdpRelayRpc {
-  rpc OpenPolicyUdpRelay(OpenPolicyUdpRelayRequest)
-      returns (OpenPolicyUdpRelayResponse);
-  rpc ClosePolicyUdpRelay(ClosePolicyUdpRelayRequest)
-      returns (ClosePolicyUdpRelayResponse);
-}
-
 enum SecureAuthLevel {
   None = 0;
   EncryptedUnauthenticated = 1;

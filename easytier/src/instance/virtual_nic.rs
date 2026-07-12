@@ -1859,7 +1859,6 @@ impl NicCtx {
             &config,
             revision.clone(),
             data_plane,
-            peer_mgr.clone(),
             peer_mgr.my_peer_id(),
             &routes,
         )
@@ -1903,19 +1902,13 @@ impl NicCtx {
         config: &crate::policy_proxy::PolicyProcessConfig,
         revision: Arc<easytier_policy::PolicyRevision>,
         data_plane: Arc<Socks5Server>,
-        peer_mgr: Arc<PeerManager>,
         self_peer_id: u32,
         routes: &[crate::proto::api::instance::Route],
     ) -> anyhow::Result<PolicyActiveRuntime> {
         let mesh_endpoints = Self::resolve_policy_mesh_endpoints(&revision, self_peer_id, routes)?;
         let mesh_bridges = Arc::new(
-            crate::policy_proxy::MeshProxyBridgeSet::start(
-                data_plane,
-                peer_mgr,
-                &revision,
-                &mesh_endpoints,
-            )
-            .await?,
+            crate::policy_proxy::MeshProxyBridgeSet::start(data_plane, &revision, &mesh_endpoints)
+                .await?,
         );
         let base_dir = config
             .policy_file
@@ -2179,7 +2172,6 @@ impl NicCtx {
                     &config,
                     revision.clone(),
                     data_plane,
-                    peer_mgr.clone(),
                     peer_mgr.my_peer_id(),
                     &route_table,
                 )
