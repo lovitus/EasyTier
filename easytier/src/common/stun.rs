@@ -12,7 +12,7 @@ use hotpath::instant::Instant;
 use rand::seq::IteratorRandom;
 use socket2::{SockAddr, SockRef};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UdpSocket, lookup_host};
+use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinSet;
 use tracing::{Instrument, Level};
@@ -23,7 +23,7 @@ use stun_codec::{Message, MessageClass, MessageDecoder, MessageEncoder};
 
 use crate::common::error::Error;
 
-use super::dns::resolve_txt_record;
+use super::dns::{lookup_control_plane_host, resolve_txt_record};
 use super::stun_codec_ext::*;
 
 fn apply_stun_socket_mark(socket: &UdpSocket, socket_mark: Option<u32>) -> Result<(), Error> {
@@ -116,9 +116,10 @@ impl HostResolverIter {
 
             let use_ipv6 = self.use_ipv6;
 
-            match lookup_host(&host).await {
+            match lookup_control_plane_host(&host).await {
                 Ok(ips) => {
                     self.ips = ips
+                        .into_iter()
                         .filter(|x| if use_ipv6 { x.is_ipv6() } else { x.is_ipv4() })
                         .choose_multiple(&mut rand::thread_rng(), self.max_ip_per_domain as usize);
 
