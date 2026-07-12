@@ -4,7 +4,7 @@
 ))]
 mod darwin;
 #[cfg(target_os = "linux")]
-mod netlink;
+pub(crate) mod netlink;
 #[cfg(target_os = "windows")]
 mod win;
 #[cfg(target_os = "windows")]
