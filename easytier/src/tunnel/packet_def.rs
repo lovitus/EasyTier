@@ -475,7 +475,6 @@ impl ZCPacketType {
 pub struct ZCPacket {
     inner: BytesMut,
     packet_type: ZCPacketType,
-    bypass_deferred_proxy: bool,
 }
 
 impl ZCPacket {
@@ -491,7 +490,6 @@ impl ZCPacket {
         Self {
             inner: BytesMut::new(),
             packet_type: ZCPacketType::NIC,
-            bypass_deferred_proxy: false,
         }
     }
 
@@ -499,16 +497,7 @@ impl ZCPacket {
         Self {
             inner: buf,
             packet_type,
-            bypass_deferred_proxy: false,
         }
-    }
-
-    pub(crate) fn set_bypass_deferred_proxy(&mut self, bypass: bool) {
-        self.bypass_deferred_proxy = bypass;
-    }
-
-    pub(crate) fn take_bypass_deferred_proxy(&mut self) -> bool {
-        std::mem::take(&mut self.bypass_deferred_proxy)
     }
 
     pub fn new_with_payload(payload: &[u8]) -> Self {
@@ -841,19 +830,5 @@ mod tests {
         let mut packet = ZCPacket::new_from_buf(BytesMut::from(&b"\x01"[..]), ZCPacketType::UDP);
 
         assert!(packet.mut_wg_tunnel_header().is_none());
-    }
-
-    #[test]
-    fn deferred_proxy_bypass_is_local_and_single_use() {
-        let mut packet = ZCPacket::new_with_payload(b"payload");
-        packet.set_bypass_deferred_proxy(true);
-
-        assert!(packet.clone().take_bypass_deferred_proxy());
-        assert!(packet.take_bypass_deferred_proxy());
-        assert!(!packet.take_bypass_deferred_proxy());
-
-        let bytes = packet.into_bytes();
-        let restored = ZCPacket::new_from_buf(BytesMut::from(bytes.as_ref()), ZCPacketType::NIC);
-        assert!(!restored.bypass_deferred_proxy);
     }
 }

@@ -142,10 +142,7 @@ impl AsyncWrite for SocksTcpStream {
 }
 
 enum Socks5EntryData {
-    Tcp {
-        _listener: TcpListener,
-        bypass_deferred_proxy: bool,
-    },
+    Tcp(TcpListener), // hold a binded socket to hold the tcp port
     #[cfg(feature = "ffi-dataplane")]
     // a data-plane routing entry that owns no resource. the entry_type in the
     // key distinguishes a listen route from an actively outbound route.
@@ -253,7 +250,6 @@ struct SmolTcpConnector {
     entries: Socks5EntrySet,
     entry_count: Arc<AtomicUsize>,
     current_entry: std::sync::Mutex<Option<Socks5Entry>>,
-    bypass_deferred_proxy: bool,
 }
 
 #[async_trait::async_trait]
@@ -279,10 +275,7 @@ impl AsyncTcpConnector for SmolTcpConnector {
             &self.entries,
             &self.entry_count,
             entry.clone(),
-            Socks5EntryData::Tcp {
-                _listener: tmp_listener,
-                bypass_deferred_proxy: self.bypass_deferred_proxy,
-            },
+            Socks5EntryData::Tcp(tmp_listener),
         );
         tracing::trace!(
             ?entry,
@@ -377,7 +370,6 @@ struct Socks5AutoConnector {
 
     inner_connector: parking_lot::Mutex<Option<Box<dyn Any + Send>>>,
     allow_kernel_fallback: bool,
-    bypass_deferred_proxy: bool,
 }
 
 #[async_trait::async_trait]
@@ -468,7 +460,6 @@ impl AsyncTcpConnector for Socks5AutoConnector {
                         entries: self.entries.clone(),
                         entry_count: self.entry_count.clone(),
                         current_entry: std::sync::Mutex::new(None),
-                        bypass_deferred_proxy: self.bypass_deferred_proxy,
                     })
                 }
             };
@@ -485,7 +476,6 @@ impl AsyncTcpConnector for Socks5AutoConnector {
                 entries: self.entries.clone(),
                 entry_count: self.entry_count.clone(),
                 current_entry: std::sync::Mutex::new(None),
-                bypass_deferred_proxy: self.bypass_deferred_proxy,
             })
         };
 
@@ -530,7 +520,6 @@ impl Socks5ServerNet {
             tracing::warn!("smoltcp stack sink exited");
         });
 
-        let output_entries = entries.clone();
         forward_tasks.spawn(async move {
             while let Some(data) = stack_stream.recv().await {
                 tracing::trace!(
@@ -544,26 +533,7 @@ impl Socks5ServerNet {
                 };
 
                 let dst = ipv4.get_destination();
-                let mut packet = ZCPacket::new_with_payload(&data);
-                if ipv4.get_next_level_protocol() == IpNextHeaderProtocols::Tcp
-                    && let Some(tcp) = TcpPacket::new(ipv4.payload())
-                {
-                    let entry = Socks5Entry {
-                        src: SocketAddr::new(ipv4.get_source().into(), tcp.get_source()),
-                        dst: SocketAddr::new(ipv4.get_destination().into(), tcp.get_destination()),
-                        entry_type: TCP_ENTRY,
-                    };
-                    let bypass = output_entries.get(&entry).is_some_and(|entry| {
-                        matches!(
-                            entry.value(),
-                            Socks5EntryData::Tcp {
-                                bypass_deferred_proxy: true,
-                                ..
-                            }
-                        )
-                    });
-                    packet.set_bypass_deferred_proxy(bypass);
-                }
+                let packet = ZCPacket::new_with_payload(&data);
                 let Some(peer_manager) = peer_manager.upgrade() else {
                     tracing::warn!("peer manager is gone, smoltcp sender exited");
                     return;
@@ -1087,7 +1057,6 @@ impl Socks5Server {
                                 src_addr: addr,
                                 inner_connector: parking_lot::Mutex::new(None),
                                 allow_kernel_fallback: true,
-                                bypass_deferred_proxy: false,
                                 entry_count: entry_count.clone(),
                             };
                             if let Some(net) = net.lock().await.as_ref() {
@@ -1278,7 +1247,6 @@ impl Socks5Server {
                     entry_count: entry_count.clone(),
                     inner_connector: parking_lot::Mutex::new(None),
                     allow_kernel_fallback: true,
-                    bypass_deferred_proxy: false,
                 };
 
                 forward_tasks
@@ -1595,10 +1563,7 @@ mod tests {
             &server.entries,
             &server.entry_count,
             entry,
-            Socks5EntryData::Tcp {
-                _listener: listener,
-                bypass_deferred_proxy: false,
-            },
+            Socks5EntryData::Tcp(listener),
         );
 
         for packet_type in [
@@ -1633,10 +1598,7 @@ mod tests {
                 dst: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 3)), 22),
                 entry_type: TCP_ENTRY,
             },
-            Socks5EntryData::Tcp {
-                _listener: listener,
-                bypass_deferred_proxy: false,
-            },
+            Socks5EntryData::Tcp(listener),
         );
 
         let unmatched_local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 144, 144, 1)), 40001);
@@ -1673,10 +1635,7 @@ mod tests {
             &server.entries,
             &server.entry_count,
             entry,
-            Socks5EntryData::Tcp {
-                _listener: listener,
-                bypass_deferred_proxy: false,
-            },
+            Socks5EntryData::Tcp(listener),
         );
 
         let mut packet = ZCPacket::new_with_payload(&build_tcp_packet(remote, local));
@@ -1780,10 +1739,7 @@ mod tests {
             &entries,
             &entry_count,
             entry.clone(),
-            Socks5EntryData::Tcp {
-                _listener: listener,
-                bypass_deferred_proxy: false,
-            },
+            Socks5EntryData::Tcp(listener),
         );
 
         let (removed, old_entry_count, new_entry_count) =
@@ -1816,20 +1772,14 @@ mod tests {
             &entries,
             &entry_count,
             entry.clone(),
-            Socks5EntryData::Tcp {
-                _listener: listener,
-                bypass_deferred_proxy: false,
-            },
+            Socks5EntryData::Tcp(listener),
         );
         let (replaced_again, old_entry_count_again, new_entry_count_again) =
             insert_entry_and_increment_count(
                 &entries,
                 &entry_count,
                 entry,
-                Socks5EntryData::Tcp {
-                    _listener: replacement,
-                    bypass_deferred_proxy: false,
-                },
+                Socks5EntryData::Tcp(replacement),
             );
 
         assert!(!replaced);

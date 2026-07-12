@@ -308,7 +308,7 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<DataPlaneTcpStream, Error> {
-        self.data_plane_tcp_connect_inner(dst_addr, timeout, true, true)
+        self.data_plane_tcp_connect_inner(dst_addr, timeout, true)
             .await
     }
 
@@ -317,16 +317,7 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<DataPlaneTcpStream, Error> {
-        self.data_plane_tcp_connect_inner(dst_addr, timeout, false, true)
-            .await
-    }
-
-    pub(crate) async fn data_plane_tcp_connect_native_mesh_only(
-        &self,
-        dst_addr: SocketAddr,
-        timeout: Duration,
-    ) -> Result<DataPlaneTcpStream, Error> {
-        self.data_plane_tcp_connect_inner(dst_addr, timeout, false, false)
+        self.data_plane_tcp_connect_inner(dst_addr, timeout, false)
             .await
     }
 
@@ -335,7 +326,6 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
         allow_kernel_fallback: bool,
-        allow_kcp: bool,
     ) -> Result<DataPlaneTcpStream, Error> {
         let data_plane_ref = self.acquire_data_plane_ref();
         let deadline = Instant::now() + timeout;
@@ -348,11 +338,7 @@ impl Socks5Server {
         let local_addr = SocketAddr::new(IpAddr::V4(ipv4_addr.address()), local_port);
         let connector = Socks5AutoConnector {
             #[cfg(feature = "kcp")]
-            kcp_endpoint: if allow_kcp {
-                self.kcp_endpoint.lock().await.clone()
-            } else {
-                None
-            },
+            kcp_endpoint: self.kcp_endpoint.lock().await.clone(),
             peer_mgr: self.peer_manager.clone(),
             entries: self.entries.clone(),
             smoltcp_net: Some(smoltcp_net),
@@ -360,7 +346,6 @@ impl Socks5Server {
             entry_count: self.entry_count.clone(),
             inner_connector: parking_lot::Mutex::new(None),
             allow_kernel_fallback,
-            bypass_deferred_proxy: !allow_kcp,
         };
 
         let remaining = deadline.saturating_duration_since(Instant::now());

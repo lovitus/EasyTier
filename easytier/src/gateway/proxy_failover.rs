@@ -1263,9 +1263,6 @@ impl NicPacketFilter for DeferredProxySelector {
         packet: &mut ZCPacket,
         context: &NicPacketContext,
     ) -> NicPacketFilterAction {
-        if packet.take_bypass_deferred_proxy() {
-            return NicPacketFilterAction::Continue;
-        }
         let Some((flow, sequence)) = Self::parse_syn(packet) else {
             return NicPacketFilterAction::Continue;
         };
@@ -2122,41 +2119,6 @@ mod tests {
         assert_eq!(statuses[0].selected_transport, "native");
         assert_eq!(statuses[0].fallback_reason, "quic_prepare_failed");
         assert_eq!(statuses[0].consecutive_failures, 1);
-    }
-
-    #[tokio::test]
-    async fn local_bypass_skips_only_the_deferred_selector() {
-        let runtime = Arc::new(FakeRuntime::default());
-        runtime.set_route(
-            "10.44.0.3".parse().unwrap(),
-            9,
-            CapabilitySnapshot {
-                quic: true,
-                kcp: true,
-                prepare_ack_version: 1,
-            },
-        );
-        let transport = Arc::new(FakeTransport::new(
-            ProxyTransport::Quic,
-            [FakePrepareResult::Success],
-        ));
-        let selector = fake_selector(runtime, vec![transport.clone()]);
-        let context = NicPacketContext {
-            ip_addr: "10.44.0.3".parse().unwrap(),
-            not_send_to_self: false,
-        };
-        let (mut packet, _) = tcp_syn(102);
-        packet.set_bypass_deferred_proxy(true);
-
-        assert_eq!(
-            selector
-                .try_process_packet_from_nic(&mut packet, &context)
-                .await,
-            NicPacketFilterAction::Continue
-        );
-        assert!(!packet.take_bypass_deferred_proxy());
-        assert!(transport.calls.lock().await.is_empty());
-        assert!(selector.list_statuses().await.is_empty());
     }
 
     #[tokio::test]
