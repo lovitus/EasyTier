@@ -1505,6 +1505,7 @@ async fn run_main(mut cli: Cli) -> anyhow::Result<()> {
         if cli.network_options.socket_mark.is_none() {
             cli.network_options.socket_mark = Some(crate::policy_proxy::POLICY_SOCKET_MARK);
         }
+        crate::common::dns::set_control_plane_socket_mark(cli.network_options.socket_mark);
         let outbound_interface = cli.policy_outbound_interface.clone().ok_or_else(|| {
             anyhow::anyhow!("--policy-config requires --policy-outbound-interface")
         })?;
