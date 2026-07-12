@@ -34,6 +34,8 @@ use pin_project_lite::pin_project;
 use pnet::packet::{ipv4::Ipv4Packet, ipv6::Ipv6Packet};
 #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+use std::time::Duration;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     sync::{Mutex, Notify},
