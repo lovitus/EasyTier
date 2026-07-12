@@ -80,6 +80,14 @@ jobs:
             --bin easytier-core \
             --bin easytier-cli \
             --features jemalloc,leaf-policy-proxy
+          cargo test \
+            --locked \
+            --release \
+            --target "$TARGET" \
+            --package easytier \
+            --features jemalloc,leaf-policy-proxy \
+            relays_udp_from_the_destination_peer_source_identity \
+            -- --nocapture
 
       - name: Verify profiling metadata
         run: |
