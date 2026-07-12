@@ -54,20 +54,28 @@ impl PolicyRoutingGuard {
             outbound_addresses: addresses,
         };
         let result = (|| -> anyhow::Result<()> {
-            let v4_default = find_default_route(&v4_routes, outbound_index).ok_or_else(|| {
-                anyhow::anyhow!(
+            let v4_physical = physical_routes(&v4_routes, outbound_index);
+            if !v4_physical
+                .iter()
+                .any(|route| route.header.destination_prefix_length == 0)
+            {
+                anyhow::bail!(
                     "policy outbound interface {outbound_interface} has no IPv4 default route"
-                )
-            })?;
-            guard.add_route(bypass_route(
-                v4_default,
-                AddressFamily::Inet,
-                outbound_index,
-            ))?;
+                );
+            }
+            for route in v4_physical {
+                guard.add_route(bypass_route(route, outbound_index))?;
+            }
 
             let has_v6_bypass = if enable_ipv6 {
-                if let Some(route) = find_default_route(&v6_routes, outbound_index) {
-                    guard.add_route(bypass_route(route, AddressFamily::Inet6, outbound_index))?;
+                let v6_physical = physical_routes(&v6_routes, outbound_index);
+                if v6_physical
+                    .iter()
+                    .any(|route| route.header.destination_prefix_length == 0)
+                {
+                    for route in v6_physical {
+                        guard.add_route(bypass_route(route, outbound_index))?;
+                    }
                     true
                 } else {
                     tracing::warn!(
@@ -160,15 +168,17 @@ fn usable_source(address: IpAddr) -> bool {
     }
 }
 
-fn find_default_route(routes: &[RouteMessage], ifindex: u32) -> Option<&RouteMessage> {
-    routes.iter().find(|route| {
-        route.header.destination_prefix_length == 0
-            && route.header.kind == RouteType::Unicast
-            && route_table(route) == RouteHeader::RT_TABLE_MAIN as u32
-            && route.attributes.iter().any(
-                |attribute| matches!(attribute, RouteAttribute::Oif(index) if *index == ifindex),
-            )
-    })
+fn physical_routes(routes: &[RouteMessage], ifindex: u32) -> Vec<&RouteMessage> {
+    routes
+        .iter()
+        .filter(|route| {
+            route.header.kind == RouteType::Unicast
+                && route_table(route) == RouteHeader::RT_TABLE_MAIN as u32
+                && route.attributes.iter().any(
+                    |attribute| matches!(attribute, RouteAttribute::Oif(index) if *index == ifindex),
+                )
+        })
+        .collect()
 }
 
 fn route_table(route: &RouteMessage) -> u32 {
@@ -182,12 +192,21 @@ fn route_table(route: &RouteMessage) -> u32 {
         .unwrap_or(route.header.table as u32)
 }
 
-fn bypass_route(source: &RouteMessage, family: AddressFamily, ifindex: u32) -> RouteMessage {
-    let mut route = base_route(family, 0, POLICY_TABLE);
+fn bypass_route(source: &RouteMessage, ifindex: u32) -> RouteMessage {
+    let mut route = base_route(
+        source.header.address_family,
+        source.header.destination_prefix_length,
+        POLICY_TABLE,
+    );
+    route.header.source_prefix_length = source.header.source_prefix_length;
+    route.header.tos = source.header.tos;
+    route.header.scope = source.header.scope;
     route.attributes.push(RouteAttribute::Oif(ifindex));
     for attribute in &source.attributes {
         match attribute {
-            RouteAttribute::Gateway(_)
+            RouteAttribute::Destination(_)
+            | RouteAttribute::Source(_)
+            | RouteAttribute::Gateway(_)
             | RouteAttribute::Via(_)
             | RouteAttribute::Priority(_)
             | RouteAttribute::PrefSource(_) => route.attributes.push(attribute.clone()),
