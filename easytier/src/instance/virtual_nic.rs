@@ -2093,6 +2093,18 @@ impl NicCtx {
                     restart_attempts = 0;
                     next_restart = tokio::time::Instant::now();
                 }
+                if endpoint_generation_changed {
+                    bridge.store(None);
+                    bridge_updates.send_replace(None);
+                    let previous = active.lock().await.take();
+                    if let Some(previous) = previous {
+                        previous.runtime.stop().await;
+                    }
+                    active_since = None;
+                    tracing::info!(
+                        "mesh proxy endpoint generation changed; rebuilding policy runtime"
+                    );
+                }
                 if let Some(current) = active.lock().await.as_ref() {
                     if route_refresh_due {
                         match resolved_mesh_endpoints {
