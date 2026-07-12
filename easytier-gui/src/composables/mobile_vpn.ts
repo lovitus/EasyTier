@@ -98,7 +98,7 @@ async function doStopVpn(force = false) {
 
 async function doStartVpn(ipv4Addr: string, cidr: number, routes: string[], dns?: string) {
   if (curVpnStatus.running) {
-    return
+    throw new Error('vpn service is still stopping')
   }
 
   console.log('start vpn service', ipv4Addr, cidr, routes, dns)
@@ -130,6 +130,28 @@ async function doStartVpn(ipv4Addr: string, cidr: number, routes: string[], dns?
   curVpnStatus.ipv4Cidr = cidr
   curVpnStatus.routes = routes
   curVpnStatus.dns = dns
+}
+
+async function startVpnWithRetry(ipv4Addr: string, cidr: number, routes: string[], dns?: string) {
+  let lastError: unknown
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await doStartVpn(ipv4Addr, cidr, routes, dns)
+    }
+    catch (error) {
+      lastError = error
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+      const transient = message.includes('wait vpn status timeout')
+        || message.includes('already')
+        || message.includes('stopping')
+      if (!transient || attempt === 2) {
+        throw error
+      }
+      syncVpnStatusFromNative(await get_vpn_status())
+      await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)))
+    }
+  }
+  throw lastError
 }
 
 async function onVpnServiceStart(payload: any) {
@@ -265,7 +287,7 @@ export async function onNetworkInstanceChange(instanceId: string) {
     }
 
     try {
-      await doStartVpn(virtual_ip, network_length, routes, dns)
+      await startVpnWithRetry(virtual_ip, network_length, routes, dns)
     }
     catch (e) {
       if (e instanceof Error && e.message === 'need_prepare') {

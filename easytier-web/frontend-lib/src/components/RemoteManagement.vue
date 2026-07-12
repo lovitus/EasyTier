@@ -232,8 +232,37 @@ const stopNetwork = async () => {
     }
 
     resetNetworkInfoRetention(true);
+    lifecycleGeneration++;
     await props.api.update_network_instance_state(selectedInstanceId.value.uuid, true);
     await loadNetworkInstanceIds();
+}
+
+let lifecycleGeneration = 0;
+
+const isTransientStartError = (error: unknown) => {
+    const message = errorDetail(error).toLowerCase();
+    return message.includes('address already in use')
+        || message.includes('only one usage of each socket address')
+        || message.includes('os error 48')
+        || message.includes('os error 98')
+        || message.includes('os error 10048');
+}
+
+const runNetworkWithRetry = async (operation: () => Promise<unknown>) => {
+    const generation = ++lifecycleGeneration;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            return await operation();
+        } catch (error) {
+            lastError = error;
+            if (!isTransientStartError(error) || generation !== lifecycleGeneration || attempt === 2) {
+                throw error;
+            }
+            await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
+        }
+    }
+    throw lastError;
 }
 
 const confirm = useConfirm();
@@ -283,9 +312,9 @@ const saveAndRunNewNetwork = async (config?: NetworkTypes.NetworkConfig) => {
     try {
         if (networkIsDisabled.value) {
             await props.api.save_config(cfg);
-            await props.api.update_network_instance_state(cfg.instance_id, false);
+            await runNetworkWithRetry(() => props.api.update_network_instance_state(cfg.instance_id, false));
         } else {
-            await props.api.run_network(cfg, currentNetworkControl.remoteSave.value);
+            await runNetworkWithRetry(() => props.api.run_network(cfg, currentNetworkControl.remoteSave.value));
         }
 
         delete networkMetaCache.value[cfg.instance_id];

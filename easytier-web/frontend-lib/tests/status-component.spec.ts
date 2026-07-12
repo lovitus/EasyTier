@@ -196,7 +196,7 @@ describe('Status mixed-version rendering', () => {
                 listeners: [],
               },
               stun_info: {
-                udp_nat_type: 0,
+                udp_nat_type: 5,
                 tcp_nat_type: 0,
                 last_update_time: 0,
               },
