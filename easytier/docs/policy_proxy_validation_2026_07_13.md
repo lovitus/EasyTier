@@ -160,6 +160,22 @@ discard buffered bytes.
     runtime for EasyTier control-plane DNS and routes STUN hostname lookups
     through it while policy mode is active. User DNS still enters Leaf, and
     Magic DNS remains mesh-owned; no blanket port-53 bypass is added.
+13. The `e664d9a5` beta proved the DNS separation: a 25-second capture saw zero
+    control-plane DNS packets on the policy TUN and 32 marked STUN lookups on
+    the physical interface, while an application query still traversed Leaf
+    and returned FakeDNS, and Magic DNS still returned the mesh peer address.
+    It also passed 100 immediate-close HTTP transfers with exact 2333-byte
+    bodies and no retained proxy entry. UDP testing exposed an independent
+    bridge defect: a strict SOCKS5 server associates UDP with the control TCP
+    source IP. KCP proxy changed that control source to the destination peer's
+    own virtual IP while mesh UDP retained the caller's virtual IP, so the
+    standards-compliant relay discarded every datagram. Merely disabling KCP
+    in the data-plane connector was insufficient because the later deferred
+    selector upgraded its SYN again; that failed beta was reverted. The next
+    candidate keeps KCP for ordinary CONNECT sessions, uses native mesh TCP for
+    UDP ASSOCIATE control, and carries a single-use non-serialized packet marker
+    that only bypasses the deferred selector. It never sets wire `no_proxy` and
+    does not skip ACL or other NIC filters.
 
 ## Static review disposition
 
