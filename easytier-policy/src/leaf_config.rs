@@ -7,13 +7,13 @@ use crate::{
     ChainKind, PolicyRevision, ProxyKind, ProxyServer, ProxyVia, RuleSetKind, config::RuleSet,
 };
 
-pub trait MeshServerResolver {
+pub trait MeshServerResolver: Send + Sync {
     fn resolve(&self, instance_id: Option<Uuid>, virtual_ip: Option<IpAddr>) -> Option<IpAddr>;
 }
 
 impl<F> MeshServerResolver for F
 where
-    F: Fn(Option<Uuid>, Option<IpAddr>) -> Option<IpAddr>,
+    F: Fn(Option<Uuid>, Option<IpAddr>) -> Option<IpAddr> + Send + Sync,
 {
     fn resolve(&self, instance_id: Option<Uuid>, virtual_ip: Option<IpAddr>) -> Option<IpAddr> {
         self(instance_id, virtual_ip)

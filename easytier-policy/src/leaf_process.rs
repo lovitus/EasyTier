@@ -1,7 +1,6 @@
 use std::{
     future::Future,
     os::fd::RawFd,
-    os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     pin::Pin,
     process::Stdio,
