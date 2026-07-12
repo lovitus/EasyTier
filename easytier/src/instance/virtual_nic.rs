@@ -67,6 +67,7 @@ struct PolicyNicContext {
     dropped_packets: Arc<AtomicU64>,
     bridge_updates: tokio::sync::watch::Sender<Option<Arc<LeafPacketBridge>>>,
     active: Arc<Mutex<Option<PolicyActiveRuntime>>>,
+    _routing: crate::policy_proxy::PolicyRoutingGuard,
     _lease: crate::policy_proxy::PolicyInstanceLease,
 }
 
@@ -1829,13 +1830,14 @@ impl NicCtx {
                 .await?,
         ));
 
-        {
+        let routing = {
             let nic = self.nic.lock().await;
-            nic.add_route(Ipv4Addr::UNSPECIFIED, 0).await?;
-            if self.global_ctx.get_flags().enable_ipv6 {
-                nic.add_ipv6_route(Ipv6Addr::UNSPECIFIED, 0).await?;
-            }
-        }
+            crate::policy_proxy::PolicyRoutingGuard::install(
+                &config.outbound_interface,
+                nic.ifname(),
+                self.global_ctx.get_flags().enable_ipv6,
+            )?
+        };
 
         let bridge = Arc::new(ArcSwapOption::empty());
         let dropped_packets = Arc::new(AtomicU64::new(0));
@@ -1877,6 +1879,7 @@ impl NicCtx {
             dropped_packets,
             bridge_updates,
             active,
+            _routing: routing,
             _lease: lease,
         });
         Ok(())

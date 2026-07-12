@@ -20,6 +20,7 @@ use netlink_packet_route::{
         RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope,
         RouteType,
     },
+    rule::RuleMessage,
 };
 use netlink_sys::{Socket, SocketAddr, protocols::NETLINK_ROUTE};
 use nix::{
@@ -68,7 +69,9 @@ fn send_netlink_req<T: NetlinkDeserializable + NetlinkSerializable + Debug>(
     Ok(socket)
 }
 
-fn send_netlink_req_and_wait_one_resp<T: NetlinkDeserializable + NetlinkSerializable + Debug>(
+pub(crate) fn send_netlink_req_and_wait_one_resp<
+    T: NetlinkDeserializable + NetlinkSerializable + Debug,
+>(
     req: T,
     is_remove: bool,
 ) -> Result<(), Error> {
@@ -311,7 +314,9 @@ impl NetlinkIfConfiger {
         Self::set_flags_op(name, SIOCGIFFLAGS, InterfaceFlags::empty())
     }
 
-    fn list_route_messages(address_family: AddressFamily) -> Result<Vec<RouteMessage>, Error> {
+    pub(crate) fn list_route_messages(
+        address_family: AddressFamily,
+    ) -> Result<Vec<RouteMessage>, Error> {
         let mut message = RouteMessage::default();
 
         message.header.table = RouteHeader::RT_TABLE_UNSPEC;
@@ -366,6 +371,46 @@ impl NetlinkIfConfiger {
         }
 
         Ok(ret_vec)
+    }
+
+    pub(crate) fn list_rule_messages(
+        address_family: AddressFamily,
+    ) -> Result<Vec<RuleMessage>, Error> {
+        let mut message = RuleMessage::default();
+        message.header.family = address_family;
+        let socket = send_netlink_req(
+            RouteNetlinkMessage::GetRule(message),
+            NLM_F_REQUEST | NLM_F_DUMP,
+        )?;
+        let mut rules = Vec::new();
+        let mut response = Vec::<u8>::new();
+        loop {
+            if response.is_empty() {
+                let (next, _) = socket.recv_from_full()?;
+                response = next;
+            }
+            let message = NetlinkMessage::<RouteNetlinkMessage>::deserialize(&response)
+                .with_context(|| "Failed to deserialize netlink rule message")?;
+            response = response.split_off(message.buffer_len());
+            match message.payload {
+                NetlinkPayload::Error(error) => {
+                    if error.code == NonZero::new(0) {
+                        continue;
+                    }
+                    return Err(error.to_io().into());
+                }
+                NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewRule(rule)) => {
+                    rules.push(rule);
+                }
+                NetlinkPayload::Done(_) => break,
+                payload => {
+                    return Err(
+                        anyhow::anyhow!("unexpected netlink rule response: {payload:?}").into(),
+                    );
+                }
+            }
+        }
+        Ok(rules)
     }
 
     fn list_routes() -> Result<Vec<RouteMessage>, Error> {

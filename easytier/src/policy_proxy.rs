@@ -9,8 +9,10 @@ use std::{
 use anyhow::Context as _;
 
 mod mesh_socks_bridge;
+mod policy_routing;
 
 pub(crate) use mesh_socks_bridge::{MeshProxyBridgeSet, MeshProxyTarget};
+pub(crate) use policy_routing::PolicyRoutingGuard;
 
 #[derive(Debug, Clone)]
 pub struct PolicyProcessConfig {
