@@ -2493,6 +2493,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "easytier-policy"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "cidr",
+ "libc",
+ "serde",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.63",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "easytier-uptime"
 version = "0.1.0"
 dependencies = [
