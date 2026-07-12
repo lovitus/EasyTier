@@ -1,7 +1,7 @@
 # Leaf Optional Policy Proxy Integration TODO
 
 **Status**: full-L3 transparent policy spike; minimal TUN boundary integration
-**Updated**: 2026-07-13
+**Updated**: 2026-07-12
 
 This TODO is the design source of truth. Update it after each material design
 discussion so implementation does not depend on chat history.
@@ -106,64 +106,23 @@ fail_closed = true
 - resource and breaker limits are internal validated defaults in v1 rather
   than a large user-facing tuning surface.
 
-Implemented Linux spike launch surfaces:
+Equivalent launch surfaces:
 
 ```text
 CLI:
   easytier-core --config config.toml \
-    --policy-config policy/default.yaml \
-    --policy-outbound-interface eth0
+    --policy-config policy/default.yaml
 
 Environment:
+  ET_POLICY_PROXY_ENABLED=true
   ET_POLICY_PROXY_CONFIG=/path/to/policy.yaml
-  ET_POLICY_OUTBOUND_INTERFACE=eth0
 
-Advanced worker override:
-  --policy-leaf-executable /path/to/easytier-leaf-worker
-  ET_POLICY_LEAF_EXECUTABLE=/path/to/easytier-leaf-worker
+TOML/RPC/GUI:
+  use the same envelope and policy document semantics
 ```
 
-For the spike, supplying `--policy-config` or `ET_POLICY_PROXY_CONFIG` enables
-policy mode. Omitting both disables it completely. Linux also requires the
-physical outbound interface. The worker override is for packaging and testing;
-normal packages place `easytier-leaf-worker` beside/on the executable path.
-The current spike does not yet read `[policy_proxy]` from the ordinary network
-TOML and does not expose policy mode through RPC, GUI, or mobile launchers.
-
-The public Linux implementation should first auto-select the outbound interface
-only when exactly one usable physical default route exists. Multiple default
-routes, policy-routing ambiguity, or no usable physical default must fail with
-an actionable error and require an explicit interface. Ordinary EasyTier mode
-and policy mode on other platforms do not expose this Linux-only selector.
-
-Final launch surfaces after the public envelope is implemented:
-
-```text
-TOML:
-  [policy_proxy]
-  enabled = true
-  config_file = "policy/default.yaml"
-
-RPC/GUI/Android:
-  enabled plus exactly one of config_file or config_inline
-```
-
-CLI/environment overrides TOML. `enabled=false` is authoritative even if a
-stored path or inline document remains, so users can toggle policy mode without
-losing their configuration. Conflicting path and inline sources are rejected
-before TUN replacement. Desktop GUI uses a file picker/editor; sandboxed mobile
-launchers store and pass `config_inline` because arbitrary host paths are not
-portable. All surfaces validate the same EasyTier-owned YAML before starting
-Leaf.
-
-The final Linux adapter may make the outbound interface optional only when a
-single usable default-route interface exists and it is not the EasyTier TUN,
-another TUN/TAP, or a known virtual policy interface. Multiple defaults,
-ambiguous VPN routes, or an interface transition are configuration errors that
-show the candidates and require an explicit choice; the runtime must never
-guess. An explicit CLI/environment/TOML value always wins. Other platforms use
-their native VPN owner to identify and protect outbound sockets and do not
-expose this Linux-only field to ordinary users.
+An explicit CLI/environment value overrides TOML. Conflicting path and inline
+sources are configuration errors shown before TUN replacement.
 
 ### Cross-platform startup
 
