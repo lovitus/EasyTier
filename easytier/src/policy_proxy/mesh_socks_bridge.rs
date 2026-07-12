@@ -295,19 +295,11 @@ async fn run_listener(
 async fn connect_remote(
     data_plane: &Socks5Server,
     remote: SocketAddr,
-    preserve_source_ip: bool,
 ) -> anyhow::Result<DataPlaneTcpStream> {
-    if preserve_source_ip {
-        data_plane
-            .data_plane_tcp_connect_native_mesh_only(remote, CONNECT_TIMEOUT)
-            .await
-            .map_err(anyhow::Error::from)
-    } else {
-        data_plane
-            .data_plane_tcp_connect_mesh_only(remote, CONNECT_TIMEOUT)
-            .await
-            .map_err(anyhow::Error::from)
-    }
+    data_plane
+        .data_plane_tcp_connect_mesh_only(remote, CONNECT_TIMEOUT)
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 async fn relay_socks5(
@@ -323,17 +315,9 @@ async fn relay_socks5(
         _ = generation.cancelled() => anyhow::bail!("mesh proxy route generation changed"),
         result = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
             authenticate_local(&mut client, password).await?;
-            let (request, command) = read_and_validate_socks_command(&mut client, udp_enabled).await?;
-            // A standard SOCKS5 UDP relay associates datagrams with the source IP of its control
-            // TCP connection. Native mesh TCP preserves that virtual source; KCP proxy does not.
-            let mut upstream = connect_remote(
-                &data_plane,
-                remote,
-                requires_source_preserving_control(command),
-            )
-            .await?;
+            let mut upstream = connect_remote(&data_plane, remote).await?;
             negotiate_upstream_no_auth(&mut upstream).await?;
-            let command = relay_socks_command(&mut client, &mut upstream, request, command).await?;
+            let command = relay_socks_command(&mut client, &mut upstream, udp_enabled).await?;
             Ok::<_, anyhow::Error>((command, upstream))
         }) => result??,
     };
@@ -362,10 +346,6 @@ async fn relay_socks5(
         }
     }
     Ok(())
-}
-
-fn requires_source_preserving_control(command: u8) -> bool {
-    command == 3
 }
 
 enum SocksCommand {
@@ -416,29 +396,8 @@ async fn negotiate_upstream_no_auth(upstream: &mut DataPlaneTcpStream) -> anyhow
 async fn relay_socks_command(
     client: &mut TcpStream,
     upstream: &mut DataPlaneTcpStream,
-    request: Vec<u8>,
-    command: u8,
-) -> anyhow::Result<SocksCommand> {
-    upstream.write_all(&request).await?;
-    let (reply, code, bound) = read_socks_reply(upstream).await?;
-    if command != 3 || code != 0 {
-        client.write_all(&reply).await?;
-    }
-    if code != 0 {
-        anyhow::bail!("upstream SOCKS command failed with reply {code}");
-    }
-
-    match command {
-        1 => Ok(SocksCommand::Connect),
-        3 => Ok(SocksCommand::UdpAssociate(bound)),
-        _ => unreachable!("SOCKS command was validated before dialing"),
-    }
-}
-
-async fn read_and_validate_socks_command(
-    client: &mut TcpStream,
     udp_enabled: bool,
-) -> anyhow::Result<(Vec<u8>, u8)> {
+) -> anyhow::Result<SocksCommand> {
     let (request, command, _) = read_socks_request(client).await?;
     if !matches!(command, 1 | 3) {
         client
@@ -458,7 +417,28 @@ async fn read_and_validate_socks_command(
             .await?;
         anyhow::bail!("UDP ASSOCIATE is disabled for this actor");
     }
-    Ok((request, command))
+    upstream.write_all(&request).await?;
+    let (reply, code, bound) = read_socks_reply(upstream).await?;
+    if command != 3 || code != 0 {
+        client.write_all(&reply).await?;
+    }
+    if code != 0 {
+        anyhow::bail!("upstream SOCKS command failed with reply {code}");
+    }
+
+    match command {
+        1 => Ok(SocksCommand::Connect),
+        3 => Ok(SocksCommand::UdpAssociate(bound)),
+        _ => {
+            client
+                .write_all(&socks_reply(
+                    7,
+                    SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
+                ))
+                .await?;
+            anyhow::bail!("unsupported SOCKS command {command}")
+        }
+    }
 }
 
 async fn relay_socks_udp(
@@ -758,12 +738,6 @@ mod tests {
     fn rejects_zero_udp_relay_port() {
         let proxy: SocketAddr = "10.44.0.8:1080".parse().unwrap();
         assert!(resolve_relay_address(SocksAddress::Domain(0), proxy).is_err());
-    }
-
-    #[test]
-    fn only_udp_associate_requires_source_preserving_control() {
-        assert!(!requires_source_preserving_control(1));
-        assert!(requires_source_preserving_control(3));
     }
 
     #[test]
