@@ -67,7 +67,7 @@ struct PolicyNicContext {
     dropped_packets: Arc<AtomicU64>,
     bridge_updates: tokio::sync::watch::Sender<Option<Arc<LeafPacketBridge>>>,
     active: Arc<Mutex<Option<PolicyActiveRuntime>>>,
-    _routing: crate::policy_proxy::PolicyRoutingGuard,
+    routing: Arc<Mutex<crate::policy_proxy::PolicyRoutingGuard>>,
     _lease: crate::policy_proxy::PolicyInstanceLease,
 }
 
@@ -1358,7 +1358,6 @@ impl NicCtx {
             let mut policy_open = true;
             while peer_open || policy_open {
                 let packet = tokio::select! {
-                    biased;
                     packet = peer_rx.recv(), if peer_open => {
                         match packet {
                             Some(packet) => Some(packet),
@@ -1755,6 +1754,18 @@ impl NicCtx {
                     .expect("Ipv6Inet always describes a valid network"),
             ));
         }
+        #[cfg(feature = "magic-dns")]
+        if self.global_ctx.get_flags().accept_dns {
+            routes.push(cidr::IpCidr::V4(
+                cidr::Ipv4Cidr::new(
+                    crate::instance::dns_server::MAGIC_DNS_FAKE_IP
+                        .parse()
+                        .expect("Magic DNS address is valid"),
+                    32,
+                )
+                .expect("Magic DNS host prefix is valid"),
+            ));
+        }
         let (proxy_v4, _, _) = ProxyCidrsMonitor::diff_proxy_cidrs(
             peer_mgr.as_ref(),
             &self.global_ctx,
@@ -1830,7 +1841,7 @@ impl NicCtx {
                 .await?,
         ));
 
-        let routing = {
+        let routing = Arc::new(Mutex::new({
             let nic = self.nic.lock().await;
             crate::policy_proxy::PolicyRoutingGuard::install(
                 &config.outbound_interface,
@@ -1838,7 +1849,7 @@ impl NicCtx {
                 self.global_ctx.get_flags().enable_ipv6,
                 self.global_ctx.get_flags().socket_mark,
             )?
-        };
+        }));
 
         let bridge = Arc::new(ArcSwapOption::empty());
         let dropped_packets = Arc::new(AtomicU64::new(0));
@@ -1880,7 +1891,7 @@ impl NicCtx {
             dropped_packets,
             bridge_updates,
             active,
-            _routing: routing,
+            routing,
             _lease: lease,
         });
         Ok(())
@@ -1930,6 +1941,7 @@ impl NicCtx {
         let classifier = policy.classifier.clone();
         let revision = policy.revision.clone();
         let active = policy.active.clone();
+        let routing = policy.routing.clone();
         let bridge = policy.bridge.clone();
         let bridge_updates = policy.bridge_updates.clone();
         let global_ctx = self.global_ctx.clone();
@@ -1993,6 +2005,16 @@ impl NicCtx {
 
                 if route_refresh_due {
                     last_route_refresh = tokio::time::Instant::now();
+                    match routing.lock().await.refresh() {
+                        Ok(true) => tracing::info!(
+                            "refreshed policy underlay routes after network change"
+                        ),
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            ?error,
+                            "failed to refresh policy underlay routes; state is tracked and the update will be retried"
+                        ),
+                    }
                     let mut routes = Vec::<cidr::IpCidr>::new();
                     if let Some(ipv4) = global_ctx.get_ipv4().or(ipv4_addr) {
                         routes.push(cidr::IpCidr::V4(
@@ -2004,6 +2026,18 @@ impl NicCtx {
                         routes.push(cidr::IpCidr::V6(
                             cidr::Ipv6Cidr::new(ipv6.first_address(), ipv6.network_length())
                                 .expect("Ipv6Inet always describes a valid network"),
+                        ));
+                    }
+                    #[cfg(feature = "magic-dns")]
+                    if global_ctx.get_flags().accept_dns {
+                        routes.push(cidr::IpCidr::V4(
+                            cidr::Ipv4Cidr::new(
+                                crate::instance::dns_server::MAGIC_DNS_FAKE_IP
+                                    .parse()
+                                    .expect("Magic DNS address is valid"),
+                                32,
+                            )
+                            .expect("Magic DNS host prefix is valid"),
                         ));
                     }
                     let (proxy_v4, _, _) = ProxyCidrsMonitor::diff_proxy_cidrs(

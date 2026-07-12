@@ -10,8 +10,8 @@ use anyhow::Context;
 use async_trait::async_trait;
 use cidr::{IpInet, Ipv4Inet, Ipv6Inet};
 use netlink_packet_core::{
-    NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST, NetlinkDeserializable,
-    NetlinkHeader, NetlinkMessage, NetlinkPayload, NetlinkSerializable,
+    NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REPLACE, NLM_F_REQUEST,
+    NetlinkDeserializable, NetlinkHeader, NetlinkMessage, NetlinkPayload, NetlinkSerializable,
 };
 use netlink_packet_route::{
     AddressFamily, RouteNetlinkMessage,
@@ -97,6 +97,24 @@ pub(crate) fn send_netlink_req_and_wait_one_resp<
             tracing::error!("Unexpected netlink response: {:?}", p);
             Err(anyhow::anyhow!("Unexpected netlink response").into())
         }
+    }
+}
+
+pub(crate) fn replace_netlink_route(route: RouteMessage) -> Result<(), Error> {
+    let socket = send_netlink_req(
+        RouteNetlinkMessage::NewRoute(route),
+        NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE | NLM_F_REQUEST,
+    )?;
+    let response = socket.recv_from_full()?;
+    let response = NetlinkMessage::<RouteNetlinkMessage>::deserialize(&response.0)
+        .with_context(|| "Failed to deserialize netlink route replacement")?;
+    match response.payload {
+        NetlinkPayload::Error(error) if error.code == NonZero::new(0) => Ok(()),
+        NetlinkPayload::Error(error) => Err(error.to_io().into()),
+        payload => Err(anyhow::anyhow!(
+            "Unexpected netlink route replacement response: {payload:?}"
+        )
+        .into()),
     }
 }
 
