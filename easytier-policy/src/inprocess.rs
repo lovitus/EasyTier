@@ -110,13 +110,14 @@ impl InProcessLeafRuntime {
                     return Err(error.to_string());
                 }
             };
-        let config = match leaf::config::from_string(&config) {
+        let mut config = match leaf::config::from_string(&config) {
             Ok(config) => config,
             Err(error) => {
                 close_if_same_fd(endpoint_fd, fd_identity);
                 return Err(format!("Leaf rejected generated config: {error}"));
             }
         };
+        disable_embedded_leaf_logger(&mut config);
 
         let runtime_id = match allocate_runtime_id() {
             Ok(runtime_id) => runtime_id,
@@ -296,6 +297,12 @@ impl PolicyRuntimeFactory for InProcessLeafFactory {
     }
 }
 
+fn disable_embedded_leaf_logger(config: &mut leaf::config::Config) {
+    // EasyTier owns the process-wide tracing subscriber. Leaf's standalone logger attempts to
+    // install another global subscriber, which panics when Leaf runs in-process on mobile.
+    config.log.mut_or_insert_default().level = leaf::config::log::Level::NONE.into();
+}
+
 fn allocate_runtime_id() -> Result<leaf::RuntimeId, String> {
     let mut reserved = RESERVED_RUNTIME_IDS.lock().unwrap();
     for _ in 0..u16::MAX {
@@ -377,15 +384,13 @@ mod tests {
 
     #[test]
     fn rejects_unbounded_or_dns_less_runtime_options() {
-        assert!(
-            InProcessLeafFactory::new(
-                PathBuf::from("."),
-                Arc::new(unresolved_mesh),
-                Vec::new(),
-                1,
-            )
-            .is_err()
-        );
+        assert!(InProcessLeafFactory::new(
+            PathBuf::from("."),
+            Arc::new(unresolved_mesh),
+            Vec::new(),
+            1,
+        )
+        .is_err());
         assert!(
             InProcessLeafFactory::new(
                 PathBuf::from("."),
@@ -395,5 +400,12 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn embedded_leaf_does_not_replace_the_process_logger() {
+        let mut config = leaf::config::Config::new();
+        disable_embedded_leaf_logger(&mut config);
+        assert_eq!(config.log.level, leaf::config::log::Level::NONE.into());
     }
 }
