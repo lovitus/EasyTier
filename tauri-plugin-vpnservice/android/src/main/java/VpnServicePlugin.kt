@@ -12,6 +12,7 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import android.webkit.WebView
+import org.json.JSONArray
 
 @InvokeArg
 class PingArgs {
@@ -113,7 +114,7 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
         val ret = JSObject()
         ret.put("running", TauriVpnService.self?.isRunning() == true)
         ret.put("ipv4Addr", TauriVpnService.ipv4Addr)
-        ret.put("routes", TauriVpnService.routes)
+        ret.put("routes", JSONArray(TauriVpnService.routes.toList()))
         ret.put("dns", TauriVpnService.dns)
         invoke.resolve(ret)
     }

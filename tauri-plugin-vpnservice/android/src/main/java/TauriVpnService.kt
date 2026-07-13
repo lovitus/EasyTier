@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.Bundle
+import org.json.JSONArray
 import java.util.concurrent.ConcurrentHashMap
 
 import app.tauri.plugin.JSObject
@@ -64,7 +65,7 @@ class TauriVpnService : VpnService() {
         if (self != this || vpnInterface == null) return
         val data = JSObject()
         data.put("networkKey", networkKey)
-        data.put("dnsServers", dnsServers)
+        data.put("dnsServers", JSONArray(dnsServers.toList()))
         triggerCallback("vpn_network_changed", data)
     }
 
@@ -151,7 +152,7 @@ class TauriVpnService : VpnService() {
 
         var event_data = JSObject()
         event_data.put("fd", newVpnInterface.fd)
-        event_data.put("dnsServers", lastUnderlyingDnsServers)
+        event_data.put("dnsServers", JSONArray(lastUnderlyingDnsServers.toList()))
         event_data.put("networkKey", lastUnderlyingNetworkKey)
         event_data.put("instanceId", instanceId)
         triggerCallback("vpn_service_start", event_data)
