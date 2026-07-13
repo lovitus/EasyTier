@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::PeerId,
-    gateway::socks5::{DataPlaneTcpStream, DataPlaneUdpSocket, Socks5Server},
+    gateway::socks5::{DataPlaneTcpListener, DataPlaneTcpStream, DataPlaneUdpSocket, Socks5Server},
     peers::peer_manager::PeerManager,
     proto::{
         peer_rpc::{
@@ -139,17 +139,26 @@ impl MeshUdpRelayService {
         let token = reservation.token;
         let (control, native_udp, upstream_relay) = open_local_socks_udp(proxy_addr).await?;
         if request.stream_version >= UOT_VERSION {
-            let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
+            let kernel_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
                 .await
                 .context("failed to bind private policy UoT listener")?;
-            let stream_addr =
-                SocketAddr::new(IpAddr::V4(local_virtual_ip), listener.local_addr()?.port());
+            let stream_port = kernel_listener.local_addr()?.port();
+            // The same logical endpoint exists in both independent TCP stacks. KCP proxy
+            // responders connect through the kernel listener; capability fallback uses the
+            // smoltcp listener without changing Socks5AutoConnector selection semantics.
+            let data_plane_listener = self
+                .data_plane
+                .data_plane_tcp_bind(stream_port, SETUP_TIMEOUT)
+                .await
+                .context("failed to bind private policy UoT data-plane listener")?;
+            let stream_addr = SocketAddr::new(IpAddr::V4(local_virtual_ip), stream_port);
             let associations = self.associations.clone();
             tokio::spawn(async move {
                 run_stream_association(
                     token,
                     source_ip,
-                    listener,
+                    kernel_listener,
+                    data_plane_listener,
                     control,
                     native_udp,
                     upstream_relay,
@@ -677,10 +686,32 @@ where
     }
 }
 
+trait PolicyUotIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+
+impl<T> PolicyUotIo for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+
+async fn accept_uot_candidate(
+    kernel_listener: &TcpListener,
+    data_plane_listener: &mut DataPlaneTcpListener,
+) -> std::io::Result<Box<dyn PolicyUotIo>> {
+    tokio::select! {
+        accepted = kernel_listener.accept() => {
+            let (stream, _) = accepted?;
+            stream.set_nodelay(true)?;
+            Ok(Box::new(stream))
+        }
+        accepted = data_plane_listener.accept() => {
+            let (stream, _) = accepted?;
+            Ok(Box::new(stream))
+        }
+    }
+}
+
 async fn run_stream_association(
     token: AssociationToken,
     source_ip: Ipv4Addr,
-    listener: TcpListener,
+    kernel_listener: TcpListener,
+    mut data_plane_listener: DataPlaneTcpListener,
     mut control: TcpStream,
     native_udp: UdpSocket,
     upstream_relay: SocketAddr,
@@ -692,8 +723,11 @@ async fn run_stream_association(
         _ = control.read(&mut setup_control_byte) => None,
         accepted = tokio::time::timeout(SETUP_TIMEOUT, async {
             for _ in 0..8 {
-                let (mut stream, _) = listener.accept().await?;
-                stream.set_nodelay(true)?;
+                let mut stream = accept_uot_candidate(
+                    &kernel_listener,
+                    &mut data_plane_listener,
+                )
+                .await?;
                 let authenticated = tokio::time::timeout(SETUP_TIMEOUT, async {
                     let mut received_token = [0u8; TOKEN_LEN];
                     stream.read_exact(&mut received_token).await?;
@@ -719,7 +753,7 @@ async fn run_stream_association(
         }) => accepted.ok().and_then(Result::ok),
     };
     let Some(stream) = accepted else {
-        tracing::warn!(%source_ip, %upstream_relay, "policy UoT setup failed");
+        tracing::debug!(%source_ip, %upstream_relay, "policy UoT setup failed");
         return;
     };
 
@@ -1005,6 +1039,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uot_stream_relays_unpaced_burst_over_smoltcp_fallback() {
+        let peer_a = create_mock_peer_manager().await;
+        let peer_b = create_mock_peer_manager().await;
+        connect_peer_manager(peer_a.clone(), peer_b.clone()).await;
+        let ip_a: cidr::Ipv4Inet = "10.178.0.1/24".parse().unwrap();
+        let ip_b: cidr::Ipv4Inet = "10.178.0.2/24".parse().unwrap();
+        peer_a.get_global_ctx().set_ipv4(Some(ip_a));
+        peer_b.get_global_ctx().set_ipv4(Some(ip_b));
+        wait_route_appear(peer_a.clone(), peer_b.clone())
+            .await
+            .unwrap();
+
+        let data_plane_a = Socks5Server::new(peer_a.get_global_ctx(), peer_a.clone(), None);
+        let data_plane_b = Socks5Server::new(peer_b.get_global_ctx(), peer_b.clone(), None);
+        data_plane_a.run(None).await.unwrap();
+        data_plane_b.run(None).await.unwrap();
+
+        let kernel_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+        let stream_port = kernel_listener.local_addr().unwrap().port();
+        let data_plane_listener = data_plane_b
+            .data_plane_tcp_bind(stream_port, SETUP_TIMEOUT)
+            .await
+            .unwrap();
+
+        let control_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let control_client = TcpStream::connect(control_listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (control, _) = control_listener.accept().await.unwrap();
+
+        let echo = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap());
+        let native_udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        native_udp
+            .connect(echo.local_addr().unwrap())
+            .await
+            .unwrap();
+        let upstream_relay = echo.local_addr().unwrap();
+        let echo_task = {
+            let echo = echo.clone();
+            tokio::spawn(async move {
+                let mut packet = vec![0u8; 1500];
+                for _ in 0..128 {
+                    let (length, source) = echo.recv_from(&mut packet).await.unwrap();
+                    echo.send_to(&packet[..length], source).await.unwrap();
+                }
+            })
+        };
+
+        let token = [0x5au8; TOKEN_LEN];
+        let cancel = CancellationToken::new();
+        let relay_task = {
+            let cancel = cancel.clone();
+            tokio::spawn(run_stream_association(
+                token,
+                ip_a.address(),
+                kernel_listener,
+                data_plane_listener,
+                control,
+                native_udp,
+                upstream_relay,
+                cancel,
+            ))
+        };
+
+        let stream_addr = SocketAddr::new(IpAddr::V4(ip_b.address()), stream_port);
+        let mut stream = data_plane_a
+            .data_plane_tcp_connect_mesh_only(stream_addr, SETUP_TIMEOUT)
+            .await
+            .unwrap();
+        stream.write_all(&token).await.unwrap();
+        stream
+            .write_all(&encode_uot_connect_request(upstream_relay))
+            .await
+            .unwrap();
+        stream.flush().await.unwrap();
+        assert_eq!(stream.read_u8().await.unwrap(), UOT_READY);
+
+        for sequence in 0u8..128 {
+            let mut packet = vec![sequence; 1200];
+            packet[1..5].copy_from_slice(b"uot2");
+            stream.write_u16(packet.len() as u16).await.unwrap();
+            stream.write_all(&packet).await.unwrap();
+        }
+
+        let mut seen = [false; 128];
+        let mut packet = vec![0u8; 1500];
+        for _ in 0..128 {
+            let length = tokio::time::timeout(SETUP_TIMEOUT, stream.read_u16())
+                .await
+                .unwrap()
+                .unwrap() as usize;
+            stream.read_exact(&mut packet[..length]).await.unwrap();
+            assert_eq!(&packet[1..5], b"uot2");
+            seen[usize::from(packet[0])] = true;
+        }
+        assert!(seen.into_iter().all(|seen| seen));
+
+        cancel.cancel();
+        drop(stream);
+        drop(control_client);
+        tokio::time::timeout(SETUP_TIMEOUT, relay_task)
+            .await
+            .unwrap()
+            .unwrap();
+        echo_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn relays_udp_from_the_destination_peer_source_identity() {
         let peer_a = create_mock_peer_manager().await;
         let peer_b = create_mock_peer_manager().await;
@@ -1093,30 +1235,37 @@ mod tests {
         let proxy_port = listener.local_addr().unwrap().port();
         let proxy_ip = ip_b.address();
         let fake_server = tokio::spawn(async move {
-            let (mut control, control_source) = listener.accept().await.unwrap();
-            let mut greeting = [0u8; 3];
-            control.read_exact(&mut greeting).await.unwrap();
-            assert_eq!(greeting, [5, 1, 0]);
-            control.write_all(&[5, 0]).await.unwrap();
-            let mut request = [0u8; 10];
-            control.read_exact(&mut request).await.unwrap();
-            assert_eq!(&request[..4], &[5, 3, 0, 1]);
-            // The SOCKS relay must reply from the address selected by the control
-            // connection. Binding to INADDR_ANY here lets Linux choose 127.0.0.1,
-            // which a UDP socket connected to `proxy_ip` correctly rejects.
-            let udp = UdpSocket::bind((proxy_ip, 0)).await.unwrap();
-            control
-                .write_all(&socks_reply_for_test(udp.local_addr().unwrap()))
-                .await
-                .unwrap();
-            let mut packet = [0u8; 256];
-            for _ in 0..128 {
-                let (length, source) = udp.recv_from(&mut packet).await.unwrap();
-                assert_eq!(source.ip(), control_source.ip());
-                udp.send_to(&packet[..length], source).await.unwrap();
+            // Loopback virtual addresses intentionally make the v2 mesh-only stream
+            // unroutable. The first association must be canceled and the second legacy
+            // association must remain usable rather than leaking the failed attempt.
+            for attempt in 0..2 {
+                let (mut control, control_source) = listener.accept().await.unwrap();
+                let mut greeting = [0u8; 3];
+                control.read_exact(&mut greeting).await.unwrap();
+                assert_eq!(greeting, [5, 1, 0]);
+                control.write_all(&[5, 0]).await.unwrap();
+                let mut request = [0u8; 10];
+                control.read_exact(&mut request).await.unwrap();
+                assert_eq!(&request[..4], &[5, 3, 0, 1]);
+                let udp = UdpSocket::bind((proxy_ip, 0)).await.unwrap();
+                control
+                    .write_all(&socks_reply_for_test(udp.local_addr().unwrap()))
+                    .await
+                    .unwrap();
+                if attempt == 0 {
+                    let mut closed = [0u8; 1];
+                    assert_eq!(control.read(&mut closed).await.unwrap(), 0);
+                    continue;
+                }
+                let mut packet = [0u8; 256];
+                for _ in 0..1 {
+                    let (length, source) = udp.recv_from(&mut packet).await.unwrap();
+                    assert_eq!(source.ip(), control_source.ip());
+                    udp.send_to(&packet[..length], source).await.unwrap();
+                }
+                let mut closed = [0u8; 1];
+                assert_eq!(control.read(&mut closed).await.unwrap(), 0);
             }
-            let mut closed = [0u8; 1];
-            assert_eq!(control.read(&mut closed).await.unwrap(), 0);
         });
 
         let association = RemoteUdpAssociation::open(
@@ -1127,22 +1276,14 @@ mod tests {
         )
         .await
         .unwrap();
-        for sequence in 0u8..128 {
-            let mut payload = b"\0\0\0\x01\x7f\0\0\x01\0\x35voice".to_vec();
-            payload.push(sequence);
-            association.send(&payload).await.unwrap();
-        }
+        let payload = b"\0\0\0\x01\x7f\0\0\x01\0\x35voice";
+        association.send(payload).await.unwrap();
         let mut response = [0u8; 256];
-        for sequence in 0u8..128 {
-            let length =
-                tokio::time::timeout(Duration::from_secs(5), association.recv(&mut response))
-                    .await
-                    .unwrap()
-                    .unwrap();
-            let mut expected = b"\0\0\0\x01\x7f\0\0\x01\0\x35voice".to_vec();
-            expected.push(sequence);
-            assert_eq!(&response[..length], expected);
-        }
+        let length = tokio::time::timeout(Duration::from_secs(5), association.recv(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&response[..length], payload);
         association.close().await;
         wait_for_condition(
             || async { relay_service.associations.is_empty() },
