@@ -19,7 +19,7 @@ use crate::{
     common::PeerId,
     gateway::socks5::{DataPlaneTcpListener, DataPlaneTcpStream, DataPlaneUdpSocket, Socks5Server},
     peers::peer_manager::PeerManager,
-    policy_proxy::tune_policy_udp_socket,
+    policy_proxy::{PolicyProxyCredentials, negotiate_policy_proxy_auth, tune_policy_udp_socket},
     proto::{
         peer_rpc::{
             ClosePolicyUdpRelayRequest, ClosePolicyUdpRelayResponse, OpenPolicyUdpRelayRequest,
@@ -136,10 +136,15 @@ impl MeshUdpRelayService {
             bail!("policy UDP relay only permits a SOCKS server on this peer's exact virtual IPv4");
         }
 
+        let credentials = PolicyProxyCredentials::from_wire(
+            request.proxy_username.clone(),
+            request.proxy_password.clone(),
+        )?;
         let cancel = CancellationToken::new();
         let mut reservation = self.reserve_token(source_peer_id, &cancel).await?;
         let token = reservation.token;
-        let (control, native_udp, upstream_relay) = open_local_socks_udp(proxy_addr).await?;
+        let (control, native_udp, upstream_relay) =
+            open_local_socks_udp(proxy_addr, credentials.as_ref()).await?;
         if request.stream_version >= UOT_VERSION {
             let kernel_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
                 .await
@@ -345,11 +350,18 @@ impl RemoteUdpAssociation {
         data_plane: &Socks5Server,
         dst_peer_id: PeerId,
         proxy_addr: SocketAddr,
+        credentials: Option<&PolicyProxyCredentials>,
     ) -> anyhow::Result<Self> {
         let stream_attempt = async {
-            let response =
-                request_remote_association(peer_mgr, dst_peer_id, proxy_addr, None, UOT_VERSION)
-                    .await?;
+            let response = request_remote_association(
+                peer_mgr,
+                dst_peer_id,
+                proxy_addr,
+                None,
+                UOT_VERSION,
+                credentials,
+            )
+            .await?;
             let token = AssociationToken::try_from(response.token.as_slice())
                 .map_err(|_| anyhow::anyhow!("policy UoT relay returned an invalid token"))?;
             let result = async {
@@ -403,8 +415,14 @@ impl RemoteUdpAssociation {
             Ok(stream) => stream,
             Err(error) => {
                 tracing::debug!(%dst_peer_id, %error, "policy UoT unavailable; falling back to legacy datagram relay");
-                open_legacy_remote_association(peer_mgr, data_plane, dst_peer_id, proxy_addr)
-                    .await?
+                open_legacy_remote_association(
+                    peer_mgr,
+                    data_plane,
+                    dst_peer_id,
+                    proxy_addr,
+                    credentials,
+                )
+                .await?
             }
         };
         let association = Self {
@@ -503,7 +521,11 @@ async fn request_remote_association(
     proxy_addr: SocketAddr,
     origin_addr: Option<SocketAddr>,
     stream_version: u32,
+    credentials: Option<&PolicyProxyCredentials>,
 ) -> anyhow::Result<OpenPolicyUdpRelayResponse> {
+    let (proxy_username, proxy_password) = credentials
+        .map(|credentials| (credentials.username.clone(), credentials.password.clone()))
+        .unwrap_or_default();
     let client = peer_mgr
         .get_peer_rpc_mgr()
         .rpc_client()
@@ -521,6 +543,8 @@ async fn request_remote_association(
                 proxy_addr: Some(proxy_addr.into()),
                 origin_addr: origin_addr.map(Into::into),
                 stream_version,
+                proxy_username,
+                proxy_password,
             },
         ),
     )
@@ -534,6 +558,7 @@ async fn open_legacy_remote_association(
     data_plane: &Socks5Server,
     dst_peer_id: PeerId,
     proxy_addr: SocketAddr,
+    credentials: Option<&PolicyProxyCredentials>,
 ) -> anyhow::Result<(AssociationToken, RemoteUdpTransport)> {
     let mesh_udp = data_plane
         .data_plane_udp_bind(0, SETUP_TIMEOUT)
@@ -545,6 +570,7 @@ async fn open_legacy_remote_association(
         proxy_addr,
         Some(mesh_udp.local_addr()),
         0,
+        credentials,
     )
     .await?;
     let token = AssociationToken::try_from(response.token.as_slice())
@@ -627,6 +653,7 @@ async fn peer_virtual_ipv4(peer_mgr: &PeerManager, peer_id: PeerId) -> Option<Ip
 
 async fn open_local_socks_udp(
     proxy_addr: SocketAddr,
+    credentials: Option<&PolicyProxyCredentials>,
 ) -> anyhow::Result<(TcpStream, UdpSocket, SocketAddr)> {
     let socket = match proxy_addr {
         SocketAddr::V4(_) => TcpSocket::new_v4()?,
@@ -636,12 +663,7 @@ async fn open_local_socks_udp(
         .await
         .context("local SOCKS TCP connect timed out")??;
     control.set_nodelay(true)?;
-    control.write_all(&[5, 1, 0]).await?;
-    let mut greeting = [0u8; 2];
-    control.read_exact(&mut greeting).await?;
-    if greeting != [5, 0] {
-        bail!("local SOCKS server does not permit no-authentication mode");
-    }
+    negotiate_policy_proxy_auth(&mut control, credentials).await?;
 
     let local_ip = control.local_addr()?.ip();
     let native_udp = UdpSocket::bind(SocketAddr::new(local_ip, 0)).await?;
@@ -1292,6 +1314,7 @@ mod tests {
             &data_plane_a,
             peer_b.my_peer_id(),
             SocketAddr::new(IpAddr::V4(ip_b.address()), proxy_port),
+            None,
         )
         .await
         .unwrap();

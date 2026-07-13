@@ -34,7 +34,7 @@ build ID, DWARF metadata, and unstripped symbol table before deployment.
 | Scenario | Result |
 | --- | --- |
 | Initial route/rule install | Pass |
-| Graceful stop cleanup | Regressed in `7a8255f5`; capture routes were removed, but rules 10899/10900 and owned table-52000 routes survived process exit |
+| Graceful stop cleanup | Pass in exact `5502cd28`; core and Leaf exited and all owned rules, routes, TUN state, and temporary config disappeared |
 | Core SIGKILL | Pass; worker exited through parent-death handling; stale owned state was cleaned on restart |
 | Worker SIGKILL | Pass; supervised restart in about 3 seconds |
 | Second policy process | Pass; rejected with `policy routing is owned by another process` without changing the first instance |
@@ -53,8 +53,13 @@ aborted the task, but did not guarantee that its future was dropped before the
 policy context needed to release the guard. The follow-up makes
 `PolicyNicContext` the only strong owner and gives the updater a `Weak`
 reference. Restart cleanup already removed this stale owned state, so the bug
-did not redirect a later instance, but graceful cleanup must pass again before
-qualification.
+did not redirect a later instance. The exact `5502cd28` follow-up was checked
+against both SHA-256 manifests, `BUILD_INFO.txt`, commit SHA, musl target, ELF
+build IDs, DWARF sections, and symbols before deployment. With an active policy
+UoT association, SIGTERM removed both policy rules, every protocol-99 route in
+table 52000 and the main table, both split-default routes, the TUN device, the
+Leaf child, and its temporary configuration. This closes the graceful-cleanup
+regression.
 
 ### Data plane
 
@@ -85,6 +90,14 @@ actor terminated the affected policy session without a CPU/retry storm;
 restarting it allowed the next UDP association to recover without restarting
 EasyTier. Killing the Leaf worker left mesh ICMP intact, and the supervisor
 restored policy UDP about two seconds later.
+
+The exact `5502cd28` cleanup follow-up repeated the data-plane baseline before
+termination. Mesh ICMP delivered 3/3 packets at about 0.77 ms. Policy TCP over
+the mesh SOCKS actor sustained 485 Mbit/s for five seconds with zero
+retransmissions. Policy UDP delivered 4,641/4,641 datagrams at 10 Mbit/s with
+zero loss and 0.248 ms jitter; the destination RPC table showed the private UoT
+stream as `Connected / Kcp`. These checks ensure that the ownership fix did not
+obtain clean shutdown by disabling the policy, mesh, or KCP data path.
 
 Magic DNS validation above proves that its mesh record path remains intact. It
 does not prove that Leaf domain/geosite matching and Magic DNS can operate on

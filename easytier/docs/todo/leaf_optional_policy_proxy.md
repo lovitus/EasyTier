@@ -117,11 +117,15 @@ final cross-platform design below:
   improving the reliable mesh path; one complete frame per write is the
   validated latency/throughput boundary;
 
-Not yet implemented in this spike: policy file hot reload, proxy credentials
-for the remote/native actor, HTTP CONNECT actor adaptation, a bundled exit-node
-SOCKS5 UDP service, instance-netns worker ownership, and desktop non-Linux TUN
-adapters. TOML/RPC/GUI envelopes and the Android single-TUN adapter are now
-implemented candidates pending packaged-build and real-device validation.
+Not yet implemented in this spike: policy file hot reload, HTTP CONNECT actor
+adaptation, a bundled exit-node SOCKS5 UDP service, instance-netns worker
+ownership, and desktop non-Linux TUN adapters. Proxy credentials for native and
+mesh SOCKS actors are now an implementation candidate: native actors emit the
+validated credentials into the private Leaf configuration, while mesh TCP and
+UDP paths perform RFC 1929 authentication at the destination actor. Empty RPC
+fields preserve the existing no-authentication wire behavior. TOML/RPC/GUI
+envelopes and the Android single-TUN adapter are also implemented candidates
+pending packaged-build and real-device validation.
 These are release blockers for claiming the full plan, but they do not affect
 ordinary EasyTier builds because the feature is off by default.
 

@@ -75,6 +75,10 @@ function syncVpnStatusFromNative(status: Awaited<ReturnType<typeof get_vpn_statu
 async function waitVpnStatus(target_status: boolean, timeout_sec: number) {
   const start_time = Date.now()
   while (curVpnStatus.running !== target_status) {
+    syncVpnStatusFromNative(await get_vpn_status())
+    if (curVpnStatus.running === target_status) {
+      return
+    }
     if (Date.now() - start_time > timeout_sec * 1000) {
       throw new Error('wait vpn status timeout')
     }
@@ -158,7 +162,7 @@ async function startVpnWithRetry(ipv4Addr: string, cidr: number, routes: string[
 async function onVpnServiceStart(payload: any) {
   console.log('vpn service start', JSON.stringify(payload))
   curVpnStatus.running = true
-  if (payload.fd) {
+  if (Number.isInteger(payload?.fd) && payload.fd >= 0) {
     await setTunFd(payload.fd, payload.dnsServers ?? [], payload.networkKey ?? '').catch((e) => {
       console.error('set tun fd failed', e)
       void doStopVpn(true).catch(stopError => console.error('stop vpn after tun setup failure', stopError))

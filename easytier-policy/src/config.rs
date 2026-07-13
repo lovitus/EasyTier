@@ -127,6 +127,16 @@ pub struct Proxy {
     pub via: ProxyVia,
     #[serde(default)]
     pub udp: bool,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+impl Proxy {
+    pub fn credentials(&self) -> Option<(&str, &str)> {
+        self.username.as_deref().zip(self.password.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,6 +379,24 @@ impl PolicyDocument {
                 }
                 _ => {}
             }
+            match (&proxy.username, &proxy.password) {
+                (None, None) => {}
+                (Some(username), Some(password))
+                    if valid_proxy_credential(username) && valid_proxy_credential(password) => {}
+                (Some(_), Some(_)) => {
+                    return Err(PolicyError::InvalidServer {
+                        name: name.clone(),
+                        reason: "username/password must be 1..=128 safe ASCII characters"
+                            .to_owned(),
+                    });
+                }
+                _ => {
+                    return Err(PolicyError::InvalidServer {
+                        name: name.clone(),
+                        reason: "username and password must be configured together".to_owned(),
+                    });
+                }
+            }
             if proxy.kind == ProxyKind::Http && proxy.udp {
                 return Err(PolicyError::InvalidServer {
                     name: name.clone(),
@@ -582,6 +610,14 @@ impl PolicyDocument {
     }
 }
 
+fn valid_proxy_credential(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b',' | b'=' | b'#' | b';'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +694,37 @@ rules: ["NETWORK,udp,tcp-only"]
             PolicyRevision::parse(source, Path::new(".")),
             Err(PolicyError::UdpUnsupported(_))
         ));
+    }
+
+    #[test]
+    fn validates_proxy_credentials_as_an_atomic_safe_pair() {
+        let valid = r#"
+version: 1
+proxies:
+  authenticated:
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    username: alice
+    password: secret
+rules: ["FINAL,authenticated"]
+"#;
+        let revision = PolicyRevision::parse(valid, Path::new(".")).unwrap();
+        assert_eq!(
+            revision.document.proxies["authenticated"].credentials(),
+            Some(("alice", "secret"))
+        );
+
+        for invalid in [
+            valid.replace("    password: secret\n", ""),
+            valid.replace("alice", "bad,name"),
+            valid.replace("secret", "\"\""),
+        ] {
+            assert!(matches!(
+                PolicyRevision::parse(invalid, Path::new(".")),
+                Err(PolicyError::InvalidServer { .. })
+            ));
+        }
     }
 
     #[test]

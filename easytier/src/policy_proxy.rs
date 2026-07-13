@@ -8,7 +8,10 @@ use std::{
 
 use anyhow::Context as _;
 use easytier_policy::PolicyRevision;
-use tokio::net::UdpSocket;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::UdpSocket,
+};
 
 use crate::common::config::{ConfigLoader, PolicyProxyConfig};
 
@@ -24,6 +27,135 @@ pub(crate) use policy_routing::PolicyRoutingGuard;
 
 pub(crate) const POLICY_SOCKET_MARK: u32 = 0x4554_5001;
 const POLICY_UDP_SOCKET_BUFFER_SIZE: usize = 4 * 1_024 * 1_024;
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PolicyProxyCredentials {
+    pub(crate) username: String,
+    pub(crate) password: String,
+}
+
+impl PolicyProxyCredentials {
+    pub(crate) fn from_proxy(proxy: &easytier_policy::Proxy) -> Option<Self> {
+        proxy.credentials().map(|(username, password)| Self {
+            username: username.to_owned(),
+            password: password.to_owned(),
+        })
+    }
+
+    pub(crate) fn from_wire(username: String, password: String) -> anyhow::Result<Option<Self>> {
+        if username.is_empty() && password.is_empty() {
+            return Ok(None);
+        }
+        if !valid_policy_proxy_credential(&username) || !valid_policy_proxy_credential(&password) {
+            anyhow::bail!(
+                "policy proxy username and password must both contain 1..=128 safe ASCII characters"
+            );
+        }
+        Ok(Some(Self { username, password }))
+    }
+
+    fn authentication_request(&self) -> Vec<u8> {
+        let username = self.username.as_bytes();
+        let password = self.password.as_bytes();
+        let mut request = Vec::with_capacity(3 + username.len() + password.len());
+        request.extend_from_slice(&[1, username.len() as u8]);
+        request.extend_from_slice(username);
+        request.push(password.len() as u8);
+        request.extend_from_slice(password);
+        request
+    }
+}
+
+fn valid_policy_proxy_credential(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b',' | b'=' | b'#' | b';'))
+}
+
+pub(crate) async fn negotiate_policy_proxy_auth<S>(
+    stream: &mut S,
+    credentials: Option<&PolicyProxyCredentials>,
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let expected_method = if credentials.is_some() { 2 } else { 0 };
+    stream.write_all(&[5, 1, expected_method]).await?;
+    let mut method = [0u8; 2];
+    stream.read_exact(&mut method).await?;
+    if method != [5, expected_method] {
+        anyhow::bail!("SOCKS server rejected the configured authentication method");
+    }
+    if let Some(credentials) = credentials {
+        stream
+            .write_all(&credentials.authentication_request())
+            .await?;
+        let mut reply = [0u8; 2];
+        stream.read_exact(&mut reply).await?;
+        if reply != [1, 0] {
+            anyhow::bail!("SOCKS username/password authentication failed");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn wire_credentials_preserve_legacy_empty_fields_and_reject_partial_values() {
+        assert!(
+            PolicyProxyCredentials::from_wire(String::new(), String::new())
+                .unwrap()
+                .is_none()
+        );
+        assert!(PolicyProxyCredentials::from_wire("user".to_owned(), String::new()).is_err());
+        assert!(
+            PolicyProxyCredentials::from_wire("bad,name".to_owned(), "secret".to_owned()).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn negotiates_legacy_no_authentication() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let server = tokio::spawn(async move {
+            let mut greeting = [0u8; 3];
+            server.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            server.write_all(&[5, 0]).await.unwrap();
+        });
+        negotiate_policy_proxy_auth(&mut client, None)
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn negotiates_rfc1929_username_and_password() {
+        let credentials = PolicyProxyCredentials {
+            username: "alice".to_owned(),
+            password: "secret".to_owned(),
+        };
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let server = tokio::spawn(async move {
+            let mut greeting = [0u8; 3];
+            server.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 2]);
+            server.write_all(&[5, 2]).await.unwrap();
+            let mut authentication = [0u8; 14];
+            server.read_exact(&mut authentication).await.unwrap();
+            assert_eq!(authentication, *b"\x01\x05alice\x06secret");
+            server.write_all(&[1, 0]).await.unwrap();
+        });
+        negotiate_policy_proxy_auth(&mut client, Some(&credentials))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+}
 
 pub(crate) fn tune_policy_udp_socket(socket: &UdpSocket) {
     let socket = socket2::SockRef::from(socket);

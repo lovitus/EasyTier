@@ -14,8 +14,8 @@ mod packet;
 mod supervisor;
 
 pub use config::{
-    ChainKind, PolicyDocument, PolicyError, PolicyMode, PolicyRevision, ProxyKind, ProxyServer,
-    ProxyVia, RuleSetKind, validate_policy_file,
+    ChainKind, PolicyDocument, PolicyError, PolicyMode, PolicyRevision, Proxy, ProxyKind,
+    ProxyServer, ProxyVia, RuleSetKind, validate_policy_file,
 };
 #[cfg(all(unix, feature = "leaf-inprocess"))]
 pub use inprocess::{InProcessLeafFactory, InProcessLeafRuntime};

@@ -18,7 +18,10 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     gateway::socks5::{DataPlaneTcpStream, Socks5Server},
     peers::peer_manager::PeerManager,
-    policy_proxy::{RemoteUdpAssociation, tune_policy_udp_socket},
+    policy_proxy::{
+        PolicyProxyCredentials, RemoteUdpAssociation, negotiate_policy_proxy_auth,
+        tune_policy_udp_socket,
+    },
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -143,11 +146,18 @@ impl MeshProxyBridgeSet {
             );
             let remote = Arc::new(RemoteSlot::new(remote));
             remotes.insert(name.clone(), remote.clone());
-            pending.push((name.clone(), proxy.udp, password, remote, listener));
+            pending.push((
+                name.clone(),
+                proxy.udp,
+                password,
+                PolicyProxyCredentials::from_proxy(proxy),
+                remote,
+                listener,
+            ));
         }
 
         let mut listeners = Vec::with_capacity(pending.len());
-        for (name, udp_enabled, password, remote, listener) in pending {
+        for (name, udp_enabled, password, credentials, remote, listener) in pending {
             let data_plane = data_plane.clone();
             let peer_mgr = peer_mgr.clone();
             let listener_cancel = cancel.child_token();
@@ -161,6 +171,7 @@ impl MeshProxyBridgeSet {
                     remote,
                     udp_enabled,
                     password,
+                    credentials,
                     permits,
                     rate_limit,
                     listener_cancel,
@@ -227,6 +238,7 @@ async fn run_listener(
     remote: Arc<RemoteSlot>,
     udp_enabled: bool,
     password: String,
+    credentials: Option<PolicyProxyCredentials>,
     permits: Arc<Semaphore>,
     rate_limit: Arc<Mutex<SessionRateLimit>>,
     cancel: CancellationToken,
@@ -271,6 +283,7 @@ async fn run_listener(
                 let peer_mgr = peer_mgr.clone();
                 let session_name = name.clone();
                 let password = password.clone();
+                let credentials = credentials.clone();
                 let Some((remote, generation)) = remote.snapshot() else {
                     rejected_for_limit = rejected_for_limit.saturating_add(1);
                     if rejected_for_limit.is_power_of_two() {
@@ -288,6 +301,7 @@ async fn run_listener(
                         remote,
                         udp_enabled,
                         &password,
+                        credentials.as_ref(),
                         generation,
                     )
                     .await;
@@ -320,6 +334,7 @@ async fn relay_socks5(
     remote: MeshProxyTarget,
     udp_enabled: bool,
     password: &str,
+    credentials: Option<&PolicyProxyCredentials>,
     generation: CancellationToken,
 ) -> anyhow::Result<()> {
     let command = tokio::select! {
@@ -334,7 +349,7 @@ async fn relay_socks5(
     match command {
         1 => {
             let mut upstream = connect_remote(&data_plane, remote.endpoint).await?;
-            negotiate_upstream_no_auth(&mut upstream).await?;
+            negotiate_policy_proxy_auth(&mut upstream, credentials).await?;
             relay_socks_connect_command(&mut client, &mut upstream, request).await?;
             tokio::select! {
                 _ = generation.cancelled() => {}
@@ -344,9 +359,14 @@ async fn relay_socks5(
             }
         }
         3 => {
-            let association =
-                RemoteUdpAssociation::open(&peer_mgr, &data_plane, remote.peer_id, remote.endpoint)
-                    .await?;
+            let association = RemoteUdpAssociation::open(
+                &peer_mgr,
+                &data_plane,
+                remote.peer_id,
+                remote.endpoint,
+                credentials,
+            )
+            .await?;
             relay_socks_udp(client, client_addr.ip(), association, generation).await?;
         }
         _ => unreachable!("SOCKS command was validated before dispatch"),
@@ -381,15 +401,6 @@ where
         .await?;
     if !authenticated {
         anyhow::bail!("local mesh bridge authentication failed");
-    }
-    Ok(())
-}
-
-async fn negotiate_upstream_no_auth(upstream: &mut DataPlaneTcpStream) -> anyhow::Result<()> {
-    upstream.write_all(&[5, 1, 0]).await?;
-    let method = read_exact_vec(upstream, 2).await?;
-    if method != [5, 0] {
-        anyhow::bail!("upstream mesh SOCKS server does not permit no-authentication mode");
     }
     Ok(())
 }

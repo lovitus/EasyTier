@@ -92,7 +92,13 @@ pub fn compile_leaf_config(
     writeln!(output, "REJECT = drop").unwrap();
     for (name, proxy) in &document.proxies {
         let (address, port, credentials) = match &proxy.server {
-            ProxyServer::Address(address) => (address.clone(), proxy.port, None),
+            ProxyServer::Address(address) => (
+                address.clone(),
+                proxy.port,
+                proxy
+                    .credentials()
+                    .map(|(username, password)| (username.to_owned(), password.to_owned())),
+            ),
             ProxyServer::Mesh {
                 instance_id,
                 virtual_ip,
@@ -284,6 +290,8 @@ proxies:
     server: 127.0.0.1
     port: 1080
     udp: true
+    username: alice
+    password: secret
 groups:
   final:
     type: fallback
@@ -305,6 +313,9 @@ rules:
         assert!(config.contains("tun-fd = 7"));
         assert!(config.contains("always-fake-ip = *"));
         assert!(config.contains("dns-server = direct:1.1.1.1"));
+        assert!(
+            config.contains("native = socks, 127.0.0.1, 1080, username=alice, password=secret")
+        );
         assert!(config.contains("final = fallback, native, DIRECT, health-check=false"));
         assert!(config.contains(&format!(
             "EXTERNAL, site:{}/site.dat:cn, DIRECT",

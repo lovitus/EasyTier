@@ -76,13 +76,12 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread {
             println("start vpn in plugin, args: $args")
 
-            TauriVpnService.self?.prepareForRestart()
-
             val it = VpnService.prepare(activity)
             val ret = JSObject()
             if (it != null) {
                 ret.put("errorMsg", "need_prepare")
             } else {
+                TauriVpnService.self?.prepareForRestart()
                 val intent = Intent(activity, TauriVpnService::class.java)
                 intent.putExtra(TauriVpnService.IPV4_ADDR, args.ipv4Addr)
                 intent.putExtra(TauriVpnService.ROUTES, args.routes)
@@ -110,7 +109,7 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun getVpnStatus(invoke: Invoke) {
         val ret = JSObject()
-        ret.put("running", TauriVpnService.self != null)
+        ret.put("running", TauriVpnService.self?.isRunning() == true)
         ret.put("ipv4Addr", TauriVpnService.ipv4Addr)
         ret.put("routes", TauriVpnService.routes)
         ret.put("dns", TauriVpnService.dns)

@@ -34,7 +34,7 @@ class TauriVpnService : VpnService() {
         const val NETWORK_CHANGE_DEBOUNCE_MS = 2_000L
     }
 
-    private lateinit var vpnInterface: ParcelFileDescriptor
+    private var vpnInterface: ParcelFileDescriptor? = null
     private var lastUnderlyingDnsServers: Array<String> = emptyArray()
     private var lastUnderlyingNetworkKey: String = ""
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -55,7 +55,7 @@ class TauriVpnService : VpnService() {
     )
 
     private fun notifyNetworkState(networkKey: String, dnsServers: Array<String>) {
-        if (self != this || !this::vpnInterface.isInitialized) return
+        if (self != this || vpnInterface == null) return
         val data = JSObject()
         data.put("networkKey", networkKey)
         data.put("dnsServers", dnsServers)
@@ -129,22 +129,26 @@ class TauriVpnService : VpnService() {
         }
         // Android may reuse the Service after the plugin manually calls onRevoke().
         self = this
+        if (vpnInterface != null) {
+            disconnect()
+        }
         println("vpn on start command ${intent?.getExtras()} $intent")
         var args = intent?.getExtras()
         ipv4Addr = args?.getString(IPV4_ADDR)
         routes = args?.getStringArray(ROUTES) ?: emptyArray()
         dns = args?.getString(DNS)
 
-        vpnInterface = createVpnInterface(args)
-        println("vpn created ${vpnInterface.fd}")
+        val newVpnInterface = createVpnInterface(args)
+        vpnInterface = newVpnInterface
+        println("vpn created ${newVpnInterface.fd}")
 
         var event_data = JSObject()
-        event_data.put("fd", vpnInterface.fd)
+        event_data.put("fd", newVpnInterface.fd)
         event_data.put("dnsServers", lastUnderlyingDnsServers)
         event_data.put("networkKey", lastUnderlyingNetworkKey)
         triggerCallback("vpn_service_start", event_data)
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onCreate() {
@@ -177,12 +181,19 @@ class TauriVpnService : VpnService() {
     }
 
     private fun disconnect() {
-        if (self == this && this::vpnInterface.isInitialized) {
+        val activeInterface = vpnInterface
+        vpnInterface = null
+        if (self == this && activeInterface != null) {
             triggerCallback("vpn_service_stop", JSObject())
-            vpnInterface.close()
         }
-        clearStatus()
+        try {
+            activeInterface?.close()
+        } finally {
+            clearStatus()
+        }
     }
+
+    fun isRunning(): Boolean = self == this && vpnInterface != null
 
     private fun clearStatus() {
         ipv4Addr = null

@@ -352,6 +352,10 @@ message OpenPolicyUdpRelayRequest {
   // Version 2 requests a reliable UoT v2 stream. Older destinations ignore
   // this field and keep returning the datagram relay endpoint.
   uint32 stream_version = 4;
+  // Optional RFC 1929 credentials for the destination peer's SOCKS actor.
+  // Both fields are empty for the existing no-authentication behavior.
+  string proxy_username = 5;
+  string proxy_password = 6;
 }
 
 message OpenPolicyUdpRelayResponse {
