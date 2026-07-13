@@ -10,14 +10,14 @@ use std::{
 use anyhow::{Context as _, bail};
 use dashmap::DashMap;
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _, ReadHalf, WriteHalf},
-    net::{TcpListener, TcpSocket, TcpStream, UdpSocket},
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    net::{TcpSocket, TcpStream, UdpSocket},
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::PeerId,
-    gateway::socks5::{DataPlaneTcpStream, DataPlaneUdpSocket, Socks5Server},
+    gateway::socks5::{DataPlaneUdpSocket, Socks5Server},
     peers::peer_manager::PeerManager,
     proto::{
         peer_rpc::{
@@ -41,11 +41,6 @@ const FRAME_VERSION: u8 = 1;
 const TOKEN_LEN: usize = 16;
 const FRAME_HEADER_LEN: usize = 1 + TOKEN_LEN;
 const MAX_DATAGRAM_SIZE: usize = u16::MAX as usize;
-const UOT_VERSION: u32 = 2;
-const UOT_READY: u8 = 0;
-const UOT_CONNECT: u8 = 1;
-const UOT_IPV4: u8 = 1;
-const UOT_IPV6: u8 = 4;
 
 pub(crate) type AssociationToken = [u8; TOKEN_LEN];
 
@@ -125,6 +120,13 @@ impl MeshUdpRelayService {
             .proxy_addr
             .context("policy UDP relay request has no proxy address")?
             .into();
+        let origin_addr: SocketAddr = request
+            .origin_addr
+            .context("policy UDP relay request has no origin endpoint")?
+            .into();
+        if origin_addr.ip() != IpAddr::V4(source_ip) || origin_addr.port() == 0 {
+            bail!("policy UDP relay origin endpoint does not match the requesting peer");
+        }
         let local_virtual_ip = peer_mgr
             .get_global_ctx()
             .get_ipv4()
@@ -137,53 +139,17 @@ impl MeshUdpRelayService {
         let cancel = CancellationToken::new();
         let mut reservation = self.reserve_token(source_peer_id, &cancel).await?;
         let token = reservation.token;
-        let (control, native_udp, upstream_relay) = open_local_socks_udp(proxy_addr).await?;
-        if request.stream_version >= UOT_VERSION {
-            let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
-                .await
-                .context("failed to bind private policy UoT listener")?;
-            let stream_addr =
-                SocketAddr::new(IpAddr::V4(local_virtual_ip), listener.local_addr()?.port());
-            let associations = self.associations.clone();
-            tokio::spawn(async move {
-                run_stream_association(
-                    token,
-                    source_ip,
-                    listener,
-                    control,
-                    native_udp,
-                    upstream_relay,
-                    cancel,
-                )
-                .await;
-                associations.remove(&token);
-            });
-            reservation.disarm();
-            return Ok(OpenPolicyUdpRelayResponse {
-                token: token.to_vec(),
-                relay_addr: None,
-                stream_addr: Some(stream_addr.into()),
-                stream_destination: Some(upstream_relay.into()),
-            });
-        }
-
-        let origin_addr: SocketAddr = request
-            .origin_addr
-            .context("legacy policy UDP relay request has no origin endpoint")?
-            .into();
-        if origin_addr.ip() != IpAddr::V4(source_ip) || origin_addr.port() == 0 {
-            bail!("policy UDP relay origin endpoint does not match the requesting peer");
-        }
         let setup = async {
+            let (control, native_udp, upstream_relay) = open_local_socks_udp(proxy_addr).await?;
             let mesh_udp = self
                 .data_plane
                 .data_plane_udp_bind(0, SETUP_TIMEOUT)
                 .await
                 .context("failed to bind mesh UDP association socket")?;
-            Ok::<_, anyhow::Error>(mesh_udp)
+            Ok::<_, anyhow::Error>((control, native_udp, upstream_relay, mesh_udp))
         }
         .await;
-        let mesh_udp = match setup {
+        let (control, native_udp, upstream_relay, mesh_udp) = match setup {
             Ok(setup) => setup,
             Err(error) => return Err(error),
         };
@@ -215,8 +181,6 @@ impl MeshUdpRelayService {
         Ok(OpenPolicyUdpRelayResponse {
             token: token.to_vec(),
             relay_addr: Some(relay_addr.into()),
-            stream_addr: None,
-            stream_destination: None,
         })
     }
 
@@ -305,151 +269,77 @@ impl PolicyUdpRelayRpc for MeshUdpRelayService {
 
 pub(crate) struct RemoteUdpAssociation {
     pub(crate) token: AssociationToken,
-    transport: RemoteUdpTransport,
+    pub(crate) relay_addr: SocketAddr,
     dst_peer_id: PeerId,
     peer_mgr: Weak<PeerManager>,
     closed: AtomicBool,
 }
 
-enum RemoteUdpTransport {
-    Datagram {
-        socket: DataPlaneUdpSocket,
-        relay_addr: SocketAddr,
-        receive_buffer: tokio::sync::Mutex<Vec<u8>>,
-    },
-    Stream {
-        reader: tokio::sync::Mutex<ReadHalf<DataPlaneTcpStream>>,
-        writer: tokio::sync::Mutex<WriteHalf<DataPlaneTcpStream>>,
-    },
-}
-
 impl RemoteUdpAssociation {
     pub(crate) async fn open(
         peer_mgr: &Arc<PeerManager>,
-        data_plane: &Socks5Server,
         dst_peer_id: PeerId,
         proxy_addr: SocketAddr,
+        mesh_udp: &DataPlaneUdpSocket,
     ) -> anyhow::Result<Self> {
-        let stream_attempt = async {
-            let response =
-                request_remote_association(peer_mgr, dst_peer_id, proxy_addr, None, UOT_VERSION)
-                    .await?;
-            let token = AssociationToken::try_from(response.token.as_slice())
-                .map_err(|_| anyhow::anyhow!("policy UoT relay returned an invalid token"))?;
-            let result = async {
-                let stream_addr: SocketAddr = response
-                    .stream_addr
-                    .context("destination does not support policy UoT v2")?
-                    .into();
-                let destination: SocketAddr = response
-                    .stream_destination
-                    .context("policy UoT relay returned no destination")?
-                    .into();
-                let mut stream = data_plane
-                    .data_plane_tcp_connect_mesh_only(stream_addr, SETUP_TIMEOUT)
-                    .await
-                    .context("failed to connect private policy UoT stream")?;
-                stream.write_all(&token).await?;
-                stream
-                    .write_all(&encode_uot_connect_request(destination))
-                    .await?;
-                stream.flush().await?;
-                let ready = tokio::time::timeout(SETUP_TIMEOUT, stream.read_u8())
-                    .await
-                    .context("policy UoT readiness timed out")??;
-                if ready != UOT_READY {
-                    bail!("policy UoT relay returned an invalid readiness byte");
-                }
-                let (reader, writer) = tokio::io::split(stream);
-                Ok::<_, anyhow::Error>((
-                    token,
-                    RemoteUdpTransport::Stream {
-                        reader: tokio::sync::Mutex::new(reader),
-                        writer: tokio::sync::Mutex::new(writer),
-                    },
-                ))
-            }
-            .await;
-            if result.is_err() {
-                close_remote_association(Arc::downgrade(peer_mgr), dst_peer_id, token).await;
-            }
-            result
-        }
-        .await;
-
-        let (token, transport) = match stream_attempt {
-            Ok(stream) => stream,
-            Err(error) => {
-                tracing::debug!(%dst_peer_id, %error, "policy UoT unavailable; falling back to legacy datagram relay");
-                open_legacy_remote_association(peer_mgr, data_plane, dst_peer_id, proxy_addr)
-                    .await?
-            }
-        };
+        let origin_addr = mesh_udp.local_addr();
+        let client = peer_mgr
+            .get_peer_rpc_mgr()
+            .rpc_client()
+            .scoped_client::<PolicyUdpRelayRpcClientFactory<RpcController>>(
+                peer_mgr.my_peer_id(),
+                dst_peer_id,
+                peer_mgr.get_global_ctx().get_network_name(),
+            );
+        let response = tokio::time::timeout(
+            SETUP_TIMEOUT,
+            client.open_policy_udp_relay(
+                RpcController::default(),
+                OpenPolicyUdpRelayRequest {
+                    source_peer_id: peer_mgr.my_peer_id(),
+                    proxy_addr: Some(proxy_addr.into()),
+                    origin_addr: Some(origin_addr.into()),
+                },
+            ),
+        )
+        .await
+        .context("policy UDP relay RPC timed out")??;
+        let token = AssociationToken::try_from(response.token.as_slice())
+            .map_err(|_| anyhow::anyhow!("policy UDP relay returned an invalid token"))?;
+        let relay_addr = response
+            .relay_addr
+            .context("policy UDP relay returned no endpoint")?
+            .into();
         let association = Self {
             token,
-            transport,
+            relay_addr,
             dst_peer_id,
             peer_mgr: Arc::downgrade(peer_mgr),
             closed: AtomicBool::new(false),
         };
+        let challenge = encode_relay_frame(&association.token, &[])
+            .expect("an empty policy relay challenge always fits");
+        mesh_udp
+            .send_to(&challenge, association.relay_addr)
+            .await
+            .context("failed to prime local policy UDP relay route")?;
+        let readiness = tokio::time::timeout(SETUP_TIMEOUT, async {
+            let mut ready = [0u8; FRAME_HEADER_LEN + 1];
+            loop {
+                let (length, source) = mesh_udp.recv_from(&mut ready).await?;
+                if source == association.relay_addr
+                    && decode_relay_frame(&association.token, &ready[..length]) == Some(&[][..])
+                {
+                    return Ok::<_, std::io::Error>(());
+                }
+            }
+        })
+        .await;
+        if !matches!(readiness, Ok(Ok(()))) {
+            association.close().await;
+            bail!("policy UDP relay returned an invalid readiness frame");
+        }
         Ok(association)
-    }
-
-    pub(crate) async fn send(&self, payload: &[u8]) -> anyhow::Result<()> {
-        if payload.len() > MAX_DATAGRAM_SIZE {
-            bail!("policy UDP payload exceeds UoT frame limit");
-        }
-        match &self.transport {
-            RemoteUdpTransport::Datagram {
-                socket, relay_addr, ..
-            } => {
-                let Some(frame) = encode_relay_frame(&self.token, payload) else {
-                    bail!("policy UDP payload exceeds datagram relay limit");
-                };
-                socket.send_to(&frame, *relay_addr).await?;
-            }
-            RemoteUdpTransport::Stream { writer, .. } => {
-                let mut writer = writer.lock().await;
-                writer
-                    .write_all(&(payload.len() as u16).to_be_bytes())
-                    .await?;
-                writer.write_all(payload).await?;
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn recv(&self, payload: &mut [u8]) -> anyhow::Result<usize> {
-        match &self.transport {
-            RemoteUdpTransport::Datagram {
-                socket,
-                relay_addr,
-                receive_buffer,
-            } => loop {
-                let mut frame = receive_buffer.lock().await;
-                let (length, source) = socket.recv_from(&mut frame).await?;
-                if source != *relay_addr {
-                    continue;
-                }
-                let Some(decoded) = decode_relay_frame(&self.token, &frame[..length]) else {
-                    continue;
-                };
-                if decoded.len() > payload.len() {
-                    bail!("policy UDP receive buffer is too small");
-                }
-                payload[..decoded.len()].copy_from_slice(decoded);
-                return Ok(decoded.len());
-            },
-            RemoteUdpTransport::Stream { reader, .. } => {
-                let mut reader = reader.lock().await;
-                let length = reader.read_u16().await? as usize;
-                if length > payload.len() {
-                    bail!("policy UoT receive buffer is too small");
-                }
-                reader.read_exact(&mut payload[..length]).await?;
-                Ok(length)
-            }
-        }
     }
 
     pub(crate) async fn close(&self) {
@@ -472,95 +362,6 @@ impl Drop for RemoteUdpAssociation {
             runtime.spawn(close_remote_association(peer_mgr, dst_peer_id, token));
         }
     }
-}
-
-async fn request_remote_association(
-    peer_mgr: &Arc<PeerManager>,
-    dst_peer_id: PeerId,
-    proxy_addr: SocketAddr,
-    origin_addr: Option<SocketAddr>,
-    stream_version: u32,
-) -> anyhow::Result<OpenPolicyUdpRelayResponse> {
-    let client = peer_mgr
-        .get_peer_rpc_mgr()
-        .rpc_client()
-        .scoped_client::<PolicyUdpRelayRpcClientFactory<RpcController>>(
-            peer_mgr.my_peer_id(),
-            dst_peer_id,
-            peer_mgr.get_global_ctx().get_network_name(),
-        );
-    tokio::time::timeout(
-        SETUP_TIMEOUT,
-        client.open_policy_udp_relay(
-            RpcController::default(),
-            OpenPolicyUdpRelayRequest {
-                source_peer_id: peer_mgr.my_peer_id(),
-                proxy_addr: Some(proxy_addr.into()),
-                origin_addr: origin_addr.map(Into::into),
-                stream_version,
-            },
-        ),
-    )
-    .await
-    .context("policy UDP relay RPC timed out")?
-    .map_err(anyhow::Error::from)
-}
-
-async fn open_legacy_remote_association(
-    peer_mgr: &Arc<PeerManager>,
-    data_plane: &Socks5Server,
-    dst_peer_id: PeerId,
-    proxy_addr: SocketAddr,
-) -> anyhow::Result<(AssociationToken, RemoteUdpTransport)> {
-    let mesh_udp = data_plane
-        .data_plane_udp_bind(0, SETUP_TIMEOUT)
-        .await
-        .context("failed to bind legacy policy UDP association socket")?;
-    let response = request_remote_association(
-        peer_mgr,
-        dst_peer_id,
-        proxy_addr,
-        Some(mesh_udp.local_addr()),
-        0,
-    )
-    .await?;
-    let token = AssociationToken::try_from(response.token.as_slice())
-        .map_err(|_| anyhow::anyhow!("policy UDP relay returned an invalid token"))?;
-    let result = async {
-        let relay_addr = response
-            .relay_addr
-            .context("legacy policy UDP relay returned no endpoint")?
-            .into();
-        let challenge =
-            encode_relay_frame(&token, &[]).expect("an empty policy relay challenge always fits");
-        mesh_udp
-            .send_to(&challenge, relay_addr)
-            .await
-            .context("failed to prime local policy UDP relay route")?;
-        tokio::time::timeout(SETUP_TIMEOUT, async {
-            let mut ready = [0u8; FRAME_HEADER_LEN + 1];
-            loop {
-                let (length, source) = mesh_udp.recv_from(&mut ready).await?;
-                if source == relay_addr
-                    && decode_relay_frame(&token, &ready[..length]) == Some(&[][..])
-                {
-                    return Ok::<_, std::io::Error>(());
-                }
-            }
-        })
-        .await
-        .context("legacy policy UDP readiness timed out")??;
-        Ok::<_, anyhow::Error>(RemoteUdpTransport::Datagram {
-            socket: mesh_udp,
-            relay_addr,
-            receive_buffer: tokio::sync::Mutex::new(vec![0u8; MAX_DATAGRAM_SIZE]),
-        })
-    }
-    .await;
-    if result.is_err() {
-        close_remote_association(Arc::downgrade(peer_mgr), dst_peer_id, token).await;
-    }
-    result.map(|transport| (token, transport))
 }
 
 async fn close_remote_association(
@@ -633,160 +434,6 @@ async fn open_local_socks_udp(
     let relay_addr = SocketAddr::new(proxy_addr.ip(), relay_port);
     native_udp.connect(relay_addr).await?;
     Ok((control, native_udp, relay_addr))
-}
-
-fn encode_uot_connect_request(destination: SocketAddr) -> Vec<u8> {
-    let mut request = Vec::with_capacity(1 + 1 + 16 + 2);
-    request.push(UOT_CONNECT);
-    match destination {
-        SocketAddr::V4(destination) => {
-            request.push(UOT_IPV4);
-            request.extend_from_slice(&destination.ip().octets());
-            request.extend_from_slice(&destination.port().to_be_bytes());
-        }
-        SocketAddr::V6(destination) => {
-            request.push(UOT_IPV6);
-            request.extend_from_slice(&destination.ip().octets());
-            request.extend_from_slice(&destination.port().to_be_bytes());
-        }
-    }
-    request
-}
-
-async fn read_uot_connect_request<R>(reader: &mut R) -> anyhow::Result<SocketAddr>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    if reader.read_u8().await? != UOT_CONNECT {
-        bail!("policy UoT requires connected UDP mode");
-    }
-    match reader.read_u8().await? {
-        UOT_IPV4 => {
-            let mut address = [0u8; 4];
-            reader.read_exact(&mut address).await?;
-            let port = reader.read_u16().await?;
-            Ok(SocketAddr::new(IpAddr::V4(address.into()), port))
-        }
-        UOT_IPV6 => {
-            let mut address = [0u8; 16];
-            reader.read_exact(&mut address).await?;
-            let port = reader.read_u16().await?;
-            Ok(SocketAddr::new(IpAddr::V6(address.into()), port))
-        }
-        address_type => bail!("unsupported policy UoT address type {address_type}"),
-    }
-}
-
-async fn run_stream_association(
-    token: AssociationToken,
-    source_ip: Ipv4Addr,
-    listener: TcpListener,
-    mut control: TcpStream,
-    native_udp: UdpSocket,
-    upstream_relay: SocketAddr,
-    cancel: CancellationToken,
-) {
-    let mut setup_control_byte = [0u8; 1];
-    let accepted = tokio::select! {
-        _ = cancel.cancelled() => None,
-        _ = control.read(&mut setup_control_byte) => None,
-        accepted = tokio::time::timeout(SETUP_TIMEOUT, async {
-            for _ in 0..8 {
-                let (mut stream, _) = listener.accept().await?;
-                stream.set_nodelay(true)?;
-                let authenticated = tokio::time::timeout(SETUP_TIMEOUT, async {
-                    let mut received_token = [0u8; TOKEN_LEN];
-                    stream.read_exact(&mut received_token).await?;
-                    if !constant_time_eq(&received_token, &token) {
-                        bail!("invalid policy UoT token");
-                    }
-                    if read_uot_connect_request(&mut stream).await? != upstream_relay {
-                        bail!("policy UoT destination does not match the reserved SOCKS relay");
-                    }
-                    stream.write_u8(UOT_READY).await?;
-                    stream.flush().await?;
-                    Ok::<_, anyhow::Error>(stream)
-                })
-                .await;
-                if let Ok(Ok(stream)) = authenticated {
-                    return Ok::<_, std::io::Error>(stream);
-                }
-            }
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "policy UoT authentication attempts exhausted",
-            ))
-        }) => accepted.ok().and_then(Result::ok),
-    };
-    let Some(stream) = accepted else {
-        tracing::warn!(%source_ip, %upstream_relay, "policy UoT setup failed");
-        return;
-    };
-
-    let native_udp = Arc::new(native_udp);
-    let (mut stream_reader, mut stream_writer) = tokio::io::split(stream);
-    let (activity_tx, mut activity_rx) = tokio::sync::watch::channel(tokio::time::Instant::now());
-    let stream_to_udp = {
-        let native_udp = native_udp.clone();
-        let activity_tx = activity_tx.clone();
-        async move {
-            let mut packet = vec![0u8; MAX_DATAGRAM_SIZE];
-            loop {
-                let length = stream_reader.read_u16().await? as usize;
-                stream_reader.read_exact(&mut packet[..length]).await?;
-                native_udp.send(&packet[..length]).await?;
-                let _ = activity_tx.send(tokio::time::Instant::now());
-            }
-            #[allow(unreachable_code)]
-            Ok::<(), std::io::Error>(())
-        }
-    };
-    let udp_to_stream = {
-        let native_udp = native_udp.clone();
-        async move {
-            let mut packet = vec![0u8; MAX_DATAGRAM_SIZE];
-            loop {
-                let length = native_udp.recv(&mut packet).await?;
-                stream_writer.write_u16(length as u16).await?;
-                stream_writer.write_all(&packet[..length]).await?;
-                let _ = activity_tx.send(tokio::time::Instant::now());
-            }
-            #[allow(unreachable_code)]
-            Ok::<(), std::io::Error>(())
-        }
-    };
-    let idle = async move {
-        loop {
-            let deadline = *activity_rx.borrow() + ASSOCIATION_IDLE_TIMEOUT;
-            tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => return,
-                changed = activity_rx.changed() => {
-                    if changed.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-    };
-    let mut control_byte = [0u8; 1];
-    tokio::select! {
-        _ = cancel.cancelled() => {}
-        _ = idle => {}
-        _ = control.read(&mut control_byte) => {}
-        _ = stream_to_udp => {}
-        _ = udp_to_stream => {}
-    }
-    tracing::debug!(%source_ip, %upstream_relay, "policy UoT association closed");
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
-        == 0
 }
 
 async fn run_association(
@@ -957,53 +604,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn uot_v2_connect_request_matches_sagernet_wire_format() {
-        assert_eq!(
-            encode_uot_connect_request("192.0.2.7:32123".parse().unwrap()),
-            [UOT_CONNECT, UOT_IPV4, 192, 0, 2, 7, 0x7d, 0x7b]
-        );
-        assert_eq!(
-            encode_uot_connect_request("[2001:db8::7]:53".parse().unwrap()),
-            [
-                UOT_CONNECT,
-                UOT_IPV6,
-                0x20,
-                0x01,
-                0x0d,
-                0xb8,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                7,
-                0,
-                53,
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn reads_uot_v2_connect_request_without_consuming_payload() {
-        let destination: SocketAddr = "192.0.2.9:5353".parse().unwrap();
-        let mut wire = encode_uot_connect_request(destination);
-        wire.extend_from_slice(&5u16.to_be_bytes());
-        wire.extend_from_slice(b"voice");
-        let mut wire = wire.as_slice();
-        assert_eq!(
-            read_uot_connect_request(&mut wire).await.unwrap(),
-            destination
-        );
-        assert_eq!(wire, [0, 5, b'v', b'o', b'i', b'c', b'e']);
-    }
-
     #[tokio::test]
     async fn relays_udp_from_the_destination_peer_source_identity() {
         let peer_a = create_mock_peer_manager().await;
@@ -1110,39 +710,42 @@ mod tests {
                 .await
                 .unwrap();
             let mut packet = [0u8; 256];
-            for _ in 0..128 {
-                let (length, source) = udp.recv_from(&mut packet).await.unwrap();
-                assert_eq!(source.ip(), control_source.ip());
-                udp.send_to(&packet[..length], source).await.unwrap();
-            }
+            let (length, source) = udp.recv_from(&mut packet).await.unwrap();
+            assert_eq!(source.ip(), control_source.ip());
+            udp.send_to(&packet[..length], source).await.unwrap();
             let mut closed = [0u8; 1];
             assert_eq!(control.read(&mut closed).await.unwrap(), 0);
         });
 
+        let mesh_udp = data_plane_a
+            .data_plane_udp_bind(0, Duration::from_secs(5))
+            .await
+            .unwrap();
         let association = RemoteUdpAssociation::open(
             &peer_a,
-            &data_plane_a,
             peer_b.my_peer_id(),
             SocketAddr::new(IpAddr::V4(ip_b.address()), proxy_port),
+            &mesh_udp,
         )
         .await
         .unwrap();
-        for sequence in 0u8..128 {
-            let mut payload = b"\0\0\0\x01\x7f\0\0\x01\0\x35voice".to_vec();
-            payload.push(sequence);
-            association.send(&payload).await.unwrap();
-        }
+        let payload = b"\0\0\0\x01\x7f\0\0\x01\0\x35voice";
+        let frame = encode_relay_frame(&association.token, payload).unwrap();
+        mesh_udp
+            .send_to(&frame, association.relay_addr)
+            .await
+            .unwrap();
         let mut response = [0u8; 256];
-        for sequence in 0u8..128 {
-            let length =
-                tokio::time::timeout(Duration::from_secs(5), association.recv(&mut response))
-                    .await
-                    .unwrap()
-                    .unwrap();
-            let mut expected = b"\0\0\0\x01\x7f\0\0\x01\0\x35voice".to_vec();
-            expected.push(sequence);
-            assert_eq!(&response[..length], expected);
-        }
+        let (length, source) =
+            tokio::time::timeout(Duration::from_secs(5), mesh_udp.recv_from(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(source, association.relay_addr);
+        assert_eq!(
+            decode_relay_frame(&association.token, &response[..length]),
+            Some(payload.as_slice())
+        );
         association.close().await;
         wait_for_condition(
             || async { relay_service.associations.is_empty() },

@@ -13,7 +13,9 @@ mod mesh_udp_relay;
 mod policy_routing;
 
 pub(crate) use mesh_socks_bridge::{MeshProxyBridgeSet, MeshProxyTarget};
-pub(crate) use mesh_udp_relay::{MeshUdpRelayService, RemoteUdpAssociation};
+pub(crate) use mesh_udp_relay::{
+    MeshUdpRelayService, RemoteUdpAssociation, decode_relay_frame, encode_relay_frame,
+};
 pub(crate) use policy_routing::PolicyRoutingGuard;
 
 pub(crate) const POLICY_SOCKET_MARK: u32 = 0x4554_5001;
