@@ -75,6 +75,43 @@ ownership, and non-Linux TUN adapters.
 These are release blockers for claiming the full plan, but they do not affect
 ordinary EasyTier builds because the feature is off by default.
 
+## Android implementation evidence
+
+The pinned Leaf revision already provides the primitives needed by the final
+Android adapter: `Config::Str`, caller-supplied TUN FDs, independently keyed
+in-process runtimes, and an Android `VpnService.protect(fd)` callback for
+outbound sockets. EasyTier's current mobile path already owns the sole
+VpnService TUN FD in `VirtualNic::run_for_mobile()`. Therefore Android policy
+mode must not create or hand the platform TUN directly to a second owner.
+
+The implementation boundary is:
+
+- retain the existing EasyTier mobile TUN stream and sink as the sole platform
+  owner;
+- reuse `PacketClassifier` and the serialized TUN writer used by the Linux
+  policy path;
+- connect only policy-classified packets to an in-process Leaf runtime through
+  the existing packet-preserving Unix datagram bridge;
+- compile Leaf from an in-memory generated config and run it on its own bounded
+  runtime thread, with a unique runtime ID and explicit shutdown/join;
+- exclude the actual runtime Android package name from VpnService capture
+  before `Builder.establish()`, which protects both EasyTier underlay and
+  in-process Leaf sockets without hard-coded package IDs. A platform variant
+  that cannot guarantee package exclusion must instead wire Leaf's
+  `VpnService.protect(fd)` callback and fail readiness when protection fails;
+- snapshot underlying DNS servers from `ConnectivityManager`/`LinkProperties`
+  before `Builder.establish()` and pass that immutable generation into policy
+  config compilation;
+- add IPv4/IPv6 default VpnService routes only when policy mode is enabled.
+  Policy-disabled mobile startup remains byte-for-byte equivalent at the
+  routing boundary.
+
+Leaf startup is blocking and only becomes externally cancellable after its
+runtime ID is registered. The wrapper must therefore validate the generated
+configuration first, bound readiness waiting, transfer the bridge FD exactly
+once, and never publish the policy bridge until `leaf::is_running(id)` is true.
+Startup failure keeps mesh forwarding active and non-mesh traffic fail-closed.
+
 ## Final Operational Plan
 
 ### Runtime components

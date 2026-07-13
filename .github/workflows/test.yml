@@ -99,7 +99,10 @@ jobs:
       - uses: taiki-e/install-action@nextest
 
       - name: Archive test
-        run: cargo nextest archive --archive-file tests.tar.zst --package easytier --features full
+        # Build the optional policy plane into the one shared archive so its
+        # integration tests run in the existing network-safe partitions. The
+        # profiling workflow then only has to build production artifacts once.
+        run: cargo nextest archive --archive-file tests.tar.zst --package easytier --features full,leaf-policy-proxy
 
       - uses: actions/upload-artifact@v5
         with:
