@@ -248,7 +248,7 @@ async function registerVpnServiceListener() {
   )
 }
 
-async function applyNetworkInstanceChange(instanceId: string, epoch: number) {
+async function applyNetworkInstanceChange(instanceId: string, epoch: number, forceRebind = false) {
   console.error('vpn service network instance change id', instanceId)
 
   if (vpnRevokedBySystem || epoch !== vpnOperationEpoch) {
@@ -334,7 +334,7 @@ async function applyNetworkInstanceChange(instanceId: string, epoch: number) {
   const configChanged = ipChanged || cidrChanged || routesChanged || dnsChanged
   const shouldStartVpn = !curVpnStatus.running
 
-  if (shouldStartVpn || configChanged) {
+  if (shouldStartVpn || configChanged || forceRebind) {
     console.info('vpn service virtual ip changed', JSON.stringify(curVpnStatus), virtual_ip)
     if (curVpnStatus.running) {
       try {
@@ -362,9 +362,9 @@ async function applyNetworkInstanceChange(instanceId: string, epoch: number) {
   }
 }
 
-export function onNetworkInstanceChange(instanceId: string) {
+export function onNetworkInstanceChange(instanceId: string, forceRebind = false) {
   const epoch = ++vpnOperationEpoch
-  return runVpnOperation(() => applyNetworkInstanceChange(instanceId, epoch))
+  return runVpnOperation(() => applyNetworkInstanceChange(instanceId, epoch, forceRebind))
 }
 
 async function isNoTunEnabled(instanceId: string | undefined) {

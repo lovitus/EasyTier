@@ -58,7 +58,9 @@ async function onPostRunNetworkInstance(event: Event<unknown>) {
     const instanceId = normalizeInstanceIdPayload(event.payload)
     console.log(`Received event '${EVENTS.POST_RUN_NETWORK_INSTANCE}', raw payload:`, event.payload, 'normalized:', instanceId)
     if (type() === 'android') {
-        await onNetworkInstanceChange(instanceId);
+        // A restarted core instance cannot reuse the TUN FD owned by the previous generation,
+        // even when its address and routes are unchanged.
+        await onNetworkInstanceChange(instanceId, true);
     }
 }
 
