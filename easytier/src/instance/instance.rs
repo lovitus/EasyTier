@@ -653,6 +653,9 @@ pub struct Instance {
     #[cfg(feature = "socks5")]
     socks5_server: Arc<Socks5Server>,
 
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    policy_udp_relay: Option<Arc<crate::policy_proxy::MeshUdpRelayService>>,
+
     proxy_cidrs_monitor: Option<AbortOnDropHandle<()>>,
 
     global_ctx: ArcGlobalCtx,
@@ -741,6 +744,9 @@ impl Instance {
 
             #[cfg(feature = "socks5")]
             socks5_server,
+
+            #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+            policy_udp_relay: None,
 
             proxy_cidrs_monitor: None,
 
@@ -1170,6 +1176,16 @@ impl Instance {
                     .map(|x| Arc::downgrade(&x.get_kcp_endpoint())),
             )
             .await?;
+
+        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        {
+            let relay = crate::policy_proxy::MeshUdpRelayService::new(
+                &self.peer_manager,
+                self.socks5_server.clone(),
+            );
+            relay.register();
+            self.policy_udp_relay = Some(relay);
+        }
 
         Ok(())
     }

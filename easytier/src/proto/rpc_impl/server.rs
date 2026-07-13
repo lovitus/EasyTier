@@ -194,6 +194,7 @@ impl Server {
         let raw_req = Bytes::from(rpc_request.request);
         ctrl.set_raw_input(raw_req.clone());
         ctrl.set_tunnel_info(tunnel_info);
+        ctrl.set_source_peer_id(packet.from_peer);
         let ret = timeout(
             timeout_duration,
             reg.call_method(packet.descriptor.unwrap(), ctrl.clone(), raw_req),
