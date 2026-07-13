@@ -122,6 +122,13 @@ a DNS recursion or silently using a public fallback. Android remains sourced
 from `ConnectivityManager` `LinkProperties` and is unaffected by this Linux
 resolver discovery change.
 
+The exact `603d1dd3` follow-up passed all 24 `easytier-policy` tests, including
+the in-process startup/shutdown test, plus the focused KCP owner and smoltcp FIN
+tests. The later EasyTier test compile then found a missing `std::path::Path`
+import in the new policy configuration round-trip code. That mechanical compile
+failure occurs before runtime tests and does not invalidate the completed Leaf,
+KCP, or smoltcp results; the next snapshot adds only the missing import.
+
 ### KCP encapsulation
 
 Symbolized `perf` data from the exact `9d582e6d` beta proved that policy TCP

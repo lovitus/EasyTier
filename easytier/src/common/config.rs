@@ -1,7 +1,7 @@
 use std::{
     hash::Hasher,
     net::{IpAddr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
