@@ -2,9 +2,8 @@ import type { NetworkTypes } from 'easytier-frontend-lib'
 import { addPluginListener } from '@tauri-apps/api/core'
 import { Utils } from 'easytier-frontend-lib'
 import { setTunFd, updateMobileNetwork } from './backend'
+import { getRoutesForVpn } from './vpn_routes'
 import { get_vpn_status, prepare_vpn, start_vpn, stop_vpn } from 'tauri-plugin-vpnservice-api'
-
-type Route = NetworkTypes.Route
 
 interface vpnStatus {
   running: boolean
@@ -247,38 +246,6 @@ async function registerVpnServiceListener() {
     'vpn_network_changed',
     onVpnNetworkChanged,
   )
-}
-
-function getRoutesForVpn(routes: Route[], node_config: NetworkTypes.NetworkConfig): string[] {
-  if (!routes) {
-    return []
-  }
-
-  const ret = []
-  for (const r of routes) {
-    for (let cidr of r.proxy_cidrs) {
-      if (!cidr.includes('/')) {
-        cidr += '/32'
-      }
-      ret.push(cidr)
-    }
-  }
-
-  node_config.routes.forEach(r => {
-    ret.push(r)
-  })
-
-  if (node_config.enable_magic_dns) {
-    ret.push('100.100.100.101/32')
-  }
-
-  if (node_config.enable_policy_proxy) {
-    ret.push('0.0.0.0/0')
-    ret.push('::/0')
-  }
-
-  // sort and dedup
-  return Array.from(new Set(ret)).sort()
 }
 
 async function applyNetworkInstanceChange(instanceId: string, epoch: number) {
