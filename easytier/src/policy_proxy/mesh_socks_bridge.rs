@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     gateway::socks5::{DataPlaneTcpStream, Socks5Server},
     peers::peer_manager::PeerManager,
-    policy_proxy::{RemoteUdpAssociation, decode_relay_frame, encode_relay_frame},
+    policy_proxy::RemoteUdpAssociation,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -344,11 +344,10 @@ async fn relay_socks5(
             }
         }
         3 => {
-            let mesh_udp = data_plane.data_plane_udp_bind(0, CONNECT_TIMEOUT).await?;
             let association =
-                RemoteUdpAssociation::open(&peer_mgr, remote.peer_id, remote.endpoint, &mesh_udp)
+                RemoteUdpAssociation::open(&peer_mgr, &data_plane, remote.peer_id, remote.endpoint)
                     .await?;
-            relay_socks_udp(client, client_addr.ip(), mesh_udp, association, generation).await?;
+            relay_socks_udp(client, client_addr.ip(), association, generation).await?;
         }
         _ => unreachable!("SOCKS command was validated before dispatch"),
     }
@@ -438,34 +437,22 @@ async fn read_and_validate_socks_command(
 async fn relay_socks_udp(
     mut control: TcpStream,
     client_ip: IpAddr,
-    mesh_udp: crate::gateway::socks5::DataPlaneUdpSocket,
     association: RemoteUdpAssociation,
     generation: CancellationToken,
 ) -> anyhow::Result<()> {
-    let local = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let local = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?);
     let local_addr = local.local_addr()?;
     control.write_all(&socks_reply(0, local_addr)).await?;
     control.flush().await?;
 
-    let mut client_endpoint = None;
-    let mut local_packet = vec![0u8; MAX_DATAGRAM_SIZE];
-    let mut remote_packet = vec![0u8; MAX_DATAGRAM_SIZE];
-    let mut client_control_byte = [0u8; 1];
-    let result = loop {
-        tokio::select! {
-            _ = generation.cancelled() => break Ok(()),
-            result = control.read(&mut client_control_byte) => {
-                match result {
-                    Ok(0) => break Ok(()),
-                    Ok(_) => break Err(anyhow::anyhow!("unexpected data on SOCKS UDP control stream")),
-                    Err(error) => break Err(error.into()),
-                }
-            }
-            result = local.recv_from(&mut local_packet) => {
-                let (length, source) = match result {
-                    Ok(value) => value,
-                    Err(error) => break Err(error.into()),
-                };
+    let (client_endpoint_tx, mut client_endpoint_rx) = tokio::sync::watch::channel(None);
+    let local_to_remote = {
+        let local = local.clone();
+        async {
+            let mut client_endpoint = None;
+            let mut packet = vec![0u8; MAX_DATAGRAM_SIZE];
+            loop {
+                let (length, source) = local.recv_from(&mut packet).await?;
                 if source.ip() != client_ip || !source.ip().is_loopback() {
                     tracing::warn!(%source, "dropping SOCKS UDP datagram from unexpected source");
                     continue;
@@ -476,33 +463,45 @@ async fn relay_socks_udp(
                     }
                 } else {
                     client_endpoint = Some(source);
+                    let _ = client_endpoint_tx.send(client_endpoint);
                 }
-                let Some(frame) = encode_relay_frame(&association.token, &local_packet[..length]) else {
-                    continue;
-                };
-                if let Err(error) = mesh_udp.send_to(&frame, association.relay_addr).await {
-                    break Err(error.into());
-                }
+                association.send(&packet[..length]).await?;
             }
-            result = mesh_udp.recv_from(&mut remote_packet) => {
-                let (length, source) = match result {
-                    Ok(value) => value,
-                    Err(error) => break Err(error.into()),
-                };
-                if source != association.relay_addr {
-                    tracing::warn!(%source, relay = %association.relay_addr, "dropping SOCKS UDP datagram from unexpected relay");
-                    continue;
-                }
-                let Some(payload) = decode_relay_frame(&association.token, &remote_packet[..length]) else {
-                    continue;
-                };
-                if let Some(client_endpoint) = client_endpoint
-                    && let Err(error) = local.send_to(payload, client_endpoint).await
-                {
-                    break Err(error.into());
-                }
-            }
+            #[allow(unreachable_code)]
+            Ok::<(), anyhow::Error>(())
         }
+    };
+    let remote_to_local = {
+        let local = local.clone();
+        async {
+            let mut packet = vec![0u8; MAX_DATAGRAM_SIZE];
+            loop {
+                let length = association.recv(&mut packet).await?;
+                let client_endpoint = loop {
+                    if let Some(client_endpoint) = *client_endpoint_rx.borrow() {
+                        break client_endpoint;
+                    }
+                    client_endpoint_rx
+                        .changed()
+                        .await
+                        .map_err(|_| anyhow::anyhow!("SOCKS UDP client endpoint was dropped"))?;
+                };
+                local.send_to(&packet[..length], client_endpoint).await?;
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), anyhow::Error>(())
+        }
+    };
+    let mut client_control_byte = [0u8; 1];
+    let result = tokio::select! {
+        _ = generation.cancelled() => Ok(()),
+        result = control.read(&mut client_control_byte) => match result {
+            Ok(0) => Ok(()),
+            Ok(_) => Err(anyhow::anyhow!("unexpected data on SOCKS UDP control stream")),
+            Err(error) => Err(error.into()),
+        },
+        result = local_to_remote => result,
+        result = remote_to_local => result,
     };
     association.close().await;
     result
