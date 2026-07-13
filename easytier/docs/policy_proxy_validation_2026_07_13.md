@@ -218,6 +218,17 @@ runtime. This change is accepted only if the same 5/20/50 Mbit/s matrix removes
 the bridge drops without unbounded RSS, delaying mesh traffic, or weakening
 worker-restart isolation.
 
+The `45bb6b74` beta removed all reported Leaf bridge drops and reduced the
+20 Mbit/s loss from 7.8-9.8% to 2.8%, but did not yet qualify. Sampling still
+showed substantial CPU headroom. Inspection of the remaining stream path found
+that every UoT datagram was split into two awaited writes (length, then
+payload), and every receive performed two unbuffered reads. The follow-up keeps
+the exact UoT wire format but builds each frame once in a reusable 16 KiB
+buffer, submits it with one `write_all`, and retains a 16 KiB `BufReader` on
+both ends. Oversized legal datagrams still grow the writer buffer or bypass the
+reader capacity normally; the initial allocation remains bounded per
+association rather than reserving 64 KiB for every idle session.
+
 ## Static review disposition
 
 - Dynamic policy-route refresh: real and fixed.

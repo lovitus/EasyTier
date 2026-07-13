@@ -94,6 +94,10 @@ cross-platform design below:
   generation so worker replacement cannot replay stale traffic. The capacity
   is 4,096 packets: bounded to normal TUN MTU memory while absorbing scheduler
   bursts that previously produced losses despite substantial CPU headroom;
+- UoT writes one complete `u16 length + payload` frame per async write and uses
+  persistent 16 KiB readers on both ends. This preserves SagerNet framing while
+  avoiding two scheduler/KCP submissions and two underlying reads per ordinary
+  MTU-sized datagram. Buffers are reused and remain bounded per association;
 
 Not yet implemented in this spike: TOML/RPC/GUI/mobile envelopes, policy file
 hot reload, proxy credentials for the remote/native actor, HTTP CONNECT actor

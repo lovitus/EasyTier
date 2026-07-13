@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context as _, bail};
 use dashmap::DashMap;
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _, ReadHalf, WriteHalf},
+    io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader, ReadHalf, WriteHalf},
     net::{TcpListener, TcpSocket, TcpStream, UdpSocket},
 };
 use tokio_util::sync::CancellationToken;
@@ -46,6 +46,7 @@ const UOT_READY: u8 = 0;
 const UOT_CONNECT: u8 = 1;
 const UOT_IPV4: u8 = 1;
 const UOT_IPV6: u8 = 4;
+const UOT_STREAM_BUFFER_SIZE: usize = 16 * 1_024;
 
 pub(crate) type AssociationToken = [u8; TOKEN_LEN];
 
@@ -327,9 +328,14 @@ enum RemoteUdpTransport {
         receive_buffer: tokio::sync::Mutex<Vec<u8>>,
     },
     Stream {
-        reader: tokio::sync::Mutex<ReadHalf<DataPlaneTcpStream>>,
-        writer: tokio::sync::Mutex<WriteHalf<DataPlaneTcpStream>>,
+        reader: tokio::sync::Mutex<BufReader<ReadHalf<DataPlaneTcpStream>>>,
+        writer: tokio::sync::Mutex<UotStreamWriter>,
     },
+}
+
+struct UotStreamWriter {
+    stream: WriteHalf<DataPlaneTcpStream>,
+    frame: Vec<u8>,
 }
 
 impl RemoteUdpAssociation {
@@ -373,8 +379,14 @@ impl RemoteUdpAssociation {
                 Ok::<_, anyhow::Error>((
                     token,
                     RemoteUdpTransport::Stream {
-                        reader: tokio::sync::Mutex::new(reader),
-                        writer: tokio::sync::Mutex::new(writer),
+                        reader: tokio::sync::Mutex::new(BufReader::with_capacity(
+                            UOT_STREAM_BUFFER_SIZE,
+                            reader,
+                        )),
+                        writer: tokio::sync::Mutex::new(UotStreamWriter {
+                            stream: writer,
+                            frame: Vec::with_capacity(UOT_STREAM_BUFFER_SIZE),
+                        }),
                     },
                 ))
             }
@@ -419,10 +431,11 @@ impl RemoteUdpAssociation {
             }
             RemoteUdpTransport::Stream { writer, .. } => {
                 let mut writer = writer.lock().await;
-                writer
-                    .write_all(&(payload.len() as u16).to_be_bytes())
-                    .await?;
-                writer.write_all(payload).await?;
+                let UotStreamWriter { stream, frame } = &mut *writer;
+                frame.clear();
+                frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+                frame.extend_from_slice(payload);
+                stream.write_all(frame).await?;
             }
         }
         Ok(())
@@ -758,7 +771,8 @@ async fn run_stream_association(
     };
 
     let native_udp = Arc::new(native_udp);
-    let (mut stream_reader, mut stream_writer) = tokio::io::split(stream);
+    let (stream_reader, mut stream_writer) = tokio::io::split(stream);
+    let mut stream_reader = BufReader::with_capacity(UOT_STREAM_BUFFER_SIZE, stream_reader);
     let (activity_tx, mut activity_rx) = tokio::sync::watch::channel(tokio::time::Instant::now());
     let stream_to_udp = {
         let native_udp = native_udp.clone();
@@ -779,10 +793,13 @@ async fn run_stream_association(
         let native_udp = native_udp.clone();
         async move {
             let mut packet = vec![0u8; MAX_DATAGRAM_SIZE];
+            let mut frame = Vec::with_capacity(UOT_STREAM_BUFFER_SIZE);
             loop {
                 let length = native_udp.recv(&mut packet).await?;
-                stream_writer.write_u16(length as u16).await?;
-                stream_writer.write_all(&packet[..length]).await?;
+                frame.clear();
+                frame.extend_from_slice(&(length as u16).to_be_bytes());
+                frame.extend_from_slice(&packet[..length]);
+                stream_writer.write_all(&frame).await?;
                 let _ = activity_tx.send(tokio::time::Instant::now());
             }
             #[allow(unreachable_code)]
