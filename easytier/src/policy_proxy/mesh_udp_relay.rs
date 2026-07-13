@@ -156,8 +156,8 @@ impl MeshUdpRelayService {
         let relay_addr = mesh_udp.local_addr();
         // Register the destination-side connected UDP route before returning the RPC. The
         // one-byte payload distinguishes this disposable warmup from the empty challenge ACK.
-        let warmup = encode_relay_frame(&token, &[0])
-            .expect("the policy relay warmup frame always fits");
+        let warmup =
+            encode_relay_frame(&token, &[0]).expect("the policy relay warmup frame always fits");
         if let Err(error) = mesh_udp.send_to(&warmup, origin_addr).await {
             return Err(error).context("failed to prime policy UDP relay route");
         }
@@ -515,10 +515,13 @@ pub(crate) fn decode_relay_frame<'a>(
     token: &AssociationToken,
     frame: &'a [u8],
 ) -> Option<&'a [u8]> {
-    (frame.len() >= FRAME_HEADER_LEN
-        && frame[0] == FRAME_VERSION
-        && frame[1..FRAME_HEADER_LEN] == *token)
-        .then_some(&frame[FRAME_HEADER_LEN..])
+    if frame.len() < FRAME_HEADER_LEN
+        || frame[0] != FRAME_VERSION
+        || frame[1..FRAME_HEADER_LEN] != *token
+    {
+        return None;
+    }
+    Some(&frame[FRAME_HEADER_LEN..])
 }
 
 fn socks_udp_associate_request(address: SocketAddr) -> Vec<u8> {
@@ -636,7 +639,8 @@ mod tests {
             relay_service
                 .reserve_token(peer_a.my_peer_id(), &CancellationToken::new())
                 .await
-                .unwrap_err()
+                .err()
+                .expect("the per-peer association limit must reject one more reservation")
                 .to_string()
                 .contains("requesting peer")
         );
@@ -687,6 +691,7 @@ mod tests {
             .await
             .unwrap();
         let proxy_port = listener.local_addr().unwrap().port();
+        let proxy_ip = ip_b.address();
         let fake_server = tokio::spawn(async move {
             let (mut control, control_source) = listener.accept().await.unwrap();
             let mut greeting = [0u8; 3];
@@ -696,7 +701,10 @@ mod tests {
             let mut request = [0u8; 10];
             control.read_exact(&mut request).await.unwrap();
             assert_eq!(&request[..4], &[5, 3, 0, 1]);
-            let udp = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+            // The SOCKS relay must reply from the address selected by the control
+            // connection. Binding to INADDR_ANY here lets Linux choose 127.0.0.1,
+            // which a UDP socket connected to `proxy_ip` correctly rejects.
+            let udp = UdpSocket::bind((proxy_ip, 0)).await.unwrap();
             control
                 .write_all(&socks_reply_for_test(udp.local_addr().unwrap()))
                 .await
