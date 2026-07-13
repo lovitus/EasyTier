@@ -78,6 +78,12 @@ struct PolicyActiveRuntime {
 }
 
 #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+struct PolicyLeafPacket {
+    bridge: Arc<LeafPacketBridge>,
+    packet: ZCPacket,
+}
+
+#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
 fn log_policy_drop(counter: &AtomicU64, reason: &'static str) {
     let dropped = counter.fetch_add(1, Ordering::Relaxed).saturating_add(1);
     if dropped.is_power_of_two() {
@@ -1201,6 +1207,38 @@ impl NicCtx {
         let Some(mgr) = self.peer_mgr.upgrade() else {
             return Err(anyhow::anyhow!("peer manager not available").into());
         };
+        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        let policy = policy.map(|(classifier, bridge_slot, dropped_packets)| {
+            // Decouple TUN reads from Leaf's packet socket without making the queue
+            // unbounded. A full queue remains fail-closed, while ordinary socket
+            // backpressure no longer turns a short scheduling delay into packet loss.
+            const POLICY_LEAF_WRITER_CAPACITY: usize = 4_096;
+            let (writer_tx, mut writer_rx) =
+                tokio::sync::mpsc::channel::<PolicyLeafPacket>(POLICY_LEAF_WRITER_CAPACITY);
+            let writer_bridge_slot = bridge_slot.clone();
+            let writer_dropped_packets = dropped_packets.clone();
+            self.tasks.spawn(async move {
+                while let Some(queued) = writer_rx.recv().await {
+                    let Some(current_bridge) = writer_bridge_slot.load_full() else {
+                        log_policy_drop(&writer_dropped_packets, "Leaf is unavailable");
+                        continue;
+                    };
+                    if !Arc::ptr_eq(&current_bridge, &queued.bridge) {
+                        log_policy_drop(&writer_dropped_packets, "Leaf runtime generation changed");
+                        continue;
+                    }
+                    if queued
+                        .bridge
+                        .send_to_leaf(queued.packet.payload())
+                        .await
+                        .is_err()
+                    {
+                        log_policy_drop(&writer_dropped_packets, "Leaf input queue is unavailable");
+                    }
+                }
+            });
+            (classifier, bridge_slot, dropped_packets, writer_tx)
+        });
         let close_notifier = self.close_notifier.clone();
         self.tasks.spawn(async move {
             while let Some(ret) = stream.next().await {
@@ -1210,15 +1248,24 @@ impl NicCtx {
                 }
                 let ret = ret.unwrap();
                 #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
-                if let Some((classifier, bridge_slot, dropped_packets)) = &policy {
+                if let Some((classifier, bridge_slot, dropped_packets, writer_tx)) = &policy {
                     match classifier.classify(ret.payload()) {
                         Ok(PacketClass::Policy) => {
                             let Some(bridge) = bridge_slot.load_full() else {
                                 log_policy_drop(dropped_packets, "Leaf is unavailable");
                                 continue;
                             };
-                            if bridge.try_send_to_leaf(ret.payload()).is_err() {
-                                log_policy_drop(dropped_packets, "Leaf input queue is unavailable");
+                            match writer_tx.try_send(PolicyLeafPacket {
+                                bridge,
+                                packet: ret,
+                            }) {
+                                Ok(()) => {}
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                    log_policy_drop(dropped_packets, "Leaf writer queue is full");
+                                }
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                    log_policy_drop(dropped_packets, "Leaf writer is unavailable");
+                                }
                             }
                             continue;
                         }

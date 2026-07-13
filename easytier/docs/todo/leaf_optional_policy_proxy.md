@@ -67,6 +67,33 @@ cross-platform design below:
   cleanup and best-effort RST so successful hedge losers cannot leave remote
   SOCKS target connections alive. This remains a release blocker until beta
   resource counters return to baseline after KCP load;
+- destination-relayed policy UDP exposed a separate throughput limit in the
+  existing smoltcp datagram data plane. The legacy relay remains available for
+  mixed-version fallback, but the new candidate requests a private,
+  token-authenticated UDP-over-TCP stream after the relay RPC. Its request and
+  connected-mode framing independently implement SagerNet UoT v2 (`isConnect`,
+  SOCKS address, then `u16` big-endian length plus payload) without importing
+  Go code. The stream uses the existing `Socks5AutoConnector`: KCP is selected
+  when the local endpoint and routed destination capability permit it;
+  otherwise the existing smoltcp TCP path remains available. Failure to build
+  the v2 stream performs one bounded retry through the legacy datagram relay.
+  The private TCP listener is per-association, unadvertised, limited by the
+  existing global/per-peer association caps, protected by a random 128-bit
+  token, and removed on setup timeout, cancellation, control EOF, or idle
+  expiry. The destination binds the same ephemeral virtual endpoint in two
+  independent TCP stacks: a kernel listener accepts KCP-proxy delivery, while
+  a smoltcp data-plane listener accepts capability fallback. The first
+  token-authenticated stream wins; this avoids duplicating or overriding the
+  existing connector selection logic. This candidate is not accepted until
+  unpaced burst, sustained UDP,
+  mixed-version, KCP-disabled, cancellation, and resource-baseline tests pass;
+- source policy packets enter Leaf through a dedicated fixed-capacity writer
+  queue rather than calling the Unix datagram bridge with `try_send()` directly
+  from the shared TUN reader. The TUN reader never awaits Leaf, a full queue is
+  still dropped fail-closed, and every queued packet retains the exact bridge
+  generation so worker replacement cannot replay stale traffic. The capacity
+  is 4,096 packets: bounded to normal TUN MTU memory while absorbing scheduler
+  bursts that previously produced losses despite substantial CPU headroom;
 
 Not yet implemented in this spike: TOML/RPC/GUI/mobile envelopes, policy file
 hot reload, proxy credentials for the remote/native actor, HTTP CONNECT actor

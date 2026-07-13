@@ -161,6 +161,63 @@ discard buffered bytes.
     through it while policy mode is active. User DNS still enters Leaf, and
     Magic DNS remains mesh-owned; no blanket port-53 bypass is added.
 
+### Destination UDP relay follow-up
+
+A later strict revalidation isolated a limitation that the earlier 5 Mbit/s
+row did not expose consistently. With the destination mesh SOCKS actor using
+the smoltcp datagram relay, an unpaced 100-packet burst delivered only 90-97
+packets in affected runs; adding 5 ms pacing delivered 100%. Eight-round
+threshold tests were lossless at 16/32/48/64 packets, lost one packet at 80,
+and lost 18 packets in total at 100. Captures proved all requests entered the
+policy TUN but only the reduced set reached the destination native SOCKS relay.
+
+Sustained 1200-byte UDP tests through that same strict path measured 16% loss
+at 5 Mbit/s, 30% at 20 Mbit/s, and 51% at 50 Mbit/s. Kernel TUN/UDP counters
+and the bounded policy writer showed no corresponding drops. The current
+smoltcp socket allocator has only 32 UDP packet metadata entries and 8 KiB
+receive/transmit buffers per socket, so the evidence points to the destination
+datagram data-plane boundary rather than Leaf routing or physical packet loss.
+Increasing those buffers alone is not accepted as a root fix.
+
+Candidate `d16663c2` carries the same SOCKS UDP payload over a reliable stream
+using the connected form of SagerNet UoT v2 framing. It reuses EasyTier's
+existing SOCKS TCP connector, so a compiled/enabled/routed KCP capability is
+preferred and capability absence selects the existing smoltcp TCP path. A
+failed v2 negotiation or stream setup retries once through the legacy datagram
+relay, preserving old-node interoperability. The destination exposes the same
+private virtual endpoint through a kernel listener for KCP delivery and a
+smoltcp listener for capability fallback; both are bounded by one association
+token and disappear together. A focused mock-peer test delivered an unpaced
+128-packet burst of 1200-byte payloads through the smoltcp TCP fallback with no
+missing frame. This is unit-level evidence only. The candidate remains
+unqualified until the exact profiling artifact passes unpaced burst,
+5/20/50 Mbit/s, KCP-enabled, KCP-disabled, old/new direction, cancellation,
+idle cleanup, FD/task/RPC baseline, TCP, Magic DNS, and worker-restart checks.
+
+The exact `d16663c2` profiling artifact subsequently passed checksum, build-ID,
+commit, target, symbol, and static-link verification and was deployed into an
+isolated namespace. During a sustained policy UDP flow, destination RPC state
+showed both the SOCKS control stream and private UoT stream as `Connected / Kcp`;
+the routed destination advertised `kcp_input=true` and the source decision log
+reported `dst_allow_kcp=true`. A ten-round unpaced burst delivered all
+1,000/1,000 1200-byte datagrams. Sustained tests were lossless at 5 Mbit/s but
+lost 9.8% at 20 Mbit/s over 30 seconds and 42% at 50 Mbit/s over 10 seconds.
+
+Those sustained losses did not originate in KCP or the destination smoltcp UDP
+relay. The source logged only `Leaf input queue is unavailable`, while the
+reverse policy TUN writer reported no drops. Sampling at 50 Mbit/s showed about
+17% CPU for EasyTier and 9% for the Leaf worker, leaving ample CPU headroom.
+The remaining bottleneck was therefore the source-side nonblocking Unix
+datagram handoff: `VirtualNic` used `try_send()` and converted every temporary
+socket backpressure event directly into a fail-closed packet drop. The next
+candidate inserts one dedicated asynchronous bridge writer behind a fixed
+4,096-packet queue. TUN classification remains nonblocking, queue overflow
+remains fail-closed and bounded, and queued packets carry their originating
+bridge identity so a Leaf restart cannot deliver an old generation to the new
+runtime. This change is accepted only if the same 5/20/50 Mbit/s matrix removes
+the bridge drops without unbounded RSS, delaying mesh traffic, or weakening
+worker-restart isolation.
+
 ## Static review disposition
 
 - Dynamic policy-route refresh: real and fixed.
