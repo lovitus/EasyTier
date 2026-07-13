@@ -83,7 +83,11 @@ jobs:
 
       - name: Verify destination-side policy UDP relay
         run: |
-          timeout 300 cargo test \
+          # The first static release test build compiles the libtest harness and
+          # dev-dependencies separately from the production binaries above. Keep
+          # the workflow timeout large enough to cover compilation; the test's own
+          # network operations remain bounded by short Tokio timeouts.
+          timeout 1200 cargo test \
             --locked \
             --release \
             --target "$TARGET" \
