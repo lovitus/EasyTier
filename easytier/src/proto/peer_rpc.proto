@@ -349,11 +349,16 @@ message OpenPolicyUdpRelayRequest {
   uint32 source_peer_id = 1;
   common.SocketAddr proxy_addr = 2;
   common.SocketAddr origin_addr = 3;
+  // Version 2 requests a reliable UoT v2 stream. Older destinations ignore
+  // this field and keep returning the datagram relay endpoint.
+  uint32 stream_version = 4;
 }
 
 message OpenPolicyUdpRelayResponse {
   bytes token = 1;
   common.SocketAddr relay_addr = 2;
+  common.SocketAddr stream_addr = 3;
+  common.SocketAddr stream_destination = 4;
 }
 
 message ClosePolicyUdpRelayRequest { bytes token = 1; }
