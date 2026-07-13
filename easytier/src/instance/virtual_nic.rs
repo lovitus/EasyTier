@@ -2053,7 +2053,9 @@ impl NicCtx {
         let classifier = policy.classifier.clone();
         let revision = policy.revision.clone();
         let active = policy.active.clone();
-        let routing = policy.routing.clone();
+        // The context owns the routing guard. The supervisor must not keep policy
+        // rules alive after the NIC context starts shutting down.
+        let routing = Arc::downgrade(&policy.routing);
         let bridge = policy.bridge.clone();
         let bridge_updates = policy.bridge_updates.clone();
         let global_ctx = self.global_ctx.clone();
@@ -2107,6 +2109,9 @@ impl NicCtx {
 
                 if route_refresh_due {
                     last_route_refresh = tokio::time::Instant::now();
+                    let Some(routing) = routing.upgrade() else {
+                        break;
+                    };
                     match routing.lock().await.refresh() {
                         Ok(true) => tracing::info!(
                             "refreshed policy underlay routes after network change"

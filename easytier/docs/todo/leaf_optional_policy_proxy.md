@@ -57,6 +57,10 @@ final cross-platform design below:
   never downloaded automatically.
 - the sidecar receives a Linux parent-death signal, so an abrupt EasyTier kill
   does not leave a worker, bridge FD, or policy session running;
+- `PolicyNicContext` is the sole strong owner of the Linux policy-routing RAII
+  guard. The periodic route updater holds only a weak reference, so task
+  cancellation cannot keep source/mark rules or table-52000 routes alive after
+  a graceful core shutdown;
 - the pinned Leaf smoltcp backend is supplied through the vendored
   `third_party/netstack-smoltcp` crate. Its local lifecycle patches drain bytes
   already accepted by `AsyncWrite` before requesting FIN, then wake and finish

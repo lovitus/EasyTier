@@ -34,7 +34,7 @@ build ID, DWARF metadata, and unstripped symbol table before deployment.
 | Scenario | Result |
 | --- | --- |
 | Initial route/rule install | Pass |
-| Graceful stop cleanup | Pass; policy rules, table routes, and capture routes removed |
+| Graceful stop cleanup | Regressed in `7a8255f5`; capture routes were removed, but rules 10899/10900 and owned table-52000 routes survived process exit |
 | Core SIGKILL | Pass; worker exited through parent-death handling; stale owned state was cleaned on restart |
 | Worker SIGKILL | Pass; supervised restart in about 3 seconds |
 | Second policy process | Pass; rejected with `policy routing is owned by another process` without changing the first instance |
@@ -46,6 +46,15 @@ build ID, DWARF metadata, and unstripped symbol table before deployment.
 During the no-default-route interval the core reported approximately 0.1% CPU,
 17 MiB RSS, ten threads, and 29 file descriptors. No retry or loop storm was
 observed.
+
+A strict rerun of the exact `7a8255f5` artifact found that the route-refresh
+task held a second strong reference to `PolicyRoutingGuard`. Process shutdown
+aborted the task, but did not guarantee that its future was dropped before the
+policy context needed to release the guard. The follow-up makes
+`PolicyNicContext` the only strong owner and gives the updater a `Weak`
+reference. Restart cleanup already removed this stale owned state, so the bug
+did not redirect a later instance, but graceful cleanup must pass again before
+qualification.
 
 ### Data plane
 
@@ -62,6 +71,20 @@ After the mixed-load test without KCP encapsulation, core/worker file
 descriptors settled from 58 to 33/11 within 20 seconds. RSS settled near 19/7
 MiB. KCP encapsulation is tracked separately below because it exposed a
 release-blocking connection-lifecycle defect.
+
+The strict `7a8255f5` rerun also separated an invalid actor setup from a UoT
+failure. EasyTier's built-in `--socks5` listener is intentionally TCP-only and
+rejects UDP ASSOCIATE with a SOCKS error reply whose bound port is zero. With a
+standards-compliant GOST UDP ASSOCIATE actor on the destination peer, the same
+artifact carried policy UDP over two observable `Connected / Kcp` streams
+(SOCKS control plus private UoT): 10 Mbit/s was lossless. After the 120-second
+UDP idle window both RPC entries and destination actor file descriptors
+returned to baseline. Advertising `kcp_input=false` selected the smoltcp TCP
+UoT path with no KCP entry and also delivered 10 Mbit/s losslessly. Killing the
+actor terminated the affected policy session without a CPU/retry storm;
+restarting it allowed the next UDP association to recover without restarting
+EasyTier. Killing the Leaf worker left mesh ICMP intact, and the supervisor
+restored policy UDP about two seconds later.
 
 Magic DNS validation above proves that its mesh record path remains intact. It
 does not prove that Leaf domain/geosite matching and Magic DNS can operate on
