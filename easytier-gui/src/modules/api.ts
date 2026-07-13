@@ -1,11 +1,16 @@
 import { type Api, type NetworkTypes } from "easytier-frontend-lib";
+import { type } from "@tauri-apps/plugin-os";
 import * as backend from "~/composables/backend";
+import { prepareVpnService } from "~/composables/mobile_vpn";
 
 export class GUIRemoteClient implements Api.RemoteClient {
     async validate_config(config: NetworkTypes.NetworkConfig): Promise<Api.ValidateConfigResponse> {
         return backend.validateConfig(config);
     }
     async run_network(config: NetworkTypes.NetworkConfig, save: boolean): Promise<undefined> {
+        if (type() === 'android') {
+            await prepareVpnService(config.no_tun ?? false);
+        }
         await backend.runNetworkInstance(config, save);
     }
     async get_network_info(inst_id: string): Promise<NetworkTypes.NetworkInstanceRunningInfo | undefined> {
@@ -18,6 +23,10 @@ export class GUIRemoteClient implements Api.RemoteClient {
         await backend.deleteNetworkInstance(inst_id);
     }
     async update_network_instance_state(inst_id: string, disabled: boolean): Promise<undefined> {
+        if (type() === 'android' && !disabled) {
+            const config = await backend.getConfig(inst_id);
+            await prepareVpnService(config.no_tun ?? false);
+        }
         await backend.updateNetworkConfigState(inst_id, disabled);
     }
     async save_config(config: NetworkTypes.NetworkConfig): Promise<undefined> {

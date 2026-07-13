@@ -16,6 +16,10 @@ interface vpnStatus {
 
 let dhcpPollingTimer: NodeJS.Timeout | null = null
 const DHCP_POLLING_INTERVAL = 2000 // 2秒后重试
+let vpnOperationTail: Promise<void> = Promise.resolve()
+let vpnOperationEpoch = 0
+let vpnRevokedBySystem = false
+let activeVpnInstanceId: string | undefined
 
 const curVpnStatus: vpnStatus = {
   running: false,
@@ -33,7 +37,7 @@ async function requestVpnPermission() {
     throw new Error(prepare_ret.errorMsg)
   }
 
-  const granted = prepare_ret?.granted ?? true
+  const granted = prepare_ret?.granted === true
   if (!granted) {
     console.info('vpn permission request was denied or dismissed')
   }
@@ -86,6 +90,12 @@ async function waitVpnStatus(target_status: boolean, timeout_sec: number) {
   }
 }
 
+function runVpnOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = vpnOperationTail.then(operation, operation)
+  vpnOperationTail = result.then(() => undefined, () => undefined)
+  return result
+}
+
 async function doStopVpn(force = false) {
   const wasRunning = curVpnStatus.running
   if (!force && !wasRunning) {
@@ -101,13 +111,17 @@ async function doStopVpn(force = false) {
   resetVpnConfigStatus()
 }
 
-async function doStartVpn(ipv4Addr: string, cidr: number, routes: string[], dns?: string) {
+async function doStartVpn(instanceId: string, ipv4Addr: string, cidr: number, routes: string[], dns?: string) {
+  if (vpnRevokedBySystem) {
+    throw new Error('vpn_revoked')
+  }
   if (curVpnStatus.running) {
     throw new Error('vpn service is still stopping')
   }
 
   console.log('start vpn service', ipv4Addr, cidr, routes, dns)
   const request = {
+    instanceId,
     ipv4Addr: `${ipv4Addr}/${cidr}`,
     routes,
     dns,
@@ -115,15 +129,18 @@ async function doStartVpn(ipv4Addr: string, cidr: number, routes: string[], dns?
     mtu: 1300,
   }
 
-  let start_ret = await start_vpn(request)
+  activeVpnInstanceId = instanceId
+  const start_ret = await start_vpn(request)
+  if (vpnRevokedBySystem) {
+    throw new Error('vpn_revoked')
+  }
   console.log('start vpn response', JSON.stringify(start_ret))
   if (start_ret?.errorMsg === 'need_prepare') {
-    const granted = await requestVpnPermission()
-    if (!granted) {
-      throw new Error('vpn_permission_denied')
-    }
-    start_ret = await start_vpn(request)
-    console.log('start vpn retry response', JSON.stringify(start_ret))
+    // Background synchronization must never reclaim VPN ownership from another app.
+    // Only prepareVpnService(), called by an explicit GUI action, may request consent.
+    vpnRevokedBySystem = true
+    activeVpnInstanceId = undefined
+    throw new Error('vpn_revoked')
   }
 
   if (start_ret?.errorMsg?.length) {
@@ -137,14 +154,17 @@ async function doStartVpn(ipv4Addr: string, cidr: number, routes: string[], dns?
   curVpnStatus.dns = dns
 }
 
-async function startVpnWithRetry(ipv4Addr: string, cidr: number, routes: string[], dns?: string) {
+async function startVpnWithRetry(instanceId: string, ipv4Addr: string, cidr: number, routes: string[], dns?: string) {
   let lastError: unknown
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await doStartVpn(ipv4Addr, cidr, routes, dns)
+      return await doStartVpn(instanceId, ipv4Addr, cidr, routes, dns)
     }
     catch (error) {
       lastError = error
+      if (vpnRevokedBySystem) {
+        throw new Error('vpn_revoked')
+      }
       const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
       const transient = message.includes('wait vpn status timeout')
         || message.includes('already')
@@ -161,9 +181,23 @@ async function startVpnWithRetry(ipv4Addr: string, cidr: number, routes: string[
 
 async function onVpnServiceStart(payload: any) {
   console.log('vpn service start', JSON.stringify(payload))
+  if (vpnRevokedBySystem) {
+    console.info('ignoring a stale VPN start after Android revoked ownership')
+    await doStopVpn(true)
+    return
+  }
+  const instanceId = typeof payload?.instanceId === 'string' && payload.instanceId.length
+    ? payload.instanceId
+    : activeVpnInstanceId
+  if (!instanceId) {
+    console.error('vpn service start did not identify its EasyTier instance')
+    await doStopVpn(true)
+    return
+  }
+  activeVpnInstanceId = instanceId
   curVpnStatus.running = true
   if (Number.isInteger(payload?.fd) && payload.fd >= 0) {
-    await setTunFd(payload.fd, payload.dnsServers ?? [], payload.networkKey ?? '').catch((e) => {
+    await setTunFd(instanceId, payload.fd, payload.dnsServers ?? [], payload.networkKey ?? '').catch((e) => {
       console.error('set tun fd failed', e)
       void doStopVpn(true).catch(stopError => console.error('stop vpn after tun setup failure', stopError))
     })
@@ -173,7 +207,7 @@ async function onVpnServiceStart(payload: any) {
 async function onVpnNetworkChanged(payload: any) {
   const dnsServers = payload?.dnsServers ?? []
   const networkKey = payload?.networkKey ?? ''
-  if (!curVpnStatus.running || !networkKey) {
+  if (vpnRevokedBySystem || !curVpnStatus.running || !networkKey) {
     return
   }
   await updateMobileNetwork(dnsServers, networkKey).catch((error) => {
@@ -183,7 +217,13 @@ async function onVpnNetworkChanged(payload: any) {
 
 async function onVpnServiceStop(payload: any) {
   console.log('vpn service stop', JSON.stringify(payload))
+  if (payload?.reason === 'revoked') {
+    vpnRevokedBySystem = true
+    vpnOperationEpoch += 1
+    console.info('Android revoked EasyTier VPN ownership; automatic restart is suppressed')
+  }
   curVpnStatus.running = false
+  activeVpnInstanceId = undefined
   resetVpnConfigStatus()
 }
 
@@ -240,8 +280,12 @@ function getRoutesForVpn(routes: Route[], node_config: NetworkTypes.NetworkConfi
   return Array.from(new Set(ret)).sort()
 }
 
-export async function onNetworkInstanceChange(instanceId: string) {
+async function applyNetworkInstanceChange(instanceId: string, epoch: number) {
   console.error('vpn service network instance change id', instanceId)
+
+  if (vpnRevokedBySystem || epoch !== vpnOperationEpoch) {
+    return
+  }
 
   if (dhcpPollingTimer) {
     clearTimeout(dhcpPollingTimer)
@@ -256,6 +300,9 @@ export async function onNetworkInstanceChange(instanceId: string) {
     return
   }
   const config = await getConfig(instanceId)
+  if (vpnRevokedBySystem || epoch !== vpnOperationEpoch) {
+    return
+  }
   console.log('vpn service loaded config', instanceId, JSON.stringify({
     no_tun: config.no_tun,
     dhcp: config.dhcp,
@@ -266,6 +313,9 @@ export async function onNetworkInstanceChange(instanceId: string) {
     return
   }
   const curNetworkInfo = (await collectNetworkInfo(instanceId)).info?.map?.[instanceId]
+  if (vpnRevokedBySystem || epoch !== vpnOperationEpoch) {
+    return
+  }
   if (!curNetworkInfo || curNetworkInfo?.error_msg?.length) {
     console.warn('vpn service skipped because network info is unavailable', instanceId, curNetworkInfo?.error_msg)
     await doStopVpn()
@@ -277,7 +327,7 @@ export async function onNetworkInstanceChange(instanceId: string) {
   if (config.dhcp && (!virtual_ip || !virtual_ip.length)) {
     console.log('DHCP enabled but no IP yet, will retry in', DHCP_POLLING_INTERVAL, 'ms')
     dhcpPollingTimer = setTimeout(() => {
-      onNetworkInstanceChange(instanceId)
+      void onNetworkInstanceChange(instanceId)
     }, DHCP_POLLING_INTERVAL)
     return
   }
@@ -314,21 +364,26 @@ export async function onNetworkInstanceChange(instanceId: string) {
       }
     }
 
+    if (vpnRevokedBySystem || epoch !== vpnOperationEpoch) {
+      return
+    }
+
     try {
-      await startVpnWithRetry(virtual_ip, network_length, routes, dns)
+      await startVpnWithRetry(instanceId, virtual_ip, network_length, routes, dns)
     }
     catch (e) {
-      if (e instanceof Error && e.message === 'need_prepare') {
-        console.info('vpn permission is required before starting the Android VPN service')
-        return
-      }
-      if (e instanceof Error && e.message === 'vpn_permission_denied') {
-        console.info('vpn permission request was denied or dismissed')
+      if (e instanceof Error && e.message === 'vpn_revoked') {
+        console.info('Android VPN ownership is unavailable; waiting for an explicit user start')
         return
       }
       console.error('start vpn service failed', e)
     }
   }
+}
+
+export function onNetworkInstanceChange(instanceId: string) {
+  const epoch = ++vpnOperationEpoch
+  return runVpnOperation(() => applyNetworkInstanceChange(instanceId, epoch))
 }
 
 async function isNoTunEnabled(instanceId: string | undefined) {
@@ -358,19 +413,35 @@ export async function initMobileVpnService() {
   await registerVpnServiceListener()
 }
 
-export async function prepareVpnService(instanceId: string) {
-  if (await isNoTunEnabled(instanceId)) {
+export async function prepareVpnService(noTun: boolean) {
+  if (noTun) {
     return
   }
-  await requestVpnPermission()
+  // Only an explicit user run with granted ownership may reclaim VpnService after Android
+  // assigned it to another VPN.
+  const granted = await requestVpnPermission()
+  vpnRevokedBySystem = !granted
+  if (!granted) {
+    throw new Error('vpn_permission_denied')
+  }
+  vpnOperationEpoch += 1
 }
 
-export async function syncMobileVpnService() {
+async function applyMobileVpnServiceSync(epoch: number) {
   syncVpnStatusFromNative(await get_vpn_status())
+  if (epoch !== vpnOperationEpoch) {
+    return
+  }
+  if (vpnRevokedBySystem) {
+    return
+  }
   const instanceId = await findRunningTunInstanceId()
+  if (epoch !== vpnOperationEpoch || vpnRevokedBySystem) {
+    return
+  }
   if (instanceId) {
     console.log('vpn service sync selected instance', instanceId)
-    await onNetworkInstanceChange(instanceId)
+    await applyNetworkInstanceChange(instanceId, epoch)
     return
   }
 
@@ -380,4 +451,9 @@ export async function syncMobileVpnService() {
   }
 
   await doStopVpn(true)
+}
+
+export function syncMobileVpnService() {
+  const epoch = ++vpnOperationEpoch
+  return runVpnOperation(() => applyMobileVpnServiceSync(epoch))
 }

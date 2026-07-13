@@ -157,6 +157,7 @@ async fn set_logging_level(level: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn set_tun_fd(
+    instance_id: String,
     fd: i32,
     dns_servers: Option<Vec<String>>,
     network_key: Option<String>,
@@ -164,34 +165,40 @@ async fn set_tun_fd(
     let Some(instance_manager) = INSTANCE_MANAGER.read().await.clone() else {
         return Err("set_tun_fd is not supported in remote mode".to_string());
     };
-    if let Some(uuid) = get_client_manager!()?
+    let uuid = instance_id
+        .parse()
+        .map_err(|error: uuid::Error| error.to_string())?;
+    if !get_client_manager!()?
         .get_enabled_instances_with_tun_ids()
-        .next()
+        .any(|candidate| candidate == uuid)
     {
-        let dns_servers = dns_servers
-            .unwrap_or_default()
-            .into_iter()
-            .map(|server| {
-                server
-                    .parse()
-                    .map_err(|error| format!("invalid VPN DNS server {server}: {error}"))
-            })
-            .collect::<Result<Vec<std::net::IpAddr>, String>>()?;
-        let network_key = network_key.unwrap_or_default();
-        instance_manager
-            .update_mobile_network(
-                &uuid,
-                easytier::launcher::MobileNetworkState {
-                    key: network_key.clone(),
-                    dns_servers: dns_servers.clone(),
-                },
-            )
-            .map_err(|e| e.to_string())?;
-        instance_manager
-            .set_mobile_tun_and_wait(&uuid, fd, dns_servers, network_key)
-            .await
-            .map_err(|e| e.to_string())?;
+        return Err(format!(
+            "VPN instance {uuid} is not enabled or does not own a TUN"
+        ));
     }
+    let dns_servers = dns_servers
+        .unwrap_or_default()
+        .into_iter()
+        .map(|server| {
+            server
+                .parse()
+                .map_err(|error| format!("invalid VPN DNS server {server}: {error}"))
+        })
+        .collect::<Result<Vec<std::net::IpAddr>, String>>()?;
+    let network_key = network_key.unwrap_or_default();
+    instance_manager
+        .update_mobile_network(
+            &uuid,
+            easytier::launcher::MobileNetworkState {
+                key: network_key.clone(),
+                dns_servers: dns_servers.clone(),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    instance_manager
+        .set_mobile_tun_and_wait(&uuid, fd, dns_servers, network_key)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

@@ -21,6 +21,7 @@ pub struct VoidRequest {}
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartVpnRequest {
+    pub instance_id: Option<String>,
     pub ipv4_addr: Option<String>,
     pub routes: Option<Vec<String>>,
     pub dns: Option<String>,

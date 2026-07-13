@@ -11,7 +11,6 @@ interface StoredGuiConfig {
 
 const EVENTS = Object.freeze({
     SAVE_CONFIGS: 'save_configs',
-    PRE_RUN_NETWORK_INSTANCE: 'pre_run_network_instance',
     POST_RUN_NETWORK_INSTANCE: 'post_run_network_instance',
     VPN_SERVICE_STOP: 'vpn_service_stop',
     DHCP_IP_CHANGED: 'dhcp_ip_changed',
@@ -55,14 +54,6 @@ function normalizeInstanceIdPayload(payload: unknown): string {
     return fallback === '[object Object]' ? '' : fallback
 }
 
-async function onPreRunNetworkInstance(event: Event<unknown>) {
-    const instanceId = normalizeInstanceIdPayload(event.payload)
-    console.log(`Received event '${EVENTS.PRE_RUN_NETWORK_INSTANCE}', raw payload:`, event.payload, 'normalized:', instanceId)
-    if (type() === 'android') {
-        await prepareVpnService(instanceId);
-    }
-}
-
 async function onPostRunNetworkInstance(event: Event<unknown>) {
     const instanceId = normalizeInstanceIdPayload(event.payload)
     console.log(`Received event '${EVENTS.POST_RUN_NETWORK_INSTANCE}', raw payload:`, event.payload, 'normalized:', instanceId)
@@ -101,7 +92,6 @@ async function onEventLagged(event: Event<unknown>) {
 export async function listenGlobalEvents() {
     const unlisteners = [
         await listen(EVENTS.SAVE_CONFIGS, onSaveConfigs),
-        await listen(EVENTS.PRE_RUN_NETWORK_INSTANCE, onPreRunNetworkInstance),
         await listen(EVENTS.POST_RUN_NETWORK_INSTANCE, onPostRunNetworkInstance),
         await listen(EVENTS.VPN_SERVICE_STOP, onVpnServiceStop),
         await listen(EVENTS.DHCP_IP_CHANGED, onDhcpIpChanged),

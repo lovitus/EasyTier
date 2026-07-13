@@ -14,6 +14,7 @@ export interface InvokeResponse {
 }
 
 export interface StartVpnRequest {
+  instanceId?: string;
   ipv4Addr?: string;
   routes?: string[];
   dns?: string;

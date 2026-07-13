@@ -20,6 +20,7 @@ class PingArgs {
 
 @InvokeArg
 class StartVpnArgs {
+    var instanceId: String? = null
     var ipv4Addr: String? = null
     var routes: Array<String> = emptyArray()
     var dns: String? = null
@@ -83,6 +84,7 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
             } else {
                 TauriVpnService.self?.prepareForRestart()
                 val intent = Intent(activity, TauriVpnService::class.java)
+                intent.putExtra(TauriVpnService.INSTANCE_ID, args.instanceId)
                 intent.putExtra(TauriVpnService.IPV4_ADDR, args.ipv4Addr)
                 intent.putExtra(TauriVpnService.ROUTES, args.routes)
                 intent.putExtra(TauriVpnService.DNS, args.dns)
@@ -99,7 +101,7 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
     fun stopVpn(invoke: Invoke) {
         activity.runOnUiThread {
             println("stop vpn in plugin")
-            TauriVpnService.self?.onRevoke()
+            TauriVpnService.self?.stopByUser()
             activity.stopService(Intent(activity, TauriVpnService::class.java))
             println("stop vpn in plugin end")
             invoke.resolve(JSObject())

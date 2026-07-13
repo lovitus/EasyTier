@@ -1663,7 +1663,7 @@ impl Instance {
         let fd = tun_config.fd;
         tracing::info!("setup_nic_ctx_for_mobile, fd: {}", fd);
         Self::clear_nic_ctx(nic_ctx.clone(), peer_packet_receiver.clone()).await;
-        if fd <= 0 {
+        if fd < 0 {
             return Ok(());
         }
         let close_notifier = Arc::new(Notify::new());

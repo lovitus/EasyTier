@@ -70,8 +70,8 @@ export async function setLoggingLevel(level: string) {
   return await invoke('set_logging_level', { level })
 }
 
-export async function setTunFd(fd: number, dnsServers: string[] = [], networkKey = '') {
-  return await invoke('set_tun_fd', { fd, dnsServers, networkKey })
+export async function setTunFd(instanceId: string, fd: number, dnsServers: string[] = [], networkKey = '') {
+  return await invoke('set_tun_fd', { instanceId, fd, dnsServers, networkKey })
 }
 
 export async function updateMobileNetwork(dnsServers: string[], networkKey: string) {

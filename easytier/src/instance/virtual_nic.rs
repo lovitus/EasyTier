@@ -104,6 +104,34 @@ fn schedule_policy_runtime_restart(
 }
 
 #[cfg(all(feature = "leaf-policy-proxy", unix))]
+fn ensure_policy_mesh_credentials_confidential(
+    global_ctx: &ArcGlobalCtx,
+    revision: &easytier_policy::PolicyRevision,
+) -> anyhow::Result<()> {
+    let has_mesh_credentials =
+        revision.document.proxies.values().any(|proxy| {
+            proxy.via == easytier_policy::ProxyVia::Mesh && proxy.credentials().is_some()
+        });
+    if !has_mesh_credentials {
+        return Ok(());
+    }
+
+    let identity = global_ctx.get_network_identity();
+    let shared_secret_encryption = global_ctx.get_flags().enable_encryption
+        && identity
+            .network_secret
+            .as_deref()
+            .is_some_and(|secret| !secret.trim().is_empty());
+    if shared_secret_encryption || global_ctx.is_explicit_secure_mode_enabled() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "authenticated mesh proxy actors require encrypted peer RPC; configure a non-empty network secret with encryption enabled or explicit secure_mode"
+    )
+}
+
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
 async fn stop_policy_active_runtime(
     active: &Arc<Mutex<Option<PolicyActiveRuntime>>>,
     bridge: &Arc<ArcSwapOption<LeafPacketBridge>>,
@@ -1933,6 +1961,7 @@ impl NicCtx {
             .into());
         }
         let revision = config.revision.clone();
+        ensure_policy_mesh_credentials_confidential(&self.global_ctx, &revision)?;
         let data_plane = self
             .policy_data_plane
             .upgrade()
@@ -2277,6 +2306,7 @@ impl NicCtx {
             );
         }
         let document = crate::policy_proxy::resolve_document(&config)?;
+        ensure_policy_mesh_credentials_confidential(&self.global_ctx, &document.revision)?;
         let data_plane = self
             .policy_data_plane
             .upgrade()
@@ -2887,8 +2917,14 @@ impl NicCtx {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "leaf-policy-proxy", unix))]
+    use crate::common::{
+        config::NetworkIdentity, global_ctx::tests::get_mock_global_ctx_with_network,
+    };
     use crate::common::{error::Error, global_ctx::tests::get_mock_global_ctx};
 
+    #[cfg(all(feature = "leaf-policy-proxy", unix))]
+    use super::ensure_policy_mesh_credentials_confidential;
     use super::{NicCtx, VirtualNic};
 
     async fn run_test_helper() -> Result<VirtualNic, Error> {
@@ -2956,5 +2992,37 @@ rules: ["FINAL,exit"]
         let resolved = NicCtx::resolve_policy_mesh_endpoints(&revision, 8, &[route]).unwrap();
         assert_eq!(resolved["exit"].peer_id, 7);
         assert_eq!(resolved["exit"].endpoint, "10.44.0.7:1080".parse().unwrap());
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", unix))]
+    #[test]
+    fn authenticated_mesh_proxy_requires_confidential_peer_rpc() {
+        let revision = easytier_policy::PolicyRevision::parse(
+            r#"
+version: 1
+proxies:
+  exit:
+    type: socks5
+    server: { virtual-ip: 10.44.0.7 }
+    port: 1080
+    via: mesh
+    username: alice
+    password: secret
+rules: ["FINAL,exit"]
+"#,
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let plain = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "plain".to_owned(),
+            String::new(),
+        )));
+        assert!(ensure_policy_mesh_credentials_confidential(&plain, &revision).is_err());
+
+        let encrypted = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+            "encrypted".to_owned(),
+            "network-secret".to_owned(),
+        )));
+        assert!(ensure_policy_mesh_credentials_confidential(&encrypted, &revision).is_ok());
     }
 }

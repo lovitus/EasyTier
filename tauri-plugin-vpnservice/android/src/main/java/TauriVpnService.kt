@@ -30,11 +30,17 @@ class TauriVpnService : VpnService() {
         const val DNS = "DNS"
         const val DISALLOWED_APPLICATIONS = "DISALLOWED_APPLICATIONS"
         const val MTU = "MTU"
+        const val INSTANCE_ID = "INSTANCE_ID"
+        const val STOP_REASON_REQUESTED = "requested"
+        const val STOP_REASON_RESTART = "restart"
+        const val STOP_REASON_REVOKED = "revoked"
+        const val STOP_REASON_DESTROYED = "destroyed"
         // LinkProperties can change several times during one roam or DHCP renewal.
         const val NETWORK_CHANGE_DEBOUNCE_MS = 2_000L
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
+    private var instanceId: String? = null
     private var lastUnderlyingDnsServers: Array<String> = emptyArray()
     private var lastUnderlyingNetworkKey: String = ""
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -130,13 +136,14 @@ class TauriVpnService : VpnService() {
         // Android may reuse the Service after the plugin manually calls onRevoke().
         self = this
         if (vpnInterface != null) {
-            disconnect()
+            disconnect(STOP_REASON_RESTART)
         }
         println("vpn on start command ${intent?.getExtras()} $intent")
         var args = intent?.getExtras()
         ipv4Addr = args?.getString(IPV4_ADDR)
         routes = args?.getStringArray(ROUTES) ?: emptyArray()
         dns = args?.getString(DNS)
+        instanceId = args?.getString(INSTANCE_ID)
 
         val newVpnInterface = createVpnInterface(args)
         vpnInterface = newVpnInterface
@@ -146,6 +153,7 @@ class TauriVpnService : VpnService() {
         event_data.put("fd", newVpnInterface.fd)
         event_data.put("dnsServers", lastUnderlyingDnsServers)
         event_data.put("networkKey", lastUnderlyingNetworkKey)
+        event_data.put("instanceId", instanceId)
         triggerCallback("vpn_service_start", event_data)
 
         return START_NOT_STICKY
@@ -161,30 +169,39 @@ class TauriVpnService : VpnService() {
     override fun onDestroy() {
         println("vpn on destroy")
         unregisterNetworkObserver()
-        disconnect()
+        disconnect(STOP_REASON_DESTROYED)
         self = null
         super.onDestroy()
     }
 
     override fun onRevoke() {
         println("vpn on revoke")
-        super.onRevoke()
-        disconnect()
+        // Preserve the platform revoke reason before VpnService stops this Service. The UI uses
+        // it to suppress every automatic restart until the user explicitly starts EasyTier again.
+        disconnect(STOP_REASON_REVOKED)
         self = null
+        super.onRevoke()
     }
 
     fun prepareForRestart() {
         // Replacing an interface must not call VpnService.onRevoke(): the platform
         // implementation stops the Service and races the immediately following startService().
-        disconnect()
+        disconnect(STOP_REASON_RESTART)
         self = this
     }
 
-    private fun disconnect() {
+    fun stopByUser() {
+        disconnect(STOP_REASON_REQUESTED)
+    }
+
+    private fun disconnect(reason: String) {
         val activeInterface = vpnInterface
         vpnInterface = null
         if (self == this && activeInterface != null) {
-            triggerCallback("vpn_service_stop", JSObject())
+            val data = JSObject()
+            data.put("reason", reason)
+            data.put("instanceId", instanceId)
+            triggerCallback("vpn_service_stop", data)
         }
         try {
             activeInterface?.close()
@@ -203,6 +220,7 @@ class TauriVpnService : VpnService() {
         lastUnderlyingNetworkKey = ""
         networkOutageObserved = false
         networkEpoch = 0
+        instanceId = null
     }
 
     private fun registerNetworkObserver() {

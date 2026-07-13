@@ -1,0 +1,81 @@
+name: EasyTier Android Policy Candidate
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: android-policy-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-aarch64-debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: oracle
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 12.0
+          packages: 'build-tools;34.0.0 ndk;26.0.10792818 platform-tools platforms;android-34'
+
+      - name: Setup Android environment
+        run: |
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/ndk/26.0.10792818/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/26.0.10792818/" >> "$GITHUB_ENV"
+
+      - name: Prepare build environment
+        uses: ./.github/actions/prepare-build
+        with:
+          target: aarch64-linux-android
+          gui: false
+          pnpm: true
+          pnpm-build-filter: ''
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: android-policy-candidate-aarch64
+          cache-targets: false
+
+      - name: Build debug APK
+        run: |
+          cd easytier-gui
+          pnpm tauri android build --debug --apk --target aarch64 --split-per-abi
+
+      - name: Package exact candidate
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          mapfile -t apks < <(find easytier-gui/src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' | sort)
+          if [[ ${#apks[@]} -ne 1 ]]; then
+            printf 'expected exactly one APK, found %s\n' "${#apks[@]}" >&2
+            printf '%s\n' "${apks[@]}" >&2
+            exit 1
+          fi
+          cp "${apks[0]}" artifacts/easytier-android-policy-candidate-aarch64.apk
+          cat > artifacts/BUILD_INFO.txt <<EOF
+          commit_sha=$GITHUB_SHA
+          workflow_run_id=$GITHUB_RUN_ID
+          workflow_run_attempt=$GITHUB_RUN_ATTEMPT
+          target=aarch64-linux-android
+          profile=debug
+          EOF
+          (cd artifacts && sha256sum easytier-android-policy-candidate-aarch64.apk BUILD_INFO.txt > SHA256SUMS.txt)
+
+      - name: Upload candidate
+        uses: actions/upload-artifact@v5
+        with:
+          name: easytier-android-policy-candidate-aarch64-${{ github.sha }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14

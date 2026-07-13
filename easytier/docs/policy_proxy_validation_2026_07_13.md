@@ -411,3 +411,61 @@ The Rust `tun2proxy` project is a useful reference for external-TUN, UDP session
 Android, Apple, and Windows lifecycle behavior, but should not be introduced as
 a second TUN owner or replace Leaf's rule/group engine without an isolated
 compatibility spike.
+
+## Authenticated mesh actor qualification
+
+Rolling profiling beta run `29236605585` produced commit
+`f268ac62fd17107c392b0894b1887b386a1c19f5`. The outer release checksum and the
+bundle's own checksum file both passed. `BUILD_INFO.txt` identified the exact
+commit, run ID, and `x86_64-unknown-linux-musl` target; the core retained GNU
+build ID `58f7d790e48fc00ca1f7152a8a8ddd00a130681a`, debug information, and symbol
+tables. The verified bundle, rather than a local rebuild, was deployed to two
+fresh network namespaces.
+
+An authenticated `via: mesh` SOCKS actor using `alice/secret` sustained 492
+Mbit/s TCP with zero retransmissions. During UDP runs, destination RPC showed
+both the SOCKS control stream and private UoT stream as `Connected / Kcp`.
+With the previously qualified GOST `udpBufferSize=65535` setting, the measured
+UDP matrix was:
+
+| Offered load | Duration | Delivered result | Destination `UdpRcvbufErrors` delta |
+| --- | ---: | ---: | ---: |
+| 20 Mbit/s | 15 s | 30,729/31,045, 1.0% loss | 316 |
+| 50 Mbit/s | 15 s | 72,418/77,619, 6.7% loss | 1,398 |
+| 100 Mbit/s | 10 s | 93,491/103,187, 9.4% loss | 0 |
+
+The source namespace reported zero receive-buffer errors throughout. At 50
+Mbit/s the four participating processes remained bounded at approximately
+17-48 MiB RSS, 6-14 file descriptors above idle, and 6-13 threads. The 100
+Mbit/s row delivered about 90.6 Mbit/s; it is additional headroom evidence, not
+a claim of lossless real-time service at that rate.
+
+Requesting a 4 MiB GOST UDP buffer was also tested and rejected as a validation
+baseline. That old GOST build retained a 256 KiB kernel receive buffer and lost
+41% at 20 Mbit/s, all accounted for by destination `UdpRcvbufErrors`. Restoring
+the qualified 65,535 setting immediately reduced the same test to 1.0%. This
+is actor configuration behavior and must not be reported as a KCP throughput
+limit.
+
+The credential and compatibility matrix also passed:
+
+- a wrong password failed closed at GOST authentication, created no target
+  iperf connection, and left no proxy RPC entry;
+- omitting both username and password on both sides preserved legacy behavior:
+  TCP reached 513 Mbit/s with zero retransmissions and UDP delivered all
+  5,105/5,105 datagrams at 10 Mbit/s;
+- with the destination explicitly advertising `kcp_input=false`, authenticated
+  TCP used the existing smoltcp path at 125 Mbit/s received, and authenticated
+  UoT delivered 10,314/10,314 datagrams at 10 Mbit/s with no KCP RPC entry;
+- EasyTier's ordinary local `--socks5` path remained KCP-only when capability
+  was available. A throttled one-GiB HTTP transfer appeared as
+  `Connected / Kcp`; terminating the client removed the RPC entry and target
+  TCP connection within three seconds.
+
+After the KCP-enabled UDP matrix, the remaining UoT stream entries disappeared
+within the two-minute acceptance window. Destination target connections closed,
+core/Leaf/GOST file descriptors and thread counts returned to idle, and policy
+shutdown removed the TUN, private rules, table 52000 routes, worker, and
+temporary Leaf configuration. These results qualify the Linux credential wire
+and fallback behavior of `f268ac62`; they do not qualify the subsequent Android
+VPN ownership changes or an Android APK.
