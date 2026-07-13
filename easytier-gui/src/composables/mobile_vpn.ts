@@ -16,6 +16,7 @@ interface vpnStatus {
 
 let dhcpPollingTimer: NodeJS.Timeout | null = null
 const DHCP_POLLING_INTERVAL = 2000 // 2秒后重试
+const NETWORK_INFO_RETRY_DELAYS = [0, 150, 300] as const
 let vpnOperationTail: Promise<void> = Promise.resolve()
 let vpnOperationEpoch = 0
 let vpnRevokedBySystem = false
@@ -312,7 +313,20 @@ async function applyNetworkInstanceChange(instanceId: string, epoch: number) {
     console.log('vpn service skipped because no_tun is enabled', instanceId)
     return
   }
-  const curNetworkInfo = (await collectNetworkInfo(instanceId)).info?.map?.[instanceId]
+  let curNetworkInfo: NetworkTypes.NetworkInstanceRunningInfo | undefined
+  for (const delay of NETWORK_INFO_RETRY_DELAYS) {
+    if (delay > 0) {
+      await new Promise(resolve => setTimeout(resolve, delay))
+    }
+    if (vpnRevokedBySystem || epoch !== vpnOperationEpoch) {
+      return
+    }
+
+    curNetworkInfo = (await collectNetworkInfo(instanceId)).info?.map?.[instanceId]
+    if (curNetworkInfo && !curNetworkInfo.error_msg?.length) {
+      break
+    }
+  }
   if (vpnRevokedBySystem || epoch !== vpnOperationEpoch) {
     return
   }
