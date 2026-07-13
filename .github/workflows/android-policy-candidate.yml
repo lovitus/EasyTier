@@ -2,6 +2,9 @@ name: EasyTier Android Policy Candidate
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/profiling-beta
 
 concurrency:
   group: android-policy-candidate-${{ github.ref }}
