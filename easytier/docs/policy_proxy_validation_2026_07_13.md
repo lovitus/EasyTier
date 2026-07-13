@@ -104,6 +104,24 @@ maintainer workspace completed the non-compiling checks allowed on that host:
 These checks do not replace Rust, Android, or real-device validation. Results
 for those artifacts must be appended from the exact beta commit.
 
+The first unified candidate (`905285c7`) compiled the pinned Leaf stack and
+started its in-process lifecycle test, but the test aborted during shutdown.
+The cause was not packet handling: Leaf's public `shutdown()` uses Tokio
+`blocking_send()`, while the wrapper invoked it directly from an async Tokio
+worker. The follow-up dispatches that blocking API through `spawn_blocking` and
+keeps only a short OS-thread fallback for abnormal `Drop`; normal packet and
+network-change paths are unchanged.
+
+The same review found that a Linux host may expose only a loopback resolver
+such as `127.0.0.53` in `/etc/resolv.conf`. That address is not a safe upstream
+for the physical-interface-bound worker. The follow-up rejects loopback,
+unspecified, multicast, and unscoped IPv6 link-local resolver addresses, then
+checks the systemd-resolved and NetworkManager non-stub resolver files. If no
+directly usable upstream exists, policy mode fails closed rather than entering
+a DNS recursion or silently using a public fallback. Android remains sourced
+from `ConnectivityManager` `LinkProperties` and is unaffected by this Linux
+resolver discovery change.
+
 ### KCP encapsulation
 
 Symbolized `perf` data from the exact `9d582e6d` beta proved that policy TCP

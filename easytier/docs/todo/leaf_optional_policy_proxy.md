@@ -160,6 +160,13 @@ The implementation boundary is:
   restart only the policy runtime when the selected physical-network signature
   changes. The VpnService TUN, EasyTier mesh, OSPF sessions, and ordinary peer
   transports remain untouched;
+- follow the Clash Meta Android selection boundary: prefer Wi-Fi, Ethernet,
+  USB tethering, Bluetooth tethering, then cellular; mark `onLosing` networks
+  as lower priority; and include the Android `Network` handle, interface,
+  addresses, routes, transport, and DNS servers in the stable generation key.
+  A roam or DHCP renewal that changes any of those properties therefore
+  produces one policy rebuild after debounce, while callback bursts that settle
+  back to the same generation produce none;
 - after a two-second debounce, treat absence of every physical network (for
   example airplane mode or an elevator) as a fail-closed outage generation:
   stop only the policy runtime, keep the TUN and mesh alive, and do not consume
@@ -173,6 +180,11 @@ The implementation boundary is:
   ownership, `onRevoke()` closes this generation and EasyTier does not fight it
   with an automatic restart loop. A sticky restart without the original
   configuration is rejected instead of creating a default/incorrect TUN;
+- on Linux, reject loopback/stub DNS endpoints such as `127.0.0.53` for the
+  physical-interface-bound Leaf worker. Resolver discovery checks
+  `/etc/resolv.conf`, then the systemd-resolved and NetworkManager non-stub
+  files; if none contains a directly usable resolver, policy startup fails
+  closed instead of entering a DNS loop;
 - add IPv4/IPv6 default VpnService routes only when policy mode is enabled.
   Policy-disabled mobile startup remains byte-for-byte equivalent at the
   routing boundary.

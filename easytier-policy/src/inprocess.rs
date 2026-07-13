@@ -179,7 +179,7 @@ impl InProcessLeafRuntime {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
             if Instant::now() >= deadline {
-                let _ = leaf::shutdown(runtime_id);
+                request_leaf_shutdown(runtime_id).await;
                 spawn_late_start_reaper(runtime_id, result_rx, thread);
                 return Err("in-process Leaf readiness timed out".to_owned());
             }
@@ -192,7 +192,7 @@ impl InProcessLeafRuntime {
     }
 
     pub async fn stop(&self) {
-        let _ = leaf::shutdown(self.runtime_id);
+        request_leaf_shutdown(self.runtime_id).await;
         let deadline = Instant::now() + STOP_TIMEOUT;
         while leaf::is_running(self.runtime_id) && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -244,7 +244,26 @@ fn spawn_late_start_reaper(
 
 impl Drop for InProcessLeafRuntime {
     fn drop(&mut self) {
-        let _ = leaf::shutdown(self.runtime_id);
+        if leaf::is_running(self.runtime_id) {
+            let runtime_id = self.runtime_id;
+            let _ = std::thread::Builder::new()
+                .name(format!("easytier-leaf-drop-{runtime_id}"))
+                .spawn(move || {
+                    let _ = leaf::shutdown(runtime_id);
+                });
+        }
+    }
+}
+
+async fn request_leaf_shutdown(runtime_id: leaf::RuntimeId) {
+    // Leaf's public shutdown API uses blocking_send internally. Keep it off Tokio worker
+    // threads so current-thread runtimes and Android lifecycle callbacks cannot panic.
+    if let Err(error) = tokio::task::spawn_blocking(move || leaf::shutdown(runtime_id)).await {
+        tracing::warn!(
+            runtime_id,
+            ?error,
+            "failed to dispatch in-process Leaf shutdown"
+        );
     }
 }
 

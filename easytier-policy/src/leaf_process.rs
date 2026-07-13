@@ -192,9 +192,25 @@ fn configure_parent_death(_parent_pid: libc::pid_t) -> std::io::Result<()> {
 }
 
 fn system_dns_servers() -> Result<Vec<std::net::IpAddr>, String> {
-    let contents = std::fs::read_to_string("/etc/resolv.conf")
-        .map_err(|error| format!("failed to read /etc/resolv.conf: {error}"))?;
-    parse_system_dns_servers(&contents)
+    const CANDIDATES: &[&str] = &[
+        "/etc/resolv.conf",
+        "/run/systemd/resolve/resolv.conf",
+        "/run/NetworkManager/no-stub-resolv.conf",
+    ];
+    let mut failures = Vec::new();
+    for path in CANDIDATES {
+        match std::fs::read_to_string(path) {
+            Ok(contents) => match parse_system_dns_servers(&contents) {
+                Ok(servers) => return Ok(servers),
+                Err(error) => failures.push(format!("{path}: {error}")),
+            },
+            Err(error) => failures.push(format!("{path}: {error}")),
+        }
+    }
+    Err(format!(
+        "no directly usable system DNS server found ({})",
+        failures.join("; ")
+    ))
 }
 
 fn parse_system_dns_servers(contents: &str) -> Result<Vec<std::net::IpAddr>, String> {
@@ -211,7 +227,7 @@ fn parse_system_dns_servers(contents: &str) -> Result<Vec<std::net::IpAddr>, Str
         let Ok(address) = address.parse() else {
             continue;
         };
-        if !servers.contains(&address) {
+        if usable_dns_server(address) && !servers.contains(&address) {
             servers.push(address);
         }
         if servers.len() == 4 {
@@ -219,9 +235,23 @@ fn parse_system_dns_servers(contents: &str) -> Result<Vec<std::net::IpAddr>, Str
         }
     }
     if servers.is_empty() {
-        return Err("/etc/resolv.conf contains no IP nameserver usable by Leaf".to_owned());
+        return Err("contains no non-loopback IP nameserver usable by Leaf".to_owned());
     }
     Ok(servers)
+}
+
+fn usable_dns_server(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(address) => {
+            !address.is_unspecified() && !address.is_loopback() && !address.is_multicast()
+        }
+        std::net::IpAddr::V6(address) => {
+            !address.is_unspecified()
+                && !address.is_loopback()
+                && !address.is_multicast()
+                && !address.is_unicast_link_local()
+        }
+    }
 }
 
 impl Drop for LeafProcessRuntime {
@@ -330,11 +360,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             servers,
-            vec![
-                "127.0.0.53".parse::<std::net::IpAddr>().unwrap(),
-                "1.1.1.1".parse::<std::net::IpAddr>().unwrap(),
-            ]
+            vec!["1.1.1.1".parse::<std::net::IpAddr>().unwrap()]
         );
+        assert!(parse_system_dns_servers("nameserver 127.0.0.53\nnameserver ::1\n").is_err());
+        assert!(parse_system_dns_servers("nameserver fe80::1\n").is_err());
         assert!(parse_system_dns_servers("search example.test\n").is_err());
     }
 }
