@@ -116,8 +116,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: "easytier"
-            opts: "-E 'not test(tests::three_node)' --test-threads 1 --no-fail-fast"
+          # Network-sensitive tests remain single-threaded inside each runner, while
+          # deterministic hash partitions reduce wall-clock time without sharing
+          # ports, namespaces, routes, or UPnP state between concurrent tests.
+          - name: "easytier (1/3)"
+            opts: "-E 'not test(tests::three_node)' --partition hash:1/3 --test-threads 1 --no-fail-fast"
+
+          - name: "easytier (2/3)"
+            opts: "-E 'not test(tests::three_node)' --partition hash:2/3 --test-threads 1 --no-fail-fast"
+
+          - name: "easytier (3/3)"
+            opts: "-E 'not test(tests::three_node)' --partition hash:3/3 --test-threads 1 --no-fail-fast"
 
           - name: "three_node"
             opts: "-E 'test(tests::three_node) and not test(subnet_proxy_three_node_test)' --test-threads 1 --no-fail-fast"
