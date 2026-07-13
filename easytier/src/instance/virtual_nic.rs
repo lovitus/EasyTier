@@ -2832,6 +2832,8 @@ impl NicCtx {
             stream,
             #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
             policy_io.clone(),
+            #[cfg(all(feature = "leaf-policy-proxy", unix, not(target_os = "linux")))]
+            None,
         )?;
         #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
         let policy_bridge_updates = self

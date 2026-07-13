@@ -1493,13 +1493,15 @@ fn win_service_main(arg: Vec<std::ffi::OsString>) {
     win_service_event_loop(stop_notify_recv, cli, status_handle);
 }
 
-async fn run_main(mut cli: Cli) -> anyhow::Result<()> {
+async fn run_main(cli: Cli) -> anyhow::Result<()> {
     defer!(dump_profile(0););
     log::init(&cli.logging_options, true)?;
     if cli.nic_backend() != NicBackend::Tun && cli.network_options.no_tun == Some(true) {
         anyhow::bail!("--no-tun conflicts with --nic-backend veth/auto");
     }
 
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    let mut cli = cli;
     #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
     if let Some(policy_file) = cli.policy_config.clone() {
         if cli.network_options.socket_mark.is_none() {

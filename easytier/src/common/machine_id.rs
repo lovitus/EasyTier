@@ -1,5 +1,4 @@
 use std::{
-    env,
     ffi::OsString,
     io::Write as _,
     path::{Path, PathBuf},
@@ -92,11 +91,11 @@ fn default_linux_machine_id_state_dir(
 fn default_machine_id_state_dir() -> anyhow::Result<PathBuf> {
     cfg_select! {
         target_os = "linux" => Ok(default_linux_machine_id_state_dir(
-            env::var_os("XDG_DATA_HOME"),
-            env::var_os("HOME"),
+            std::env::var_os("XDG_DATA_HOME"),
+            std::env::var_os("HOME"),
         )),
         all(target_os = "macos", not(feature = "macos-ne")) => {
-            let home = non_empty_os_string(env::var_os("HOME"))
+            let home = non_empty_os_string(std::env::var_os("HOME"))
                 .ok_or_else(|| anyhow::anyhow!("HOME is not set, cannot resolve machine id state directory"))?;
             Ok(PathBuf::from(home)
                 .join("Library")
@@ -104,13 +103,13 @@ fn default_machine_id_state_dir() -> anyhow::Result<PathBuf> {
                 .join("com.easytier"))
         },
         target_os = "windows" => {
-            let local_app_data = non_empty_os_string(env::var_os("LOCALAPPDATA")).ok_or_else(|| {
+            let local_app_data = non_empty_os_string(std::env::var_os("LOCALAPPDATA")).ok_or_else(|| {
                 anyhow::anyhow!("LOCALAPPDATA is not set, cannot resolve machine id state directory")
             })?;
             Ok(PathBuf::from(local_app_data).join("easytier"))
         },
         target_os = "freebsd" => {
-            let home = non_empty_os_string(env::var_os("HOME"))
+            let home = non_empty_os_string(std::env::var_os("HOME"))
                 .ok_or_else(|| anyhow::anyhow!("HOME is not set, cannot resolve machine id state directory"))?;
             Ok(PathBuf::from(home).join(".local").join("share").join("easytier"))
         },
