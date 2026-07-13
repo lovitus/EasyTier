@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::Context as _;
+use tokio::net::UdpSocket;
 
 mod mesh_socks_bridge;
 mod mesh_udp_relay;
@@ -17,6 +18,24 @@ pub(crate) use mesh_udp_relay::{MeshUdpRelayService, RemoteUdpAssociation};
 pub(crate) use policy_routing::PolicyRoutingGuard;
 
 pub(crate) const POLICY_SOCKET_MARK: u32 = 0x4554_5001;
+const POLICY_UDP_SOCKET_BUFFER_SIZE: usize = 4 * 1_024 * 1_024;
+
+pub(crate) fn tune_policy_udp_socket(socket: &UdpSocket) {
+    let socket = socket2::SockRef::from(socket);
+    if let Err(error) = socket.set_recv_buffer_size(POLICY_UDP_SOCKET_BUFFER_SIZE) {
+        tracing::warn!(?error, "failed to enlarge policy UDP receive buffer");
+    }
+    if let Err(error) = socket.set_send_buffer_size(POLICY_UDP_SOCKET_BUFFER_SIZE) {
+        tracing::warn!(?error, "failed to enlarge policy UDP send buffer");
+    }
+    let recv_buffer_size = socket.recv_buffer_size().unwrap_or_default();
+    let send_buffer_size = socket.send_buffer_size().unwrap_or_default();
+    tracing::debug!(
+        recv_buffer_size,
+        send_buffer_size,
+        "configured policy UDP socket buffers"
+    );
+}
 
 #[derive(Debug, Clone)]
 pub struct PolicyProcessConfig {

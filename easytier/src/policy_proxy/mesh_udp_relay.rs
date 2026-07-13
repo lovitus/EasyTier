@@ -19,6 +19,7 @@ use crate::{
     common::PeerId,
     gateway::socks5::{DataPlaneTcpListener, DataPlaneTcpStream, DataPlaneUdpSocket, Socks5Server},
     peers::peer_manager::PeerManager,
+    policy_proxy::tune_policy_udp_socket,
     proto::{
         peer_rpc::{
             ClosePolicyUdpRelayRequest, ClosePolicyUdpRelayResponse, OpenPolicyUdpRelayRequest,
@@ -644,6 +645,7 @@ async fn open_local_socks_udp(
 
     let local_ip = control.local_addr()?.ip();
     let native_udp = UdpSocket::bind(SocketAddr::new(local_ip, 0)).await?;
+    tune_policy_udp_socket(&native_udp);
     let request_addr = native_udp.local_addr()?;
     control
         .write_all(&socks_udp_associate_request(request_addr))

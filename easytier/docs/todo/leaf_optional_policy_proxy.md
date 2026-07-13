@@ -98,6 +98,11 @@ cross-platform design below:
   persistent 16 KiB readers on both ends. This preserves SagerNet framing while
   avoiding two scheduler/KCP submissions and two underlying reads per ordinary
   MTU-sized datagram. Buffers are reused and remain bounded per association;
+- EasyTier-owned loopback UDP sockets at the Leaf/SOCKS bridge and destination
+  SOCKS-associate boundary request 4 MiB send/receive buffers and log the
+  kernel-granted values. Tuning failure remains compatible but observable;
+  third-party final-hop SOCKS servers retain responsibility for their own UDP
+  receive capacity;
 
 Not yet implemented in this spike: TOML/RPC/GUI/mobile envelopes, policy file
 hot reload, proxy credentials for the remote/native actor, HTTP CONNECT actor

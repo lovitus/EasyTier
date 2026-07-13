@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     gateway::socks5::{DataPlaneTcpStream, Socks5Server},
     peers::peer_manager::PeerManager,
-    policy_proxy::RemoteUdpAssociation,
+    policy_proxy::{RemoteUdpAssociation, tune_policy_udp_socket},
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -441,6 +441,7 @@ async fn relay_socks_udp(
     generation: CancellationToken,
 ) -> anyhow::Result<()> {
     let local = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?);
+    tune_policy_udp_socket(&local);
     let local_addr = local.local_addr()?;
     control.write_all(&socks_reply(0, local_addr)).await?;
     control.flush().await?;

@@ -229,6 +229,18 @@ both ends. Oversized legal datagrams still grow the writer buffer or bypass the
 reader capacity normally; the initial allocation remains bounded per
 association rather than reserving 64 KiB for every idle session.
 
+The `6e518851` beta reduced 20 Mbit/s loss to 1.3% and 50 Mbit/s loss to 20%
+without reporting any bridge-writer drop. A 30-second 50 Mbit/s counter capture
+then located the remaining loss: the policy client's namespace added 22,397
+`UdpRcvbufErrors` and the destination namespace added 914 while iperf reported
+30,563 missing datagrams. The client-side loss is the loopback UDP socket used
+between Leaf's SOCKS UDP client and `mesh_socks_bridge`; the smaller destination
+count belongs to the local native SOCKS UDP relay boundary. EasyTier and Leaf
+used only about 6% and 3% CPU in that sample. The next candidate requests 4 MiB
+receive and send buffers on both EasyTier-owned policy UDP sockets and logs the
+actual kernel-granted sizes. Failure to tune is non-fatal for compatibility,
+but the measured size and `UdpRcvbufErrors` delta are part of qualification.
+
 ## Static review disposition
 
 - Dynamic policy-route refresh: real and fixed.
