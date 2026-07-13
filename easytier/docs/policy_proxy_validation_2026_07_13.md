@@ -241,6 +241,18 @@ receive and send buffers on both EasyTier-owned policy UDP sockets and logs the
 actual kernel-granted sizes. Failure to tune is non-fatal for compatibility,
 but the measured size and `UdpRcvbufErrors` delta are part of qualification.
 
+With the external GOST actor restored to its validated 65,535-byte UDP buffer,
+the `a8b5e374` beta received 8 MiB kernel receive buffers and 2 MiB send buffers
+on both EasyTier-owned sockets. Client-namespace `UdpRcvbufErrors` stayed at
+zero: 20 Mbit/s lost 30/20,628 datagrams (0.15%), while a 30-second 50 Mbit/s
+run lost 7,913/155,744 (5.1%). Of those, 2,055 were directly accounted for by
+the third-party actor's receive-buffer errors. The same policy/KCP path carried
+TCP at 510 Mbit/s with zero retransmissions, disproving a KCP or mesh throughput
+ceiling. The follow-up therefore drains already-ready UDP datagrams without a
+timer and coalesces up to 32 datagrams/about 16 KiB into one stream write while
+retaining each UoT length prefix. Low-rate traffic still writes immediately;
+no pacing delay or wire change is introduced.
+
 ## Static review disposition
 
 - Dynamic policy-route refresh: real and fixed.
