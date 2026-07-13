@@ -129,6 +129,14 @@ import in the new policy configuration round-trip code. That mechanical compile
 failure occurs before runtime tests and does not invalidate the completed Leaf,
 KCP, or smoltcp results; the next snapshot adds only the missing import.
 
+The import follow-up compiled the EasyTier test binary and reached the policy
+configuration tests. It exposed that validation rejected an ambiguous
+`config_file` plus `config_inline` document correctly, but the ordinary error
+display stopped at an outer `failed to parse policy_proxy` context and hid the
+actionable `mutually exclusive` cause. The next snapshot preserves the same
+rejection and error chain while including the complete cause chain in the
+top-level message shown by CLI/RPC/GUI launchers.
+
 ### KCP encapsulation
 
 Symbolized `perf` data from the exact `9d582e6d` beta proved that policy TCP

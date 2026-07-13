@@ -852,7 +852,7 @@ impl TomlConfigLoader {
         Self::normalize_config_source(&mut config);
 
         Self::new_from_config(config).map_err(|err| {
-            let message = format!("failed to load config from {source_name}: {err}");
+            let message = format!("failed to load config from {source_name}: {err:#}");
             err.context(message)
         })
     }
