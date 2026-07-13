@@ -5,6 +5,8 @@
 //! runtimes attach through narrow traits in later integration layers.
 
 mod config;
+#[cfg(all(unix, feature = "leaf-inprocess"))]
+mod inprocess;
 mod leaf_config;
 #[cfg(unix)]
 mod leaf_process;
@@ -15,6 +17,8 @@ pub use config::{
     ChainKind, PolicyDocument, PolicyError, PolicyMode, PolicyRevision, ProxyKind, ProxyServer,
     ProxyVia, RuleSetKind, validate_policy_file,
 };
+#[cfg(all(unix, feature = "leaf-inprocess"))]
+pub use inprocess::{InProcessLeafFactory, InProcessLeafRuntime};
 pub use leaf_config::{
     LeafConfigError, MeshServerResolver, ResolvedMeshServer, compile_leaf_config,
 };
@@ -25,5 +29,5 @@ pub use packet::{LeafPacketBridge, LeafPacketEndpoint};
 pub use packet::{MeshRouteSnapshot, PacketClass, PacketClassifier, PacketError};
 pub use supervisor::{
     ApplyResult, HealthEvent, PolicyRuntime, PolicyRuntimeFactory, PolicyStatus, PolicySupervisor,
-    RetryDecision, RetryPolicy,
+    RetryDecision, RetryPolicy, RuntimeRestartBudget, RuntimeRestartDecision,
 };

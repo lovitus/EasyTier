@@ -1,12 +1,19 @@
 package com.plugin.vpnservice
 
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.Bundle
-import java.net.InetAddress
-import java.util.Arrays
+import java.util.concurrent.ConcurrentHashMap
 
 import app.tauri.plugin.JSObject
 
@@ -23,11 +30,105 @@ class TauriVpnService : VpnService() {
         const val DNS = "DNS"
         const val DISALLOWED_APPLICATIONS = "DISALLOWED_APPLICATIONS"
         const val MTU = "MTU"
+        // LinkProperties can change several times during one roam or DHCP renewal.
+        const val NETWORK_CHANGE_DEBOUNCE_MS = 2_000L
     }
 
     private lateinit var vpnInterface: ParcelFileDescriptor
+    private var lastUnderlyingDnsServers: Array<String> = emptyArray()
+    private var lastUnderlyingNetworkKey: String = ""
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val underlyingNetworks = ConcurrentHashMap<Network, UnderlyingNetwork>()
+    private var networkCallbackRegistered = false
+    @Volatile private var networkOutageObserved = false
+    private var networkEpoch = 0L
+
+    private data class UnderlyingNetwork(
+        @Volatile var linkProperties: LinkProperties? = null,
+        @Volatile var losingUntil: Long = 0,
+    )
+
+    private data class SelectedNetwork(
+        val network: Network,
+        val key: String,
+        val dnsServers: Array<String>,
+    )
+
+    private fun notifyNetworkState(networkKey: String, dnsServers: Array<String>) {
+        if (self != this || !this::vpnInterface.isInitialized) return
+        val data = JSObject()
+        data.put("networkKey", networkKey)
+        data.put("dnsServers", dnsServers)
+        triggerCallback("vpn_network_changed", data)
+    }
+
+    private val emitNetworkChange = Runnable {
+        val selectedNetwork = selectUnderlyingNetwork()
+        if (selectedNetwork == null) {
+            if (networkOutageObserved) return@Runnable
+            networkOutageObserved = true
+            networkEpoch += 1
+            lastUnderlyingNetworkKey = "outage!$networkEpoch"
+            lastUnderlyingDnsServers = emptyArray()
+            notifyNetworkState(lastUnderlyingNetworkKey, lastUnderlyingDnsServers)
+            return@Runnable
+        }
+        val recoveredFromOutage = networkOutageObserved
+        networkOutageObserved = false
+        val selected = selectedNetwork.copy(key = "${selectedNetwork.key}!$networkEpoch")
+        if (!recoveredFromOutage
+            && selected.key == lastUnderlyingNetworkKey
+            && selected.dnsServers.contentEquals(lastUnderlyingDnsServers)) {
+            return@Runnable
+        }
+        lastUnderlyingNetworkKey = selected.key
+        lastUnderlyingDnsServers = selected.dnsServers
+        if (Build.VERSION.SDK_INT in Build.VERSION_CODES.LOLLIPOP_MR1..Build.VERSION_CODES.P) {
+            setUnderlyingNetworks(arrayOf(selected.network))
+        }
+        notifyNetworkState(selected.key, selected.dnsServers)
+    }
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            underlyingNetworks.putIfAbsent(network, UnderlyingNetwork())
+            scheduleNetworkChange()
+        }
+
+        override fun onLosing(network: Network, maxMsToLive: Int) {
+            underlyingNetworks[network]?.losingUntil = System.currentTimeMillis() + maxMsToLive
+            scheduleNetworkChange()
+        }
+
+        override fun onLost(network: Network) {
+            underlyingNetworks.remove(network)
+            scheduleNetworkChange()
+        }
+
+        override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
+            val candidate = UnderlyingNetwork()
+            val info = underlyingNetworks[network]
+                ?: underlyingNetworks.putIfAbsent(network, candidate)
+                ?: candidate
+            info.linkProperties = properties
+            scheduleNetworkChange()
+        }
+
+        override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+            underlyingNetworks.putIfAbsent(network, UnderlyingNetwork())
+            scheduleNetworkChange()
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent == null) {
+            // This service has no persisted configuration from which a sticky restart can be
+            // reconstructed. Starting with defaults would create a wrong VPN generation.
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        // Android may reuse the Service after the plugin manually calls onRevoke().
+        self = this
         println("vpn on start command ${intent?.getExtras()} $intent")
         var args = intent?.getExtras()
         ipv4Addr = args?.getString(IPV4_ADDR)
@@ -39,6 +140,8 @@ class TauriVpnService : VpnService() {
 
         var event_data = JSObject()
         event_data.put("fd", vpnInterface.fd)
+        event_data.put("dnsServers", lastUnderlyingDnsServers)
+        event_data.put("networkKey", lastUnderlyingNetworkKey)
         triggerCallback("vpn_service_start", event_data)
 
         return START_STICKY
@@ -47,14 +150,16 @@ class TauriVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         self = this
+        registerNetworkObserver()
         println("vpn on create")
     }
 
     override fun onDestroy() {
         println("vpn on destroy")
-        super.onDestroy()
+        unregisterNetworkObserver()
         disconnect()
         self = null
+        super.onDestroy()
     }
 
     override fun onRevoke() {
@@ -62,6 +167,13 @@ class TauriVpnService : VpnService() {
         super.onRevoke()
         disconnect()
         self = null
+    }
+
+    fun prepareForRestart() {
+        // Replacing an interface must not call VpnService.onRevoke(): the platform
+        // implementation stops the Service and races the immediately following startService().
+        disconnect()
+        self = this
     }
 
     private fun disconnect() {
@@ -76,9 +188,134 @@ class TauriVpnService : VpnService() {
         ipv4Addr = null
         routes = emptyArray()
         dns = null
+        lastUnderlyingDnsServers = emptyArray()
+        lastUnderlyingNetworkKey = ""
+        networkOutageObserved = false
+        networkEpoch = 0
+    }
+
+    private fun registerNetworkObserver() {
+        if (networkCallbackRegistered) return
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        try {
+            connectivityManager.registerNetworkCallback(request, networkCallback)
+            networkCallbackRegistered = true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                connectivityManager.activeNetwork?.let { network ->
+                    val capabilities = connectivityManager.getNetworkCapabilities(network)
+                    if (isUsableUnderlying(capabilities)) {
+                        underlyingNetworks[network] = UnderlyingNetwork(
+                            connectivityManager.getLinkProperties(network)
+                        )
+                    }
+                }
+            }
+        } catch (error: Exception) {
+            println("vpn network observer registration failed: $error")
+        }
+    }
+
+    private fun unregisterNetworkObserver() {
+        mainHandler.removeCallbacks(emitNetworkChange)
+        if (networkCallbackRegistered) {
+            val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            try {
+                connectivityManager.unregisterNetworkCallback(networkCallback)
+            } catch (error: Exception) {
+                println("vpn network observer unregister failed: $error")
+            }
+        }
+        networkCallbackRegistered = false
+        underlyingNetworks.clear()
+    }
+
+    private fun scheduleNetworkChange() {
+        mainHandler.removeCallbacks(emitNetworkChange)
+        mainHandler.postDelayed(emitNetworkChange, NETWORK_CHANGE_DEBOUNCE_MS)
+    }
+
+    private fun isUsableUnderlying(capabilities: NetworkCapabilities?): Boolean {
+        return capabilities != null
+            && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    private fun networkPriority(capabilities: NetworkCapabilities?, losing: Boolean): Int {
+        val base = when {
+            capabilities == null -> 100
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 0
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 1
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_USB) -> 2
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) -> 3
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 4
+            else -> 20
+        }
+        return base + if (losing) 10 else 0
+    }
+
+    private fun selectUnderlyingNetwork(): SelectedNetwork? {
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val active = connectivityManager.activeNetwork
+            if (active != null
+                && isUsableUnderlying(connectivityManager.getNetworkCapabilities(active))) {
+                underlyingNetworks.putIfAbsent(
+                    active,
+                    UnderlyingNetwork(connectivityManager.getLinkProperties(active)),
+                )
+            }
+        }
+        val now = System.currentTimeMillis()
+        val selected = underlyingNetworks.entries
+            .filter { isUsableUnderlying(connectivityManager.getNetworkCapabilities(it.key)) }
+            .minByOrNull {
+                networkPriority(
+                    connectivityManager.getNetworkCapabilities(it.key),
+                    it.value.losingUntil > now,
+                )
+            }
+            ?: return null
+        val properties = selected.value.linkProperties
+            ?: connectivityManager.getLinkProperties(selected.key)
+            ?: return null
+        val dnsServers = properties.dnsServers
+            .mapNotNull { it.hostAddress }
+            .filter { !it.contains('%') }
+            .distinct()
+            .take(4)
+            .toTypedArray()
+        if (dnsServers.isEmpty()) return null
+        val capabilities = connectivityManager.getNetworkCapabilities(selected.key)
+        val transport = when {
+            capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> "wifi"
+            capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true -> "ethernet"
+            capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> "cellular"
+            else -> "other"
+        }
+        val linkSignature = listOf(
+            properties.interfaceName.orEmpty(),
+            properties.linkAddresses.map { it.toString() }.sorted().joinToString(","),
+            properties.routes.map { it.toString() }.sorted().joinToString(","),
+            dnsServers.joinToString(","),
+        ).joinToString("|").let { Integer.toHexString(it.hashCode()) }
+        return SelectedNetwork(
+            selected.key,
+            "${selected.key}@$transport#$linkSignature",
+            dnsServers,
+        )
     }
 
     private fun createVpnInterface(args: Bundle?): ParcelFileDescriptor {
+        val selectedNetwork = selectUnderlyingNetwork()?.let {
+            it.copy(key = "${it.key}!$networkEpoch")
+        }
+        networkOutageObserved = selectedNetwork == null
+        val underlyingDnsServers = selectedNetwork?.dnsServers ?: emptyArray()
         var builder = Builder()
                 .setSession("TauriVpnService")
                 .setBlocking(false)
@@ -107,16 +344,23 @@ class TauriVpnService : VpnService() {
             builder.addRoute(ipParts[0], ipParts[1].toInt())
         }
         
-        for (app in disallowedApplications) {
+        for (app in (disallowedApplications + packageName).distinct()) {
             builder.addDisallowedApplication(app)
         }
 
-        return builder.also {
+        val vpn = builder.also {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 it.setMetered(false)
             }
         }
         .establish()
         ?: throw IllegalStateException("Failed to init VpnService")
+        lastUnderlyingDnsServers = underlyingDnsServers
+        lastUnderlyingNetworkKey = selectedNetwork?.key.orEmpty()
+        if (selectedNetwork != null
+            && Build.VERSION.SDK_INT in Build.VERSION_CODES.LOLLIPOP_MR1..Build.VERSION_CODES.P) {
+            setUnderlyingNetworks(arrayOf(selectedNetwork.network))
+        }
+        return vpn
     }
 }

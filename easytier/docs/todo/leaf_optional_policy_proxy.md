@@ -1,19 +1,20 @@
 # Leaf Optional Policy Proxy Integration TODO
 
-**Status**: full-L3 transparent policy spike; minimal TUN boundary integration
+**Status**: Linux candidate validated; Android single-TUN candidate awaiting packaged build and real-device validation
 **Updated**: 2026-07-13
 
 This TODO is the design source of truth. Update it after each material design
 discussion so implementation does not depend on chat history.
 
-## Linux v1 validation snapshot
+## Current implementation snapshot
 
-The current implementation is an opt-in Linux spike behind the
-`leaf-policy-proxy` Cargo feature. It is deliberately narrower than the final
-cross-platform design below:
+The current implementation is opt-in behind `leaf-policy-proxy`; Android adds
+`leaf-policy-mobile` for the in-process runtime. It remains narrower than the
+final cross-platform design below:
 
-- absence of `--policy-config` creates no Leaf process, policy task, default
-  route, packet mux, bridge, timer, or session table;
+- an absent or disabled `[policy_proxy]` envelope creates no Leaf process,
+  policy task, default route, packet mux, bridge, timer, or session table. The
+  Linux process-level `--policy-config` override remains supported;
 - enabled mode requires `bind_device=true`, an explicit physical
   `--policy-outbound-interface`, no configured instance netns, and one active
   policy instance per process. If a process hosts additional networks, they
@@ -75,8 +76,12 @@ cross-platform design below:
   SOCKS address, then `u16` big-endian length plus payload) without importing
   Go code. The stream uses the existing `Socks5AutoConnector`: KCP is selected
   when the local endpoint and routed destination capability permit it;
-  otherwise the existing smoltcp TCP path remains available. Failure to build
-  the v2 stream performs one bounded retry through the legacy datagram relay.
+  otherwise the existing smoltcp TCP path remains available. If capability
+  says KCP but its connect attempt fails or exceeds five seconds, policy UoT
+  alone retries the same private stream endpoint once through smoltcp within
+  the existing ten-second setup budget. Ordinary EasyTier SOCKS remains
+  KCP-only after selecting KCP. Only failure of both UoT stream paths performs
+  one bounded retry through the legacy datagram relay.
   The private TCP listener is per-association, unadvertised, limited by the
   existing global/per-peer association caps, protected by a random 128-bit
   token, and removed on setup timeout, cancellation, control EOF, or idle
@@ -103,13 +108,25 @@ cross-platform design below:
   kernel-granted values. Tuning failure remains compatible but observable;
   third-party final-hop SOCKS servers retain responsibility for their own UDP
   receive capacity;
+- multi-datagram UoT coalescing is intentionally excluded. Beta profiling
+  showed that it increased burst loss at the final SOCKS UDP actor without
+  improving the reliable mesh path; one complete frame per write is the
+  validated latency/throughput boundary;
 
-Not yet implemented in this spike: TOML/RPC/GUI/mobile envelopes, policy file
-hot reload, proxy credentials for the remote/native actor, HTTP CONNECT actor
-adaptation, a bundled exit-node SOCKS5 UDP service, instance-netns worker
-ownership, and non-Linux TUN adapters.
+Not yet implemented in this spike: policy file hot reload, proxy credentials
+for the remote/native actor, HTTP CONNECT actor adaptation, a bundled exit-node
+SOCKS5 UDP service, instance-netns worker ownership, and desktop non-Linux TUN
+adapters. TOML/RPC/GUI envelopes and the Android single-TUN adapter are now
+implemented candidates pending packaged-build and real-device validation.
 These are release blockers for claiming the full plan, but they do not affect
 ordinary EasyTier builds because the feature is off by default.
+
+The Android candidate currently targets the official Tauri GUI/VpnService
+path. The separate `easytier-android-jni` contrib SDK remains feature-disabled:
+its host API does not yet carry policy default routes, underlying DNS, or
+network-generation callbacks. Enabling the Cargo feature there without that
+public host contract would expose a configuration that cannot recover after a
+network change.
 
 ## Android implementation evidence
 
@@ -138,6 +155,24 @@ The implementation boundary is:
 - snapshot underlying DNS servers from `ConnectivityManager`/`LinkProperties`
   before `Builder.establish()` and pass that immutable generation into policy
   config compilation;
+- observe only `NOT_VPN + INTERNET` networks, coalesce Wi-Fi roam, cellular
+  switch, DHCP renewal, route, address, and DNS callbacks for two seconds, and
+  restart only the policy runtime when the selected physical-network signature
+  changes. The VpnService TUN, EasyTier mesh, OSPF sessions, and ordinary peer
+  transports remain untouched;
+- after a two-second debounce, treat absence of every physical network (for
+  example airplane mode or an elevator) as a fail-closed outage generation:
+  stop only the policy runtime, keep the TUN and mesh alive, and do not consume
+  restart budget or walk all fallbacks. Recovery publishes one usable
+  generation and performs one bounded policy rebuild, even if Android reuses
+  the same `Network` handle and DHCP/DNS signature;
+- use kernel-assigned port `0` for every private policy bridge/listener. Policy
+  mode introduces no fixed local listener port that can conflict with another
+  VPN application;
+- respect Android's single-`VpnService` ownership rule. If another VPN takes
+  ownership, `onRevoke()` closes this generation and EasyTier does not fight it
+  with an automatic restart loop. A sticky restart without the original
+  configuration is rejected instead of creating a default/incorrect TUN;
 - add IPv4/IPv6 default VpnService routes only when policy mode is enabled.
   Policy-disabled mobile startup remains byte-for-byte equivalent at the
   routing boundary.
@@ -175,18 +210,19 @@ All launch surfaces map to one configuration:
 ```toml
 [policy_proxy]
 enabled = true
-mode = "rule"                  # rule | global | direct
-profile = "default"
 config_file = "policy/default.yaml"
-fail_closed = true
+# config_inline = "..."        # GUI/RPC/mobile alternative
+outbound_interface = "eth0"    # Linux only
+# leaf_executable = "easytier-leaf-worker"
 ```
 
 - absence of the section or `enabled=false` is exactly current EasyTier;
 - `config_file` is resolved relative to the EasyTier config directory;
 - GUI/mobile/RPC may store `config_inline` instead of a path; the two are
   mutually exclusive;
-- `fail_closed=true` is mandatory in v1. A policy failure preserves mesh L3 but
-  blocks non-mesh traffic; it never silently changes to DIRECT;
+- fail-closed behavior is mandatory and internal in v1. A policy failure
+  preserves mesh L3 but blocks non-mesh traffic; it never silently changes to
+  DIRECT;
 - resource and breaker limits are internal validated defaults in v1 rather
   than a large user-facing tuning surface.
 
@@ -211,8 +247,11 @@ For the spike, supplying `--policy-config` or `ET_POLICY_PROXY_CONFIG` enables
 policy mode. Omitting both disables it completely. Linux also requires the
 physical outbound interface. The worker override is for packaging and testing;
 normal packages place `easytier-leaf-worker` beside/on the executable path.
-The current spike does not yet read `[policy_proxy]` from the ordinary network
-TOML and does not expose policy mode through RPC, GUI, or mobile launchers.
+The current candidate reads the same envelope from ordinary network TOML,
+protobuf/RPC, and GUI configuration. CLI/environment process overrides still
+win. Relative policy paths resolve from the network TOML directory; GUI and
+Android should prefer `config_inline`. Enabling the section without exactly one
+document source is rejected before the instance starts.
 
 The public Linux implementation should first auto-select the outbound interface
 only when exactly one usable physical default route exists. Multiple default
@@ -248,6 +287,26 @@ show the candidates and require an explicit choice; the runtime must never
 guess. An explicit CLI/environment/TOML value always wins. Other platforms use
 their native VPN owner to identify and protect outbound sockets and do not
 expose this Linux-only field to ordinary users.
+
+Android reuses the single VpnService TUN owned by EasyTier. Policy packets pass
+to an in-process Leaf runtime through the bounded packet bridge; mesh routes,
+proxy CIDRs, public IPv6 routes, multicast, and Magic DNS remain on the
+PeerManager path. The runtime package is excluded before `Builder.establish()`,
+and underlying DNS servers are captured from `LinkProperties` before the VPN
+becomes active. Policy mode alone adds IPv4 and IPv6 default routes.
+
+The in-process runtime parses generated Leaf configuration before spawning,
+allocates a unique runtime ID, publishes the bridge only after readiness, and
+uses a late-start reaper if the three-second readiness window expires. Linux
+and Android share a bounded 1/2/5-second restart budget. A fourth failure in
+the same route generation becomes dormant; a route identity change retries,
+and 60 seconds of stable operation resets the budget.
+
+Magic DNS remains deliberately mesh-owned. Queries sent to its virtual address
+bypass Leaf, so Leaf `DOMAIN`/`GEOSITE` rules cannot observe those names. The
+runtime emits an explicit warning rather than claiming split-DNS support. This
+limitation remains until a split-DNS adapter can preserve both EasyTier's
+authoritative zone and Leaf FakeDNS semantics.
 
 ### Cross-platform startup
 
@@ -1011,7 +1070,7 @@ The envelope remains stable if Leaf is upgraded or replaced. The policy schema
 may initially reuse a documented subset of Leaf semantics, but unsupported Leaf
 fields must be rejected rather than silently ignored.
 
-Initial envelope draft:
+Historical envelope draft (superseded by the implemented envelope above):
 
 ```toml
 [policy_proxy]

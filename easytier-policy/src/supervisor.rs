@@ -10,9 +10,17 @@ use thiserror::Error;
 use crate::PolicyRevision;
 
 const MAX_RESTARTS: u8 = 3;
+const RUNTIME_RESTART_BACKOFF: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+];
 
 pub trait PolicyRuntime: Send + Sync {
     fn revision_id(&self) -> &str;
+    fn is_running(&self) -> bool {
+        true
+    }
     fn shutdown(self: Arc<Self>) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 }
 
@@ -45,6 +53,35 @@ pub enum RetryDecision {
     Wait(Duration),
     Probe,
     Dormant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeRestartDecision {
+    RetryAfter(Duration),
+    Dormant,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeRestartBudget {
+    failures: usize,
+}
+
+impl RuntimeRestartBudget {
+    pub fn record_failure(&mut self) -> RuntimeRestartDecision {
+        let Some(delay) = RUNTIME_RESTART_BACKOFF.get(self.failures).copied() else {
+            return RuntimeRestartDecision::Dormant;
+        };
+        self.failures += 1;
+        RuntimeRestartDecision::RetryAfter(delay)
+    }
+
+    pub fn reset(&mut self) {
+        self.failures = 0;
+    }
+
+    pub fn failures(&self) -> usize {
+        self.failures
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +274,31 @@ mod tests {
     use super::*;
 
     const POLICY: &str = "version: 1\nrules: [\"MATCH,DIRECT\"]\n";
+
+    #[test]
+    fn runtime_restart_budget_uses_every_delay_then_becomes_dormant() {
+        let mut budget = RuntimeRestartBudget::default();
+        assert_eq!(
+            budget.record_failure(),
+            RuntimeRestartDecision::RetryAfter(Duration::from_secs(1))
+        );
+        assert_eq!(
+            budget.record_failure(),
+            RuntimeRestartDecision::RetryAfter(Duration::from_secs(2))
+        );
+        assert_eq!(
+            budget.record_failure(),
+            RuntimeRestartDecision::RetryAfter(Duration::from_secs(5))
+        );
+        assert_eq!(budget.record_failure(), RuntimeRestartDecision::Dormant);
+        assert_eq!(budget.failures(), 3);
+        budget.reset();
+        assert_eq!(budget.failures(), 0);
+        assert_eq!(
+            budget.record_failure(),
+            RuntimeRestartDecision::RetryAfter(Duration::from_secs(1))
+        );
+    }
 
     struct Runtime(String);
 

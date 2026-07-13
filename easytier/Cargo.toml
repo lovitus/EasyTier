@@ -400,6 +400,7 @@ smoltcp = ["dep:smoltcp"]
 socks5 = ["smoltcp"]
 ffi-dataplane = ["socks5"]
 leaf-policy-proxy = ["dep:easytier-policy", "ffi-dataplane", "tun"]
+leaf-policy-mobile = ["leaf-policy-proxy", "easytier-policy/leaf-inprocess"]
 jemalloc = ["dep:jemallocator", "dep:jemalloc-sys"]
 jemalloc-prof = [
     "jemalloc",

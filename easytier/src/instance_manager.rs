@@ -16,6 +16,25 @@ use crate::{
     rpc_service::InstanceRpcService,
 };
 
+#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+fn ensure_policy_socket_mark(config: &TomlConfigLoader) -> anyhow::Result<Option<u32>> {
+    if !config
+        .get_policy_proxy_config()
+        .is_some_and(|policy| policy.enabled)
+    {
+        return Ok(None);
+    }
+    let mut flags = config.get_flags();
+    let mark = *flags
+        .socket_mark
+        .get_or_insert(crate::policy_proxy::POLICY_SOCKET_MARK);
+    if mark == 0 {
+        anyhow::bail!("policy_proxy requires a non-zero socket_mark");
+    }
+    config.set_flags(flags);
+    Ok(Some(mark))
+}
+
 pub(crate) struct DaemonGuard {
     guard: Option<Arc<()>>,
     stop_check_notifier: Arc<tokio::sync::Notify>,
@@ -121,6 +140,20 @@ impl NetworkInstanceManager {
         config_file_control: ConfigFileControl,
     ) -> Result<uuid::Uuid, anyhow::Error> {
         cfg.set_nic_backend(self.nic_backend);
+        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        if let Some(mark) = ensure_policy_socket_mark(&cfg)? {
+            crate::common::dns::set_control_plane_socket_mark(Some(mark));
+        }
+        if cfg
+            .get_policy_proxy_config()
+            .is_some_and(|policy| policy.enabled)
+            && !cfg!(any(
+                all(feature = "leaf-policy-proxy", target_os = "linux"),
+                all(feature = "leaf-policy-mobile", target_os = "android")
+            ))
+        {
+            anyhow::bail!("policy_proxy is enabled but this build has no supported policy runtime");
+        }
         if cfg.get_flags().no_tun && self.nic_backend != NicBackend::Tun {
             anyhow::bail!("--no-tun conflicts with --nic-backend veth/auto");
         }
@@ -314,6 +347,15 @@ impl NetworkInstanceManager {
     }
 
     pub fn set_tun_fd(&self, instance_id: &uuid::Uuid, fd: i32) -> Result<(), anyhow::Error> {
+        self.set_mobile_tun(instance_id, fd, Vec::new())
+    }
+
+    pub fn set_mobile_tun(
+        &self,
+        instance_id: &uuid::Uuid,
+        fd: i32,
+        dns_servers: Vec<std::net::IpAddr>,
+    ) -> Result<(), anyhow::Error> {
         let sender = self
             .instance_map
             .get(instance_id)
@@ -322,10 +364,56 @@ impl NetworkInstanceManager {
             .ok_or_else(|| anyhow::anyhow!("tun fd sender not found"))?;
 
         sender
-            .try_send(Some(fd))
+            .try_send(Some(crate::launcher::MobileTunConfig {
+                fd,
+                dns_servers,
+                network_key: String::new(),
+                completion: None,
+            }))
             .map_err(|e| anyhow::anyhow!("failed to send tun fd: {}", e))?;
 
         Ok(())
+    }
+
+    pub async fn set_mobile_tun_and_wait(
+        &self,
+        instance_id: &uuid::Uuid,
+        fd: i32,
+        dns_servers: Vec<std::net::IpAddr>,
+        network_key: String,
+    ) -> Result<(), anyhow::Error> {
+        let sender = self
+            .instance_map
+            .get(instance_id)
+            .ok_or_else(|| anyhow::anyhow!("instance not found"))?
+            .get_tun_fd_sender()
+            .ok_or_else(|| anyhow::anyhow!("tun fd sender not found"))?;
+        let (completion, result) = tokio::sync::oneshot::channel();
+        sender
+            .try_send(Some(crate::launcher::MobileTunConfig {
+                fd,
+                dns_servers,
+                network_key,
+                completion: Some(completion),
+            }))
+            .map_err(|error| anyhow::anyhow!("failed to send tun fd: {error}"))?;
+        tokio::time::timeout(std::time::Duration::from_secs(20), result)
+            .await
+            .map_err(|_| anyhow::anyhow!("mobile virtual NIC readiness timed out"))?
+            .map_err(|_| anyhow::anyhow!("mobile virtual NIC setup task stopped"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    #[cfg(mobile)]
+    pub fn update_mobile_network(
+        &self,
+        instance_id: &uuid::Uuid,
+        state: crate::launcher::MobileNetworkState,
+    ) -> Result<(), anyhow::Error> {
+        self.instance_map
+            .get(instance_id)
+            .ok_or_else(|| anyhow::anyhow!("instance not found"))?
+            .update_mobile_network(state)
     }
 
     pub fn get_config_dir(&self) -> Option<&PathBuf> {
@@ -599,6 +687,44 @@ impl Display for proto::api::instance::PeerConnInfo {
 mod tests {
     use super::*;
     use crate::common::config::*;
+
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[test]
+    fn policy_toml_gets_a_default_socket_mark_without_overwriting_an_explicit_mark() {
+        let config = TomlConfigLoader::new_from_str(
+            r#"
+[policy_proxy]
+enabled = true
+config_inline = 'version: 1\nrules: ["FINAL,DIRECT"]'
+outbound_interface = "eth0"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ensure_policy_socket_mark(&config).unwrap(),
+            Some(crate::policy_proxy::POLICY_SOCKET_MARK)
+        );
+        assert_eq!(
+            config.get_flags().socket_mark,
+            Some(crate::policy_proxy::POLICY_SOCKET_MARK)
+        );
+
+        let mut flags = config.get_flags();
+        flags.socket_mark = Some(77);
+        config.set_flags(flags);
+        assert_eq!(ensure_policy_socket_mark(&config).unwrap(), Some(77));
+        assert_eq!(config.get_flags().socket_mark, Some(77));
+
+        let mut flags = config.get_flags();
+        flags.socket_mark = Some(0);
+        config.set_flags(flags);
+        assert!(
+            ensure_policy_socket_mark(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("non-zero")
+        );
+    }
 
     #[tokio::test]
     #[serial_test::serial]

@@ -238,6 +238,10 @@ impl PolicyRuntime for LeafProcessRuntime {
         &self.revision_id
     }
 
+    fn is_running(&self) -> bool {
+        LeafProcessRuntime::is_running(self)
+    }
+
     fn shutdown(self: Arc<Self>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(async move { self.stop().await })
     }

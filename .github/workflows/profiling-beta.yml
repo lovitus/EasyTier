@@ -52,28 +52,57 @@ jobs:
       - name: Build optimized binaries with symbols
         run: |
           set -euo pipefail
-          cargo test \
+          timeout 900 cargo test \
             --locked \
             --target "$TARGET" \
-            --package easytier-policy
-          cargo test \
+            --package easytier-policy \
+            --features leaf-inprocess
+          timeout 600 cargo test \
             --locked \
             --target "$TARGET" \
             --package kcp-sys \
             dropping_one_stream_resets_both_connection_states
-          cargo test \
+          timeout 600 cargo test \
             --locked \
             --target "$TARGET" \
             --package netstack-smoltcp \
             shutdown_completes_when_fin_is_committed
-          cargo build \
+          timeout 600 cargo test \
+            --locked \
+            --target "$TARGET" \
+            --package easytier \
+            --lib \
+            --features leaf-policy-proxy \
+            policy_proxy_config
+          timeout 600 cargo test \
+            --locked \
+            --target "$TARGET" \
+            --package easytier \
+            --lib \
+            --features leaf-policy-proxy \
+            network_config_roundtrips_policy_proxy_envelope
+          timeout 600 cargo test \
+            --locked \
+            --target "$TARGET" \
+            --package easytier \
+            --lib \
+            --features leaf-policy-proxy \
+            policy_toml_gets_a_default_socket_mark
+          timeout 600 cargo test \
+            --locked \
+            --target "$TARGET" \
+            --package easytier \
+            --lib \
+            --features leaf-policy-proxy \
+            uot_
+          timeout 1800 cargo build \
             --locked \
             --release \
             --target "$TARGET" \
             --package easytier-policy \
             --bin easytier-leaf-worker \
             --features leaf-worker
-          cargo build \
+          timeout 1800 cargo build \
             --locked \
             --release \
             --target "$TARGET" \

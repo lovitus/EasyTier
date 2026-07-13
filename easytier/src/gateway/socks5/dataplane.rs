@@ -308,7 +308,7 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<DataPlaneTcpStream, Error> {
-        self.data_plane_tcp_connect_inner(dst_addr, timeout, true)
+        self.data_plane_tcp_connect_inner(dst_addr, timeout, true, false)
             .await
     }
 
@@ -317,7 +317,16 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<DataPlaneTcpStream, Error> {
-        self.data_plane_tcp_connect_inner(dst_addr, timeout, false)
+        self.data_plane_tcp_connect_inner(dst_addr, timeout, false, false)
+            .await
+    }
+
+    pub(crate) async fn data_plane_tcp_connect_mesh_uot(
+        &self,
+        dst_addr: SocketAddr,
+        timeout: Duration,
+    ) -> Result<DataPlaneTcpStream, Error> {
+        self.data_plane_tcp_connect_inner(dst_addr, timeout, false, true)
             .await
     }
 
@@ -326,6 +335,7 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
         allow_kernel_fallback: bool,
+        fallback_to_smoltcp_on_kcp_failure: bool,
     ) -> Result<DataPlaneTcpStream, Error> {
         let data_plane_ref = self.acquire_data_plane_ref();
         let deadline = Instant::now() + timeout;
@@ -346,6 +356,7 @@ impl Socks5Server {
             entry_count: self.entry_count.clone(),
             inner_connector: parking_lot::Mutex::new(None),
             allow_kernel_fallback,
+            fallback_to_smoltcp_on_kcp_failure,
         };
 
         let remaining = deadline.saturating_duration_since(Instant::now());

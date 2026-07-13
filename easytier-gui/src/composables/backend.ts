@@ -70,8 +70,12 @@ export async function setLoggingLevel(level: string) {
   return await invoke('set_logging_level', { level })
 }
 
-export async function setTunFd(fd: number) {
-  return await invoke('set_tun_fd', { fd })
+export async function setTunFd(fd: number, dnsServers: string[] = [], networkKey = '') {
+  return await invoke('set_tun_fd', { fd, dnsServers, networkKey })
+}
+
+export async function updateMobileNetwork(dnsServers: string[], networkKey: string) {
+  return await invoke('update_mobile_network', { dnsServers, networkKey })
 }
 
 export async function getEasytierVersion() {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AutoComplete, Button, Checkbox, Dialog, Divider, InputNumber, InputText, Panel, Password, SelectButton, ToggleButton } from 'primevue'
+import { AutoComplete, Button, Checkbox, Dialog, Divider, InputNumber, InputText, Panel, Password, SelectButton, Textarea, ToggleButton } from 'primevue'
 import InputGroup from 'primevue/inputgroup'
 import InputGroupAddon from 'primevue/inputgroupaddon'
 import {
@@ -103,6 +103,7 @@ const bool_flags: BoolFlag[] = [
   { field: 'stealth_mode', help: 'stealth_mode_help' },
   { field: 'disable_legacy_udp_hole_punch', help: 'disable_legacy_udp_hole_punch_help' },
   { field: 'underlay_candidate_guard', help: 'underlay_candidate_guard_help' },
+  { field: 'enable_policy_proxy', help: 'enable_policy_proxy_help' },
   { field: 'enable_udp_broadcast_relay', help: 'enable_udp_broadcast_relay_help' },
   { field: 'disable_upnp', help: 'disable_upnp_help' },
   { field: 'disable_sym_hole_punching', help: 'disable_sym_hole_punching_help' },
@@ -215,6 +216,26 @@ const instanceRecvBpsLimitInput = computed<string>({
     }
   },
 })
+
+const policyConfigFile = computed<string>({
+  get: () => curNetwork.value.policy_config_file ?? '',
+  set: (value) => {
+    curNetwork.value.policy_config_file = value
+    if (value.trim().length > 0) {
+      curNetwork.value.policy_config_inline = ''
+    }
+  },
+})
+
+const policyConfigInline = computed<string>({
+  get: () => curNetwork.value.policy_config_inline ?? '',
+  set: (value) => {
+    curNetwork.value.policy_config_inline = value
+    if (value.trim().length > 0) {
+      curNetwork.value.policy_config_file = ''
+    }
+  },
+})
 </script>
 
 <template>
@@ -303,6 +324,31 @@ const instanceRecvBpsLimitInput = computed<string>({
                   <label for="hostname">{{ t('hostname') }}</label>
                   <InputText id="hostname" v-model="curNetwork.hostname" aria-describedby="hostname-help" :format="true"
                     :placeholder="t('hostname_placeholder', [props.hostname])" />
+                </div>
+              </div>
+
+              <div v-if="curNetwork.enable_policy_proxy" class="flex flex-col gap-2">
+                <div class="flex">
+                  <label for="policy_config_file">{{ t('policy_config_file') }}</label>
+                  <span class="pi pi-question-circle ml-2 self-center"
+                    v-tooltip="t('policy_config_file_help')"></span>
+                </div>
+                <InputText id="policy_config_file" v-model="policyConfigFile"
+                  :placeholder="t('policy_config_file_placeholder')" />
+                <label for="policy_config_inline">{{ t('policy_config_inline') }}</label>
+                <Textarea id="policy_config_inline" v-model="policyConfigInline" rows="8" auto-resize
+                  :placeholder="t('policy_config_inline_placeholder')" />
+                <div class="flex flex-row gap-x-9 flex-wrap">
+                  <div class="flex flex-col gap-2 basis-5/12 grow">
+                    <label for="policy_outbound_interface">{{ t('policy_outbound_interface') }}</label>
+                    <InputText id="policy_outbound_interface" v-model="curNetwork.policy_outbound_interface"
+                      :placeholder="t('policy_outbound_interface_placeholder')" />
+                  </div>
+                  <div class="flex flex-col gap-2 basis-5/12 grow">
+                    <label for="policy_leaf_executable">{{ t('policy_leaf_executable') }}</label>
+                    <InputText id="policy_leaf_executable" v-model="curNetwork.policy_leaf_executable"
+                      placeholder="easytier-leaf-worker" />
+                  </div>
                 </div>
               </div>
 

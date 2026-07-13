@@ -326,6 +326,11 @@ pub trait ConfigLoader: Send + Sync {
     fn get_secure_mode(&self) -> Option<SecureModeConfig>;
     fn set_secure_mode(&self, secure_mode: Option<SecureModeConfig>);
 
+    fn get_policy_proxy_config(&self) -> Option<PolicyProxyConfig> {
+        None
+    }
+    fn set_policy_proxy_config(&self, _config: Option<PolicyProxyConfig>) {}
+
     fn get_credential_file(&self) -> Option<std::path::PathBuf> {
         None
     }
@@ -554,6 +559,80 @@ pub struct PortForwardConfig {
     pub proto: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyProxyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub config_file: Option<PathBuf>,
+    pub config_inline: Option<String>,
+    pub outbound_interface: Option<String>,
+    pub leaf_executable: Option<PathBuf>,
+    #[serde(skip)]
+    pub source_dir: Option<PathBuf>,
+}
+
+impl PolicyProxyConfig {
+    const MAX_INLINE_BYTES: usize = 4 * 1024 * 1024;
+
+    pub fn validate_envelope(&self) -> anyhow::Result<()> {
+        if self.config_file.is_some() && self.config_inline.is_some() {
+            anyhow::bail!("policy_proxy config_file and config_inline are mutually exclusive");
+        }
+        if self.enabled && self.config_file.is_none() && self.config_inline.is_none() {
+            anyhow::bail!(
+                "policy_proxy enabled=true requires exactly one of config_file or config_inline"
+            );
+        }
+        if self
+            .config_file
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            anyhow::bail!("policy_proxy config_file cannot be empty");
+        }
+        if let Some(config_inline) = self.config_inline.as_ref() {
+            if config_inline.trim().is_empty() {
+                anyhow::bail!("policy_proxy config_inline cannot be empty");
+            }
+            if config_inline.len() > Self::MAX_INLINE_BYTES {
+                anyhow::bail!(
+                    "policy_proxy config_inline exceeds {} bytes",
+                    Self::MAX_INLINE_BYTES
+                );
+            }
+        }
+        if self
+            .outbound_interface
+            .as_ref()
+            .is_some_and(|interface| interface.trim().is_empty())
+        {
+            anyhow::bail!("policy_proxy outbound_interface cannot be empty");
+        }
+        if self
+            .leaf_executable
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            anyhow::bail!("policy_proxy leaf_executable cannot be empty");
+        }
+        Ok(())
+    }
+
+    pub fn resolved_config_file(&self) -> Option<PathBuf> {
+        self.config_file.as_ref().map(|path| {
+            if path.is_absolute() {
+                path.clone()
+            } else {
+                self.source_dir
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(path)
+            }
+        })
+    }
+}
+
 impl From<PortForwardConfigPb> for PortForwardConfig {
     fn from(config: PortForwardConfigPb) -> Self {
         PortForwardConfig {
@@ -659,6 +738,8 @@ struct Config {
 
     secure_mode: Option<SecureModeConfig>,
 
+    policy_proxy: Option<PolicyProxyConfig>,
+
     flags: Option<serde_json::Map<String, serde_json::Value>>,
 
     #[serde(skip)]
@@ -749,7 +830,9 @@ impl TomlConfigLoader {
             .with_context(|| format!("failed to read config file: {}", config_path.display()))?;
 
         let source_name = config_path.display().to_string();
-        Self::new_from_str_with_source(&source_name, &config_str)
+        let config = Self::new_from_str_with_source(&source_name, &config_str)?;
+        config.set_policy_proxy_source_dir(config_path.parent().map(Path::to_path_buf));
+        Ok(config)
     }
 
     pub(crate) fn new_from_str_with_source(
@@ -775,6 +858,11 @@ impl TomlConfigLoader {
     }
 
     fn new_from_config(mut config: Config) -> Result<Self, anyhow::Error> {
+        if let Some(policy_proxy) = config.policy_proxy.as_ref() {
+            policy_proxy
+                .validate_envelope()
+                .context("failed to parse policy_proxy")?;
+        }
         let mut flags = Self::gen_flags(config.flags.clone().unwrap_or_default())
             .context("failed to parse flags")?;
         Self::reconcile_stealth_secure_mode(&config, &mut flags)?;
@@ -925,6 +1013,12 @@ impl TomlConfigLoader {
 
     pub fn set_stealth_mode_explicit(&self, explicit: bool) {
         self.config.lock().unwrap().stealth_mode_explicit = explicit;
+    }
+
+    pub fn set_policy_proxy_source_dir(&self, source_dir: Option<PathBuf>) {
+        if let Some(policy_proxy) = self.config.lock().unwrap().policy_proxy.as_mut() {
+            policy_proxy.source_dir = source_dir;
+        }
     }
 
     pub fn reconcile_security_modes(&self) -> Result<(), anyhow::Error> {
@@ -1346,6 +1440,14 @@ impl ConfigLoader for TomlConfigLoader {
         }
     }
 
+    fn get_policy_proxy_config(&self) -> Option<PolicyProxyConfig> {
+        self.config.lock().unwrap().policy_proxy.clone()
+    }
+
+    fn set_policy_proxy_config(&self, config: Option<PolicyProxyConfig>) {
+        self.config.lock().unwrap().policy_proxy = config;
+    }
+
     fn get_credential_file(&self) -> Option<PathBuf> {
         self.config.lock().unwrap().credential_file.clone()
     }
@@ -1540,6 +1642,7 @@ pub async fn load_config_from_file(
 
     let source_name = config_file.display().to_string();
     let config = TomlConfigLoader::new_from_str_with_source(&source_name, &expanded_config_str)?;
+    config.set_policy_proxy_source_dir(config_file.parent().map(Path::to_path_buf));
 
     let mut control = ConfigFileControl::from_path(config_file.clone()).await;
 
@@ -2794,5 +2897,73 @@ enable_encryption = ${MIXED_ENCRYPTION}
         remove_env_var("MIXED_MTU");
         remove_env_var("MIXED_ENCRYPTION");
         remove_env_var("MIXED_LISTEN_PORT");
+    }
+
+    #[test]
+    fn policy_proxy_config_roundtrips_and_preserves_disabled_preference() {
+        let config = TomlConfigLoader::new_from_str(
+            r#"
+[policy_proxy]
+enabled = false
+config_file = "policy/default.yaml"
+outbound_interface = "eth0"
+leaf_executable = "easytier-leaf-worker"
+"#,
+        )
+        .unwrap();
+
+        let policy = config.get_policy_proxy_config().unwrap();
+        assert!(!policy.enabled);
+        assert_eq!(
+            policy.config_file.as_deref(),
+            Some(Path::new("policy/default.yaml"))
+        );
+
+        let dumped = config.dump();
+        let loaded = TomlConfigLoader::new_from_str(&dumped).unwrap();
+        assert_eq!(loaded.get_policy_proxy_config(), Some(policy));
+    }
+
+    #[test]
+    fn policy_proxy_config_rejects_ambiguous_or_missing_enabled_source() {
+        let ambiguous = TomlConfigLoader::new_from_str(
+            r#"
+[policy_proxy]
+enabled = true
+config_file = "policy.yaml"
+config_inline = "version: 1\nrules: [FINAL,DIRECT]"
+"#,
+        )
+        .unwrap_err();
+        assert!(ambiguous.to_string().contains("mutually exclusive"));
+
+        let missing =
+            TomlConfigLoader::new_from_str("[policy_proxy]\nenabled = true\n").unwrap_err();
+        assert!(missing.to_string().contains("requires exactly one"));
+    }
+
+    #[test]
+    fn policy_proxy_file_is_resolved_relative_to_network_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("network.toml");
+        std::fs::write(
+            &config_path,
+            "[policy_proxy]\nenabled = true\nconfig_file = \"policy/default.yaml\"\n",
+        )
+        .unwrap();
+
+        let config = TomlConfigLoader::new(&config_path).unwrap();
+        assert_eq!(
+            config
+                .get_policy_proxy_config()
+                .unwrap()
+                .resolved_config_file(),
+            Some(directory.path().join("policy/default.yaml"))
+        );
+        assert!(
+            config
+                .dump()
+                .contains("config_file = \"policy/default.yaml\"")
+        );
     }
 }

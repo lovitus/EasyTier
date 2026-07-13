@@ -1,6 +1,6 @@
 use crate::common::config::{
-    ConfigFileControl, ConfigSource, PortForwardConfig, parse_mapped_listener_urls,
-    process_secure_mode_cfg,
+    ConfigFileControl, ConfigSource, PolicyProxyConfig, PortForwardConfig,
+    parse_mapped_listener_urls, process_secure_mode_cfg,
 };
 #[cfg(feature = "ffi-dataplane")]
 use crate::gateway::socks5::Socks5Server;
@@ -36,7 +36,21 @@ use tokio::{
 pub type MyNodeInfo = crate::proto::api::manage::MyNodeInfo;
 
 type ArcMutApiService = Arc<RwLock<Option<Arc<dyn InstanceRpcService>>>>;
-type TunFd = Option<i32>;
+#[derive(Debug)]
+pub struct MobileTunConfig {
+    pub fd: i32,
+    pub dns_servers: Vec<std::net::IpAddr>,
+    pub network_key: String,
+    pub completion: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MobileNetworkState {
+    pub key: String,
+    pub dns_servers: Vec<std::net::IpAddr>,
+}
+
+type TunFd = Option<MobileTunConfig>;
 
 #[derive(serde::Serialize, Clone)]
 pub struct Event {
@@ -47,6 +61,8 @@ pub struct Event {
 struct EasyTierData {
     events: RwLock<VecDeque<Event>>,
     tun_fd: (mpsc::Sender<TunFd>, Mutex<Option<mpsc::Receiver<TunFd>>>),
+    #[cfg(mobile)]
+    mobile_network: tokio::sync::watch::Sender<MobileNetworkState>,
     event_subscriber: RwLock<broadcast::Sender<GlobalCtxEvent>>,
     instance_stop_notifier: Arc<tokio::sync::Notify>,
     #[cfg(feature = "ffi-dataplane")]
@@ -66,6 +82,8 @@ impl Default for EasyTierData {
             event_subscriber: RwLock::new(tx),
             events: RwLock::new(VecDeque::new()),
             tun_fd: (sender, Mutex::new(Some(receiver))),
+            #[cfg(mobile)]
+            mobile_network: tokio::sync::watch::channel(MobileNetworkState::default()).0,
             instance_stop_notifier: Arc::new(tokio::sync::Notify::new()),
             #[cfg(feature = "ffi-dataplane")]
             data_plane: tokio::sync::watch::channel(None).0,
@@ -119,23 +137,46 @@ impl EasyTierLauncher {
     ) {
         let global_ctx = instance.get_global_ctx();
         let peer_mgr = instance.get_peer_manager();
+        #[cfg(all(feature = "leaf-policy-proxy", unix))]
+        let policy_data_plane = Arc::downgrade(&instance.get_socks5_server());
         let nic_ctx = instance.get_nic_ctx();
         let peer_packet_receiver = instance.get_peer_packet_receiver();
         let mut tun_fd_receiver = data.tun_fd.1.lock().unwrap().take().unwrap();
+        #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
+        let mobile_network_updates = data.mobile_network.subscribe();
 
         tasks.spawn(async move {
             loop {
-                let Some(tun_fd) = tun_fd_receiver.recv().await.flatten() else {
+                let Some(tun_config) = tun_fd_receiver.recv().await.flatten() else {
                     return;
                 };
-                let res = Instance::setup_nic_ctx_for_mobile(
-                    nic_ctx.clone(),
-                    global_ctx.clone(),
-                    peer_mgr.clone(),
-                    peer_packet_receiver.clone(),
-                    tun_fd,
+                let mut tun_config = tun_config;
+                let completion = tun_config.completion.take();
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(18),
+                    Instance::setup_nic_ctx_for_mobile(
+                        nic_ctx.clone(),
+                        global_ctx.clone(),
+                        peer_mgr.clone(),
+                        peer_packet_receiver.clone(),
+                        tun_config,
+                        #[cfg(all(feature = "leaf-policy-proxy", unix))]
+                        policy_data_plane.clone(),
+                        #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
+                        mobile_network_updates.clone(),
+                    ),
                 )
-                .await;
+                .await
+                .map_err(|_| anyhow::anyhow!("mobile virtual NIC setup timed out"))
+                .and_then(|result| result);
+                if let Some(completion) = completion {
+                    let _ =
+                        completion.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+                }
+                if let Err(error) = result {
+                    tracing::error!(?error, "mobile virtual NIC setup failed");
+                    global_ctx.issue_event(GlobalCtxEvent::TunDeviceError(error.to_string()));
+                }
             }
         });
     }
@@ -484,6 +525,16 @@ impl NetworkInstance {
         self.launcher
             .as_ref()
             .map(|launcher| launcher.data.tun_fd.0.clone())
+    }
+
+    #[cfg(mobile)]
+    pub fn update_mobile_network(&self, state: MobileNetworkState) -> anyhow::Result<()> {
+        let launcher = self
+            .launcher
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("instance is not running"))?;
+        launcher.data.mobile_network.send_replace(state);
+        Ok(())
     }
 
     pub fn start(&mut self) -> Result<EventBusSubscriber, anyhow::Error> {
@@ -856,6 +907,40 @@ impl NetworkConfig {
             );
         }
 
+        if self.enable_policy_proxy.is_some()
+            || self.policy_config_file.is_some()
+            || self.policy_config_inline.is_some()
+            || self.policy_outbound_interface.is_some()
+            || self.policy_leaf_executable.is_some()
+        {
+            let policy = PolicyProxyConfig {
+                enabled: self.enable_policy_proxy.unwrap_or_default(),
+                config_file: self
+                    .policy_config_file
+                    .as_ref()
+                    .filter(|value| !value.is_empty())
+                    .map(Into::into),
+                config_inline: self
+                    .policy_config_inline
+                    .as_ref()
+                    .filter(|value| !value.is_empty())
+                    .cloned(),
+                outbound_interface: self
+                    .policy_outbound_interface
+                    .as_ref()
+                    .filter(|value| !value.is_empty())
+                    .cloned(),
+                leaf_executable: self
+                    .policy_leaf_executable
+                    .as_ref()
+                    .filter(|value| !value.is_empty())
+                    .map(Into::into),
+                source_dir: None,
+            };
+            policy.validate_envelope()?;
+            cfg.set_policy_proxy_config(Some(policy));
+        }
+
         let mut flags = gen_default_flags();
         if let Some(latency_first) = self.latency_first {
             flags.latency_first = latency_first;
@@ -1170,6 +1255,17 @@ impl NetworkConfig {
         result.credential_file = config
             .get_credential_file()
             .map(|path| path.to_string_lossy().into_owned());
+        if let Some(policy) = config.get_policy_proxy_config() {
+            result.enable_policy_proxy = Some(policy.enabled);
+            result.policy_config_file = policy
+                .config_file
+                .map(|path| path.to_string_lossy().into_owned());
+            result.policy_config_inline = policy.config_inline;
+            result.policy_outbound_interface = policy.outbound_interface;
+            result.policy_leaf_executable = policy
+                .leaf_executable
+                .map(|path| path.to_string_lossy().into_owned());
+        }
         let flags = config.get_flags();
         let default_flags = default_config.get_flags();
         result.latency_first = Some(flags.latency_first);
@@ -1301,6 +1397,34 @@ mod tests {
         assert!(dumped.contains("enable_quic_proxy = true"));
         assert!(dumped.contains("disable_tcp_hole_punching = true"));
         assert!(dumped.contains("disable_sym_hole_punching = true"));
+        Ok(())
+    }
+
+    #[test]
+    fn network_config_roundtrips_policy_proxy_envelope() -> Result<(), anyhow::Error> {
+        let network_config = super::NetworkConfig {
+            instance_id: Some(uuid::Uuid::new_v4().to_string()),
+            network_name: Some("policy-demo".to_string()),
+            network_secret: Some("secret".to_string()),
+            enable_policy_proxy: Some(true),
+            policy_config_inline: Some("version: 1\nrules: [\"FINAL,DIRECT\"]\n".to_string()),
+            policy_outbound_interface: Some("eth0".to_string()),
+            policy_leaf_executable: Some("easytier-leaf-worker".to_string()),
+            ..Default::default()
+        };
+
+        let config = network_config.gen_config()?;
+        let roundtrip = super::NetworkConfig::new_from_config(&config)?;
+        assert_eq!(roundtrip.enable_policy_proxy, Some(true));
+        assert_eq!(
+            roundtrip.policy_config_inline,
+            network_config.policy_config_inline
+        );
+        assert_eq!(roundtrip.policy_outbound_interface.as_deref(), Some("eth0"));
+        assert_eq!(
+            roundtrip.policy_leaf_executable.as_deref(),
+            Some("easytier-leaf-worker")
+        );
         Ok(())
     }
 

@@ -13,7 +13,9 @@ required-features = ["leaf-worker"]
 
 [features]
 default = []
-leaf-worker = ["dep:leaf"]
+leaf-runtime = ["dep:leaf"]
+leaf-worker = ["leaf-runtime"]
+leaf-inprocess = ["leaf-runtime"]
 
 [dependencies]
 arc-swap = "1.7"

@@ -54,8 +54,9 @@ impl PolicyRoutingGuard {
             .map_err(|(_, error)| {
                 anyhow::anyhow!("policy routing is owned by another process: {error}")
             })?;
-        let socket_mark = socket_mark
-            .ok_or_else(|| anyhow::anyhow!("policy mode requires an underlay socket mark"))?;
+        let socket_mark = socket_mark.filter(|mark| *mark != 0).ok_or_else(|| {
+            anyhow::anyhow!("policy mode requires a non-zero underlay socket mark")
+        })?;
         let outbound_index = NetlinkIfConfiger::get_interface_index(outbound_interface)?;
         let tun_index = NetlinkIfConfiger::get_interface_index(tun_interface)?;
         let addresses = NetlinkIfConfiger::list_addresses(outbound_interface)?

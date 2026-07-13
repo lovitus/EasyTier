@@ -76,7 +76,7 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread {
             println("start vpn in plugin, args: $args")
 
-            TauriVpnService.self?.onRevoke()
+            TauriVpnService.self?.prepareForRestart()
 
             val it = VpnService.prepare(activity)
             val ret = JSObject()

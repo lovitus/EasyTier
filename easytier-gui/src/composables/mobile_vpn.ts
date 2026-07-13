@@ -1,6 +1,7 @@
 import type { NetworkTypes } from 'easytier-frontend-lib'
 import { addPluginListener } from '@tauri-apps/api/core'
 import { Utils } from 'easytier-frontend-lib'
+import { setTunFd, updateMobileNetwork } from './backend'
 import { get_vpn_status, prepare_vpn, start_vpn, stop_vpn } from 'tauri-plugin-vpnservice-api'
 
 type Route = NetworkTypes.Route
@@ -158,10 +159,22 @@ async function onVpnServiceStart(payload: any) {
   console.log('vpn service start', JSON.stringify(payload))
   curVpnStatus.running = true
   if (payload.fd) {
-    await setTunFd(payload.fd).catch((e) => {
+    await setTunFd(payload.fd, payload.dnsServers ?? [], payload.networkKey ?? '').catch((e) => {
       console.error('set tun fd failed', e)
+      void doStopVpn(true).catch(stopError => console.error('stop vpn after tun setup failure', stopError))
     })
   }
+}
+
+async function onVpnNetworkChanged(payload: any) {
+  const dnsServers = payload?.dnsServers ?? []
+  const networkKey = payload?.networkKey ?? ''
+  if (!curVpnStatus.running || !networkKey) {
+    return
+  }
+  await updateMobileNetwork(dnsServers, networkKey).catch((error) => {
+    console.error('update mobile network failed', error)
+  })
 }
 
 async function onVpnServiceStop(payload: any) {
@@ -182,6 +195,12 @@ async function registerVpnServiceListener() {
     'vpnservice',
     'vpn_service_stop',
     onVpnServiceStop,
+  )
+
+  await addPluginListener(
+    'vpnservice',
+    'vpn_network_changed',
+    onVpnNetworkChanged,
   )
 }
 
@@ -206,6 +225,11 @@ function getRoutesForVpn(routes: Route[], node_config: NetworkTypes.NetworkConfi
 
   if (node_config.enable_magic_dns) {
     ret.push('100.100.100.101/32')
+  }
+
+  if (node_config.enable_policy_proxy) {
+    ret.push('0.0.0.0/0')
+    ret.push('::/0')
   }
 
   // sort and dedup

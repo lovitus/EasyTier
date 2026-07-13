@@ -191,6 +191,16 @@ underlay_candidate_guard: Underlay Candidate Sanitization
 underlay_candidate_guard_help: Filters advertised, direct-connect, and hole-punch candidates that likely come from system TUN/fake-IP ranges or EasyTier's own virtual addresses. It does not affect listeners bound to 0.0.0.0.
 underlay_exclude_cidrs: Excluded underlay candidate CIDRs
 underlay_exclude_cidrs_help: Comma-separated user CIDRs added to the built-in guard. Editing replaces only the user list; clearing it keeps built-in fake-IP ranges and runtime EasyTier virtual-address filtering enabled.
+enable_policy_proxy: Enable Policy Routing
+enable_policy_proxy_help: Transparently route non-mesh traffic with the optional Leaf policy engine. Mesh routes and peer endpoints always stay on the ordinary EasyTier data path.
+policy_config_file: Policy file
+policy_config_file_help: Desktop/Linux path to the EasyTier policy YAML. It is mutually exclusive with inline policy; relative TOML paths are resolved from the network config directory.
+policy_config_file_placeholder: "policy/default.yaml (desktop/Linux)"
+policy_config_inline: Inline policy YAML
+policy_config_inline_placeholder: "version: 1\nrules: [\"FINAL,DIRECT\"]"
+policy_outbound_interface: Physical outbound interface
+policy_outbound_interface_placeholder: "Required on Linux, for example eth0"
+policy_leaf_executable: Leaf worker executable
 
 enable_udp_broadcast_relay: UDP Broadcast Relay
 enable_udp_broadcast_relay_help: "Windows only: capture local UDP broadcast packets from physical interfaces and forward them to EasyTier peers. Helps games to find rooms in local network. Requires administrator privileges."

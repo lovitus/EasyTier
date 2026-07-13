@@ -109,6 +109,11 @@ message NetworkConfig {
   optional string stealth_protocols = 72;
   optional bool underlay_candidate_guard = 73;
   optional string underlay_exclude_cidrs = 74;
+  optional bool enable_policy_proxy = 75;
+  optional string policy_config_file = 76;
+  optional string policy_config_inline = 77;
+  optional string policy_outbound_interface = 78;
+  optional string policy_leaf_executable = 79;
 }
 
 message PortForwardConfig {

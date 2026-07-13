@@ -36,6 +36,7 @@ const CONFIG_FLAG_FIELDS = [
   'stealth_mode',
   'disable_legacy_udp_hole_punch',
   'underlay_candidate_guard',
+  'enable_policy_proxy',
   'enable_udp_broadcast_relay',
   'disable_upnp',
   'disable_sym_hole_punching',
@@ -110,6 +111,24 @@ const InputTextStub = defineComponent({
       value: props.modelValue ?? '',
       'data-stub': 'input-text',
       onInput: (event: Event) => emit('update:modelValue', (event.target as HTMLInputElement).value),
+    })
+  },
+})
+
+const TextareaStub = defineComponent({
+  name: 'Textarea',
+  props: {
+    modelValue: String,
+    id: String,
+  },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    return () => h('textarea', {
+      ...attrs,
+      id: props.id,
+      value: props.modelValue ?? '',
+      'data-stub': 'textarea',
+      onInput: (event: Event) => emit('update:modelValue', (event.target as HTMLTextAreaElement).value),
     })
   },
 })
@@ -364,6 +383,7 @@ function mountConfig(config: NetworkConfig = makeConfig()) {
         Panel: PanelStub,
         Password: PasswordStub,
         SelectButton: SelectButtonStub,
+        Textarea: TextareaStub,
         ToggleButton: ToggleButtonStub,
         UrlListInput: UrlListInputStub,
       },
@@ -389,6 +409,34 @@ describe('Config.vue network config projection', () => {
     expect(config.stealth_mode).toBe(true)
     expect(config.stealth_protocols).toBe(DEFAULT_STEALTH_PROTOCOLS)
     expect(config.transport_priority).toBe(DEFAULT_TRANSPORT_PRIORITY)
+    expect(config.enable_policy_proxy).toBe(false)
+  })
+
+  it('round-trips policy settings and keeps file and inline sources exclusive', async () => {
+    const config = makeConfig()
+    config.enable_policy_proxy = true
+    config.policy_config_file = 'policy/default.yaml'
+    config.policy_outbound_interface = 'eth0'
+    config.policy_leaf_executable = 'easytier-leaf-worker'
+    const { curNetwork, wrapper } = mountConfig(config)
+    await nextTick()
+
+    expect(input(wrapper, '#policy_config_file').value).toBe('policy/default.yaml')
+    await wrapper.find<HTMLTextAreaElement>('#policy_config_inline').setValue(
+      'version: 1\nrules: ["FINAL,DIRECT"]\n',
+    )
+    await nextTick()
+    expect(curNetwork.policy_config_file).toBe('')
+    expect(curNetwork.policy_config_inline).toContain('FINAL,DIRECT')
+
+    const backend = toBackendNetworkConfig(curNetwork)
+    expect(backend).toMatchObject({
+      enable_policy_proxy: true,
+      policy_config_file: '',
+      policy_config_inline: 'version: 1\nrules: ["FINAL,DIRECT"]\n',
+      policy_outbound_interface: 'eth0',
+      policy_leaf_executable: 'easytier-leaf-worker',
+    })
   })
 
   it('disables and visually clears stealth while the network secret is empty', async () => {

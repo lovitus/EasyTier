@@ -24,7 +24,7 @@ use crate::{
     },
 };
 
-#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
 use arc_swap::ArcSwapOption;
 use byteorder::WriteBytesExt as _;
 use bytes::{BufMut, BytesMut};
@@ -32,9 +32,9 @@ use cidr::{Ipv4Inet, Ipv6Inet};
 use futures::{SinkExt, Stream, StreamExt, lock::BiLock, ready};
 use pin_project_lite::pin_project;
 use pnet::packet::{ipv4::Ipv4Packet, ipv6::Ipv6Packet};
-#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
 use std::time::Duration;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -50,16 +50,20 @@ use zerocopy::{NativeEndian, NetworkEndian};
 #[cfg(target_os = "windows")]
 use crate::common::ifcfg::RegistryManager;
 
-#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
 use crate::gateway::socks5::Socks5Server;
 
 #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+use easytier_policy::LeafProcessRuntime;
+#[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
+use easytier_policy::{InProcessLeafFactory, InProcessLeafRuntime};
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
 use easytier_policy::{
-    LeafPacketBridge, LeafProcessRuntime, MeshRouteSnapshot, PacketClass, PacketClassifier,
-    PolicyRuntime,
+    LeafPacketBridge, MeshRouteSnapshot, PacketClass, PacketClassifier, PolicyRuntime,
+    RuntimeRestartBudget, RuntimeRestartDecision,
 };
 
-#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
 struct PolicyNicContext {
     revision: Arc<easytier_policy::PolicyRevision>,
     classifier: Arc<PacketClassifier>,
@@ -67,23 +71,54 @@ struct PolicyNicContext {
     dropped_packets: Arc<AtomicU64>,
     bridge_updates: tokio::sync::watch::Sender<Option<Arc<LeafPacketBridge>>>,
     active: Arc<Mutex<Option<PolicyActiveRuntime>>>,
+    #[cfg(target_os = "linux")]
     routing: Arc<Mutex<crate::policy_proxy::PolicyRoutingGuard>>,
     _lease: crate::policy_proxy::PolicyInstanceLease,
 }
 
-#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
 struct PolicyActiveRuntime {
-    runtime: Arc<LeafProcessRuntime>,
+    runtime: Arc<dyn PolicyRuntime>,
+    bridge: Arc<LeafPacketBridge>,
     mesh_bridges: Arc<crate::policy_proxy::MeshProxyBridgeSet>,
 }
 
-#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
 struct PolicyLeafPacket {
     bridge: Arc<LeafPacketBridge>,
     packet: ZCPacket,
 }
 
-#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
+fn schedule_policy_runtime_restart(
+    budget: &mut RuntimeRestartBudget,
+    next_restart: &mut tokio::time::Instant,
+) -> bool {
+    match budget.record_failure() {
+        RuntimeRestartDecision::RetryAfter(delay) => {
+            *next_restart = tokio::time::Instant::now() + delay;
+            false
+        }
+        RuntimeRestartDecision::Dormant => true,
+    }
+}
+
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
+async fn stop_policy_active_runtime(
+    active: &Arc<Mutex<Option<PolicyActiveRuntime>>>,
+    bridge: &Arc<ArcSwapOption<LeafPacketBridge>>,
+    bridge_updates: &tokio::sync::watch::Sender<Option<Arc<LeafPacketBridge>>>,
+) {
+    let previous = active.lock().await.take();
+    bridge.store(None);
+    bridge_updates.send_replace(None);
+    if let Some(previous) = previous {
+        previous.mesh_bridges.disable_all();
+        previous.runtime.shutdown().await;
+    }
+}
+
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
 fn log_policy_drop(counter: &AtomicU64, reason: &'static str) {
     let dropped = counter.fetch_add(1, Ordering::Relaxed).saturating_add(1);
     if dropped.is_power_of_two() {
@@ -1017,10 +1052,12 @@ pub struct NicCtx {
     nic: Arc<Mutex<VirtualNic>>,
     tasks: JoinSet<()>,
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(feature = "leaf-policy-proxy", unix))]
     policy: Option<PolicyNicContext>,
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(feature = "leaf-policy-proxy", unix))]
     policy_data_plane: Weak<Socks5Server>,
+    #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
+    mobile_network_updates: tokio::sync::watch::Receiver<crate::launcher::MobileNetworkState>,
 
     #[cfg(target_os = "windows")]
     windows_udp_broadcast_relay: Option<AbortOnDropHandle<()>>,
@@ -1032,8 +1069,10 @@ impl NicCtx {
         peer_manager: &Arc<PeerManager>,
         peer_packet_receiver: Arc<Mutex<PacketRecvChanReceiver>>,
         close_notifier: Arc<Notify>,
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))] policy_data_plane: Weak<
-            Socks5Server,
+        #[cfg(all(feature = "leaf-policy-proxy", unix))] policy_data_plane: Weak<Socks5Server>,
+        #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
+        mobile_network_updates: tokio::sync::watch::Receiver<
+            crate::launcher::MobileNetworkState,
         >,
     ) -> Self {
         NicCtx {
@@ -1046,10 +1085,12 @@ impl NicCtx {
             nic: Arc::new(Mutex::new(VirtualNic::new(global_ctx))),
             tasks: JoinSet::new(),
 
-            #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+            #[cfg(all(feature = "leaf-policy-proxy", unix))]
             policy: None,
-            #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+            #[cfg(all(feature = "leaf-policy-proxy", unix))]
             policy_data_plane,
+            #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
+            mobile_network_updates,
 
             #[cfg(target_os = "windows")]
             windows_udp_broadcast_relay: None,
@@ -1197,7 +1238,7 @@ impl NicCtx {
     fn do_forward_nic_to_peers_task(
         &mut self,
         mut stream: Pin<Box<dyn ZCPacketStream>>,
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))] policy: Option<(
+        #[cfg(all(feature = "leaf-policy-proxy", unix))] policy: Option<(
             Arc<PacketClassifier>,
             Arc<ArcSwapOption<LeafPacketBridge>>,
             Arc<AtomicU64>,
@@ -1207,7 +1248,7 @@ impl NicCtx {
         let Some(mgr) = self.peer_mgr.upgrade() else {
             return Err(anyhow::anyhow!("peer manager not available").into());
         };
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        #[cfg(all(feature = "leaf-policy-proxy", unix))]
         let policy = policy.map(|(classifier, bridge_slot, dropped_packets)| {
             // Decouple TUN reads from Leaf's packet socket without making the queue
             // unbounded. A full queue remains fail-closed, while ordinary socket
@@ -1247,7 +1288,7 @@ impl NicCtx {
                     break;
                 }
                 let ret = ret.unwrap();
-                #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+                #[cfg(all(feature = "leaf-policy-proxy", unix))]
                 if let Some((classifier, bridge_slot, dropped_packets, writer_tx)) = &policy {
                     match classifier.classify(ret.payload()) {
                         Ok(PacketClass::Policy) => {
@@ -1332,7 +1373,7 @@ impl NicCtx {
         });
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(feature = "leaf-policy-proxy", unix))]
     fn do_forward_peers_and_policy_to_nic(
         &mut self,
         mut sink: Pin<Box<dyn ZCPacketSink>>,
@@ -1376,6 +1417,13 @@ impl NicCtx {
                         match result {
                             Ok(0) => {}
                             Ok(length) => {
+                                let still_current = bridge_updates
+                                    .borrow()
+                                    .as_ref()
+                                    .is_some_and(|active| Arc::ptr_eq(active, &bridge));
+                                if !still_current {
+                                    continue;
+                                }
                                 match policy_tx.try_send(ZCPacket::new_with_payload(&packet[..length])) {
                                     Ok(()) => {}
                                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -1404,39 +1452,38 @@ impl NicCtx {
             let mut peer_open = true;
             let mut policy_open = true;
             while peer_open || policy_open {
-                let packet = tokio::select! {
+                let selected = tokio::select! {
                     packet = peer_rx.recv(), if peer_open => {
                         match packet {
-                            Some(packet) => Some(packet),
+                            Some(packet) => Some((packet, false)),
                             None => { peer_open = false; None }
                         }
                     }
                     packet = policy_rx.recv(), if policy_open => {
                         match packet {
-                            Some(packet) => Some(packet),
+                            Some(packet) => Some((packet, true)),
                             None => { policy_open = false; None }
                         }
                     }
                 };
-                let Some(packet) = packet else {
+                let Some((packet, from_policy)) = selected else {
                     continue;
                 };
                 let mut result = sink.feed(packet).await;
                 let mut count = 1usize;
+                let mut prefer_policy = !from_policy;
                 while result.is_ok() && count < MAX_BATCH {
-                    match peer_rx.try_recv() {
-                        Ok(packet) => {
-                            result = sink.feed(packet).await;
-                            count += 1;
-                        }
-                        Err(_) => match policy_rx.try_recv() {
-                            Ok(packet) => {
-                                result = sink.feed(packet).await;
-                                count += 1;
-                            }
-                            Err(_) => break,
-                        },
-                    }
+                    let packet = if prefer_policy {
+                        policy_rx.try_recv().or_else(|_| peer_rx.try_recv())
+                    } else {
+                        peer_rx.try_recv().or_else(|_| policy_rx.try_recv())
+                    };
+                    let Ok(packet) = packet else {
+                        break;
+                    };
+                    result = sink.feed(packet).await;
+                    count += 1;
+                    prefer_policy = !prefer_policy;
                 }
                 if result.is_ok() {
                     result = sink.flush().await;
@@ -1779,7 +1826,7 @@ impl NicCtx {
         Ok(())
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(feature = "leaf-policy-proxy", unix))]
     async fn collect_policy_mesh_routes(
         &self,
         ipv4_addr: Option<cidr::Ipv4Inet>,
@@ -1788,6 +1835,22 @@ impl NicCtx {
         let Some(peer_mgr) = self.peer_mgr.upgrade() else {
             return Err(anyhow::anyhow!("peer manager not available").into());
         };
+        Self::collect_policy_mesh_routes_for(
+            &self.global_ctx,
+            peer_mgr.as_ref(),
+            ipv4_addr,
+            ipv6_addr,
+        )
+        .await
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", unix))]
+    async fn collect_policy_mesh_routes_for(
+        global_ctx: &ArcGlobalCtx,
+        peer_mgr: &PeerManager,
+        ipv4_addr: Option<cidr::Ipv4Inet>,
+        ipv6_addr: Option<cidr::Ipv6Inet>,
+    ) -> Result<MeshRouteSnapshot, Error> {
         let mut routes = Vec::<cidr::IpCidr>::new();
         if let Some(ipv4) = ipv4_addr {
             routes.push(cidr::IpCidr::V4(
@@ -1802,7 +1865,7 @@ impl NicCtx {
             ));
         }
         #[cfg(feature = "magic-dns")]
-        if self.global_ctx.get_flags().accept_dns {
+        if global_ctx.get_flags().accept_dns {
             routes.push(cidr::IpCidr::V4(
                 cidr::Ipv4Cidr::new(
                     crate::instance::dns_server::MAGIC_DNS_FAKE_IP
@@ -1813,12 +1876,8 @@ impl NicCtx {
                 .expect("Magic DNS host prefix is valid"),
             ));
         }
-        let (proxy_v4, _, _) = ProxyCidrsMonitor::diff_proxy_cidrs(
-            peer_mgr.as_ref(),
-            &self.global_ctx,
-            &BTreeSet::new(),
-        )
-        .await;
+        let (proxy_v4, _, _) =
+            ProxyCidrsMonitor::diff_proxy_cidrs(peer_mgr, global_ctx, &BTreeSet::new()).await;
         routes.extend(proxy_v4.into_iter().map(|route| cidr::IpCidr::V4(route)));
         routes.extend(
             peer_mgr
@@ -1847,11 +1906,14 @@ impl NicCtx {
         &mut self,
         ipv4_addr: Option<cidr::Ipv4Inet>,
         ipv6_addr: Option<cidr::Ipv6Inet>,
+        config: crate::policy_proxy::PolicyProcessConfig,
         lease: crate::policy_proxy::PolicyInstanceLease,
     ) -> Result<(), Error> {
-        let Some(config) = crate::policy_proxy::configured().cloned() else {
-            return Ok(());
-        };
+        if self.global_ctx.get_flags().accept_dns {
+            tracing::warn!(
+                "Magic DNS remains mesh-owned in policy mode; DOMAIN/GEOSITE rules cannot observe names resolved through Magic DNS"
+            );
+        }
         if !self.global_ctx.get_flags().bind_device {
             return Err(anyhow::anyhow!(
                 "policy mode requires EasyTier bind_device=true to prevent underlay recursion"
@@ -1870,10 +1932,7 @@ impl NicCtx {
             )
             .into());
         }
-        let revision = Arc::new(
-            easytier_policy::validate_policy_file(&config.policy_file)
-                .map_err(|error| anyhow::anyhow!(error))?,
-        );
+        let revision = config.revision.clone();
         let data_plane = self
             .policy_data_plane
             .upgrade()
@@ -1913,12 +1972,12 @@ impl NicCtx {
         .await
         {
             Ok(candidate) => {
-                let candidate_bridge = candidate.runtime.bridge();
+                let candidate_bridge = candidate.bridge.clone();
                 bridge.store(Some(candidate_bridge.clone()));
                 bridge_updates.send_replace(Some(candidate_bridge));
                 tracing::info!(
                     revision = candidate.runtime.revision_id(),
-                    policy_file = %config.policy_file.display(),
+                    policy_source = %config.source_label,
                     outbound_interface = %config.outbound_interface,
                     "transparent policy proxy is ready"
                 );
@@ -1927,7 +1986,7 @@ impl NicCtx {
             Err(error) => {
                 tracing::error!(
                     ?error,
-                    policy_file = %config.policy_file.display(),
+                    policy_source = %config.source_label,
                     "policy runtime is unavailable; mesh remains active and non-mesh traffic is blocked"
                 );
             }
@@ -1964,21 +2023,19 @@ impl NicCtx {
             )
             .await?,
         );
-        let base_dir = config
-            .policy_file
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
         let runtime = LeafProcessRuntime::start(
             &config.leaf_executable,
-            base_dir,
+            &config.base_dir,
             Some(&config.outbound_interface),
             mesh_bridges.as_ref(),
             revision,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
+        let bridge = runtime.bridge();
         Ok(PolicyActiveRuntime {
-            runtime,
+            runtime: runtime as Arc<dyn PolicyRuntime>,
+            bridge,
             mesh_bridges,
         })
     }
@@ -1988,6 +2045,7 @@ impl NicCtx {
         &mut self,
         ipv4_addr: Option<cidr::Ipv4Inet>,
         ipv6_addr: Option<cidr::Ipv6Inet>,
+        config: crate::policy_proxy::PolicyProcessConfig,
     ) {
         let Some(policy) = self.policy.as_ref() else {
             return;
@@ -2001,31 +2059,21 @@ impl NicCtx {
         let global_ctx = self.global_ctx.clone();
         let peer_mgr = self.peer_mgr.clone();
         let policy_data_plane = self.policy_data_plane.clone();
-        let Some(config) = crate::policy_proxy::configured().cloned() else {
-            return;
-        };
         let mut events = global_ctx.subscribe();
         self.tasks.spawn(async move {
-            const RESTART_BACKOFF: [Duration; 3] = [
-                Duration::from_secs(1),
-                Duration::from_secs(2),
-                Duration::from_secs(5),
-            ];
             let mut monitor = tokio::time::interval(Duration::from_secs(1));
             monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut restart_attempts = 0usize;
+            let initial_active = active.lock().await.is_some();
+            let mut restart_budget = RuntimeRestartBudget::default();
             let mut next_restart = tokio::time::Instant::now();
-            let mut dormant = false;
+            let mut dormant = !initial_active
+                && schedule_policy_runtime_restart(&mut restart_budget, &mut next_restart);
             let mut last_route_refresh = tokio::time::Instant::now();
             let mut last_mesh_endpoints: Option<
                 BTreeMap<String, crate::policy_proxy::MeshProxyTarget>,
             > = None;
             let mut mesh_generation_initialized = false;
-            let mut active_since = active
-                .lock()
-                .await
-                .is_some()
-                .then(tokio::time::Instant::now);
+            let mut active_since = initial_active.then(tokio::time::Instant::now);
             loop {
                 let event = tokio::select! {
                     _ = monitor.tick() => None,
@@ -2069,61 +2117,20 @@ impl NicCtx {
                             "failed to refresh policy underlay routes; state is tracked and the update will be retried"
                         ),
                     }
-                    let mut routes = Vec::<cidr::IpCidr>::new();
-                    if let Some(ipv4) = global_ctx.get_ipv4().or(ipv4_addr) {
-                        routes.push(cidr::IpCidr::V4(
-                            cidr::Ipv4Cidr::new(ipv4.first_address(), ipv4.network_length())
-                                .expect("Ipv4Inet always describes a valid network"),
-                        ));
-                    }
-                    if let Some(ipv6) = global_ctx.get_ipv6().or(ipv6_addr) {
-                        routes.push(cidr::IpCidr::V6(
-                            cidr::Ipv6Cidr::new(ipv6.first_address(), ipv6.network_length())
-                                .expect("Ipv6Inet always describes a valid network"),
-                        ));
-                    }
-                    #[cfg(feature = "magic-dns")]
-                    if global_ctx.get_flags().accept_dns {
-                        routes.push(cidr::IpCidr::V4(
-                            cidr::Ipv4Cidr::new(
-                                crate::instance::dns_server::MAGIC_DNS_FAKE_IP
-                                    .parse()
-                                    .expect("Magic DNS address is valid"),
-                                32,
-                            )
-                            .expect("Magic DNS host prefix is valid"),
-                        ));
-                    }
-                    let (proxy_v4, _, _) = ProxyCidrsMonitor::diff_proxy_cidrs(
-                        peer_mgr.as_ref(),
+                    match Self::collect_policy_mesh_routes_for(
                         &global_ctx,
-                        &BTreeSet::new(),
+                        peer_mgr.as_ref(),
+                        global_ctx.get_ipv4().or(ipv4_addr),
+                        global_ctx.get_ipv6().or(ipv6_addr),
                     )
-                    .await;
-                    routes.extend(proxy_v4.into_iter().map(cidr::IpCidr::V4));
-                    routes.extend(
-                        peer_mgr
-                            .list_proxy_cidrs_v6()
-                            .await
-                            .into_iter()
-                            .map(cidr::IpCidr::V6),
-                    );
-                    routes.extend(
-                        peer_mgr
-                            .list_public_ipv6_routes()
-                            .await
-                            .into_iter()
-                            .map(|route| {
-                                cidr::IpCidr::V6(
-                                    cidr::Ipv6Cidr::new(
-                                        route.first_address(),
-                                        route.network_length(),
-                                    )
-                                    .expect("Ipv6Inet always describes a valid network"),
-                                )
-                            }),
-                    );
-                    classifier.replace_routes(MeshRouteSnapshot::new(routes));
+                    .await
+                    {
+                        Ok(routes) => classifier.replace_routes(routes),
+                        Err(error) => tracing::warn!(
+                            ?error,
+                            "failed to refresh policy mesh routes; retaining the previous snapshot"
+                        ),
+                    }
                 }
 
                 let stopped = {
@@ -2133,27 +2140,19 @@ impl NicCtx {
                         .is_some_and(|active| !active.runtime.is_running())
                 };
                 if stopped {
-                    bridge.store(None);
-                    bridge_updates.send_replace(None);
-                    if let Some(stopped) = active.lock().await.take() {
-                        stopped.runtime.stop().await;
-                    }
+                    stop_policy_active_runtime(&active, &bridge, &bridge_updates).await;
                     active_since = None;
-                    restart_attempts = restart_attempts.saturating_add(1);
-                    if restart_attempts >= RESTART_BACKOFF.len() {
-                        dormant = true;
-                    }
+                    dormant = schedule_policy_runtime_restart(
+                        &mut restart_budget,
+                        &mut next_restart,
+                    );
                     tracing::warn!("Leaf policy worker exited; non-mesh traffic is fail-closed");
-                    next_restart = tokio::time::Instant::now()
-                        + RESTART_BACKOFF[restart_attempts
-                            .saturating_sub(1)
-                            .min(RESTART_BACKOFF.len() - 1)];
                 }
 
                 let has_active = active.lock().await.is_some();
                 if has_active && !route_refresh_due {
                     if active_since.is_some_and(|since| since.elapsed() >= Duration::from_secs(60)) {
-                        restart_attempts = 0;
+                        restart_budget.reset();
                     }
                     continue;
                 }
@@ -2179,16 +2178,11 @@ impl NicCtx {
                 let config_patched = matches!(event, Some(GlobalCtxEvent::ConfigPatched(_)));
                 if endpoint_generation_changed || config_patched {
                     dormant = false;
-                    restart_attempts = 0;
+                    restart_budget.reset();
                     next_restart = tokio::time::Instant::now();
                 }
                 if endpoint_generation_changed {
-                    bridge.store(None);
-                    bridge_updates.send_replace(None);
-                    let previous = active.lock().await.take();
-                    if let Some(previous) = previous {
-                        previous.runtime.stop().await;
-                    }
+                    stop_policy_active_runtime(&active, &bridge, &bridge_updates).await;
                     active_since = None;
                     tracing::info!(
                         "mesh proxy endpoint generation changed; rebuilding policy runtime"
@@ -2233,7 +2227,7 @@ impl NicCtx {
                 .await
                 {
                     Ok(candidate) => {
-                        let candidate_bridge = candidate.runtime.bridge();
+                        let candidate_bridge = candidate.bridge.clone();
                         bridge.store(Some(candidate_bridge.clone()));
                         bridge_updates.send_replace(Some(candidate_bridge));
                         *active.lock().await = Some(candidate);
@@ -2241,14 +2235,18 @@ impl NicCtx {
                         tracing::info!(revision = %revision.id, "Leaf policy worker recovered");
                     }
                     Err(error) => {
-                        restart_attempts += 1;
-                        if restart_attempts >= RESTART_BACKOFF.len() {
-                            dormant = true;
+                        dormant = schedule_policy_runtime_restart(
+                            &mut restart_budget,
+                            &mut next_restart,
+                        );
+                        if dormant {
                             tracing::error!(?error, "policy restart budget exhausted; waiting for route or configuration change");
                         } else {
-                            next_restart = tokio::time::Instant::now()
-                                + RESTART_BACKOFF[restart_attempts - 1];
-                            tracing::warn!(?error, restart_attempts, "policy restart failed");
+                            tracing::warn!(
+                                ?error,
+                                failures = restart_budget.failures(),
+                                "policy restart failed"
+                            );
                         }
                     }
                 }
@@ -2256,7 +2254,359 @@ impl NicCtx {
         });
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
+    async fn start_policy_proxy_mobile(
+        &mut self,
+        dns_servers: Vec<IpAddr>,
+        network_key: String,
+        lease: crate::policy_proxy::PolicyInstanceLease,
+    ) -> Result<(), Error> {
+        let config = self
+            .global_ctx
+            .config
+            .get_policy_proxy_config()
+            .ok_or_else(|| anyhow::anyhow!("policy_proxy configuration is missing"))?;
+        if self.global_ctx.get_flags().accept_dns {
+            tracing::warn!(
+                "Magic DNS remains mesh-owned in Android policy mode; DOMAIN/GEOSITE rules cannot observe names resolved through Magic DNS"
+            );
+        }
+        let document = crate::policy_proxy::resolve_document(&config)?;
+        let data_plane = self
+            .policy_data_plane
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("policy data plane is not available"))?;
+        let peer_mgr = self
+            .peer_mgr
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("peer manager not available"))?;
+        let revision = document.revision.clone();
+        let classifier = Arc::new(PacketClassifier::new(
+            self.collect_policy_mesh_routes(self.global_ctx.get_ipv4(), self.global_ctx.get_ipv6())
+                .await?,
+        ));
+        let bridge = Arc::new(ArcSwapOption::empty());
+        let dropped_packets = Arc::new(AtomicU64::new(0));
+        let (bridge_updates, _) = tokio::sync::watch::channel(None);
+        let active = Arc::new(Mutex::new(None));
+        let routes = peer_mgr.list_routes().await;
+        let initial_endpoints =
+            Self::resolve_policy_mesh_endpoints(&revision, peer_mgr.my_peer_id(), &routes).ok();
+        let initial_active = if dns_servers.is_empty() {
+            tracing::warn!(
+                policy_source = %document.source_label,
+                "Android has no usable underlying DNS yet; mesh remains active and policy traffic stays blocked until network recovery"
+            );
+            false
+        } else {
+            match Self::build_policy_runtime_mobile(
+                &document,
+                &dns_servers,
+                data_plane,
+                peer_mgr.clone(),
+                peer_mgr.my_peer_id(),
+                &routes,
+            )
+            .await
+            {
+                Ok(candidate) => {
+                    bridge.store(Some(candidate.bridge.clone()));
+                    bridge_updates.send_replace(Some(candidate.bridge.clone()));
+                    *active.lock().await = Some(candidate);
+                    tracing::info!(
+                        revision = %revision.id,
+                        policy_source = %document.source_label,
+                        "Android transparent policy proxy is ready"
+                    );
+                    true
+                }
+                Err(error) => {
+                    tracing::error!(
+                        ?error,
+                        policy_source = %document.source_label,
+                        "Android policy runtime is unavailable; mesh remains active and non-mesh traffic is blocked"
+                    );
+                    false
+                }
+            }
+        };
+        self.policy = Some(PolicyNicContext {
+            revision,
+            classifier,
+            bridge,
+            dropped_packets,
+            bridge_updates,
+            active,
+            _lease: lease,
+        });
+        self.run_mobile_policy_updater(
+            document,
+            dns_servers,
+            network_key,
+            initial_endpoints,
+            initial_active,
+            self.mobile_network_updates.clone(),
+        );
+        Ok(())
+    }
+
+    #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
+    async fn build_policy_runtime_mobile(
+        document: &crate::policy_proxy::ResolvedPolicyDocument,
+        dns_servers: &[IpAddr],
+        data_plane: Arc<Socks5Server>,
+        peer_mgr: Arc<PeerManager>,
+        self_peer_id: u32,
+        routes: &[crate::proto::api::instance::Route],
+    ) -> anyhow::Result<PolicyActiveRuntime> {
+        let mesh_endpoints =
+            Self::resolve_policy_mesh_endpoints(&document.revision, self_peer_id, routes)?;
+        let mesh_bridges = Arc::new(
+            crate::policy_proxy::MeshProxyBridgeSet::start(
+                data_plane,
+                peer_mgr,
+                &document.revision,
+                &mesh_endpoints,
+            )
+            .await?,
+        );
+        let worker_threads = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(2);
+        let factory = InProcessLeafFactory::new(
+            document.base_dir.clone(),
+            mesh_bridges.clone(),
+            dns_servers.to_vec(),
+            worker_threads,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let runtime: Arc<InProcessLeafRuntime> = factory
+            .start(document.revision.clone())
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let bridge = runtime.bridge();
+        Ok(PolicyActiveRuntime {
+            runtime: runtime as Arc<dyn PolicyRuntime>,
+            bridge,
+            mesh_bridges,
+        })
+    }
+
+    #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
+    fn run_mobile_policy_updater(
+        &mut self,
+        document: crate::policy_proxy::ResolvedPolicyDocument,
+        dns_servers: Vec<IpAddr>,
+        initial_network_key: String,
+        initial_endpoints: Option<BTreeMap<String, crate::policy_proxy::MeshProxyTarget>>,
+        initial_active: bool,
+        mut network_updates: tokio::sync::watch::Receiver<crate::launcher::MobileNetworkState>,
+    ) {
+        let Some(policy) = self.policy.as_ref() else {
+            return;
+        };
+        let revision = policy.revision.clone();
+        let classifier = policy.classifier.clone();
+        let active = policy.active.clone();
+        let bridge = policy.bridge.clone();
+        let bridge_updates = policy.bridge_updates.clone();
+        let global_ctx = self.global_ctx.clone();
+        let peer_mgr = self.peer_mgr.clone();
+        let policy_data_plane = self.policy_data_plane.clone();
+        self.tasks.spawn(async move {
+            let mut dns_servers = dns_servers;
+            let mut network_key = initial_network_key;
+            let mut network_available = !dns_servers.is_empty();
+            let mut events = global_ctx.subscribe();
+            let mut last_endpoints = initial_endpoints;
+            let mut restart_budget = RuntimeRestartBudget::default();
+            let mut next_restart = tokio::time::Instant::now();
+            let mut dormant = !initial_active
+                && (dns_servers.is_empty()
+                    || schedule_policy_runtime_restart(&mut restart_budget, &mut next_restart));
+            let mut active_since = initial_active.then(tokio::time::Instant::now);
+            let mut pending_network_state = Some(network_updates.borrow_and_update().clone());
+            loop {
+                let active_present = active.lock().await.is_some();
+                let retry_pending = network_available && !dormant && !active_present;
+                let route_poll = tokio::time::sleep(Duration::from_secs(5));
+                let retry_timer = tokio::time::sleep_until(next_restart);
+                tokio::pin!(route_poll);
+                tokio::pin!(retry_timer);
+                let network_state = if let Some(state) = pending_network_state.take() {
+                    Some(state)
+                } else {
+                    tokio::select! {
+                        changed = network_updates.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                            Some(network_updates.borrow_and_update().clone())
+                        }
+                        event = events.recv() => {
+                            match event {
+                                Ok(event) if matches!(
+                                    event,
+                                    GlobalCtxEvent::PeerAdded(_)
+                                        | GlobalCtxEvent::PeerRemoved(_)
+                                        | GlobalCtxEvent::ProxyCidrsUpdated(_, _)
+                                        | GlobalCtxEvent::PublicIpv6RoutesUpdated(_, _)
+                                        | GlobalCtxEvent::DhcpIpv4Changed(_, _)
+                                        | GlobalCtxEvent::ConfigPatched(_)
+                                ) => None,
+                                Ok(_) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    events = events.resubscribe();
+                                    None
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                        _ = &mut route_poll, if active_present => None,
+                        _ = &mut retry_timer, if retry_pending => None,
+                    }
+                };
+                if let Some(state) = network_state {
+                    if !state.key.is_empty() && state.dns_servers.is_empty() {
+                        if state.key != network_key {
+                            network_key = state.key;
+                            dns_servers.clear();
+                            network_available = false;
+                            dormant = true;
+                            active_since = None;
+                            stop_policy_active_runtime(&active, &bridge, &bridge_updates).await;
+                            tracing::info!(
+                                %network_key,
+                                "Android underlying network is unavailable; policy traffic is fail-closed without consuming restart budget"
+                            );
+                        }
+                    } else if !state.key.is_empty()
+                        && !state.dns_servers.is_empty()
+                        && (state.key != network_key || state.dns_servers != dns_servers)
+                    {
+                        network_key = state.key;
+                        dns_servers = state.dns_servers;
+                        network_available = true;
+                        restart_budget.reset();
+                        dormant = false;
+                        next_restart = tokio::time::Instant::now();
+                        active_since = None;
+                        stop_policy_active_runtime(&active, &bridge, &bridge_updates).await;
+                        tracing::info!(%network_key, "Android underlying network changed; rebuilding policy runtime once");
+                    }
+                }
+                let Some(peer_mgr) = peer_mgr.upgrade() else {
+                    break;
+                };
+                if let Ok(routes) = Self::collect_policy_mesh_routes_for(
+                    &global_ctx,
+                    peer_mgr.as_ref(),
+                    global_ctx.get_ipv4(),
+                    global_ctx.get_ipv6(),
+                )
+                .await
+                {
+                    classifier.replace_routes(routes);
+                }
+
+                let routes = peer_mgr.list_routes().await;
+                let endpoints =
+                    Self::resolve_policy_mesh_endpoints(&revision, peer_mgr.my_peer_id(), &routes)
+                        .ok();
+                if endpoints != last_endpoints {
+                    last_endpoints = endpoints.clone();
+                    restart_budget.reset();
+                    dormant = !network_available;
+                    active_since = None;
+                    next_restart = tokio::time::Instant::now();
+                    stop_policy_active_runtime(&active, &bridge, &bridge_updates).await;
+                }
+
+                let runtime_failed = active
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|active| !active.runtime.is_running());
+                if runtime_failed {
+                    stop_policy_active_runtime(&active, &bridge, &bridge_updates).await;
+                    active_since = None;
+                    dormant = schedule_policy_runtime_restart(
+                        &mut restart_budget,
+                        &mut next_restart,
+                    );
+                    if dormant {
+                        tracing::error!(
+                            "Android policy worker restart budget exhausted; waiting for route identity change"
+                        );
+                    }
+                } else if active_since.is_some_and(|since| since.elapsed() >= Duration::from_secs(60))
+                {
+                    restart_budget.reset();
+                    active_since = None;
+                }
+
+                if active.lock().await.is_some()
+                    || !network_available
+                    || dormant
+                    || tokio::time::Instant::now() < next_restart
+                {
+                    continue;
+                }
+                let Some(endpoints) = endpoints else {
+                    next_restart = tokio::time::Instant::now() + Duration::from_secs(5);
+                    continue;
+                };
+                let Some(data_plane) = policy_data_plane.upgrade() else {
+                    break;
+                };
+                match Self::build_policy_runtime_mobile(
+                    &document,
+                    &dns_servers,
+                    data_plane,
+                    peer_mgr.clone(),
+                    peer_mgr.my_peer_id(),
+                    &routes,
+                )
+                .await
+                {
+                    Ok(candidate) => {
+                        debug_assert_eq!(
+                            Self::resolve_policy_mesh_endpoints(
+                                &revision,
+                                peer_mgr.my_peer_id(),
+                                &routes
+                            )
+                            .ok(),
+                            Some(endpoints)
+                        );
+                        bridge.store(Some(candidate.bridge.clone()));
+                        bridge_updates.send_replace(Some(candidate.bridge.clone()));
+                        *active.lock().await = Some(candidate);
+                        active_since = Some(tokio::time::Instant::now());
+                        tracing::info!(revision = %revision.id, "Android policy runtime recovered");
+                    }
+                    Err(error) => {
+                        dormant = schedule_policy_runtime_restart(
+                            &mut restart_budget,
+                            &mut next_restart,
+                        );
+                        if dormant {
+                            tracing::error!(?error, "Android policy restart budget exhausted; waiting for route identity change");
+                        } else {
+                            tracing::warn!(
+                                ?error,
+                                failures = restart_budget.failures(),
+                                "Android policy restart failed"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", unix))]
     fn resolve_policy_mesh_endpoints(
         revision: &easytier_policy::PolicyRevision,
         self_peer_id: u32,
@@ -2392,7 +2742,9 @@ impl NicCtx {
         }
 
         #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
-        let policy_lease = if crate::policy_proxy::configured().is_some() {
+        let policy_config = crate::policy_proxy::configured_for(self.global_ctx.config.as_ref())?;
+        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        let policy_lease = if policy_config.is_some() {
             match crate::policy_proxy::acquire_instance() {
                 Ok(lease) => Some(lease),
                 Err(error) => {
@@ -2419,10 +2771,10 @@ impl NicCtx {
             .await?;
 
         #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
-        if let Some(policy_lease) = policy_lease {
-            self.start_policy_proxy(ipv4_addr, ipv6_addr, policy_lease)
+        if let (Some(policy_config), Some(policy_lease)) = (policy_config, policy_lease) {
+            self.start_policy_proxy(ipv4_addr, ipv6_addr, policy_config.clone(), policy_lease)
                 .await?;
-            self.run_policy_route_updater(ipv4_addr, ipv6_addr);
+            self.run_policy_route_updater(ipv4_addr, ipv6_addr, policy_config);
         }
 
         let mut nic = self.nic.lock().await;
@@ -2464,15 +2816,16 @@ impl NicCtx {
     }
 
     #[cfg(mobile)]
-    pub async fn run_for_mobile(&mut self, tun_fd: std::os::fd::RawFd) -> Result<(), Error> {
+    pub async fn run_for_mobile(
+        &mut self,
+        tun_fd: std::os::fd::RawFd,
+        dns_servers: Vec<IpAddr>,
+        network_key: String,
+    ) -> Result<(), Error> {
         let tunnel = {
             let mut nic = self.nic.lock().await;
             match nic.create_dev_for_mobile(tun_fd).await {
-                Ok(ret) => {
-                    self.global_ctx
-                        .issue_event(GlobalCtxEvent::TunDeviceReady(nic.ifname().to_string()));
-                    ret
-                }
+                Ok(ret) => ret,
                 Err(err) => {
                     self.global_ctx
                         .issue_event(GlobalCtxEvent::TunDeviceError(err.to_string()));
@@ -2481,9 +2834,46 @@ impl NicCtx {
             }
         };
 
+        #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
+        if self
+            .global_ctx
+            .config
+            .get_policy_proxy_config()
+            .is_some_and(|config| config.enabled)
+        {
+            let lease = crate::policy_proxy::acquire_instance()?;
+            self.start_policy_proxy_mobile(dns_servers, network_key, lease)
+                .await?;
+        }
+        #[cfg(not(all(feature = "leaf-policy-mobile", target_os = "android")))]
+        let _ = (dns_servers, network_key);
+
+        self.global_ctx.issue_event(GlobalCtxEvent::TunDeviceReady(
+            self.nic.lock().await.ifname().to_string(),
+        ));
+
         let (stream, sink) = tunnel.split();
 
-        self.do_forward_nic_to_peers_task(stream)?;
+        #[cfg(all(feature = "leaf-policy-proxy", unix))]
+        let policy_io = self.policy.as_ref().map(|policy| {
+            (
+                policy.classifier.clone(),
+                policy.bridge.clone(),
+                policy.dropped_packets.clone(),
+            )
+        });
+        self.do_forward_nic_to_peers_task(
+            stream,
+            #[cfg(all(feature = "leaf-policy-proxy", unix))]
+            policy_io,
+        )?;
+        #[cfg(all(feature = "leaf-policy-proxy", unix))]
+        if let Some(policy) = self.policy.as_ref() {
+            self.do_forward_peers_and_policy_to_nic(sink, policy.bridge_updates.subscribe(), false);
+        } else {
+            self.do_forward_peers_to_nic(sink);
+        }
+        #[cfg(not(all(feature = "leaf-policy-proxy", unix)))]
         self.do_forward_peers_to_nic(sink);
 
         Ok(())
@@ -2526,7 +2916,7 @@ mod tests {
         // }
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(feature = "leaf-policy-proxy", unix))]
     #[test]
     fn policy_mesh_endpoint_rejects_current_peer_identity() {
         let instance_id = uuid::Uuid::new_v4();

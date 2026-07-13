@@ -653,7 +653,7 @@ pub struct Instance {
     #[cfg(feature = "socks5")]
     socks5_server: Arc<Socks5Server>,
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(feature = "leaf-policy-proxy", unix))]
     policy_udp_relay: Option<Arc<crate::policy_proxy::MeshUdpRelayService>>,
 
     proxy_cidrs_monitor: Option<AbortOnDropHandle<()>>,
@@ -745,7 +745,7 @@ impl Instance {
             #[cfg(feature = "socks5")]
             socks5_server,
 
-            #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+            #[cfg(all(feature = "leaf-policy-proxy", unix))]
             policy_udp_relay: None,
 
             proxy_cidrs_monitor: None,
@@ -844,7 +844,7 @@ impl Instance {
         use rand::Rng;
         let peer_manager_c = Arc::downgrade(&self.peer_manager.clone());
         let global_ctx_c = self.get_global_ctx();
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        #[cfg(all(feature = "leaf-policy-proxy", unix, not(mobile)))]
         let policy_data_plane = Arc::downgrade(&self.socks5_server);
         #[cfg(feature = "tun")]
         let nic_ctx = self.nic_ctx.clone();
@@ -931,7 +931,7 @@ impl Instance {
                             &peer_manager_c,
                             _peer_packet_receiver.clone(),
                             nic_closed_notifier.clone(),
-                            #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+                            #[cfg(all(feature = "leaf-policy-proxy", unix))]
                             policy_data_plane.clone(),
                         );
                         if let Err(e) = new_nic_ctx.run(Some(ip), global_ctx_c.get_ipv6()).await {
@@ -981,7 +981,7 @@ impl Instance {
         let nic_ctx = self.nic_ctx.clone();
         let peer_mgr = Arc::downgrade(&self.peer_manager);
         let peer_packet_receiver = self.peer_packet_receiver.clone();
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        #[cfg(all(feature = "leaf-policy-proxy", unix, not(mobile)))]
         let policy_data_plane = Arc::downgrade(&self.socks5_server);
 
         tokio::spawn(async move {
@@ -1003,7 +1003,7 @@ impl Instance {
                         &peer_mgr,
                         peer_packet_receiver.clone(),
                         close_notifier.clone(),
-                        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+                        #[cfg(all(feature = "leaf-policy-proxy", unix))]
                         policy_data_plane.clone(),
                     );
 
@@ -1177,7 +1177,7 @@ impl Instance {
             )
             .await?;
 
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        #[cfg(all(feature = "leaf-policy-proxy", unix))]
         {
             let relay = crate::policy_proxy::MeshUdpRelayService::new(
                 &self.peer_manager,
@@ -1653,8 +1653,14 @@ impl Instance {
         global_ctx: ArcGlobalCtx,
         peer_manager: Arc<PeerManager>,
         peer_packet_receiver: Arc<Mutex<PacketRecvChanReceiver>>,
-        fd: i32,
+        tun_config: crate::launcher::MobileTunConfig,
+        #[cfg(all(feature = "leaf-policy-proxy", unix))] policy_data_plane: Weak<Socks5Server>,
+        #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
+        mobile_network_updates: tokio::sync::watch::Receiver<
+            crate::launcher::MobileNetworkState,
+        >,
     ) -> Result<(), anyhow::Error> {
+        let fd = tun_config.fd;
         tracing::info!("setup_nic_ctx_for_mobile, fd: {}", fd);
         Self::clear_nic_ctx(nic_ctx.clone(), peer_packet_receiver.clone()).await;
         if fd <= 0 {
@@ -1666,9 +1672,13 @@ impl Instance {
             &peer_manager,
             peer_packet_receiver.clone(),
             close_notifier.clone(),
+            #[cfg(all(feature = "leaf-policy-proxy", unix))]
+            policy_data_plane,
+            #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
+            mobile_network_updates,
         );
         new_nic_ctx
-            .run_for_mobile(fd)
+            .run_for_mobile(fd, tun_config.dns_servers, tun_config.network_key)
             .await
             .with_context(|| "add ip failed")?;
 

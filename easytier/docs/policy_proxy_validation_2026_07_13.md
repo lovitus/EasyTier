@@ -63,6 +63,47 @@ descriptors settled from 58 to 33/11 within 20 seconds. RSS settled near 19/7
 MiB. KCP encapsulation is tracked separately below because it exposed a
 release-blocking connection-lifecycle defect.
 
+Magic DNS validation above proves that its mesh record path remains intact. It
+does not prove that Leaf domain/geosite matching and Magic DNS can operate on
+the same query. Queries sent to `100.100.100.101` remain mesh-owned and are not
+visible to Leaf FakeDNS; current candidates warn about this split-DNS
+limitation.
+
+### Abnormal recovery follow-up
+
+The accepted Linux baseline was also exercised with abrupt component loss:
+
+- killing only the Leaf worker left the core and mesh path alive; the worker
+  returned in about two seconds, new HTTP sessions and a 200/200 UDP run
+  recovered, and the proxy table returned to empty;
+- killing and restarting the destination core did not migrate the already-open
+  UDP association, which is the documented session boundary. Retries remained
+  bounded, the route generation returned in about 17 seconds, and new HTTP plus
+  five 100/100 UDP rounds succeeded;
+- neither case produced unbounded retry logs, persistent proxy entries, task
+  growth, or a file-descriptor trend.
+
+These results validate the external-worker Linux baseline. The unified TOML,
+RPC/GUI envelope and in-process Android runtime remain candidate code until the
+exact profiling-beta and Android artifacts pass their build and device matrix.
+
+### Candidate pre-build checks
+
+Before the unified candidate was submitted to the rolling profiling beta, the
+maintainer workspace completed the non-compiling checks allowed on that host:
+
+- `cargo fmt --all -- --check`, `git diff --check`, and
+  `cargo metadata --no-deps` passed;
+- protobuf TypeScript regeneration completed;
+- the frontend configuration/status suite passed 30/30 tests and
+  `vue-tsc --noEmit` passed;
+- static generation review confirmed that policy-private TCP/UDP/UoT listeners
+  use kernel-assigned port zero, ordinary SOCKS keeps its KCP-only selection
+  semantics, and only policy UoT may retry smoltcp after a bounded KCP failure.
+
+These checks do not replace Rust, Android, or real-device validation. Results
+for those artifacts must be appended from the exact beta commit.
+
 ### KCP encapsulation
 
 Symbolized `perf` data from the exact `9d582e6d` beta proved that policy TCP
@@ -240,6 +281,28 @@ used only about 6% and 3% CPU in that sample. The next candidate requests 4 MiB
 receive and send buffers on both EasyTier-owned policy UDP sockets and logs the
 actual kernel-granted sizes. Failure to tune is non-fatal for compatibility,
 but the measured size and `UdpRcvbufErrors` delta are part of qualification.
+
+With the external GOST actor restored to its validated 65,535-byte UDP buffer,
+the `a8b5e374` beta received 8 MiB kernel receive buffers and 2 MiB send buffers
+on both EasyTier-owned sockets. Client-namespace `UdpRcvbufErrors` stayed at
+zero: 20 Mbit/s lost 30/20,628 datagrams (0.15%), while a 30-second 50 Mbit/s
+run lost 7,913/155,744 (5.1%). Of those, 2,055 were directly accounted for by
+the third-party actor's receive-buffer errors. The same policy/KCP path carried
+TCP at 510 Mbit/s with zero retransmissions, disproving a KCP or mesh throughput
+ceiling. KCP-disabled UoT over smoltcp TCP was lossless at 5 and 20 Mbit/s and
+lost 11% at 50 Mbit/s, with no KCP proxy entry or EasyTier bridge drop.
+
+Candidate `23f95f3b` attempted to coalesce already-ready UoT datagrams without
+a timer. It was rejected and explicitly reverted by `cfdae5b5`: 50 Mbit/s loss
+regressed from 5.1% to 7.4%, and destination GOST `UdpRcvbufErrors` increased
+from 2,055 to 5,632 because coalescing made downstream UDP delivery burstier.
+The stable design therefore retains one complete UoT frame per stream write.
+
+Both mixed-version directions remained functional. A new source against
+`b2ba762e` logged the expected v2 failure and completed one bounded legacy
+datagram retry; an old `b2ba762e` source against the new destination remained
+on the version-0 relay. Their higher loss matches the measured legacy smoltcp
+datagram limit and is not attributed to the UoT path.
 
 ## Static review disposition
 

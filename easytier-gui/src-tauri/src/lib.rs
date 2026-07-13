@@ -156,7 +156,11 @@ async fn set_logging_level(level: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn set_tun_fd(fd: i32) -> Result<(), String> {
+async fn set_tun_fd(
+    fd: i32,
+    dns_servers: Option<Vec<String>>,
+    network_key: Option<String>,
+) -> Result<(), String> {
     let Some(instance_manager) = INSTANCE_MANAGER.read().await.clone() else {
         return Err("set_tun_fd is not supported in remote mode".to_string());
     };
@@ -164,11 +168,64 @@ async fn set_tun_fd(fd: i32) -> Result<(), String> {
         .get_enabled_instances_with_tun_ids()
         .next()
     {
+        let dns_servers = dns_servers
+            .unwrap_or_default()
+            .into_iter()
+            .map(|server| {
+                server
+                    .parse()
+                    .map_err(|error| format!("invalid VPN DNS server {server}: {error}"))
+            })
+            .collect::<Result<Vec<std::net::IpAddr>, String>>()?;
+        let network_key = network_key.unwrap_or_default();
         instance_manager
-            .set_tun_fd(&uuid, fd)
+            .update_mobile_network(
+                &uuid,
+                easytier::launcher::MobileNetworkState {
+                    key: network_key.clone(),
+                    dns_servers: dns_servers.clone(),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        instance_manager
+            .set_mobile_tun_and_wait(&uuid, fd, dns_servers, network_key)
+            .await
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn update_mobile_network(
+    dns_servers: Vec<String>,
+    network_key: String,
+) -> Result<(), String> {
+    let Some(instance_manager) = INSTANCE_MANAGER.read().await.clone() else {
+        return Err("update_mobile_network is not supported in remote mode".to_string());
+    };
+    let Some(uuid) = get_client_manager!()?
+        .get_enabled_instances_with_tun_ids()
+        .next()
+    else {
+        return Ok(());
+    };
+    let dns_servers = dns_servers
+        .into_iter()
+        .map(|server| {
+            server
+                .parse()
+                .map_err(|error| format!("invalid VPN DNS server {server}: {error}"))
+        })
+        .collect::<Result<Vec<std::net::IpAddr>, String>>()?;
+    instance_manager
+        .update_mobile_network(
+            &uuid,
+            easytier::launcher::MobileNetworkState {
+                key: network_key,
+                dns_servers,
+            },
+        )
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1390,6 +1447,7 @@ pub fn run_gui() -> std::process::ExitCode {
             collect_network_info,
             set_logging_level,
             set_tun_fd,
+            update_mobile_network,
             easytier_version,
             set_dock_visibility,
             list_network_instance_ids,
