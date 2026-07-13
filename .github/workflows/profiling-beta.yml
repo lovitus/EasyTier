@@ -67,34 +67,42 @@ jobs:
             --target "$TARGET" \
             --package netstack-smoltcp \
             shutdown_completes_when_fin_is_committed
-          timeout 600 cargo test \
+          easytier_test_json="$(mktemp)"
+          set +e
+          timeout 900 cargo test \
             --locked \
             --target "$TARGET" \
             --package easytier \
             --lib \
             --features leaf-policy-proxy \
-            policy_proxy_config
-          timeout 600 cargo test \
-            --locked \
-            --target "$TARGET" \
-            --package easytier \
-            --lib \
-            --features leaf-policy-proxy \
-            network_config_roundtrips_policy_proxy_envelope
-          timeout 600 cargo test \
-            --locked \
-            --target "$TARGET" \
-            --package easytier \
-            --lib \
-            --features leaf-policy-proxy \
-            policy_toml_gets_a_default_socket_mark
-          timeout 600 cargo test \
-            --locked \
-            --target "$TARGET" \
-            --package easytier \
-            --lib \
-            --features leaf-policy-proxy \
+            --no-run \
+            --message-format=json-render-diagnostics > "$easytier_test_json"
+          build_status=$?
+          set -e
+          if [[ $build_status -ne 0 ]]; then
+            jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' \
+              "$easytier_test_json"
+            exit "$build_status"
+          fi
+          easytier_test_bin="$(
+            jq -r '
+              select(
+                .reason == "compiler-artifact"
+                and .target.name == "easytier"
+                and .profile.test == true
+                and (.target.kind | index("lib"))
+              ) | .executable // empty
+            ' "$easytier_test_json" | tail -n 1
+          )"
+          test -n "$easytier_test_bin" -a -x "$easytier_test_bin"
+          for test_filter in \
+            policy_proxy_config \
+            network_config_roundtrips_policy_proxy_envelope \
+            policy_toml_gets_a_default_socket_mark \
             uot_
+          do
+            timeout 600 "$easytier_test_bin" "$test_filter" --nocapture
+          done
           timeout 1800 cargo build \
             --locked \
             --release \

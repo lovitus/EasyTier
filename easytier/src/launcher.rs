@@ -1406,6 +1406,7 @@ mod tests {
             instance_id: Some(uuid::Uuid::new_v4().to_string()),
             network_name: Some("policy-demo".to_string()),
             network_secret: Some("secret".to_string()),
+            networking_method: Some(crate::proto::api::manage::NetworkingMethod::Standalone as i32),
             enable_policy_proxy: Some(true),
             policy_config_inline: Some("version: 1\nrules: [\"FINAL,DIRECT\"]\n".to_string()),
             policy_outbound_interface: Some("eth0".to_string()),

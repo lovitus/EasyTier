@@ -137,6 +137,14 @@ actionable `mutually exclusive` cause. The next snapshot preserves the same
 rejection and error chain while including the complete cause chain in the
 top-level message shown by CLI/RPC/GUI launchers.
 
+The error-display follow-up passed both policy configuration tests. The next
+round-trip fixture then failed before exercising policy fields because it left
+the unrelated networking method at its `PublicServer` default without a public
+server URL. The fixture is corrected to explicit `Standalone`; production URL
+validation remains strict. To avoid four repeated four-minute links of the
+same EasyTier lib test target, the profiling workflow now compiles that test
+binary once with `--no-run` and executes the four unchanged filters directly.
+
 ### KCP encapsulation
 
 Symbolized `perf` data from the exact `9d582e6d` beta proved that policy TCP
