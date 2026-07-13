@@ -48,7 +48,6 @@ const UOT_CONNECT: u8 = 1;
 const UOT_IPV4: u8 = 1;
 const UOT_IPV6: u8 = 4;
 const UOT_STREAM_BUFFER_SIZE: usize = 16 * 1_024;
-const UOT_MAX_BATCH_DATAGRAMS: usize = 32;
 
 pub(crate) type AssociationToken = [u8; TOKEN_LEN];
 
@@ -419,51 +418,24 @@ impl RemoteUdpAssociation {
     }
 
     pub(crate) async fn send(&self, payload: &[u8]) -> anyhow::Result<()> {
-        self.send_batch(payload, &[payload.len()]).await
-    }
-
-    pub(crate) async fn send_batch(
-        &self,
-        payloads: &[u8],
-        lengths: &[usize],
-    ) -> anyhow::Result<()> {
-        let mut total_length = 0usize;
-        for length in lengths {
-            if *length > MAX_DATAGRAM_SIZE {
-                bail!("policy UDP payload exceeds UoT frame limit");
-            }
-            total_length = total_length
-                .checked_add(*length)
-                .context("policy UDP batch length overflow")?;
-        }
-        if total_length != payloads.len() {
-            bail!("policy UDP batch lengths do not match payload size");
+        if payload.len() > MAX_DATAGRAM_SIZE {
+            bail!("policy UDP payload exceeds UoT frame limit");
         }
         match &self.transport {
             RemoteUdpTransport::Datagram {
                 socket, relay_addr, ..
             } => {
-                let mut offset = 0usize;
-                for length in lengths {
-                    let payload = &payloads[offset..offset + *length];
-                    let Some(frame) = encode_relay_frame(&self.token, payload) else {
-                        bail!("policy UDP payload exceeds datagram relay limit");
-                    };
-                    socket.send_to(&frame, *relay_addr).await?;
-                    offset += *length;
-                }
+                let Some(frame) = encode_relay_frame(&self.token, payload) else {
+                    bail!("policy UDP payload exceeds datagram relay limit");
+                };
+                socket.send_to(&frame, *relay_addr).await?;
             }
             RemoteUdpTransport::Stream { writer, .. } => {
                 let mut writer = writer.lock().await;
                 let UotStreamWriter { stream, frame } = &mut *writer;
                 frame.clear();
-                frame.reserve(total_length.saturating_add(lengths.len().saturating_mul(2)));
-                let mut offset = 0usize;
-                for length in lengths {
-                    frame.extend_from_slice(&(*length as u16).to_be_bytes());
-                    frame.extend_from_slice(&payloads[offset..offset + *length]);
-                    offset += *length;
-                }
+                frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+                frame.extend_from_slice(payload);
                 stream.write_all(frame).await?;
             }
         }
@@ -829,18 +801,6 @@ async fn run_stream_association(
                 frame.clear();
                 frame.extend_from_slice(&(length as u16).to_be_bytes());
                 frame.extend_from_slice(&packet[..length]);
-                let mut datagrams = 1usize;
-                while datagrams < UOT_MAX_BATCH_DATAGRAMS && frame.len() < UOT_STREAM_BUFFER_SIZE {
-                    match native_udp.try_recv(&mut packet) {
-                        Ok(length) => {
-                            frame.extend_from_slice(&(length as u16).to_be_bytes());
-                            frame.extend_from_slice(&packet[..length]);
-                            datagrams += 1;
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                        Err(error) => return Err(error),
-                    }
-                }
                 stream_writer.write_all(&frame).await?;
                 let _ = activity_tx.send(tokio::time::Instant::now());
             }

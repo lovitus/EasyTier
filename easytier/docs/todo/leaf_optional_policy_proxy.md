@@ -103,10 +103,6 @@ cross-platform design below:
   kernel-granted values. Tuning failure remains compatible but observable;
   third-party final-hop SOCKS servers retain responsibility for their own UDP
   receive capacity;
-- each readable UDP event drains only already-ready packets, capped at 32
-  datagrams and a 16 KiB target, then emits their unchanged UoT frames in one
-  stream write. There is no batching timer, so voice/DNS latency is unchanged;
-  the cap prevents an attacker or busy socket from monopolizing the relay task;
 
 Not yet implemented in this spike: TOML/RPC/GUI/mobile envelopes, policy file
 hot reload, proxy credentials for the remote/native actor, HTTP CONNECT actor

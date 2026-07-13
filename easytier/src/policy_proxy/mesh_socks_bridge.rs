@@ -27,8 +27,6 @@ const MAX_ACTIVE_SESSIONS: usize = 1024;
 const MAX_NEW_SESSIONS_PER_SECOND: u32 = 1000;
 const MAX_SOCKS_MESSAGE: usize = 1024;
 const MAX_DATAGRAM_SIZE: usize = u16::MAX as usize;
-const UOT_SEND_BATCH_SIZE: usize = 16 * 1_024;
-const UOT_MAX_BATCH_DATAGRAMS: usize = 32;
 
 struct SessionRateLimit {
     window_started: tokio::time::Instant,
@@ -455,47 +453,21 @@ async fn relay_socks_udp(
         async move {
             let mut client_endpoint = None;
             let mut packet = vec![0u8; MAX_DATAGRAM_SIZE];
-            let mut payloads = Vec::with_capacity(UOT_SEND_BATCH_SIZE);
-            let mut lengths = Vec::with_capacity(UOT_MAX_BATCH_DATAGRAMS);
             loop {
-                payloads.clear();
-                lengths.clear();
-                while lengths.is_empty() {
-                    let (length, source) = local.recv_from(&mut packet).await?;
-                    if source.ip() != client_ip || !source.ip().is_loopback() {
-                        tracing::warn!(%source, "dropping SOCKS UDP datagram from unexpected source");
+                let (length, source) = local.recv_from(&mut packet).await?;
+                if source.ip() != client_ip || !source.ip().is_loopback() {
+                    tracing::warn!(%source, "dropping SOCKS UDP datagram from unexpected source");
+                    continue;
+                }
+                if let Some(expected) = client_endpoint {
+                    if expected != source {
                         continue;
                     }
-                    if let Some(expected) = client_endpoint {
-                        if expected != source {
-                            continue;
-                        }
-                    } else {
-                        client_endpoint = Some(source);
-                        let _ = client_endpoint_tx.send(client_endpoint);
-                    }
-                    payloads.extend_from_slice(&packet[..length]);
-                    lengths.push(length);
+                } else {
+                    client_endpoint = Some(source);
+                    let _ = client_endpoint_tx.send(client_endpoint);
                 }
-                let mut drained = 0usize;
-                while lengths.len() < UOT_MAX_BATCH_DATAGRAMS
-                    && drained < UOT_MAX_BATCH_DATAGRAMS
-                    && payloads.len() < UOT_SEND_BATCH_SIZE
-                {
-                    match local.try_recv_from(&mut packet) {
-                        Ok((length, source)) => {
-                            drained += 1;
-                            if Some(source) != client_endpoint {
-                                continue;
-                            }
-                            payloads.extend_from_slice(&packet[..length]);
-                            lengths.push(length);
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                association.send_batch(&payloads, &lengths).await?;
+                association.send(&packet[..length]).await?;
             }
             #[allow(unreachable_code)]
             Ok::<(), anyhow::Error>(())
