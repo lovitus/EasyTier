@@ -409,7 +409,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let revision = Arc::new(
             PolicyRevision::parse(
-                &format!(
+                format!(
                     "version: 1\nrules: [\"DOMAIN,{}.invalid,DIRECT\", \"FINAL,DIRECT\"]\n",
                     uuid::Uuid::new_v4()
                 ),
