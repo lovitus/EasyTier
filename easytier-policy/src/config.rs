@@ -543,7 +543,7 @@ impl PolicyDocument {
             let rule_type = parts[0].to_ascii_uppercase();
             let expected_parts = match rule_type.as_str() {
                 "MATCH" | "FINAL" => 2,
-                "IP-CIDR" | "DOMAIN" | "DOMAIN-SUFFIX" | "DOMAIN-KEYWORD" | "GEOIP"
+                "IP-CIDR" | "DOMAIN" | "DOMAIN-SUFFIX" | "DOMAIN-KEYWORD" | "GEOIP" | "GEOSITE"
                 | "EXTERNAL" | "PORT-RANGE" | "NETWORK" | "INBOUND-TAG" => 3,
                 _ => {
                     return Err(PolicyError::InvalidRule {
@@ -572,6 +572,9 @@ impl PolicyDocument {
             };
             match rule_type.as_str() {
                 "GEOIP" => self.require_single_rule_set(index, RuleSetKind::Mmdb, "mmdb")?,
+                "GEOSITE" => {
+                    self.require_single_rule_set(index, RuleSetKind::Geosite, "geosite")?
+                }
                 "EXTERNAL" => {
                     let (kind, code) = parts[1].split_once(':').unwrap_or(("site", parts[1]));
                     if code.is_empty() {

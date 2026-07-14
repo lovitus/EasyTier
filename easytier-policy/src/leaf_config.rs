@@ -217,6 +217,16 @@ fn compile_leaf_rules(
                     })?;
                 rule.external = Some(vec![external_rule("mmdb", rule_set, parts[1], base_dir)?]);
             }
+            "GEOSITE" => {
+                let rule_set =
+                    find_single_rule_set(document.rule_sets.values(), RuleSetKind::Geosite).ok_or(
+                        LeafConfigError::MissingRuleSet {
+                            index,
+                            kind: "geosite",
+                        },
+                    )?;
+                rule.external = Some(vec![external_rule("site", rule_set, parts[1], base_dir)?]);
+            }
             "EXTERNAL" => {
                 let (kind, code) = parts[1].split_once(':').unwrap_or(("site", parts[1]));
                 let (rule_set_kind, leaf_kind) = match kind.to_ascii_lowercase().as_str() {
@@ -384,7 +394,7 @@ groups:
     type: fallback
     members: [native, DIRECT]
 rules:
-  - EXTERNAL,site:cn,DIRECT
+  - GEOSITE,cn,DIRECT
   - GEOIP,US,final
   - MATCH,final
 "#;

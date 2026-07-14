@@ -490,7 +490,7 @@ groups:
     members: [mesh-hk, DIRECT]
 
 rules:
-  - "EXTERNAL,site:cn,DIRECT"
+  - "GEOSITE,CN,DIRECT"
   - "GEOIP,CN,DIRECT"
   - "NETWORK,udp,final-udp"
   - "MATCH,final-tcp"
@@ -588,10 +588,10 @@ rule-sets:
     sha256: "<verified digest>"
 
 rules:
-  - "EXTERNAL,site:cn,DIRECT"
+  - "GEOSITE,CN,DIRECT"
   - "GEOIP,CN,DIRECT"
   - "NETWORK,udp,overseas-udp"
-  - "EXTERNAL,site:geolocation-!cn,overseas"
+  - "GEOSITE,geolocation-!cn,overseas"
   - "MATCH,overseas"
 ```
 
