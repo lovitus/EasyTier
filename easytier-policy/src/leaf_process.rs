@@ -17,6 +17,7 @@ use crate::{
 };
 
 const LEAF_TUN_FD: RawFd = 3;
+const LEAF_CONFIG_VALIDATION_TIMEOUT: Duration = Duration::from_secs(30);
 static CONFIG_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct LeafProcessFactory {
@@ -73,18 +74,20 @@ impl LeafProcessRuntime {
         ));
         write_private_file(&config_path, config.as_bytes()).map_err(|error| error.to_string())?;
 
-        let mut validation_command = Command::new(executable);
-        validation_command.arg("-T").arg("-c").arg(&config_path);
-        if let Some(interface) = outbound_interface {
-            validation_command.arg("-b").arg(interface);
-        }
-        let validation = validation_command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|error| format!("failed to execute Leaf config validation: {error}"))?;
+        let validation = match run_leaf_config_validation(
+            executable,
+            &config_path,
+            outbound_interface,
+            LEAF_CONFIG_VALIDATION_TIMEOUT,
+        )
+        .await
+        {
+            Ok(validation) => validation,
+            Err(error) => {
+                let _ = std::fs::remove_file(&config_path);
+                return Err(error);
+            }
+        };
         if !validation.status.success() {
             let _ = std::fs::remove_file(&config_path);
             return Err(format!(
@@ -171,6 +174,34 @@ impl LeafProcessRuntime {
             .unwrap()
             .as_mut()
             .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+    }
+}
+
+async fn run_leaf_config_validation(
+    executable: &Path,
+    config_path: &Path,
+    outbound_interface: Option<&str>,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    let mut command = Command::new(executable);
+    command
+        .arg("-T")
+        .arg("-c")
+        .arg(config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(interface) = outbound_interface {
+        command.arg("-b").arg(interface);
+    }
+
+    match tokio::time::timeout(timeout, command.output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(format!("failed to execute Leaf config validation: {error}")),
+        Err(_) => Err(format!(
+            "Leaf config validation timed out after {timeout:?}"
+        )),
     }
 }
 
@@ -311,7 +342,7 @@ fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt as _};
+    use std::{fs, os::unix::fs::PermissionsExt as _, time::Instant};
 
     use super::*;
 
@@ -348,6 +379,77 @@ mod tests {
         runtime.stop().await;
         assert!(!runtime.is_running());
         assert!(!config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn config_validation_timeout_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("hanging-leaf");
+        let config_path = dir.path().join("leaf.json");
+        fs::write(
+            &executable,
+            b"#!/bin/sh\nif [ \"$1\" = \"-T\" ]; then while :; do :; done; fi\n",
+        )
+        .unwrap();
+        fs::write(&config_path, b"{}").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let started = Instant::now();
+        let error =
+            run_leaf_config_validation(&executable, &config_path, None, Duration::from_millis(50))
+                .await
+                .unwrap_err();
+
+        assert!(error.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn validation_execution_failure_removes_private_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let revision = Arc::new(
+            PolicyRevision::parse(
+                &format!(
+                    "version: 1\nrules: [\"DOMAIN,{}.invalid,DIRECT\", \"FINAL,DIRECT\"]\n",
+                    uuid::Uuid::new_v4()
+                ),
+                dir.path(),
+            )
+            .unwrap(),
+        );
+        let prefix = format!("easytier-leaf-{}-{}-", std::process::id(), revision.id);
+        let existing = matching_temp_configs(&prefix);
+
+        let error = match LeafProcessRuntime::start(
+            &dir.path().join("missing-leaf"),
+            dir.path(),
+            None,
+            &unresolved_mesh,
+            revision,
+        )
+        .await
+        {
+            Ok(_) => panic!("missing Leaf executable unexpectedly started"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("failed to execute Leaf config validation"));
+        assert_eq!(matching_temp_configs(&prefix), existing);
+    }
+
+    fn matching_temp_configs(prefix: &str) -> Vec<PathBuf> {
+        let mut paths = fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(prefix) && name.ends_with(".json"))
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
     }
 
     #[test]
