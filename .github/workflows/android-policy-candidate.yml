@@ -88,9 +88,9 @@ jobs:
             printf '%s\n' "${apks[@]}" >&2
             exit 1
           fi
-          badging="$($ANDROID_HOME/build-tools/34.0.0/aapt dump badging "${apks[0]}")"
+          badging="$("$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "${apks[0]}")"
           grep -Fq "package: name='com.kkrainbow.easytier.policycandidate'" <<<"$badging"
-          signer="$($ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs "${apks[0]}")"
+          signer="$("$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "${apks[0]}")"
           grep -Fq 'Signer #1 certificate SHA-256 digest: 14d2d885ce1bc361923a493210865f86390ffcd32eb2b555042bbd1a8b6c38e0' <<<"$signer"
           cp "${apks[0]}" artifacts/easytier-android-policy-candidate-aarch64.apk
           cat > artifacts/BUILD_INFO.txt <<EOF
