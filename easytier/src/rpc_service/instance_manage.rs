@@ -248,6 +248,7 @@ impl WebClientService for InstanceManageRpcService {
         _: BaseController,
         req: UpdatePolicyRuleDataRequest,
     ) -> Result<UpdatePolicyRuleDataResponse, rpc_types::error::Error> {
+        let _mutation_guard = self.remote_mutation_lock.lock().await;
         let instance_id: uuid::Uuid = req
             .inst_id
             .ok_or_else(|| anyhow::anyhow!("instance id is required"))?
@@ -267,7 +268,6 @@ impl WebClientService for InstanceManageRpcService {
             .get_config_dir()
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("managed config directory is unavailable"))?;
-        let _mutation_guard = self.remote_mutation_lock.lock().await;
 
         #[cfg(feature = "leaf-policy-proxy")]
         {

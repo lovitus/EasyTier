@@ -404,16 +404,23 @@ impl NetworkInstanceManager {
             .map_err(anyhow::Error::msg)
     }
 
-    #[cfg(mobile)]
     pub fn update_mobile_network(
         &self,
         instance_id: &uuid::Uuid,
         state: crate::launcher::MobileNetworkState,
     ) -> Result<(), anyhow::Error> {
-        self.instance_map
-            .get(instance_id)
-            .ok_or_else(|| anyhow::anyhow!("instance not found"))?
-            .update_mobile_network(state)
+        #[cfg(mobile)]
+        {
+            self.instance_map
+                .get(instance_id)
+                .ok_or_else(|| anyhow::anyhow!("instance not found"))?
+                .update_mobile_network(state)
+        }
+        #[cfg(not(mobile))]
+        {
+            let _ = (instance_id, state);
+            anyhow::bail!("mobile network updates are unavailable on this platform")
+        }
     }
 
     pub fn get_config_dir(&self) -> Option<&PathBuf> {

@@ -1,6 +1,7 @@
 # Repository Agent Instructions
 
 - Do not compile this repository on the maintainer's local machine.
+- For every Leaf or policy-proxy implementation, first inspect the corresponding behavior in the local Mihomo source tree at `/Users/fanli/Documents/mihomo-rev`; inspect sing-box as an additional reference when Mihomo does not cover the feature or when platform integration differs. This is mandatory for rule semantics, DNS behavior, GeoIP/GeoSite data handling, caching, hot paths, failover, network-change recovery, loop prevention, resource updates, and error handling. Do not invent behavior that conflicts with mainstream Mihomo/sing-box semantics or introduces avoidable functional or performance regressions. If EasyTier intentionally differs because of its mesh/Leaf architecture, document the reason, compatibility boundary, and validation evidence in code comments or project documentation before merging.
 - The primary build-and-validation path is the rolling profiling beta workflow:
   1. Commit the exact code and documentation snapshot to `codex/profiling-beta`.
   2. Push the branch and let `.github/workflows/profiling-beta.yml` build the optimized, symbolized x86_64-musl bundle.
