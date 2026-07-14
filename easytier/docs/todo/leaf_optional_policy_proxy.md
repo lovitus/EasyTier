@@ -2125,3 +2125,18 @@ Validation snapshot: `cf405e8041dd58044dcdab96905ab283f57c3e97` on `codex/profil
 - Let the authoritative Android policy-candidate workflow build both APKs and verify `BUILD_INFO.txt`, signer metadata, package IDs, manifest boundary, and checksums.
 - Upgrade the candidate on `192.168.234.227:5555`, verify the selection is restored before interaction, install the exact probe APK, confirm its UID is captured, and test controlled DIRECT and REJECT targets with bounded `run-as` commands.
 - Remove the probe APK after evidence collection. Do not use screenshots until final visual confirmation.
+
+### Probe candidate A result: rejected
+
+- The exact empty probe APK installed successfully as UID `10255`; its on-device SHA-256 matched `35ae376bb6b0f1327c1598eaac4d03ae984bb2f1ae9b5e46f2c4d32a82907ae2`, and `run-as` reported the expected UID plus the `inet` supplementary group.
+- Despite the correct Linux UID, `run-as` executed in SELinux context `u:r:runas_app:s0:...`. ICMP returned `sendmsg: Operation not permitted`, loopback `127.0.0.1:5555` TCP timed out, and all bounded public TCP candidates timed out while the VPN was down.
+- Android's package manager exposes no shell command here to transition the no-component package into a normal application process. More importantly, changing package stopped state would not change the `runas_app` execution domain.
+- Therefore candidate A cannot generate policy evidence. The failed TCP/53 and TCP/443 observations are execution-domain failures, not DIRECT or REJECT results. Keeping `run-as` would create a systematic false-negative test and is rejected.
+
+### Probe candidate B: target plus on-demand instrumentation
+
+- Keep the empty target APK as the independent UID and add a separate `androidTest` runner APK. Android instrumentation runs the probe code in the target application's UID/process domain rather than `runas_app`, works without UI interaction, and requires no Activity, Service, Receiver, or Provider.
+- `PolicyProbeInstrumentation` accepts `host`, `port`, and a bounded `timeout_ms` (100 to 10,000 ms), opens exactly one TCP socket, closes it immediately, and reports target UID, SELinux context, target, timeout, connected state, elapsed time, and normalized error.
+- A failed connection is returned as a valid observation with successful instrumentation completion; invalid arguments remain an instrumentation failure. This prevents an intentional `MATCH,REJECT` result from being confused with a broken runner.
+- The workflow builds and signs both target and runner in the same Gradle invocation, verifies package IDs and instrumentation target, rejects runtime components, requires matching debug signer digests, and includes both APKs in `SHA256SUMS.txt`.
+- Candidate B requires one additional authoritative Android build. Linux behavior is unchanged; the already successful `f57f5599` Linux artifact remains valid for that exact snapshot, while the next snapshot must still complete the normal rolling workflow before deployment.

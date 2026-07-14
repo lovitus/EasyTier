@@ -5,7 +5,7 @@
     <!--
       Test-only UID container. It intentionally has no Activity, Service, Receiver,
       Provider, native library, or application code. Validation traffic is created
-      explicitly with `run-as com.kkrainbow.easytier.policyprobe ...`.
+      explicitly by the separately installed androidTest instrumentation APK.
     -->
     <application
         android:allowBackup="false"

@@ -10,6 +10,7 @@ android {
         applicationId = "com.kkrainbow.easytier.policyprobe"
         minSdk = 24
         targetSdk = 34
+        testInstrumentationRunner = "com.kkrainbow.easytier.policyprobe.PolicyProbeInstrumentation"
         versionCode = 1
         versionName = "1.0"
     }

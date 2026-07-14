@@ -82,7 +82,7 @@ jobs:
       - name: Build captured-UID policy probe
         run: |
           cd easytier-gui/src-tauri/gen/android
-          ./gradlew --no-daemon :policy-probe:assembleDebug
+          ./gradlew --no-daemon :policy-probe:assembleDebug :policy-probe:assembleDebugAndroidTest
 
       - name: Package exact candidate
         run: |
@@ -125,6 +125,26 @@ jobs:
           test -n "$probe_signing_cert_sha256"
           cp "${probe_apks[0]}" artifacts/easytier-android-policy-probe-debug.apk
 
+          mapfile -t probe_runner_apks < <(find easytier-gui/src-tauri/gen/android/policy-probe/build/outputs/apk/androidTest/debug -type f -name '*.apk' | sort)
+          if [[ ${#probe_runner_apks[@]} -ne 1 ]]; then
+            printf 'expected exactly one policy probe runner APK, found %s\n' "${#probe_runner_apks[@]}" >&2
+            printf '%s\n' "${probe_runner_apks[@]}" >&2
+            exit 1
+          fi
+          probe_runner_badging="$("$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "${probe_runner_apks[0]}")"
+          grep -Fq "package: name='com.kkrainbow.easytier.policyprobe.test'" <<<"$probe_runner_badging"
+          grep -Fq 'com.kkrainbow.easytier.policyprobe.PolicyProbeInstrumentation' <<<"$probe_runner_badging"
+          grep -Fq "targetPackage='com.kkrainbow.easytier.policyprobe'" <<<"$probe_runner_badging"
+          probe_runner_manifest="$("$ANDROID_HOME/build-tools/34.0.0/aapt" dump xmltree "${probe_runner_apks[0]}" AndroidManifest.xml)"
+          if grep -Eq 'E: (activity|activity-alias|service|receiver|provider)' <<<"$probe_runner_manifest"; then
+            echo 'policy probe runner must contain only instrumentation code' >&2
+            exit 1
+          fi
+          probe_runner_signer="$("$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "${probe_runner_apks[0]}")"
+          probe_runner_signing_cert_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<<"$probe_runner_signer")"
+          test "$probe_runner_signing_cert_sha256" = "$probe_signing_cert_sha256"
+          cp "${probe_runner_apks[0]}" artifacts/easytier-android-policy-probe-runner-debug.apk
+
           cat > artifacts/BUILD_INFO.txt <<EOF
           commit_sha=$GITHUB_SHA
           workflow_run_id=$GITHUB_RUN_ID
@@ -135,10 +155,13 @@ jobs:
           signing_cert_sha256=14d2d885ce1bc361923a493210865f86390ffcd32eb2b555042bbd1a8b6c38e0
           probe_application_id=com.kkrainbow.easytier.policyprobe
           probe_signing_cert_sha256=$probe_signing_cert_sha256
+          probe_runner_application_id=com.kkrainbow.easytier.policyprobe.test
+          probe_runner_signing_cert_sha256=$probe_runner_signing_cert_sha256
+          probe_instrumentation=com.kkrainbow.easytier.policyprobe.PolicyProbeInstrumentation
           probe_purpose=captured-uid-network-validation
           probe_has_runtime_components=false
           EOF
-          (cd artifacts && sha256sum easytier-android-policy-candidate-aarch64.apk easytier-android-policy-probe-debug.apk BUILD_INFO.txt > SHA256SUMS.txt)
+          (cd artifacts && sha256sum easytier-android-policy-candidate-aarch64.apk easytier-android-policy-probe-debug.apk easytier-android-policy-probe-runner-debug.apk BUILD_INFO.txt > SHA256SUMS.txt)
 
       - name: Remove candidate signing material
         if: always()
