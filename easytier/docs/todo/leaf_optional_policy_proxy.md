@@ -2159,3 +2159,12 @@ Validation snapshot: `cf405e8041dd58044dcdab96905ab283f57c3e97` on `codex/profil
 - The known local TypeScript test annotation was corrected from invalid `typeof INSTANCE_UUID[]` syntax to `Array<typeof INSTANCE_UUID>` before submission.
 - Batch the workflow diagnostics and the RemoteManagement startup-race correction into the next exact candidate snapshot.
 - Run the helper and RemoteManagement regression specs before the expensive Android/Rust build in the same workflow, so a frontend regression fails fast without consuming a full candidate build.
+
+### `505b03ce` instrumentation device result: target attachment rejected
+
+- Android run `29364758408` and Linux run `29364758464` succeeded for exact commit `505b03ce89400e4e6c1aa30b67729658707d14da`; focused persisted-selection tests and all artifact packaging gates passed.
+- The exact candidate and probe pair installed with matching on-device hashes. The target registered as UID `10256`, the runner as UID `10257`, and package manager reported the expected instrumentation target.
+- VPN-down execution failed before probe code started: `INSTRUMENTATION_FAILED` with `Instrumentation target has no code: com.kkrainbow.easytier.policyprobe`. No socket attempt occurred, so this is not DIRECT/REJECT evidence.
+- Cause: the target manifest explicitly set `android:hasCode=false`. Android requires a code-capable target process even when all executable test code lives in the separate instrumentation APK.
+- Candidate B revision: remove the explicit false flag and keep the default code-capable application boundary. Do not add an Activity, Service, Receiver, Provider, native library, or production business class. The runner remains the only executable probe code.
+- Add a package gate rejecting an explicit false `android:hasCode` value and record `probe_target_code_capable=true` in `BUILD_INFO.txt`. This is an Android instrumentation requirement, not an EasyTier policy behavior difference.

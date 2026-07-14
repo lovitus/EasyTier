@@ -127,6 +127,10 @@ jobs:
             echo 'policy probe must not contain runtime components' >&2
             exit 1
           fi
+          if grep -Eq 'A: android:hasCode.*0x0' <<<"$probe_manifest"; then
+            echo 'policy probe target must remain code-capable for instrumentation attachment' >&2
+            exit 1
+          fi
           probe_signer="$("$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "${probe_apks[0]}")"
           probe_signing_cert_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<<"$probe_signer")"
           test -n "$probe_signing_cert_sha256"
@@ -176,6 +180,7 @@ jobs:
           probe_runner_signing_cert_sha256=$probe_runner_signing_cert_sha256
           probe_instrumentation=com.kkrainbow.easytier.policyprobe.PolicyProbeInstrumentation
           probe_purpose=captured-uid-network-validation
+          probe_target_code_capable=true
           probe_has_runtime_components=false
           EOF
           (cd artifacts && sha256sum easytier-android-policy-candidate-aarch64.apk easytier-android-policy-probe-debug.apk easytier-android-policy-probe-runner-debug.apk BUILD_INFO.txt > SHA256SUMS.txt)

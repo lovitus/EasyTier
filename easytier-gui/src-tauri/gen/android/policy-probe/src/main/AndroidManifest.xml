@@ -9,7 +9,6 @@
     -->
     <application
         android:allowBackup="false"
-        android:hasCode="false"
         android:label="EasyTier Policy Probe"
         android:supportsRtl="false" />
 </manifest>
