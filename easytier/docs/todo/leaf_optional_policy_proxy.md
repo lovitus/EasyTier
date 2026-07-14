@@ -266,7 +266,13 @@ The implementation boundary is:
 - respect Android's single-`VpnService` ownership rule. If another VPN takes
   ownership, `onRevoke()` closes this generation and EasyTier does not fight it
   with an automatic restart loop. A sticky restart without the original
-  configuration is rejected instead of creating a default/incorrect TUN;
+  configuration is rejected instead of creating a default/incorrect TUN.
+  `VpnService.prepare()` remains an explicit-run ownership check: Android shows
+  its authorization UI after the first installation only when permission is
+  actually absent; normal EasyTier stop/start cycles do not request permission
+  again. A native persisted revoke marker prevents WebView/process restart from
+  reclaiming the VPN in the background, and a later explicit Run clears it only
+  after Android reports that EasyTier owns VPN permission;
 - on Linux, reject loopback/stub DNS endpoints such as `127.0.0.53` for the
   physical-interface-bound Leaf worker. Resolver discovery checks
   `/etc/resolv.conf`, then the systemd-resolved and NetworkManager non-stub

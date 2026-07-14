@@ -54,11 +54,14 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
     fun prepareVpn(invoke: Invoke) {
         activity.runOnUiThread {
             println("prepare vpn in plugin")
+            // After the first installation grant Android returns null here, so ordinary
+            // stop/start cycles perform only this silent ownership check and show no dialog.
             val it = VpnService.prepare(activity)
             if (it != null) {
                 startActivityForResult(invoke, it, "onPrepareVpnResult")
                 return@runOnUiThread
             }
+            TauriVpnService.setRevokedBySystem(activity, false)
             val ret = JSObject()
             ret.put("granted", true)
             invoke.resolve(ret)
@@ -67,8 +70,10 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
 
     @ActivityCallback
     fun onPrepareVpnResult(invoke: Invoke, result: ActivityResult) {
+        val granted = result.resultCode == Activity.RESULT_OK
+        TauriVpnService.setRevokedBySystem(activity, !granted)
         val ret = JSObject()
-        ret.put("granted", result.resultCode == Activity.RESULT_OK)
+        ret.put("granted", granted)
         invoke.resolve(ret)
     }
 
@@ -78,9 +83,11 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread {
             println("start vpn in plugin, args: $args")
 
-            val it = VpnService.prepare(activity)
             val ret = JSObject()
-            if (it != null) {
+            if (TauriVpnService.wasRevokedBySystem(activity)) {
+                ret.put("errorMsg", "vpn_revoked")
+            } else if (VpnService.prepare(activity) != null) {
+                TauriVpnService.setRevokedBySystem(activity, true)
                 ret.put("errorMsg", "need_prepare")
             } else {
                 TauriVpnService.self?.prepareForRestart()
@@ -116,6 +123,7 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
         ret.put("ipv4Addr", TauriVpnService.ipv4Addr)
         ret.put("routes", JSONArray(TauriVpnService.routes.toList()))
         ret.put("dns", TauriVpnService.dns)
+        ret.put("revokedBySystem", TauriVpnService.wasRevokedBySystem(activity))
         invoke.resolve(ret)
     }
 }

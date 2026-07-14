@@ -16,10 +16,9 @@ interface vpnStatus {
 let dhcpPollingTimer: NodeJS.Timeout | null = null
 const DHCP_POLLING_INTERVAL = 2000 // 2秒后重试
 const NETWORK_INFO_RETRY_DELAYS = [0, 150, 300] as const
-const VPN_REVOKED_STORAGE_KEY = 'easytier_vpn_revoked_by_system'
 let vpnOperationTail: Promise<void> = Promise.resolve()
 let vpnOperationEpoch = 0
-let vpnRevokedBySystem = loadVpnRevokedBySystem()
+let vpnRevokedBySystem = false
 let activeVpnInstanceId: string | undefined
 
 const curVpnStatus: vpnStatus = {
@@ -30,28 +29,8 @@ const curVpnStatus: vpnStatus = {
   dns: undefined,
 }
 
-function loadVpnRevokedBySystem() {
-  try {
-    return localStorage.getItem(VPN_REVOKED_STORAGE_KEY) === '1'
-  }
-  catch {
-    return false
-  }
-}
-
 function setVpnRevokedBySystem(revoked: boolean) {
   vpnRevokedBySystem = revoked
-  try {
-    if (revoked) {
-      localStorage.setItem(VPN_REVOKED_STORAGE_KEY, '1')
-    }
-    else {
-      localStorage.removeItem(VPN_REVOKED_STORAGE_KEY)
-    }
-  }
-  catch {
-    // Keep the in-memory guard active when WebView storage is unavailable.
-  }
 }
 
 async function requestVpnPermission() {
@@ -78,6 +57,9 @@ function resetVpnConfigStatus() {
 }
 
 function syncVpnStatusFromNative(status: Awaited<ReturnType<typeof get_vpn_status>>) {
+  if (status?.revokedBySystem === true) {
+    setVpnRevokedBySystem(true)
+  }
   curVpnStatus.running = status?.running ?? false
   if (!curVpnStatus.running) {
     resetVpnConfigStatus()
@@ -160,7 +142,7 @@ async function doStartVpn(instanceId: string, ipv4Addr: string, cidr: number, ro
     throw new Error('vpn_revoked')
   }
   console.log('start vpn response', JSON.stringify(start_ret))
-  if (start_ret?.errorMsg === 'need_prepare') {
+  if (start_ret?.errorMsg === 'need_prepare' || start_ret?.errorMsg === 'vpn_revoked') {
     // Background synchronization must never reclaim VPN ownership from another app.
     // Only prepareVpnService(), called by an explicit GUI action, may request consent.
     setVpnRevokedBySystem(true)

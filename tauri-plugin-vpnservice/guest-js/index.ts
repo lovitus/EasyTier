@@ -27,6 +27,7 @@ export interface VpnStatusResponse {
   ipv4Addr?: string;
   routes?: string[];
   dns?: string;
+  revokedBySystem?: boolean;
 }
 
 export async function prepare_vpn(): Promise<InvokeResponse | null> {

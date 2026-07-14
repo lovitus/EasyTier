@@ -36,8 +36,24 @@ class TauriVpnService : VpnService() {
         const val STOP_REASON_RESTART = "restart"
         const val STOP_REASON_REVOKED = "revoked"
         const val STOP_REASON_DESTROYED = "destroyed"
+        private const val PREFERENCES_NAME = "easytier_vpnservice"
+        private const val REVOKED_BY_SYSTEM = "revoked_by_system"
         // LinkProperties can change several times during one roam or DHCP renewal.
         const val NETWORK_CHANGE_DEBOUNCE_MS = 2_000L
+
+        fun wasRevokedBySystem(context: Context): Boolean =
+            context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+                .getBoolean(REVOKED_BY_SYSTEM, false)
+
+        fun setRevokedBySystem(context: Context, revoked: Boolean) {
+            val persisted = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(REVOKED_BY_SYSTEM, revoked)
+                .commit()
+            if (!persisted) {
+                println("failed to persist Android VPN revocation state")
+            }
+        }
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -179,6 +195,7 @@ class TauriVpnService : VpnService() {
         println("vpn on revoke")
         // Preserve the platform revoke reason before VpnService stops this Service. The UI uses
         // it to suppress every automatic restart until the user explicitly starts EasyTier again.
+        setRevokedBySystem(this, true)
         disconnect(STOP_REASON_REVOKED)
         self = null
         super.onRevoke()
