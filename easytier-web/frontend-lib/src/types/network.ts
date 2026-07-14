@@ -300,6 +300,7 @@ export interface Route {
   ipv4_addr: Ipv4Inet | string | null
   next_hop_peer_id: number
   cost: number
+  path_latency_latency_first?: number
   proxy_cidrs: string[]
   hostname: string
   stun_info?: StunInfo
