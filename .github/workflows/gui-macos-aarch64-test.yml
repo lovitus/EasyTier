@@ -40,9 +40,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: ""
-          shared-key: "gui-registry"
-          cache-targets: "false"
+          prefix-key: gui-test
+          shared-key: macos-aarch64
+          cache-targets: true
+          cache-on-failure: true
 
       - name: Build Leaf policy sidecar
         run: |
@@ -62,7 +63,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ./artifacts
-          mv ./target/${GUI_TARGET}/release/bundle/dmg/*.dmg ./artifacts/
+          mv "./target/${GUI_TARGET}/release/bundle/dmg/"*.dmg ./artifacts/
           shasum -a 256 ./artifacts/* > ./artifacts/SHA256SUMS.txt
           ls -lh ./artifacts
 

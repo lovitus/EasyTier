@@ -48,7 +48,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: android-policy-candidate-aarch64
-          cache-targets: false
+          cache-targets: true
+          cache-on-failure: true
 
       - name: Restore stable candidate signing key
         env:
