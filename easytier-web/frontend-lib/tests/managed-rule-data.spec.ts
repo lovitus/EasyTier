@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type * as Api from '../src/modules/api'
 import {
+  MANAGED_RULE_DATA,
   ensureManagedRuleDataRows,
   managedRuleDataRows,
   updateManagedRuleData,
@@ -8,12 +9,15 @@ import {
 import { emptyPolicyDocument } from '../src/components/policy/policyDocument'
 
 describe('managed Geo rule data', () => {
-  it('shows fixed uninstalled resources without serializing empty rule sets', () => {
+  it('shows fixed managed resources without serializing implicit builtins', () => {
     const document = emptyPolicyDocument()
 
     const rows = managedRuleDataRows(document)
 
     expect(rows.map(row => row.type)).toEqual(['geosite', 'geoip', 'mmdb'])
+    expect(MANAGED_RULE_DATA.geosite.builtin).toBe(true)
+    expect(MANAGED_RULE_DATA.geoip.builtin).toBe(true)
+    expect(MANAGED_RULE_DATA.mmdb.builtin).toBe(false)
     expect(document.ruleSets).toEqual([])
   })
 

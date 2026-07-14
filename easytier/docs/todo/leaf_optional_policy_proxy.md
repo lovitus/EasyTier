@@ -83,7 +83,8 @@ Status meanings:
 | AND-MESH-ICMP | investigating | Android policy-enabled mesh path after VPN revoke/reclaim | External IPv4 and DNS passed, but the first `10.245.0.1` ICMP run lost 5/5 packets. Confirm the remote TUN/peer state, then A/B the same Android config with only policy mode disabled before assigning a root cause |
 | AND-NETWORK-CHANGE | implemented-validation-pending | Wi-Fi roam, DHCP renew, Wi-Fi/mobile-data/airplane-mode transitions | Repeated transitions must update DNS/network generation, stop without restart storms while offline, recover once after connectivity returns, preserve mesh routes, and not reclaim VPN after another app owns it |
 | AND-POLICY-UI | implemented-validation-pending | Android policy editor, import/preflight and managed rule data | Validate the collapsible editor without coordinate automation, config import/export, diagnostics, manual update buttons and persistence across process death and signed APK upgrade |
-| GEO-RESOURCE-UX | implemented-validation-pending | Managed Geo resource UI exposes internal name, path and mutable SHA-256 | The editor now exposes three fixed identities and only a default/custom HTTPS source plus update status. Uninstalled rows remain editor-local; successful bounded download, parser validation, hashing and atomic replacement commit the system-owned path/digest. Validate default and custom sources, failed-download retention, damaged data, Android upgrade persistence and no empty rule-set serialization |
+| GEO-RESOURCE-UX | implemented-validation-pending | GeoSite/GeoIP should work without path, digest or first-run download fields | The editor now reports the pinned bundled GeoSite/GeoIP snapshots as built in and keeps Country MMDB optional. Empty built-in rows remain editor-local and are not serialized. Validate default presets, explicit same-kind override, Android upgrade persistence and no path/SHA prompts |
+| GEO-ONLINE-UPDATE | planned-next-version | Online replacement currently does not reliably attach the downloaded resource to the saved policy | Keep online replacement unavailable for bundled GeoSite/GeoIP in this version. The next version must make explicit update atomically replace and activate a validated snapshot, preserve the old snapshot on any failure, and cover save/restart/Android upgrade before exposing the action again |
 | POLICY-OUTBOUND-UX | implemented-validation-pending | Outbound interface was an unconditional free-text field | Target-side RPC now reports platform applicability and active physical interfaces. Linux/traditional macOS use a selector and recommended route match; Android hides the field because VpnService owns the path; unsupported platforms report unavailable. Validate multiple physical interfaces, active system VPN, network changes, stale selections and old-server RPC failure |
 | DESK-RELOAD | implemented-validation-pending | Transactional source-file hot reload and bounded restart | Valid edit publishes a ready candidate; malformed edit retains old revision; worker kill follows 1/2/5-second budget; no bridge/task/FD growth |
 | POLICY-ROUTE-REFRESH | implemented-validation-pending | Review P1: underlay bypass routes must track address/default-route changes | The supervisor now refreshes the namespace-bound routing guard on relevant events and at most every five seconds, retaining fail-closed state on error. Validate DHCP renew, interface index change, default-route loss/restore and no recursive underlay capture |
@@ -93,7 +94,7 @@ Status meanings:
 | LNX-POLICY | implemented-validation-pending | Linux policy routing, source/mark bypass and fail-closed behavior | Isolated namespace/container tests plus physical-host mesh regression; include stale cleanup, competing table/rule ownership, abrupt exit, underlay change and route restoration |
 | MAC-UTUN | implemented-validation-pending | Traditional macOS utun transparent adapter and packaged Leaf sidecar | DMG contains signed/runnable sidecar; v4/v6 split routes install, DIRECT and proxy paths work, normal stop reverses exact owned routes |
 | MAC-ORPHAN | implemented-validation-pending | macOS parent-PID watchdog | Forced GUI/core termination removes worker within two seconds and leaves no policy route, temp config, session or repeated respawn |
-| POLICY-GEODATA | implemented-validation-pending | Managed `geosite.dat`, `geoip-lite.dat` and optional Country MMDB | Validate MetaCubeX-compatible category semantics, manual-only downloads, TLS/size/checksum limits, atomic replacement, damaged/old file retention and no automatic network update. ASN MMDB remains out of v1 because no actor consumes it |
+| POLICY-GEODATA | implemented-validation-pending | Bundled `geosite.dat`, `geoip-lite.dat` and optional Country MMDB | GeoSite/GeoIP are pinned MetaCubeX snapshots embedded in the core and materialized only when a matching rule lacks an explicit same-kind rule set. Validate parser/category semantics, digest and atomic materialization, read-only config fallback, explicit override and no network dependency. Country MMDB remains optional; ASN MMDB remains out of v1 because no actor consumes it |
 | POLICY-RULES | implemented-validation-pending | Ordered first-match GEOIP/GEOSITE/COUNTRY/IP/domain rules | Compare ordering, `no-resolve`, missing category, duplicate resource and UDP actor-skip behavior with the pinned Mihomo references; preflight and runtime must produce the same result |
 | POLICY-EDITOR | implemented-validation-pending | GUI/RPC policy switch, nodes, groups, rules, fallback and rule-data controls | Desktop and Android round-trip must preserve order and explicit IDs/IPs, show validation diagnostics before start, update managed data only on explicit click and never mutate unrelated EasyTier settings |
 | POLICY-CONFIG | implemented-validation-pending | Opt-in startup and configuration across CLI, TOML, RPC, GUI and Android import | Disabled/absent mode must create no policy task, route, bridge or worker; enabled mode must use the same validated document and diagnostics; malformed or unsupported platform configuration must fail policy startup without breaking the mesh |
@@ -134,7 +135,7 @@ modules without hiding failures:
    lifecycle, route ownership and resource-leak tests.
 6. `POLICY-UDP-LOSS` and `POLICY-PERF`: profile only after correctness is
    stable; keep or revert optimizations based on exact-artifact evidence.
-7. `WIN-ADAPTER`, `MAC-NE`, `IOS-ADAPTER`, `MULTI-INSTANCE`,
+7. `GEO-ONLINE-UPDATE`, `WIN-ADAPTER`, `MAC-NE`, `IOS-ADAPTER`, `MULTI-INSTANCE`,
    `NETNS-ADAPTER` and `SPLIT-DNS` remain explicit future work and cannot be
    implied by a Linux/macOS-traditional/Android pass.
 
@@ -621,14 +622,8 @@ The stable EasyTier-owned YAML contains only the concepts users need:
 version: 1
 
 rule-sets:
-  geosite:
-    type: geosite
-    path: rules/geosite.dat
-    update: manual
-  geoip:
-    type: geoip
-    path: rules/geoip-lite.dat
-    update: manual
+  # GeoSite and GeoIP are omitted here: matching rules use EasyTier's pinned
+  # bundled snapshots unless an explicit same-kind rule set is supplied.
   country:
     type: mmdb
     path: rules/country-lite.mmdb
@@ -683,14 +678,15 @@ Implementation status (2026-07-14): the first two layers are now wired into the
 shared GUI as an ACL-style collapsed **Policy Proxy** panel. The enable switch
 is inside the panel; disabled users do not see or initialize the editor. The
 inline visual editor covers mesh/native SOCKS5 actors, ordered chain/fallback
-members, ordered common rules, Geosite/GeoIP DAT/Country MMDB metadata, three bounded rule
+members, ordered common rules, bundled Geosite/GeoIP DAT and optional Country MMDB, three bounded rule
 presets, and the same advanced YAML text. YAML is the only persisted source;
 invalid YAML suspends visual write-back instead of restoring an older model.
 The existing config validation RPC now invokes the runtime policy parser and
-returns structured warnings before Save/Run. The rule-data panel can explicitly
-download the three fixed MetaCubeX resources into the saved instance's private
-configuration directory. It validates size and format, computes SHA-256, and
-atomically replaces the active file before updating YAML. Peer picker and the
+returns structured warnings before Save/Run. The core embeds pinned MetaCubeX
+GeoSite and GeoIP snapshots, verifies and materializes only the missing kinds
+used by a policy, and leaves an explicit same-kind rule set untouched. Country
+MMDB remains an optional user-managed resource. Online replacement of bundled
+snapshots is deferred to `GEO-ONLINE-UPDATE`. Peer picker and the
 side-effect-free simulator remain explicit follow-up items; the UI does not
 fake these capabilities client-side.
 
@@ -712,13 +708,12 @@ UI:
    Rules use an ordered table with drag/reorder and an advanced raw-rule cell.
    Unsupported health knobs are shown as fixed runtime behavior, not invented
    as fields that the current schema cannot consume.
-3. **Local rule-data manager.** Advanced YAML can continue to reference a local
-   file. The shared GUI additionally offers explicit one-shot updates for the
-   fixed MetaCubeX `geosite.dat`, `geoip-lite.dat`, and `country-lite.mmdb`
-   sources. Download uses a private staging file, a 256 MiB limit, format
-   validation, SHA-256 calculation, and atomic replacement. A failed update
-   neither replaces the existing file nor changes its YAML path/digest. There
-   is no automatic update, subscription, ASN database, or source fallback.
+3. **Local rule-data manager.** `GEOSITE` and `GEOIP` use pinned bundled
+   MetaCubeX snapshots without a first-run download or persisted path. Advanced
+   YAML may override either kind with one explicit local rule set. Country MMDB
+   stays optional and user-managed. Bundled data has no automatic update,
+   subscription, ASN database or source fallback in this version; safe online
+   replacement remains a separate next-version task.
 
 The editor also provides a side-effect-free policy simulator. Given a domain
 or IP, TCP/UDP, and optional destination port, it reports the matched rule,
@@ -765,23 +760,12 @@ The generated baseline is deterministic and inspectable. A typical country
 split uses Geosite for domain categories and GeoIP DAT for IP categories;
 Country MMDB remains an explicit third matcher for ISO country rules:
 
-The visual editor owns the map names, paths and digests shown below. Users do
-not enter them; they choose only the fixed resource and, when necessary, a
-custom `source-url`. Advanced YAML keeps these fields for reproducibility and
-backward compatibility.
+The visual editor does not serialize paths or digests for the bundled GeoSite
+and GeoIP snapshots. Advanced YAML can still supply an explicit same-kind rule
+set, which takes precedence. The example only declares optional Country MMDB:
 
 ```yaml
 rule-sets:
-  geosite:
-    type: geosite
-    path: rules/geosite.dat
-    update: manual
-    sha256: "<verified digest>"
-  geoip:
-    type: geoip
-    path: rules/geoip-lite.dat
-    update: manual
-    sha256: "<verified digest>"
   country:
     type: mmdb
     path: rules/country-lite.mmdb

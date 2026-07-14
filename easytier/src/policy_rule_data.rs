@@ -7,12 +7,20 @@ use std::{
 };
 
 use anyhow::{Context, ensure};
-use easytier_policy::{ManagedRuleDataKind, validate_managed_rule_data};
+use easytier_policy::{ManagedRuleDataKind, RuleSet, RuleSetKind, validate_managed_rule_data};
 use http_req::request::{RedirectPolicy, Request};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const MAX_RULE_DATA_BYTES: u64 = 256 * 1024 * 1024;
+const BUILTIN_SNAPSHOT: &str = "metacubex-4178770b";
+const BUILTIN_GEOSITE_SHA256: &str =
+    "0f464192b311ee9b8a2cdc309118928c532b6b5982b486c6a42060db671e3038";
+const BUILTIN_GEOIP_SHA256: &str =
+    "cba612b84b6c023ad2ec110b57c04c88c6ac888935963279b00884731af53301";
+const BUILTIN_GEOSITE: &[u8] = include_bytes!("../resources/policy-rule-data/geosite.dat");
+const BUILTIN_GEOIP: &[u8] = include_bytes!("../resources/policy-rule-data/geoip-lite.dat");
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PolicyRuleDataResource {
     Geosite,
@@ -21,6 +29,14 @@ pub(crate) enum PolicyRuleDataResource {
 }
 
 impl PolicyRuleDataResource {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Geosite => "geosite",
+            Self::Geoip => "geoip",
+            Self::CountryMmdb => "mmdb",
+        }
+    }
+
     fn default_source_url(self) -> &'static str {
         match self {
             Self::Geosite => {
@@ -53,6 +69,22 @@ impl PolicyRuleDataResource {
                 .map_err(|error| anyhow::anyhow!(error.to_string())),
         }
     }
+
+    fn builtin(self) -> Option<(&'static [u8], &'static str)> {
+        match self {
+            Self::Geosite => Some((BUILTIN_GEOSITE, BUILTIN_GEOSITE_SHA256)),
+            Self::Geoip => Some((BUILTIN_GEOIP, BUILTIN_GEOIP_SHA256)),
+            Self::CountryMmdb => None,
+        }
+    }
+
+    fn rule_set_kind(self) -> Option<RuleSetKind> {
+        match self {
+            Self::Geosite => Some(RuleSetKind::Geosite),
+            Self::Geoip => Some(RuleSetKind::Geoip),
+            Self::CountryMmdb => None,
+        }
+    }
 }
 
 impl FromStr for PolicyRuleDataResource {
@@ -74,6 +106,112 @@ pub(crate) struct PolicyRuleDataUpdate {
     pub sha256: String,
     pub size: u64,
     pub source_url: String,
+}
+
+pub(crate) fn builtin_rule_set_default(
+    base_dir: &Path,
+    kind: RuleSetKind,
+) -> anyhow::Result<Option<(String, RuleSet)>> {
+    let resource = match kind {
+        RuleSetKind::Geosite => PolicyRuleDataResource::Geosite,
+        RuleSetKind::Geoip => PolicyRuleDataResource::Geoip,
+        RuleSetKind::Mmdb => return Ok(None),
+    };
+    materialize_builtin_rule_set(base_dir, resource).map(Some)
+}
+
+fn materialize_builtin_rule_set(
+    base_dir: &Path,
+    resource: PolicyRuleDataResource,
+) -> anyhow::Result<(String, RuleSet)> {
+    let preferred_dir = base_dir
+        .join(".easytier-policy-rule-data")
+        .join(BUILTIN_SNAPSHOT);
+    match materialize_builtin_rule_set_at(&preferred_dir, resource) {
+        Ok(default) => Ok(default),
+        Err(preferred_error) => {
+            let fallback_dir = std::env::temp_dir()
+                .join("easytier-policy-rule-data")
+                .join(BUILTIN_SNAPSHOT);
+            if fallback_dir == preferred_dir {
+                return Err(preferred_error);
+            }
+            materialize_builtin_rule_set_at(&fallback_dir, resource).with_context(|| {
+                format!(
+                    "materializing builtin rule data under {} failed first: {preferred_error:#}",
+                    preferred_dir.display()
+                )
+            })
+        }
+    }
+}
+
+fn materialize_builtin_rule_set_at(
+    cache_dir: &Path,
+    resource: PolicyRuleDataResource,
+) -> anyhow::Result<(String, RuleSet)> {
+    let path = materialize_builtin_rule_data(cache_dir, resource)?;
+    let (_, sha256) = resource
+        .builtin()
+        .expect("only builtin resources are materialized");
+    Ok((
+        format!("easytier-builtin-{}", resource.name()),
+        RuleSet {
+            kind: resource
+                .rule_set_kind()
+                .expect("only builtin resources are materialized"),
+            path,
+            update: "manual".to_owned(),
+            sha256: Some(sha256.to_owned()),
+            source_url: Some(resource.default_source_url().to_owned()),
+        },
+    ))
+}
+
+fn materialize_builtin_rule_data(
+    cache_dir: &Path,
+    resource: PolicyRuleDataResource,
+) -> anyhow::Result<PathBuf> {
+    let (bytes, expected_sha256) = resource
+        .builtin()
+        .ok_or_else(|| anyhow::anyhow!("{} has no builtin snapshot", resource.name()))?;
+    fs::create_dir_all(cache_dir).with_context(|| {
+        format!(
+            "creating builtin policy rule data directory {}",
+            cache_dir.display()
+        )
+    })?;
+    let target_path = cache_dir.join(resource.file_name());
+    if target_path
+        .metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() == bytes.len() as u64)
+        && sha256_file(&target_path).is_ok_and(|digest| digest == expected_sha256)
+    {
+        return Ok(target_path);
+    }
+
+    let temporary_path = cache_dir.join(format!(
+        ".{}.{}.builtin",
+        resource.file_name(),
+        Uuid::new_v4()
+    ));
+    let mut pending = PendingFile::new(temporary_path.clone());
+    let mut file = create_private_file(&temporary_path)?;
+    file.write_all(bytes)
+        .context("writing builtin policy rule data")?;
+    file.flush().context("flushing builtin policy rule data")?;
+    file.sync_all()
+        .context("syncing builtin policy rule data")?;
+    drop(file);
+    resource.validate(&temporary_path)?;
+    ensure!(
+        sha256_file(&temporary_path)? == expected_sha256,
+        "builtin policy rule data digest mismatch"
+    );
+    replace_file(&temporary_path, &target_path)?;
+    pending.commit();
+    sync_parent_dir(cache_dir);
+    Ok(target_path)
 }
 
 pub(crate) async fn update_policy_rule_data(
@@ -337,6 +475,23 @@ mod tests {
             assert!(resource.default_source_url().ends_with(file_name));
         }
         assert!("asn".parse::<PolicyRuleDataResource>().is_err());
+    }
+
+    #[test]
+    fn builtin_snapshots_materialize_with_pinned_digests() {
+        let directory = tempfile::tempdir().unwrap();
+        for resource in [
+            PolicyRuleDataResource::Geosite,
+            PolicyRuleDataResource::Geoip,
+        ] {
+            let (name, rule_set) =
+                materialize_builtin_rule_set_at(directory.path(), resource).unwrap();
+            let (_, expected_sha256) = resource.builtin().unwrap();
+            assert_eq!(name, format!("easytier-builtin-{}", resource.name()));
+            assert_eq!(rule_set.sha256.as_deref(), Some(expected_sha256));
+            assert_eq!(sha256_file(&rule_set.path).unwrap(), expected_sha256);
+            resource.validate(&rule_set.path).unwrap();
+        }
     }
 
     #[test]

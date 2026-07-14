@@ -238,7 +238,7 @@ policy:
     add_rule_set: Add standard geo data
     managed_source: Managed source
     update_rule_data: Download and verify
-    rule_data_help: EasyTier owns each resource name, storage path, and digest. Use the default MetaCubeX source or replace only its source URL; a successful download must pass size and format validation before it atomically replaces the current file. Save and restart the instance to apply it.
+    rule_data_help: GeoSite and GeoIP are bundled and work without a download. Country MMDB remains optional. Explicit rule-set paths in advanced YAML override bundled data.
     rule_data_updated: "{type} updated ({size}); save and restart the instance to apply it"
     rule_data_source: Resource source URL
     rule_data_source_help: The shown MetaCubeX URL is the default. Edit it only when using a trusted custom mirror.
@@ -248,6 +248,8 @@ policy:
     status: Status
     installed: Installed and verified
     installed_unverified: Configured; update once to verify
+    builtin: Built in and verified
+    builtin_help: Bundled MetaCubeX snapshot from 2026-07-13. Online replacement is deferred to the next version.
     not_installed: Not installed
     recommended: Recommended
     refresh_interfaces: Refresh interfaces
@@ -257,7 +259,6 @@ policy:
     outbound_load_failed: Failed to list outbound interfaces
     presets: Presets
     preset_china_direct: China direct / overseas preferred
-    preset_geo_required: Download Geosite and GeoIP data first
     preset_global: Preferred target for all traffic
     preset_direct: Direct all traffic
 

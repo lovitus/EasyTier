@@ -196,9 +196,13 @@ impl PolicyProcessConfig {
         let Some(source_file) = self.source_file.as_deref() else {
             return Ok(None);
         };
-        easytier_policy::reload_policy_file_if_changed(source_file, current_digest)
-            .with_context(|| format!("invalid policy config {}", source_file.display()))
-            .map(|revision| revision.map(std::sync::Arc::new))
+        easytier_policy::reload_policy_file_if_changed_with_rule_set_provider(
+            source_file,
+            current_digest,
+            |kind| builtin_rule_set_default(self.base_dir.as_path(), kind),
+        )
+        .with_context(|| format!("invalid policy config {}", source_file.display()))
+        .map(|revision| revision.map(std::sync::Arc::new))
     }
 }
 
@@ -229,7 +233,7 @@ pub fn configure(
         anyhow::bail!("policy mode requires a non-empty outbound interface");
     }
     let leaf_executable = resolve_executable(&leaf_executable)?;
-    let revision = easytier_policy::validate_policy_file(&policy_file)
+    let revision = validate_policy_file(&policy_file)
         .with_context(|| format!("invalid policy config {}", policy_file.display()))?;
     let source_label = policy_file.display().to_string();
     let base_dir = policy_file
@@ -313,7 +317,7 @@ pub fn resolve_document(config: &PolicyProxyConfig) -> anyhow::Result<ResolvedPo
     config.validate_envelope()?;
     let (revision, source_label, base_dir) =
         if let Some(policy_file) = config.resolved_config_file() {
-            let revision = easytier_policy::validate_policy_file(&policy_file)
+            let revision = validate_policy_file(&policy_file)
                 .with_context(|| format!("invalid policy config {}", policy_file.display()))?;
             let source_label = policy_file.display().to_string();
             let base_dir = policy_file
@@ -331,13 +335,43 @@ pub fn resolve_document(config: &PolicyProxyConfig) -> anyhow::Result<ResolvedPo
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("."));
             let revision =
-                PolicyRevision::parse(source, &base_dir).context("invalid inline policy config")?;
+                parse_policy_source(source, &base_dir).context("invalid inline policy config")?;
             (revision, "inline policy config".to_owned(), base_dir)
         };
     Ok(ResolvedPolicyDocument {
         revision: std::sync::Arc::new(revision),
         source_label,
         base_dir,
+    })
+}
+
+fn validate_policy_file(path: &Path) -> anyhow::Result<PolicyRevision> {
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    easytier_policy::validate_policy_file_with_rule_set_provider(path, |kind| {
+        builtin_rule_set_default(base_dir, kind)
+    })
+    .map_err(Into::into)
+}
+
+fn parse_policy_source(
+    source: impl Into<std::sync::Arc<str>>,
+    base_dir: &Path,
+) -> anyhow::Result<PolicyRevision> {
+    PolicyRevision::parse_with_rule_set_provider(source, base_dir, |kind| {
+        builtin_rule_set_default(base_dir, kind)
+    })
+    .map_err(Into::into)
+}
+
+fn builtin_rule_set_default(
+    base_dir: &Path,
+    kind: easytier_policy::RuleSetKind,
+) -> Result<Option<(String, easytier_policy::RuleSet)>, easytier_policy::PolicyError> {
+    crate::policy_rule_data::builtin_rule_set_default(base_dir, kind).map_err(|error| {
+        easytier_policy::PolicyError::InvalidRuleSet {
+            name: format!("builtin-{kind:?}").to_ascii_lowercase(),
+            reason: error.to_string(),
+        }
     })
 }
 
@@ -362,6 +396,7 @@ fn require_regular_file(path: &Path, name: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use easytier_policy::RuleSetKind;
 
     #[test]
     fn resolves_inline_instance_config_without_persisting_generated_state() {
@@ -425,5 +460,88 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(reloaded.document.rules, ["FINAL,REJECT"]);
+    }
+
+    #[test]
+    fn materializes_only_the_builtin_rule_data_used_by_the_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let revision = parse_policy_source(
+            "version: 1\nrules: [\"GEOSITE,CN,DIRECT\", \"MATCH,DIRECT\"]\n",
+            directory.path(),
+        )
+        .unwrap();
+
+        let rule_set = revision
+            .document
+            .rule_sets
+            .values()
+            .find(|rule_set| rule_set.kind == RuleSetKind::Geosite)
+            .unwrap();
+        assert!(rule_set.path.is_file());
+        assert!(rule_set.sha256.is_some());
+        assert!(
+            !revision
+                .document
+                .rule_sets
+                .values()
+                .any(|rule_set| rule_set.kind == RuleSetKind::Geoip)
+        );
+        assert!(!rule_set.path.with_file_name("geoip-lite.dat").exists());
+    }
+
+    #[test]
+    fn ordinary_and_explicit_geo_policies_do_not_materialize_unused_builtins() {
+        let directory = tempfile::tempdir().unwrap();
+        parse_policy_source("version: 1\nrules: [\"MATCH,DIRECT\"]\n", directory.path()).unwrap();
+        assert!(!directory.path().join(".easytier-policy-rule-data").exists());
+
+        let custom = directory.path().join("custom-geosite.dat");
+        std::fs::write(&custom, b"custom").unwrap();
+        let source = format!(
+            "version: 1\nrule-sets:\n  custom:\n    type: geosite\n    path: {}\nrules: [\"GEOSITE,CN,DIRECT\", \"MATCH,DIRECT\"]\n",
+            custom.display()
+        );
+        let revision = parse_policy_source(source, directory.path()).unwrap();
+
+        assert_eq!(revision.document.rule_sets.len(), 1);
+        assert_eq!(revision.document.rule_sets["custom"].path, custom);
+        assert!(!directory.path().join(".easytier-policy-rule-data").exists());
+    }
+
+    #[test]
+    fn bundled_geosite_and_geoip_compile_into_leaf_rules() {
+        let directory = tempfile::tempdir().unwrap();
+        let revision = parse_policy_source(
+            "version: 1\nrules: [\"GEOSITE,CN,DIRECT\", \"GEOIP,CN,DIRECT,no-resolve\", \"MATCH,DIRECT\"]\n",
+            directory.path(),
+        )
+        .unwrap();
+        let resolver = |_name: &str,
+                        _instance_id: Option<uuid::Uuid>,
+                        _virtual_ip: Option<std::net::IpAddr>,
+                        _port: u16| { None };
+
+        let compiled = easytier_policy::compile_leaf_config(
+            &revision,
+            7,
+            directory.path(),
+            &resolver,
+            &["1.1.1.1".parse().unwrap()],
+        )
+        .unwrap();
+        let compiled: serde_json::Value = serde_json::from_str(&compiled).unwrap();
+        let rules = compiled["router"]["rules"].as_array().unwrap();
+
+        assert!(
+            rules[0]["external"][0]
+                .as_str()
+                .unwrap()
+                .contains("geosite.dat:CN")
+        );
+        assert!(
+            rules[1]["ip"]
+                .as_array()
+                .is_some_and(|cidrs| !cidrs.is_empty())
+        );
     }
 }

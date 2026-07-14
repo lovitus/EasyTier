@@ -22,6 +22,18 @@ const CheckboxStub = defineComponent({
   },
 })
 
+const ButtonStub = defineComponent({
+  name: 'Button',
+  props: { label: String, disabled: Boolean },
+  emits: ['click'],
+  setup(props, { emit }) {
+    return () => h('button', {
+      disabled: props.disabled,
+      onClick: () => emit('click'),
+    }, props.label)
+  },
+})
+
 const PanelStub = defineComponent({
   name: 'Panel',
   props: { header: String },
@@ -57,7 +69,7 @@ function mountEditor(config: NetworkConfig, api?: import('../src/modules/api').R
     global: {
       directives: { tooltip: () => {} },
       stubs: {
-        Button: true,
+        Button: ButtonStub,
         Checkbox: CheckboxStub,
         Column: true,
         DataTable: true,
@@ -146,5 +158,24 @@ describe('PolicyEditor', () => {
 
     expect(model.policy_outbound_interface).toBe('')
     expect(wrapper.text()).toContain('policy.editor.outbound_automatic')
+  })
+
+  it('applies the GeoSite and GeoIP preset without serializing resource paths', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
+    const { model, wrapper } = mountEditor(config)
+    const preset = wrapper.findAllComponents({ name: 'Button' })
+      .find(button => button.props('label') === 'policy.editor.preset_china_direct')
+
+    expect(preset).toBeDefined()
+    expect(preset?.attributes('disabled')).toBeUndefined()
+    await preset?.trigger('click')
+    await nextTick()
+
+    expect(model.policy_config_inline).toContain('GEOSITE,CN,DIRECT')
+    expect(model.policy_config_inline).toContain('GEOIP,CN,DIRECT,no-resolve')
+    expect(model.policy_config_inline).not.toContain('rule-sets:')
+    expect(model.policy_config_inline).not.toContain('sha256:')
   })
 })

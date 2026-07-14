@@ -66,10 +66,6 @@ const ruleTypeOptions = [
   'GEOSITE', 'GEOIP', 'COUNTRY', 'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD', 'IP-CIDR',
   'NETWORK', 'PORT-RANGE', 'INBOUND-TAG', 'EXTERNAL', 'MATCH',
 ]
-const hasCountryRuleData = computed(() =>
-  document.value.ruleSets.some(ruleSet => ruleSet.type === 'geosite' && ruleSet.path.trim())
-  && document.value.ruleSets.some(ruleSet => ruleSet.type === 'geoip' && ruleSet.path.trim()),
-)
 const actorOptions = computed(() => [
   'DIRECT',
   'REJECT',
@@ -200,7 +196,6 @@ function preferredTarget() {
 }
 
 function applyPreset(preset: 'china-direct' | 'global' | 'direct') {
-  if (preset === 'china-direct' && !hasCountryRuleData.value) return
   const target = preferredTarget()
   if (preset === 'china-direct') {
     document.value.rules = [
@@ -250,7 +245,12 @@ function isManagedRuleDataInstalled(row: PolicyRuleSetRow) {
   return Boolean(row.path.trim())
 }
 
+function usesBundledRuleData(row: PolicyRuleSetRow) {
+  return MANAGED_RULE_DATA[row.type].builtin && !isManagedRuleDataInstalled(row)
+}
+
 function managedRuleDataStatus(row: PolicyRuleSetRow) {
+  if (usesBundledRuleData(row)) return t('policy.editor.builtin')
   if (!row.path.trim()) return t('policy.editor.not_installed')
   return row.sha256.trim()
     ? t('policy.editor.installed')
@@ -427,7 +427,6 @@ onMounted(() => {
               <div class="flex flex-wrap items-center gap-2">
                 <span class="font-semibold">{{ t('policy.editor.presets') }}</span>
                 <Button :label="t('policy.editor.preset_china_direct')" severity="secondary" outlined
-                  :disabled="!hasCountryRuleData" v-tooltip="!hasCountryRuleData ? t('policy.editor.preset_geo_required') : ''"
                   @click="applyPreset('china-direct')" />
                 <Button :label="t('policy.editor.preset_global')" severity="secondary" outlined
                   @click="applyPreset('global')" />
@@ -484,19 +483,26 @@ onMounted(() => {
                 </Column>
                 <Column :header="t('policy.editor.managed_source')">
                   <template #body="{ data }">
-                    <InputText :model-value="ruleDataSource(data)" class="w-full min-w-96"
-                      :aria-label="t('policy.editor.rule_data_source')"
-                      @update:model-value="setRuleDataSource(data, String($event))" />
-                    <small class="text-surface-500">{{ t('policy.editor.rule_data_source_help') }}</small>
+                    <template v-if="usesBundledRuleData(data)">
+                      <div class="font-mono text-xs break-all min-w-72">{{ managedRuleDataSource(data.type) }}</div>
+                      <small class="text-surface-500">{{ t('policy.editor.builtin_help') }}</small>
+                    </template>
+                    <template v-else>
+                      <InputText :model-value="ruleDataSource(data)" class="w-full min-w-96"
+                        :aria-label="t('policy.editor.rule_data_source')"
+                        @update:model-value="setRuleDataSource(data, String($event))" />
+                      <small class="text-surface-500">{{ t('policy.editor.rule_data_source_help') }}</small>
+                    </template>
                   </template>
                 </Column>
                 <Column :header="t('policy.editor.status')">
                   <template #body="{ data }">
                     <div class="flex flex-col gap-2 min-w-36">
-                      <span :class="isManagedRuleDataInstalled(data) ? 'text-green-600' : 'text-surface-500'">
+                      <span :class="isManagedRuleDataInstalled(data) || usesBundledRuleData(data) ? 'text-green-600' : 'text-surface-500'">
                         {{ managedRuleDataStatus(data) }}
                       </span>
-                      <Button icon="pi pi-refresh" :label="t('policy.editor.update_rule_data')" size="small"
+                      <Button v-if="!usesBundledRuleData(data)" icon="pi pi-refresh"
+                        :label="t('policy.editor.update_rule_data')" size="small"
                         :loading="updatingRuleData === data.type"
                         :disabled="!props.api?.update_policy_rule_data || !config.instance_id || Boolean(updatingRuleData)"
                         @click="updateRuleData(data)" />
@@ -505,7 +511,8 @@ onMounted(() => {
                 </Column>
                 <Column header-style="width: 4rem">
                   <template #body="{ data }">
-                    <Button v-if="isManagedRuleDataInstalled(data)" icon="pi pi-trash" severity="danger" text
+                    <Button v-if="isManagedRuleDataInstalled(data) && !usesBundledRuleData(data)"
+                      icon="pi pi-trash" severity="danger" text
                       @click="removeRuleData(data)" />
                   </template>
                 </Column>

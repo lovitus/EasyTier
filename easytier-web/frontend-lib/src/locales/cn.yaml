@@ -239,7 +239,7 @@ policy:
     add_rule_set: 添加标准 Geo 数据
     managed_source: 官方数据源
     update_rule_data: 下载并校验
-    rule_data_help: 资源名称、保存路径和摘要均由 EasyTier 管理。默认使用 MetaCubeX 来源；只有使用自定义镜像时才修改来源 URL。下载必须通过大小和格式校验，成功后才会原子替换旧文件；保存并重新运行实例后生效。
+    rule_data_help: GeoSite 和 GeoIP 已内置，无需下载即可使用；Country MMDB 仍为可选资源。高级 YAML 中显式配置的同类数据文件优先于内置数据。
     rule_data_updated: "{type} 已更新（{size}），请保存并重新运行实例"
     rule_data_source: 资源来源 URL
     rule_data_source_help: 当前显示的是 MetaCubeX 默认地址；仅在使用可信自定义镜像时修改。
@@ -249,6 +249,8 @@ policy:
     status: 状态
     installed: 已安装并验证
     installed_unverified: 已配置；更新一次以完成校验
+    builtin: 已内置并校验
+    builtin_help: 内置 2026-07-13 MetaCubeX 快照；在线替换功能延后到下个版本处理。
     not_installed: 未安装
     recommended: 推荐
     refresh_interfaces: 刷新接口
@@ -258,7 +260,6 @@ policy:
     outbound_load_failed: 无法获取出口接口列表
     presets: 快捷规则
     preset_china_direct: 中国直连 / 其他优先代理
-    preset_geo_required: 请先下载 Geosite 和 GeoIP 数据
     preset_global: 全部使用首选目标
     preset_direct: 全部直连
 

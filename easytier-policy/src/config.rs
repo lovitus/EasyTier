@@ -183,11 +183,62 @@ pub struct PolicyRevision {
 
 impl PolicyRevision {
     pub fn parse(source: impl Into<Arc<str>>, base_dir: &Path) -> Result<Self, PolicyError> {
+        Self::parse_with_rule_set_provider(source, base_dir, |_| Ok(None))
+    }
+
+    pub fn parse_with_rule_set_defaults(
+        source: impl Into<Arc<str>>,
+        base_dir: &Path,
+        defaults: impl IntoIterator<Item = (String, RuleSet)>,
+    ) -> Result<Self, PolicyError> {
+        let mut defaults = defaults.into_iter().collect::<Vec<_>>();
+        Self::parse_with_rule_set_provider(source, base_dir, move |kind| {
+            let Some(index) = defaults
+                .iter()
+                .position(|(_, rule_set)| rule_set.kind == kind)
+            else {
+                return Ok(None);
+            };
+            Ok(Some(defaults.remove(index)))
+        })
+    }
+
+    pub fn parse_with_rule_set_provider(
+        source: impl Into<Arc<str>>,
+        base_dir: &Path,
+        mut default_for: impl FnMut(RuleSetKind) -> Result<Option<(String, RuleSet)>, PolicyError>,
+    ) -> Result<Self, PolicyError> {
         let source = source.into();
         if source.len() as u64 > MAX_DOCUMENT_BYTES {
             return Err(PolicyError::TooLarge);
         }
-        let document: PolicyDocument = serde_yaml::from_str(&source)?;
+        let mut document: PolicyDocument = serde_yaml::from_str(&source)?;
+        for kind in [RuleSetKind::Geosite, RuleSetKind::Geoip, RuleSetKind::Mmdb] {
+            if !document.uses_rule_set_kind(kind)
+                || document
+                    .rule_sets
+                    .values()
+                    .any(|existing| existing.kind == kind)
+            {
+                continue;
+            }
+            let Some((name, rule_set)) = default_for(kind)? else {
+                continue;
+            };
+            if rule_set.kind != kind {
+                return Err(PolicyError::InvalidRuleSet {
+                    name,
+                    reason: "default rule-set kind does not match the requested kind".to_owned(),
+                });
+            }
+            if document.rule_sets.contains_key(&name) {
+                return Err(PolicyError::InvalidRuleSet {
+                    name,
+                    reason: "default rule-set name conflicts with an explicit rule-set".to_owned(),
+                });
+            }
+            document.rule_sets.insert(name, rule_set);
+        }
         let group_order = document.validate(base_dir)?;
         let digest: [u8; 32] = Sha256::digest(source.as_bytes()).into();
         let id = digest[..8]
@@ -205,6 +256,13 @@ impl PolicyRevision {
 }
 
 pub fn validate_policy_file(path: &Path) -> Result<PolicyRevision, PolicyError> {
+    validate_policy_file_with_rule_set_provider(path, |_| Ok(None))
+}
+
+pub fn validate_policy_file_with_rule_set_provider(
+    path: &Path,
+    default_for: impl FnMut(RuleSetKind) -> Result<Option<(String, RuleSet)>, PolicyError>,
+) -> Result<PolicyRevision, PolicyError> {
     let metadata = fs::metadata(path).map_err(|source| PolicyError::Read {
         path: path.to_owned(),
         source,
@@ -216,7 +274,11 @@ pub fn validate_policy_file(path: &Path) -> Result<PolicyRevision, PolicyError> 
         path: path.to_owned(),
         source,
     })?;
-    PolicyRevision::parse(source, path.parent().unwrap_or_else(|| Path::new(".")))
+    PolicyRevision::parse_with_rule_set_provider(
+        source,
+        path.parent().unwrap_or_else(|| Path::new(".")),
+        default_for,
+    )
 }
 
 /// Reload a file-backed policy only when its source bytes changed.
@@ -227,6 +289,14 @@ pub fn validate_policy_file(path: &Path) -> Result<PolicyRevision, PolicyError> 
 pub fn reload_policy_file_if_changed(
     path: &Path,
     current_digest: &[u8; 32],
+) -> Result<Option<PolicyRevision>, PolicyError> {
+    reload_policy_file_if_changed_with_rule_set_provider(path, current_digest, |_| Ok(None))
+}
+
+pub fn reload_policy_file_if_changed_with_rule_set_provider(
+    path: &Path,
+    current_digest: &[u8; 32],
+    default_for: impl FnMut(RuleSetKind) -> Result<Option<(String, RuleSet)>, PolicyError>,
 ) -> Result<Option<PolicyRevision>, PolicyError> {
     let metadata = fs::metadata(path).map_err(|source| PolicyError::Read {
         path: path.to_owned(),
@@ -243,10 +313,49 @@ pub fn reload_policy_file_if_changed(
     if &digest == current_digest {
         return Ok(None);
     }
-    PolicyRevision::parse(source, path.parent().unwrap_or_else(|| Path::new("."))).map(Some)
+    PolicyRevision::parse_with_rule_set_provider(
+        source,
+        path.parent().unwrap_or_else(|| Path::new(".")),
+        default_for,
+    )
+    .map(Some)
 }
 
 impl PolicyDocument {
+    fn uses_rule_set_kind(&self, kind: RuleSetKind) -> bool {
+        self.rules.iter().any(|rule| {
+            let mut parts = rule.split(',').map(str::trim);
+            let rule_type = parts.next().unwrap_or_default();
+            let operand = parts.next().unwrap_or_default();
+            match kind {
+                RuleSetKind::Geosite => {
+                    rule_type.eq_ignore_ascii_case("GEOSITE")
+                        || (rule_type.eq_ignore_ascii_case("EXTERNAL")
+                            && operand.split_once(':').is_none_or(|(source, _)| {
+                                source.eq_ignore_ascii_case("site")
+                                    || source.eq_ignore_ascii_case("geosite")
+                            }))
+                }
+                RuleSetKind::Geoip => {
+                    (rule_type.eq_ignore_ascii_case("GEOIP")
+                        && !operand.eq_ignore_ascii_case("LAN"))
+                        || (rule_type.eq_ignore_ascii_case("EXTERNAL")
+                            && operand.split_once(':').is_some_and(|(source, _)| {
+                                source.eq_ignore_ascii_case("geoip")
+                                    || source.eq_ignore_ascii_case("geoip-dat")
+                            }))
+                }
+                RuleSetKind::Mmdb => {
+                    rule_type.eq_ignore_ascii_case("COUNTRY")
+                        || (rule_type.eq_ignore_ascii_case("EXTERNAL")
+                            && operand
+                                .split_once(':')
+                                .is_some_and(|(source, _)| source.eq_ignore_ascii_case("mmdb")))
+                }
+            }
+        })
+    }
+
     fn validate(&self, base_dir: &Path) -> Result<Vec<String>, PolicyError> {
         if self.version != 1 {
             return Err(PolicyError::UnsupportedVersion(self.version));
@@ -789,6 +898,127 @@ rules:
             first.group_order.as_ref(),
             ["chain", "final-tcp", "final-udp"]
         );
+    }
+
+    #[test]
+    fn injects_only_required_missing_rule_set_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let geosite = directory.path().join("geosite.dat");
+        let geoip = directory.path().join("geoip.dat");
+        fs::write(&geosite, b"geosite").unwrap();
+        fs::write(&geoip, b"geoip").unwrap();
+        let source = r#"
+version: 1
+rules:
+  - GEOSITE,CN,DIRECT
+  - MATCH,DIRECT
+"#;
+        let revision = PolicyRevision::parse_with_rule_set_defaults(
+            source,
+            directory.path(),
+            [
+                (
+                    "geosite".to_owned(),
+                    RuleSet {
+                        kind: RuleSetKind::Geosite,
+                        path: geosite.clone(),
+                        update: manual_update(),
+                        sha256: None,
+                        source_url: None,
+                    },
+                ),
+                (
+                    "geoip".to_owned(),
+                    RuleSet {
+                        kind: RuleSetKind::Geoip,
+                        path: geoip,
+                        update: manual_update(),
+                        sha256: None,
+                        source_url: None,
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(revision.document.rule_sets.len(), 1);
+        assert_eq!(revision.document.rule_sets["geosite"].path, geosite);
+        let expected_digest: [u8; 32] = Sha256::digest(source.as_bytes()).into();
+        assert_eq!(revision.digest, expected_digest);
+    }
+
+    #[test]
+    fn external_rules_request_the_matching_default_rule_set() {
+        let directory = tempfile::tempdir().unwrap();
+        let geosite = directory.path().join("geosite.dat");
+        fs::write(&geosite, b"geosite").unwrap();
+        let source = r#"
+version: 1
+rules:
+  - EXTERNAL,site:CN,DIRECT
+  - MATCH,DIRECT
+"#;
+        let revision = PolicyRevision::parse_with_rule_set_defaults(
+            source,
+            directory.path(),
+            [(
+                "geosite".to_owned(),
+                RuleSet {
+                    kind: RuleSetKind::Geosite,
+                    path: geosite.clone(),
+                    update: manual_update(),
+                    sha256: None,
+                    source_url: None,
+                },
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(revision.document.rule_sets["geosite"].path, geosite);
+    }
+
+    #[test]
+    fn builtin_geoip_is_not_required_for_the_lan_special_case() {
+        let source = "version: 1\nrules: [\"GEOIP,LAN,DIRECT,no-resolve\", \"MATCH,DIRECT\"]\n";
+        let mut provider_called = false;
+        PolicyRevision::parse_with_rule_set_provider(source, Path::new("."), |_| {
+            provider_called = true;
+            Ok(None)
+        })
+        .unwrap();
+
+        assert!(!provider_called);
+    }
+
+    #[test]
+    fn explicit_rule_set_overrides_the_default_of_the_same_kind() {
+        let directory = tempfile::tempdir().unwrap();
+        let custom = directory.path().join("custom.dat");
+        let builtin = directory.path().join("builtin.dat");
+        fs::write(&custom, b"custom").unwrap();
+        fs::write(&builtin, b"builtin").unwrap();
+        let source = format!(
+            "version: 1\nrule-sets:\n  custom:\n    type: geosite\n    path: {}\nrules: [\"GEOSITE,CN,DIRECT\", \"MATCH,DIRECT\"]\n",
+            custom.display()
+        );
+        let revision = PolicyRevision::parse_with_rule_set_defaults(
+            source,
+            directory.path(),
+            [(
+                "geosite".to_owned(),
+                RuleSet {
+                    kind: RuleSetKind::Geosite,
+                    path: builtin,
+                    update: manual_update(),
+                    sha256: None,
+                    source_url: None,
+                },
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(revision.document.rule_sets.len(), 1);
+        assert_eq!(revision.document.rule_sets["custom"].path, custom);
     }
 
     #[test]

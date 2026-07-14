@@ -7,18 +7,21 @@ import type {
 
 export const MANAGED_RULE_DATA = {
   geosite: {
+    builtin: true,
     name: 'geosite',
     source: 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat',
   },
   geoip: {
+    builtin: true,
     name: 'geoip',
     source: 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip-lite.dat',
   },
   mmdb: {
+    builtin: false,
     name: 'country',
     source: 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb',
   },
-} satisfies Record<PolicyRuleSetKind, { name: string, source: string }>
+} satisfies Record<PolicyRuleSetKind, { builtin: boolean, name: string, source: string }>
 
 export const MANAGED_RULE_DATA_TYPES = Object.keys(MANAGED_RULE_DATA) as PolicyRuleSetKind[]
 
