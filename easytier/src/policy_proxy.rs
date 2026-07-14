@@ -181,6 +181,21 @@ pub struct PolicyProcessConfig {
     pub base_dir: PathBuf,
     pub leaf_executable: PathBuf,
     pub outbound_interface: String,
+    source_file: Option<PathBuf>,
+}
+
+impl PolicyProcessConfig {
+    pub fn reload_revision_if_changed(
+        &self,
+        current_digest: &[u8; 32],
+    ) -> anyhow::Result<Option<std::sync::Arc<PolicyRevision>>> {
+        let Some(source_file) = self.source_file.as_deref() else {
+            return Ok(None);
+        };
+        easytier_policy::reload_policy_file_if_changed(source_file, current_digest)
+            .with_context(|| format!("invalid policy config {}", source_file.display()))
+            .map(|revision| revision.map(std::sync::Arc::new))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +239,7 @@ pub fn configure(
             base_dir,
             leaf_executable,
             outbound_interface,
+            source_file: Some(policy_file),
         })
         .map_err(|_| anyhow::anyhow!("policy process config was initialized more than once"))
 }
@@ -267,6 +283,7 @@ pub fn configured_for(config: &dyn ConfigLoader) -> anyhow::Result<Option<Policy
 
 fn resolve_instance_config(config: PolicyProxyConfig) -> anyhow::Result<PolicyProcessConfig> {
     config.validate_envelope()?;
+    let source_file = config.resolved_config_file();
     let outbound_interface = config
         .outbound_interface
         .clone()
@@ -284,6 +301,7 @@ fn resolve_instance_config(config: PolicyProxyConfig) -> anyhow::Result<PolicyPr
         base_dir: document.base_dir,
         leaf_executable,
         outbound_interface,
+        source_file,
     })
 }
 
@@ -360,6 +378,12 @@ mod tests {
         assert_eq!(resolved.source_label, "inline policy config");
         assert_eq!(resolved.base_dir, directory.path());
         assert_eq!(resolved.leaf_executable, worker);
+        assert!(
+            resolved
+                .reload_revision_if_changed(&resolved.revision.digest)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -386,5 +410,16 @@ mod tests {
         let resolved = resolve_instance_config(config).unwrap();
         assert_eq!(resolved.base_dir, policy_dir);
         assert!(resolved.source_label.ends_with("policy/default.yaml"));
+
+        std::fs::write(
+            policy_dir.join("default.yaml"),
+            "version: 1\nrules: [\"FINAL,REJECT\"]\n",
+        )
+        .unwrap();
+        let reloaded = resolved
+            .reload_revision_if_changed(&resolved.revision.digest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.document.rules, ["FINAL,REJECT"]);
     }
 }

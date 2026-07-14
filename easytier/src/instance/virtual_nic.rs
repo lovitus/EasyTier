@@ -152,7 +152,35 @@ async fn stop_policy_active_runtime(
     bridge_updates.send_replace(None);
     if let Some(previous) = previous {
         previous.mesh_bridges.disable_all();
-        previous.runtime.shutdown().await;
+        if tokio::time::timeout(Duration::from_secs(5), previous.runtime.shutdown())
+            .await
+            .is_err()
+        {
+            tracing::warn!("policy runtime shutdown exceeded five seconds; forcing owner drop");
+        }
+    }
+}
+
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
+async fn activate_policy_runtime(
+    active: &Arc<Mutex<Option<PolicyActiveRuntime>>>,
+    bridge: &Arc<ArcSwapOption<LeafPacketBridge>>,
+    bridge_updates: &tokio::sync::watch::Sender<Option<Arc<LeafPacketBridge>>>,
+    candidate: PolicyActiveRuntime,
+) {
+    let candidate_bridge = candidate.bridge.clone();
+    let previous = active.lock().await.replace(candidate);
+    bridge.store(Some(candidate_bridge.clone()));
+    bridge_updates.send_replace(Some(candidate_bridge));
+
+    if let Some(previous) = previous {
+        previous.mesh_bridges.disable_all();
+        if tokio::time::timeout(Duration::from_secs(5), previous.runtime.shutdown())
+            .await
+            .is_err()
+        {
+            tracing::warn!("replaced policy runtime did not stop within five seconds");
+        }
     }
 }
 
@@ -2007,16 +2035,13 @@ impl NicCtx {
         .await
         {
             Ok(candidate) => {
-                let candidate_bridge = candidate.bridge.clone();
-                bridge.store(Some(candidate_bridge.clone()));
-                bridge_updates.send_replace(Some(candidate_bridge));
+                activate_policy_runtime(&active, &bridge, &bridge_updates, candidate).await;
                 tracing::info!(
-                    revision = candidate.runtime.revision_id(),
+                    revision = %revision.id,
                     policy_source = %config.source_label,
                     outbound_interface = %config.outbound_interface,
                     "transparent policy proxy is ready"
                 );
-                *active.lock().await = Some(candidate);
             }
             Err(error) => {
                 tracing::error!(
@@ -2076,6 +2101,44 @@ impl NicCtx {
     }
 
     #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[allow(clippy::too_many_arguments)]
+    async fn reload_policy_runtime_if_changed(
+        config: &crate::policy_proxy::PolicyProcessConfig,
+        current_revision: &Arc<easytier_policy::PolicyRevision>,
+        global_ctx: &ArcGlobalCtx,
+        policy_data_plane: &Weak<Socks5Server>,
+        peer_mgr: &Arc<PeerManager>,
+        route_table: &[crate::proto::api::instance::Route],
+        active: &Arc<Mutex<Option<PolicyActiveRuntime>>>,
+        bridge: &Arc<ArcSwapOption<LeafPacketBridge>>,
+        bridge_updates: &tokio::sync::watch::Sender<Option<Arc<LeafPacketBridge>>>,
+    ) -> Result<Option<Arc<easytier_policy::PolicyRevision>>, String> {
+        let Some(candidate_revision) = config
+            .reload_revision_if_changed(&current_revision.digest)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        ensure_policy_mesh_credentials_confidential(global_ctx, &candidate_revision)
+            .map_err(|error| error.to_string())?;
+        let data_plane = policy_data_plane
+            .upgrade()
+            .ok_or_else(|| "policy data plane is not available".to_owned())?;
+        let candidate = Self::build_policy_runtime(
+            config,
+            candidate_revision.clone(),
+            data_plane,
+            peer_mgr.clone(),
+            peer_mgr.my_peer_id(),
+            route_table,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        activate_policy_runtime(active, bridge, bridge_updates, candidate).await;
+        Ok(Some(candidate_revision))
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
     fn run_policy_route_updater(
         &mut self,
         ipv4_addr: Option<cidr::Ipv4Inet>,
@@ -2086,7 +2149,7 @@ impl NicCtx {
             return;
         };
         let classifier = policy.classifier.clone();
-        let revision = policy.revision.clone();
+        let mut revision = policy.revision.clone();
         let active = policy.active.clone();
         // The context owns the routing guard. The supervisor must not keep policy
         // rules alive after the NIC context starts shutting down.
@@ -2111,6 +2174,9 @@ impl NicCtx {
             > = None;
             let mut mesh_generation_initialized = false;
             let mut active_since = initial_active.then(tokio::time::Instant::now);
+            let mut policy_reload_failures = 0u8;
+            let mut next_policy_reload = tokio::time::Instant::now();
+            let mut last_policy_reload_error: Option<String> = None;
             loop {
                 let event = tokio::select! {
                     _ = monitor.tick() => None,
@@ -2204,6 +2270,59 @@ impl NicCtx {
                     continue;
                 }
                 let route_table = peer_mgr.list_routes().await;
+                if route_refresh_due && tokio::time::Instant::now() >= next_policy_reload {
+                    match Self::reload_policy_runtime_if_changed(
+                        &config,
+                        &revision,
+                        &global_ctx,
+                        &policy_data_plane,
+                        &peer_mgr,
+                        &route_table,
+                        &active,
+                        &bridge,
+                        &bridge_updates,
+                    )
+                    .await
+                    {
+                        Ok(Some(candidate_revision)) => {
+                            revision = candidate_revision;
+                            policy_reload_failures = 0;
+                            next_policy_reload = tokio::time::Instant::now();
+                            last_policy_reload_error = None;
+                            restart_budget.reset();
+                            dormant = false;
+                            active_since = Some(tokio::time::Instant::now());
+                            mesh_generation_initialized = false;
+                            last_mesh_endpoints = None;
+                            tracing::info!(
+                                revision = %revision.id,
+                                policy_source = %config.source_label,
+                                "transactionally applied policy file revision"
+                            );
+                        }
+                        Ok(None) => {
+                            policy_reload_failures = 0;
+                            last_policy_reload_error = None;
+                        }
+                        Err(error) => {
+                            if last_policy_reload_error.as_deref() != Some(error.as_str()) {
+                                tracing::warn!(
+                                    %error,
+                                    "policy candidate rejected; retaining active revision"
+                                );
+                                last_policy_reload_error = Some(error);
+                            }
+                            policy_reload_failures = policy_reload_failures.saturating_add(1);
+                        }
+                    }
+                    if policy_reload_failures > 0 {
+                        const RELOAD_BACKOFF_SECS: [u64; 6] = [1, 2, 5, 10, 30, 60];
+                        let delay = RELOAD_BACKOFF_SECS[usize::from(policy_reload_failures - 1)
+                            .min(RELOAD_BACKOFF_SECS.len() - 1)];
+                        next_policy_reload =
+                            tokio::time::Instant::now() + Duration::from_secs(delay);
+                    }
+                }
                 let resolved_mesh_endpoints =
                     Self::resolve_policy_mesh_endpoints(
                         &revision,
@@ -2267,10 +2386,7 @@ impl NicCtx {
                 .await
                 {
                     Ok(candidate) => {
-                        let candidate_bridge = candidate.bridge.clone();
-                        bridge.store(Some(candidate_bridge.clone()));
-                        bridge_updates.send_replace(Some(candidate_bridge));
-                        *active.lock().await = Some(candidate);
+                        activate_policy_runtime(&active, &bridge, &bridge_updates, candidate).await;
                         active_since = Some(tokio::time::Instant::now());
                         tracing::info!(revision = %revision.id, "Leaf policy worker recovered");
                     }
@@ -2351,9 +2467,7 @@ impl NicCtx {
             .await
             {
                 Ok(candidate) => {
-                    bridge.store(Some(candidate.bridge.clone()));
-                    bridge_updates.send_replace(Some(candidate.bridge.clone()));
-                    *active.lock().await = Some(candidate);
+                    activate_policy_runtime(&active, &bridge, &bridge_updates, candidate).await;
                     tracing::info!(
                         revision = %revision.id,
                         policy_source = %document.source_label,
@@ -2621,9 +2735,7 @@ impl NicCtx {
                             .ok(),
                             Some(endpoints)
                         );
-                        bridge.store(Some(candidate.bridge.clone()));
-                        bridge_updates.send_replace(Some(candidate.bridge.clone()));
-                        *active.lock().await = Some(candidate);
+                        activate_policy_runtime(&active, &bridge, &bridge_updates, candidate).await;
                         active_since = Some(tokio::time::Instant::now());
                         tracing::info!(revision = %revision.id, "Android policy runtime recovered");
                     }

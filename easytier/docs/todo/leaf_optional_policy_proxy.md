@@ -1,6 +1,37 @@
 # Leaf Optional Policy Proxy Integration TODO
 
-**Status**: Linux candidate and automated test matrix validated; Android single-TUN candidate builds, with repeatable side-by-side device packaging pending validation
+## Mandatory reference policy
+
+All Leaf/policy-proxy behavior must be designed and reviewed against the local
+Mihomo implementation configured in `AGENTS.md`; sing-box is the secondary
+reference when Mihomo lacks the feature or platform behavior differs.
+Implementation notes and tests must identify the referenced files/functions and
+the observable semantics being preserved. This includes ordered rule matching,
+DNS/FakeDNS, GeoIP/GeoSite loading and updates, caches, hot paths, proxy groups,
+failover/recovery, loop prevention, lifecycle, and errors. EasyTier-specific
+differences are allowed only when required by the mesh/Leaf architecture and
+must document their reason, compatibility boundary, failure behavior, and
+validation evidence. Unknown behavior is an investigation blocker, not a reason
+to invent a new semantic.
+
+Current implementation references:
+
+- transactional policy loading was checked against Mihomo
+  `hub/executor/executor.go::ApplyConfig` and
+  `component/updater/update_geo.go::{UpdateGeoIp,UpdateGeoSite}`. Mihomo
+  serializes application under its executor lock and validates Geo data before
+  replacing the stored file. EasyTier intentionally builds a complete Leaf
+  candidate off-path, atomically publishes it only after readiness, and retains
+  the previous runtime on failure because dropping non-mesh traffic during an
+  invalid file edit would violate the policy-plane availability contract;
+- Android VPN ownership was checked against Clash Meta for Android
+  `app/.../util/Clash.kt::startClashService` and
+  `service/.../TunService.kt`. VPN permission acquisition remains an explicit
+  user action. EasyTier additionally persists a system-revoked marker because
+  its mesh instance may remain enabled after Android transfers TUN ownership;
+  WebView reload or process synchronization must not silently reclaim it.
+
+**Status**: Linux candidate and automated test matrix validated; exact Android side-by-side candidate established a Stealth-protected mesh and in-process policy runtime on a real device. DHCP-empty and persisted VPN-revocation fixes are pending a replacement candidate build and repeat validation.
 **Updated**: 2026-07-14
 
 This TODO is the design source of truth. Update it after each material design
@@ -150,15 +181,20 @@ growth. This was discussed with the maintainer on 2026-07-13: both effects
 match expectations and are accepted as-is. No further handling, classifier
 change, or documentation-visible warning is planned for this interaction.
 
-Not yet implemented in this spike: policy file hot reload, HTTP CONNECT actor
+File-backed policy hot reload is now an implementation candidate: it hashes the
+bounded source first, builds and readiness-checks a complete replacement while
+the old runtime remains active, atomically publishes the replacement, and
+retains the old revision with bounded retry/log suppression when validation or
+startup fails. Inline/RPC policy changes still use the existing explicit
+save-and-rerun path. Not yet implemented in this spike: HTTP CONNECT actor
 adaptation, a bundled exit-node SOCKS5 UDP service, instance-netns worker
 ownership, and desktop non-Linux TUN adapters. Proxy credentials for native and
 mesh SOCKS actors are now an implementation candidate: native actors emit the
 validated credentials into the private Leaf configuration, while mesh TCP and
 UDP paths perform RFC 1929 authentication at the destination actor. Empty RPC
 fields preserve the existing no-authentication wire behavior. TOML/RPC/GUI
-envelopes and the Android single-TUN adapter are also implemented candidates
-pending packaged-build and real-device validation.
+envelopes and the Android single-TUN adapter are implemented candidates; the
+replacement candidate must repeat packaged-build and real-device validation.
 These are release blockers for claiming the full plan, but they do not affect
 ordinary EasyTier builds because the feature is off by default.
 

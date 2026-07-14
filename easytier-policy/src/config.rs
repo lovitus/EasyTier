@@ -213,6 +213,33 @@ pub fn validate_policy_file(path: &Path) -> Result<PolicyRevision, PolicyError> 
     PolicyRevision::parse(source, path.parent().unwrap_or_else(|| Path::new(".")))
 }
 
+/// Reload a file-backed policy only when its source bytes changed.
+///
+/// Resource validation can be expensive for large GeoIP/GeoSite datasets, so
+/// compare the source digest before parsing the document and its dependencies.
+/// The caller keeps the active revision when this function returns an error.
+pub fn reload_policy_file_if_changed(
+    path: &Path,
+    current_digest: &[u8; 32],
+) -> Result<Option<PolicyRevision>, PolicyError> {
+    let metadata = fs::metadata(path).map_err(|source| PolicyError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    if metadata.len() > MAX_DOCUMENT_BYTES {
+        return Err(PolicyError::TooLarge);
+    }
+    let source = fs::read_to_string(path).map_err(|source| PolicyError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    let digest: [u8; 32] = Sha256::digest(source.as_bytes()).into();
+    if &digest == current_digest {
+        return Ok(None);
+    }
+    PolicyRevision::parse(source, path.parent().unwrap_or_else(|| Path::new("."))).map(Some)
+}
+
 impl PolicyDocument {
     fn validate(&self, base_dir: &Path) -> Result<Vec<String>, PolicyError> {
         if self.version != 1 {
@@ -756,6 +783,29 @@ rules:
             first.group_order.as_ref(),
             ["chain", "final-tcp", "final-udp"]
         );
+    }
+
+    #[test]
+    fn file_reload_skips_unchanged_source_and_rejects_invalid_candidate() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policy.yaml");
+        fs::write(&path, "version: 1\nrules: [\"FINAL,DIRECT\"]\n").unwrap();
+        let initial = validate_policy_file(&path).unwrap();
+
+        assert!(
+            reload_policy_file_if_changed(&path, &initial.digest)
+                .unwrap()
+                .is_none()
+        );
+
+        fs::write(&path, "version: 1\nrules: [\"FINAL,REJECT\"]\n").unwrap();
+        let updated = reload_policy_file_if_changed(&path, &initial.digest)
+            .unwrap()
+            .unwrap();
+        assert_ne!(updated.digest, initial.digest);
+
+        fs::write(&path, "version: 1\nrules: []\n").unwrap();
+        assert!(reload_policy_file_if_changed(&path, &updated.digest).is_err());
     }
 
     #[test]

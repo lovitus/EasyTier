@@ -17,7 +17,7 @@ mod supervisor;
 
 pub use config::{
     ChainKind, PolicyDocument, PolicyError, PolicyMode, PolicyRevision, Proxy, ProxyKind,
-    ProxyServer, ProxyVia, RuleSetKind, validate_policy_file,
+    ProxyServer, ProxyVia, RuleSetKind, reload_policy_file_if_changed, validate_policy_file,
 };
 pub use geodata::{ManagedRuleDataKind, validate_managed_rule_data};
 #[cfg(all(unix, feature = "leaf-inprocess"))]

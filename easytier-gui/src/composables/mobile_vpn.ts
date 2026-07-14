@@ -1,9 +1,9 @@
 import type { NetworkTypes } from 'easytier-frontend-lib'
 import { addPluginListener } from '@tauri-apps/api/core'
 import { Utils } from 'easytier-frontend-lib'
+import { get_vpn_status, prepare_vpn, start_vpn, stop_vpn } from 'tauri-plugin-vpnservice-api'
 import { setTunFd, updateMobileNetwork } from './backend'
 import { getRoutesForVpn } from './vpn_routes'
-import { get_vpn_status, prepare_vpn, start_vpn, stop_vpn } from 'tauri-plugin-vpnservice-api'
 
 interface vpnStatus {
   running: boolean
@@ -16,9 +16,10 @@ interface vpnStatus {
 let dhcpPollingTimer: NodeJS.Timeout | null = null
 const DHCP_POLLING_INTERVAL = 2000 // 2秒后重试
 const NETWORK_INFO_RETRY_DELAYS = [0, 150, 300] as const
+const VPN_REVOKED_STORAGE_KEY = 'easytier_vpn_revoked_by_system'
 let vpnOperationTail: Promise<void> = Promise.resolve()
 let vpnOperationEpoch = 0
-let vpnRevokedBySystem = false
+let vpnRevokedBySystem = loadVpnRevokedBySystem()
 let activeVpnInstanceId: string | undefined
 
 const curVpnStatus: vpnStatus = {
@@ -27,6 +28,30 @@ const curVpnStatus: vpnStatus = {
   ipv4Cidr: undefined,
   routes: [],
   dns: undefined,
+}
+
+function loadVpnRevokedBySystem() {
+  try {
+    return localStorage.getItem(VPN_REVOKED_STORAGE_KEY) === '1'
+  }
+  catch {
+    return false
+  }
+}
+
+function setVpnRevokedBySystem(revoked: boolean) {
+  vpnRevokedBySystem = revoked
+  try {
+    if (revoked) {
+      localStorage.setItem(VPN_REVOKED_STORAGE_KEY, '1')
+    }
+    else {
+      localStorage.removeItem(VPN_REVOKED_STORAGE_KEY)
+    }
+  }
+  catch {
+    // Keep the in-memory guard active when WebView storage is unavailable.
+  }
 }
 
 async function requestVpnPermission() {
@@ -138,7 +163,7 @@ async function doStartVpn(instanceId: string, ipv4Addr: string, cidr: number, ro
   if (start_ret?.errorMsg === 'need_prepare') {
     // Background synchronization must never reclaim VPN ownership from another app.
     // Only prepareVpnService(), called by an explicit GUI action, may request consent.
-    vpnRevokedBySystem = true
+    setVpnRevokedBySystem(true)
     activeVpnInstanceId = undefined
     throw new Error('vpn_revoked')
   }
@@ -218,7 +243,7 @@ async function onVpnNetworkChanged(payload: any) {
 async function onVpnServiceStop(payload: any) {
   console.log('vpn service stop', JSON.stringify(payload))
   if (payload?.reason === 'revoked') {
-    vpnRevokedBySystem = true
+    setVpnRevokedBySystem(true)
     vpnOperationEpoch += 1
     console.info('Android revoked EasyTier VPN ownership; automatic restart is suppressed')
   }
@@ -303,7 +328,8 @@ async function applyNetworkInstanceChange(instanceId: string, epoch: number, for
     return
   }
 
-  const virtual_ip = Utils.ipv4ToString(curNetworkInfo?.my_node_info?.virtual_ipv4?.address)
+  const virtualIpv4Address = curNetworkInfo?.my_node_info?.virtual_ipv4?.address
+  const virtual_ip = virtualIpv4Address ? Utils.ipv4ToString(virtualIpv4Address) : ''
 
   if (config.dhcp && (!virtual_ip || !virtual_ip.length)) {
     console.log('DHCP enabled but no IP yet, will retry in', DHCP_POLLING_INTERVAL, 'ms')
@@ -401,7 +427,7 @@ export async function prepareVpnService(noTun: boolean) {
   // Only an explicit user run with granted ownership may reclaim VpnService after Android
   // assigned it to another VPN.
   const granted = await requestVpnPermission()
-  vpnRevokedBySystem = !granted
+  setVpnRevokedBySystem(!granted)
   if (!granted) {
     throw new Error('vpn_permission_denied')
   }
