@@ -14,6 +14,8 @@ use crate::{
     geodata::{lan_cidrs, load_geoip_categories},
 };
 
+const MAX_COMPILED_GEOIP_CIDRS: usize = 256 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMeshServer {
     pub endpoint: SocketAddr,
@@ -233,6 +235,7 @@ fn compile_leaf_rules(
         BTreeMap::new()
     };
     let mut compiled = Vec::with_capacity(document.rules.len());
+    let mut compiled_geoip_cidrs = 0usize;
     for (index, source) in document.rules.iter().enumerate() {
         let parts: Vec<&str> = source.split(',').map(str::trim).collect();
         let rule_type = parts[0].to_ascii_uppercase();
@@ -248,7 +251,10 @@ fn compile_leaf_rules(
             "DOMAIN-SUFFIX" => rule.domain_suffix = Some(vec![parts[1].to_owned()]),
             "DOMAIN-KEYWORD" => rule.domain_keyword = Some(vec![parts[1].to_owned()]),
             "GEOIP" => {
-                apply_geoip_rule(&mut rule, parts[1], &geoip_categories)?;
+                compiled_geoip_cidrs = reserve_geoip_cidrs(
+                    compiled_geoip_cidrs,
+                    apply_geoip_rule(&mut rule, parts[1], &geoip_categories)?,
+                )?;
             }
             "COUNTRY" => {
                 let rule_set = find_single_rule_set(document.rule_sets.values(), RuleSetKind::Mmdb)
@@ -291,7 +297,12 @@ fn compile_leaf_rules(
                         rule.external =
                             Some(vec![external_rule("mmdb", rule_set, code, base_dir)?]);
                     }
-                    "geoip" | "geoip-dat" => apply_geoip_rule(&mut rule, code, &geoip_categories)?,
+                    "geoip" | "geoip-dat" => {
+                        compiled_geoip_cidrs = reserve_geoip_cidrs(
+                            compiled_geoip_cidrs,
+                            apply_geoip_rule(&mut rule, code, &geoip_categories)?,
+                        )?;
+                    }
                     _ => {
                         return Err(LeafConfigError::MissingRuleSet {
                             index,
@@ -337,7 +348,7 @@ fn apply_geoip_rule(
     rule: &mut CompiledLeafRule,
     code: &str,
     geoip_categories: &BTreeMap<String, Vec<String>>,
-) -> Result<(), LeafConfigError> {
+) -> Result<usize, LeafConfigError> {
     if code.eq_ignore_ascii_case("lan") {
         rule.ip = Some(lan_cidrs());
     } else {
@@ -347,7 +358,17 @@ fn apply_geoip_rule(
                 LeafConfigError::GeoipData(format!("category {code} is missing"))
             })?);
     }
-    Ok(())
+    Ok(rule.ip.as_ref().map_or(0, Vec::len))
+}
+
+fn reserve_geoip_cidrs(current: usize, additional: usize) -> Result<usize, LeafConfigError> {
+    let total = current.saturating_add(additional);
+    if total > MAX_COMPILED_GEOIP_CIDRS {
+        return Err(LeafConfigError::GeoipData(format!(
+            "compiled rules exceed the {MAX_COMPILED_GEOIP_CIDRS} CIDR limit"
+        )));
+    }
+    Ok(total)
 }
 
 fn empty_leaf_rule(target: String) -> CompiledLeafRule {
@@ -547,6 +568,12 @@ rules:
                 .unwrap()
                 .contains(&serde_json::json!("10.0.0.0/8"))
         );
+    }
+
+    #[test]
+    fn bounds_repeated_geoip_rule_expansion() {
+        assert_eq!(reserve_geoip_cidrs(100, 200).unwrap(), 300);
+        assert!(reserve_geoip_cidrs(MAX_COMPILED_GEOIP_CIDRS, 1).is_err());
     }
 
     #[test]
