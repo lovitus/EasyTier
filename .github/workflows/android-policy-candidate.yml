@@ -50,6 +50,27 @@ jobs:
           shared-key: android-policy-candidate-aarch64
           cache-targets: false
 
+      - name: Restore stable candidate signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_POLICY_CANDIDATE_KEYSTORE_B64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_POLICY_CANDIDATE_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_POLICY_CANDIDATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_B64"
+          test -n "$STORE_PASSWORD"
+          test -n "$KEY_PASSWORD"
+          android_dir=easytier-gui/src-tauri/gen/android
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$android_dir/app/policy-candidate-keystore.jks"
+          chmod 600 "$android_dir/app/policy-candidate-keystore.jks"
+          cat > "$android_dir/keystore.properties" <<EOF
+          storePassword=$STORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=easytier-policy-candidate
+          storeFile=policy-candidate-keystore.jks
+          EOF
+          chmod 600 "$android_dir/keystore.properties"
+
       - name: Build debug APK
         env:
           ORG_GRADLE_PROJECT_easytierPolicyCandidate: 'true'
@@ -70,7 +91,7 @@ jobs:
           badging="$($ANDROID_HOME/build-tools/34.0.0/aapt dump badging "${apks[0]}")"
           grep -Fq "package: name='com.kkrainbow.easytier.policycandidate'" <<<"$badging"
           signer="$($ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs "${apks[0]}")"
-          grep -Fq 'Signer #1 certificate SHA-256 digest: 589080507c25cc5f136f489ada340bce870df8c97db73c0691ec2a1f2eb9fecc' <<<"$signer"
+          grep -Fq 'Signer #1 certificate SHA-256 digest: 14d2d885ce1bc361923a493210865f86390ffcd32eb2b555042bbd1a8b6c38e0' <<<"$signer"
           cp "${apks[0]}" artifacts/easytier-android-policy-candidate-aarch64.apk
           cat > artifacts/BUILD_INFO.txt <<EOF
           commit_sha=$GITHUB_SHA
@@ -79,9 +100,15 @@ jobs:
           target=aarch64-linux-android
           profile=debug
           application_id=com.kkrainbow.easytier.policycandidate
-          signing_cert_sha256=589080507c25cc5f136f489ada340bce870df8c97db73c0691ec2a1f2eb9fecc
+          signing_cert_sha256=14d2d885ce1bc361923a493210865f86390ffcd32eb2b555042bbd1a8b6c38e0
           EOF
           (cd artifacts && sha256sum easytier-android-policy-candidate-aarch64.apk BUILD_INFO.txt > SHA256SUMS.txt)
+
+      - name: Remove candidate signing material
+        if: always()
+        run: |
+          rm -f easytier-gui/src-tauri/gen/android/app/policy-candidate-keystore.jks
+          git checkout -- easytier-gui/src-tauri/gen/android/keystore.properties
 
       - name: Upload candidate
         uses: actions/upload-artifact@v5
