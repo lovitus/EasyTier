@@ -268,6 +268,15 @@ impl IPCollector {
         self.cached_ip_list.read().await.deref().clone()
     }
 
+    /// Collect interface addresses without the advertisement cache.
+    ///
+    /// Connector bind addresses must reflect DHCP and interface changes
+    /// immediately; using the one-minute peer-advertisement cache here can
+    /// repeatedly bind a removed address during reconnect.
+    pub async fn collect_local_ip_addrs_now(&self) -> GetIpListResponse {
+        Self::do_collect_local_ip_addrs(self.net_ns.clone()).await
+    }
+
     pub async fn collect_interfaces(net_ns: NetNS, filter: bool) -> Vec<NetworkInterface> {
         let _g = net_ns.guard();
         #[cfg(target_os = "windows")]

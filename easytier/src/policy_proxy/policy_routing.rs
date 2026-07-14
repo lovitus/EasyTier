@@ -115,6 +115,7 @@ impl PolicyRoutingGuard {
             .filter(|address| self.enable_ipv6 || address.is_ipv4())
             .collect::<Vec<_>>();
         if !addresses.iter().any(IpAddr::is_ipv4) {
+            self.has_v4_bypass = false;
             anyhow::bail!(
                 "policy outbound interface {} has no usable IPv4 address",
                 self.outbound_interface
@@ -123,6 +124,10 @@ impl PolicyRoutingGuard {
         let v4_routes = NetlinkIfConfiger::list_route_messages(AddressFamily::Inet)?;
         let v6_routes = NetlinkIfConfiger::list_route_messages(AddressFamily::Inet6)?;
         self.refresh_with(v4_routes, v6_routes, addresses)
+    }
+
+    pub(crate) fn has_usable_underlay(&self) -> bool {
+        self.has_v4_bypass
     }
 
     fn refresh_with(
