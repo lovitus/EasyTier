@@ -44,6 +44,35 @@ describe('statusDisplay', () => {
     expect(lossRate(info)).toBe('7%')
   })
 
+  it('shows cumulative route latency for relay peers without a direct connection', () => {
+    const info = {
+      route: {
+        cost: 3,
+        path_latency: 120,
+        path_latency_latency_first: 87,
+      },
+    } as any
+
+    expect(latencyMs(info)).toBe('87ms')
+  })
+
+  it('keeps direct connection latency ahead of route latency', () => {
+    const info = {
+      route: {
+        cost: 2,
+        path_latency_latency_first: 87,
+      },
+      peer: {
+        default_conn_id: 'default-conn',
+        conns: [
+          { conn_id: 'default-conn', stats: { latency_us: 42000 } },
+        ],
+      },
+    } as any
+
+    expect(latencyMs(info)).toBe('42ms')
+  })
+
   it('normalizes mixed camelCase running info at the API boundary', () => {
     const normalized = normalizeRunningInfo({
       devName: 'utun7',
@@ -69,6 +98,7 @@ describe('statusDisplay', () => {
           ipv4Addr: { address: { addr: '456' }, networkLength: '24' },
           nextHopPeerId: 8,
           cost: 1,
+          pathLatencyLatencyFirst: 23,
           proxyCidrs: [],
           hostname: 'peer',
           stunInfo: { udpNatType: 'PortRestricted', tcpNatType: 'Symmetric', lastUpdateTime: '6' },
@@ -130,6 +160,7 @@ describe('statusDisplay', () => {
     expect(normalized?.peer_route_pairs[0].route.stun_info?.tcp_nat_type).toBe(6)
     expect(normalized?.peer_route_pairs[0].route.feature_flag?.is_public_server).toBe(true)
     expect(normalized?.peer_route_pairs[0].route.feature_flag?.proxy_prepare_ack_version).toBe(1)
+    expect(normalized?.peer_route_pairs[0].route.path_latency_latency_first).toBe(23)
     expect(latencyMs(normalized?.peer_route_pairs[0] as any)).toBe('15ms')
     expect(normalized?.peer_route_pairs[0].peer?.conns[0].stats?.tx_bytes).toBe(1000)
     expect(normalized?.peer_route_pairs[0].peer?.conns[0].stats?.rx_bytes).toBe(2048)
