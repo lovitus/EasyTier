@@ -11,6 +11,7 @@ mod leaf_config;
 #[cfg(unix)]
 mod leaf_process;
 mod packet;
+mod preflight;
 mod supervisor;
 
 pub use config::{
@@ -27,6 +28,10 @@ pub use leaf_process::{LeafProcessFactory, LeafProcessRuntime};
 #[cfg(unix)]
 pub use packet::{LeafPacketBridge, LeafPacketEndpoint};
 pub use packet::{MeshRouteSnapshot, PacketClass, PacketClassifier, PacketError};
+pub use preflight::{
+    DiagnosticSeverity, PolicyDiagnostic, PolicyPreflight, PolicyPreflightReport,
+    preflight_policy_file, preflight_policy_source,
+};
 pub use supervisor::{
     ApplyResult, HealthEvent, PolicyRuntime, PolicyRuntimeFactory, PolicyStatus, PolicySupervisor,
     RetryDecision, RetryPolicy, RuntimeRestartBudget, RuntimeRestartDecision,

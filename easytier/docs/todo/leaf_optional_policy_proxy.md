@@ -256,6 +256,55 @@ EasyTier core exposes no Leaf types. OSPF, PeerManager, wire, Stealth, existing
 SOCKS, Proxy Failover, and ordinary VirtualNic packet processing remain
 unchanged.
 
+### Modular development and candidate selection
+
+Do not continue adding policy lifecycle branches directly to `VirtualNic`.
+Keep `VirtualNic` responsible only for creating the platform packet endpoint,
+classifying mesh-owned packets, and attaching/detaching one policy controller.
+Move the remaining orchestration behind these internal boundaries:
+
+1. `PolicyFrontend`: parse, normalize, preflight, statically simulate, and
+   manage immutable rule-data snapshots. It has no Leaf or EasyTier runtime
+   types and is shared by CLI, RPC, GUI, and mobile.
+2. `PolicyController`: own candidate construction, atomic publication,
+   platform/network-generation changes, bounded restart state, and shutdown.
+   Linux and Android use the same state machine rather than maintaining two
+   copies in `virtual_nic.rs`.
+3. `PolicyEngineFactory`: construct an engine from a validated revision,
+   packet endpoint, DNS snapshot, and resolved mesh actors. Leaf process and
+   in-process Leaf remain separate implementations of this interface.
+4. `PlatformPolicyAdapter`: own only platform routing, protected/native socket
+   behavior, rule-data storage, and network-change notifications. It cannot
+   inspect policy rules or Leaf configuration.
+5. `MeshActorResolver`: translate stable instance/IP selectors to the existing
+   EasyTier SOCKS/UoT data plane without exposing PeerManager to the policy
+   engine.
+
+Alternative implementations are allowed only at one of these seams. Do not
+maintain several complete policy stacks. The profiling build may compile a
+small `policy-experiments` feature with a non-persistent selector such as
+`ET_POLICY_EXPERIMENT_ENGINE=leaf-process|leaf-inprocess|replay`; release builds
+must omit this selector and contain only the accepted platform default. Packet
+bridge, writer scheduling, UDP relay, or DNS experiments use the same pattern:
+each candidate implements one shared trait and receives identical bounded
+packet traces and lifecycle events.
+
+Every candidate must pass the same conformance harness before traffic testing:
+
+- malformed policy and damaged rule data leave the previous revision active;
+- mesh packets and Magic DNS never enter the policy engine;
+- startup, cancellation, network-generation changes, late completion, and
+  restart-budget exhaustion have deterministic expected states;
+- TCP, UDP ASSOCIATE, KCP-backed UoT, credentials, fallback, and actor identity
+  produce the same externally visible results;
+- queues, tasks, sessions, FDs, and retry state return to their baseline;
+- packet replay records correctness, drops, allocations, CPU time, and
+  wakeups, then real-device profiling decides the winner.
+
+Candidate code that loses validation is removed or reverted rather than left
+as a permanent public option. This keeps experimentation parallel while the
+shipping configuration and long-term maintenance surface remain singular.
+
 ### Public configuration envelope
 
 All launch surfaces map to one configuration:
@@ -453,6 +502,143 @@ Editing UX:
 - peer picker shows hostname/current IP but stores stable `instance-id` plus the
   current `virtual-ip` guard when available;
 - advanced users edit the same YAML in a syntax-highlighted editor;
+
+#### GUI authoring and preflight delivery order
+
+The validated EasyTier policy YAML remains the only source of truth. The GUI
+must never expose or persist generated Leaf configuration. Deliver the editing
+surface in three small layers rather than cloning Mihomo's full configuration
+UI:
+
+1. **Core preflight first.** Saving and running both call the same
+   `easytier-policy` parser used at runtime. The result is structured by field,
+   actor/rule index, severity, and stable error code. It validates rule-set
+   files and digests, references, cycles, expanded chain limits, UDP actor
+   capability, and rule syntax. A failed preflight blocks Run but does not
+   destroy the last saved/running valid policy.
+2. **Visual actors and ordered rules.** Proxy rows provide a mesh peer picker
+   (display hostname/current address, persist `instance-id` and optional exact
+   virtual-IP guard), native address, credentials, and UDP capability. Group
+   rows edit only the supported `chain`/`fallback` type and ordered members.
+   Rules use an ordered table with drag/reorder and an advanced raw-rule cell.
+   Unsupported health knobs are shown as fixed runtime behavior, not invented
+   as fields that the current schema cannot consume.
+3. **Local rule-data manager.** Desktop/server can select a local file; mobile
+   imports into the application's private policy directory. Each entry shows
+   source label, resolved local path, kind, size, SHA-256, validation time, and
+   active/previous snapshot. MetaCubeX release URLs are optional one-shot
+   presets only. Download/import uses staging, bounded size, format/digest
+   validation, and atomic replacement; failure retains the previous snapshot.
+
+The editor also provides a side-effect-free policy simulator. Given a domain
+or IP, TCP/UDP, and optional destination port, it reports the matched rule,
+expanded actor chain, UDP eligibility, and final DIRECT/REJECT/proxy action.
+This is static policy evaluation, not a connectivity health check. A separate
+optional **Test selected exit** action may resolve the current mesh identity and
+perform bounded TCP/UDP probes, but network failure must not make an otherwise
+valid document unsavable.
+
+File and inline editing remain mutually exclusive. Switching from the visual
+editor to YAML serializes the same document deterministically; returning to the
+visual editor is allowed only after preflight succeeds, so unknown or malformed
+fields are never silently discarded. Secrets remain masked in the form and are
+excluded from diagnostics and generated previews.
+
+#### Quick policy presets
+
+The ordinary GUI flow must not start from an empty rule table. It offers small
+EasyTier-owned presets based on the familiar MetaCubeX GeoX layout, while
+generating only syntax supported by the validated policy schema and Leaf:
+
+- **China direct, overseas preferred:** private/local and mesh-owned traffic is
+  excluded first; `GEOSITE,CN` and `GEOIP,CN` use `DIRECT`;
+  `GEOSITE,geolocation-!cn` and the final rule use the selected overseas
+  fallback group.
+- **Selected services:** optional switches add well-known categories such as
+  GitHub, Google, Telegram, YouTube, Netflix, and Spotify before the broad
+  country rules. Every enabled category is checked against the imported
+  Geosite snapshot before the revision can be applied.
+- **Global policy:** private/local and mesh-owned traffic remains excluded,
+  while all remaining TCP and UDP traffic uses the selected groups.
+- **Direct except selected:** only checked categories use the policy group;
+  the final action is `DIRECT`.
+
+The wizard asks for the preferred and fallback actors separately for TCP and
+UDP. It marks TCP-only actors clearly and previews that a matching UDP session
+will continue to the next configured rule, exactly as Mihomo does. It can offer
+`DIRECT` or `REJECT` as an explicit UDP fallback and never changes a UDP
+decision into TCP-only forwarding. The generated order is only an editable
+preset: the persisted `rules` list is authoritative, and neither EasyTier nor
+Leaf assigns an implicit priority to `NETWORK`, Geosite, or GeoIP rules.
+
+The generated baseline is deterministic and inspectable. A typical country
+split uses one imported Geosite file and one imported country MMDB:
+
+```yaml
+rule-sets:
+  geosite:
+    type: geosite
+    path: rules/geosite.dat
+    update: manual
+    sha256: "<verified digest>"
+  geoip:
+    type: mmdb
+    path: rules/country-lite.mmdb
+    update: manual
+    sha256: "<verified digest>"
+
+rules:
+  - "EXTERNAL,site:cn,DIRECT"
+  - "GEOIP,CN,DIRECT"
+  - "NETWORK,udp,overseas-udp"
+  - "EXTERNAL,site:geolocation-!cn,overseas"
+  - "MATCH,overseas"
+```
+
+The two data sources are ordered alternatives, not an intersection. Leaf uses
+first-match semantics: the first matching rule selects the actor and evaluation
+stops. The persisted order is entirely user-defined: EasyTier does not force
+Geosite before GeoIP, GeoIP before Geosite, or `NETWORK,udp` into a fixed
+position. The example first lets Chinese domain and IP rules select `DIRECT`,
+then sends the remaining UDP traffic to `overseas-udp`; moving any rule changes
+the result exactly as the displayed order implies. MMDB GeoIP remains useful
+for literal-IP traffic, missing domain attribution, and address-based policy,
+but it is not consulted after an earlier rule has matched. Neither source
+replaces the protected mesh/private route snapshot, and a final rule remains
+mandatory so an unknown destination never receives an implicit action. The
+current Leaf compiler emits `GEOIP` as an MMDB external rule, so
+`country-lite.mmdb` is used here; `geoip-lite.dat` is not loaded in parallel
+unless a separately validated Leaf DAT reader is implemented. Loading two
+different country databases with overlapping semantics would create precedence
+ambiguity rather than additional safety.
+
+If every target is UDP-capable, the user may omit the explicit `NETWORK,udp`
+rule and let the same ordered domain/IP rules handle both transports. For a
+TCP-only target, the EasyTier-to-Leaf compiler adds `network=tcp` to that rule's
+existing condition in Leaf's JSON router representation. TCP still observes
+the original rule at the original index; UDP does not select that actor and
+continues to the next configured rule. An explicit `NETWORK,udp` rule targeting
+a TCP-only actor is therefore an ineffective branch and preflight reports it,
+but it does not reorder the document. `MATCH`/`FINAL` is compiled as a normal
+TCP/UDP network condition instead of Leaf CONF's special FINAL mechanism, so
+even unconditional rules retain their configured position. This reproduces
+Mihomo's ordered “matched actor lacks UDP support, continue scanning” behavior
+without modifying Leaf or inventing a system priority.
+
+Platform-owned mesh routes, the exact Magic DNS address, and configured proxy
+CIDRs remain in `PolicyTunMux`'s mesh snapshot and therefore precede this rule
+document without duplicating volatile routes into YAML. The preset additionally
+generates explicit local/LAN exclusions needed for destinations that are not
+owned by the mesh. The preview labels these rules as protected defaults; users
+may inspect them, but unsafe removal requires the advanced editor and a
+preflight warning.
+
+The resource page offers the official MetaCubeX release assets only as explicit
+one-shot import presets. It does not copy Mihomo's `geox-url` auto-download or
+subscription behavior. The selected release URL is resolved once, downloaded
+to staging, bounded by size, format-checked, hashed, and atomically promoted;
+the GUI then writes the local path and digest shown above. Runtime startup is
+offline and never follows a `latest` URL.
 - every edit has Validate, Diff, Apply, and Roll Back actions;
 - desktop watches the local file with a 500 ms debounce; GUI/mobile applies an
   explicit saved revision through RPC;
@@ -888,7 +1074,8 @@ configuration in the first version.
 
 - UDP support belongs to each standard proxy actor, not to an EasyTier peer.
 - SOCKS5 actors may support UDP ASSOCIATE; HTTP CONNECT actors are normally
-  TCP-only. Leaf validates the complete chain before assigning UDP traffic.
+  TCP-only. EasyTier derives the expanded actor capability before compiling
+  protocol-aware Leaf rules.
 - UDP policy traffic should remain datagram-native across UDP-capable actors.
   Do not silently carry voice UDP over a reliable stream.
 - A TCP-only chain remains available for TCP rules and is excluded from UDP
@@ -992,8 +1179,8 @@ groups:
 ```
 
 The final UDP group may use a preferred complete UDP-capable chain and a simple
-mesh SOCKS5 endpoint as last resort. Every expanded member of `final-udp` must
-support datagrams; a TCP-only chain is excluded at validation time.
+mesh SOCKS5 endpoint as last resort. A TCP-only chain is not selected for UDP;
+matching continues with the next configured rule or UDP-capable fallback.
 
 Leaf's current failover implementation periodically probes all members and
 sorts the schedule by measured RTT. Defaults include a 300-second check
@@ -1281,6 +1468,9 @@ rule-sets:
 The recommended interoperable defaults follow the MetaCubeX example data
 layout without copying its automatic-download behavior:
 
+Reference: <https://wiki.metacubex.one/example/conf/#__tabbed_1_1> and the
+versioned assets published by <https://github.com/MetaCubeX/meta-rules-dat>.
+
 - `geosite.dat` from the versioned `MetaCubeX/meta-rules-dat` release is the
   default Geosite import candidate;
 - `country-lite.mmdb` from the same release is the default country GeoIP MMDB
@@ -1342,9 +1532,9 @@ fallback group. It must cover:
   enabled and validated.
 - A final HTTP CONNECT actor is TCP-only unless that specific implementation
   explicitly provides a compatible datagram extension.
-- UDP traffic never silently enters a TCP-only chain. Each UDP rule/group must
-  define one of: a UDP-capable fallback group, native DIRECT, or explicit
-  REJECT.
+- UDP traffic never silently enters a TCP-only chain. It continues with the
+  next configured rule; policies should end their UDP path with a UDP-capable
+  group, native DIRECT, or explicit REJECT so the fallback is visible.
 - A recommended policy uses separate `web` and `voice` groups even when they
   share some endpoints.
 
@@ -1396,12 +1586,15 @@ First-version transport scope:
 - standard SOCKS5, HTTP CONNECT, and DIRECT actors are sufficient for the first
   spike;
 - TCP chains may combine compatible SOCKS5 and HTTP actors;
-- UDP rules may select only groups/chains whose complete actor sequence supports
-  datagrams. HTTP CONNECT normally makes a chain TCP-only;
-- Leaf's standard capability validation decides this from actor types. There is
-  no EasyTier peer UDP capability or new capability advertisement;
-- an incompatible UDP chain is rejected explicitly and never silently changes
-  to TCP encapsulation, DIRECT, or the existing EasyTier SOCKS portal.
+- UDP rules select only groups/chains whose complete actor sequence supports
+  datagrams. HTTP CONNECT normally makes a chain TCP-only, so UDP skips a rule
+  targeting it and keeps scanning in document order;
+- EasyTier derives this capability from actor types while compiling the ordered
+  JSON rules. There is no EasyTier peer UDP capability or new capability
+  advertisement;
+- an incompatible actor is never silently changed to TCP encapsulation or the
+  existing EasyTier SOCKS portal. The selected fallback is the next matching
+  compatible rule written by the user.
 
 Configuration application is transactional:
 
@@ -1433,8 +1626,8 @@ Do not merge production integration until all gates pass:
 5. Verify a real bidirectional voice/WebRTC-style UDP flow for at least one
    hour, including NAT keepalive and idle/resume behavior.
 6. Verify a mesh SOCKS5 endpoint, an external firewall HTTP/SOCKS endpoint, a
-   mixed two-hop TCP chain, and a fully UDP-capable SOCKS5 chain; reject UDP
-   through an HTTP-only actor.
+   mixed two-hop TCP chain, and a fully UDP-capable SOCKS5 chain; prove UDP
+   skips an HTTP-only actor and selects the next configured compatible rule.
 7. Create more than the session limit and prove memory, tasks, and file
    descriptors remain bounded without disrupting existing calls.
 8. Inject a TCP connection storm and UDP datagram amplification loop; verify

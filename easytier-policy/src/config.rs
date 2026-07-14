@@ -47,8 +47,6 @@ pub enum PolicyError {
     Cycle(String),
     #[error("chain {0} expands beyond the actor limit")]
     ChainTooDeep(String),
-    #[error("UDP rule targets TCP-only actor {0}")]
-    UdpUnsupported(String),
     #[error("proxy {name} has invalid server selector: {reason}")]
     InvalidServer { name: String, reason: String },
     #[error("rule {index} is invalid: {reason}")]
@@ -256,6 +254,16 @@ impl PolicyDocument {
             } else {
                 base_dir.join(&rule_set.path)
             };
+            if path
+                .to_string_lossy()
+                .chars()
+                .any(|character| matches!(character, ':' | ',' | '\r' | '\n' | '=' | '#' | ';'))
+            {
+                return Err(PolicyError::InvalidRuleSet {
+                    name: name.clone(),
+                    reason: "path contains a delimiter unsupported by Leaf".to_owned(),
+                });
+            }
             let metadata = fs::metadata(&path).map_err(|error| PolicyError::InvalidRuleSet {
                 name: name.clone(),
                 reason: format!("{}: {error}", path.display()),
@@ -550,6 +558,45 @@ impl PolicyDocument {
                     reason: format!("{rule_type} requires {expected_parts} fields"),
                 });
             }
+            let network = if rule_type == "NETWORK" {
+                let network = parts[1].to_ascii_lowercase();
+                if !matches!(network.as_str(), "tcp" | "udp") {
+                    return Err(PolicyError::InvalidRule {
+                        index,
+                        reason: "NETWORK requires tcp or udp".to_owned(),
+                    });
+                }
+                Some(network)
+            } else {
+                None
+            };
+            match rule_type.as_str() {
+                "GEOIP" => self.require_single_rule_set(index, RuleSetKind::Mmdb, "mmdb")?,
+                "EXTERNAL" => {
+                    let (kind, code) = parts[1].split_once(':').unwrap_or(("site", parts[1]));
+                    if code.is_empty() {
+                        return Err(PolicyError::InvalidRule {
+                            index,
+                            reason: "EXTERNAL category cannot be empty".to_owned(),
+                        });
+                    }
+                    match kind.to_ascii_lowercase().as_str() {
+                        "site" | "geosite" => {
+                            self.require_single_rule_set(index, RuleSetKind::Geosite, "geosite")?
+                        }
+                        "mmdb" | "geoip" => {
+                            self.require_single_rule_set(index, RuleSetKind::Mmdb, "mmdb")?
+                        }
+                        _ => {
+                            return Err(PolicyError::InvalidRule {
+                                index,
+                                reason: format!("unsupported EXTERNAL data kind {kind}"),
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
             let target = parts.last().copied().unwrap_or_default();
             if !self.actor_exists(target) {
                 return Err(PolicyError::UnknownReference {
@@ -557,15 +604,29 @@ impl PolicyDocument {
                     reference: target.to_owned(),
                 });
             }
-            let is_udp = rule_type == "NETWORK"
-                && parts
-                    .get(1)
-                    .is_some_and(|value| value.eq_ignore_ascii_case("udp"));
-            if is_udp && !self.actor_supports_udp(target, &mut BTreeSet::new())? {
-                return Err(PolicyError::UdpUnsupported(target.to_owned()));
-            }
         }
         Ok(())
+    }
+
+    fn require_single_rule_set(
+        &self,
+        index: usize,
+        kind: RuleSetKind,
+        label: &str,
+    ) -> Result<(), PolicyError> {
+        if self
+            .rule_sets
+            .values()
+            .filter(|rule_set| rule_set.kind == kind)
+            .count()
+            == 1
+        {
+            return Ok(());
+        }
+        Err(PolicyError::InvalidRule {
+            index,
+            reason: format!("rule requires exactly one {label} rule-set"),
+        })
     }
 
     fn actor_exists(&self, name: &str) -> bool {
@@ -574,7 +635,7 @@ impl PolicyDocument {
             || self.groups.contains_key(name)
     }
 
-    fn actor_supports_udp(
+    pub(crate) fn actor_supports_udp(
         &self,
         actor: &str,
         visited: &mut BTreeSet<String>,
@@ -679,7 +740,7 @@ rules: ["MATCH,a"]
     }
 
     #[test]
-    fn rejects_tcp_only_udp_target() {
+    fn accepts_tcp_only_udp_target_for_ordered_runtime_fallthrough() {
         let source = r#"
 version: 1
 proxies:
@@ -690,9 +751,92 @@ proxies:
     udp: false
 rules: ["NETWORK,udp,tcp-only"]
 "#;
+        PolicyRevision::parse(source, Path::new(".")).unwrap();
+    }
+
+    #[test]
+    fn accepts_tcp_only_domain_rule_before_udp_fallback() {
+        let source = r#"
+version: 1
+proxies:
+  tcp-only:
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    udp: false
+rules:
+  - DOMAIN-SUFFIX,example.com,tcp-only
+  - NETWORK,udp,REJECT
+  - MATCH,tcp-only
+"#;
+        PolicyRevision::parse(source, Path::new(".")).unwrap();
+    }
+
+    #[test]
+    fn allows_tcp_only_rules_after_an_unconditional_udp_rule() {
+        let source = r#"
+version: 1
+proxies:
+  tcp-only:
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    udp: false
+rules:
+  - NETWORK,udp,REJECT
+  - DOMAIN-SUFFIX,example.com,tcp-only
+  - MATCH,tcp-only
+"#;
+        PolicyRevision::parse(source, Path::new(".")).unwrap();
+    }
+
+    #[test]
+    fn rejects_unknown_network_protocol() {
+        let source = "version: 1\nrules: [\"NETWORK,quic,DIRECT\", \"MATCH,DIRECT\"]\n";
         assert!(matches!(
             PolicyRevision::parse(source, Path::new(".")),
-            Err(PolicyError::UdpUnsupported(_))
+            Err(PolicyError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_ambiguous_external_rule_data() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("first.mmdb"), b"first").unwrap();
+        std::fs::write(directory.path().join("second.mmdb"), b"second").unwrap();
+        let source = r#"
+version: 1
+rule-sets:
+  first: { type: mmdb, path: first.mmdb }
+  second: { type: mmdb, path: second.mmdb }
+rules: ["GEOIP,CN,DIRECT"]
+"#;
+        assert!(matches!(
+            PolicyRevision::parse(source, directory.path()),
+            Err(PolicyError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_leaf_delimiters_in_rule_set_paths_during_preflight() {
+        let source = r#"
+version: 1
+rule-sets:
+  site: { type: geosite, path: "bad:name.dat" }
+rules: ["EXTERNAL,site:cn,DIRECT"]
+"#;
+        assert!(matches!(
+            PolicyRevision::parse(source, Path::new(".")),
+            Err(PolicyError::InvalidRuleSet { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_external_data_kind() {
+        let source = "version: 1\nrules: [\"EXTERNAL,unknown:cn,DIRECT\"]\n";
+        assert!(matches!(
+            PolicyRevision::parse(source, Path::new(".")),
+            Err(PolicyError::InvalidRule { .. })
         ));
     }
 
@@ -707,7 +851,9 @@ proxies:
     port: 1080
     username: alice
     password: secret
-rules: ["FINAL,authenticated"]
+rules:
+  - NETWORK,udp,REJECT
+  - FINAL,authenticated
 "#;
         let revision = PolicyRevision::parse(valid, Path::new(".")).unwrap();
         assert_eq!(

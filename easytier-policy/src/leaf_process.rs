@@ -66,7 +66,7 @@ impl LeafProcessRuntime {
         let config = compile_leaf_config(&revision, LEAF_TUN_FD, base_dir, resolver, &dns_servers)
             .map_err(|error| error.to_string())?;
         let config_path = std::env::temp_dir().join(format!(
-            "easytier-leaf-{}-{}-{}.conf",
+            "easytier-leaf-{}-{}-{}.json",
             std::process::id(),
             revision.id,
             CONFIG_SEQUENCE.fetch_add(1, Ordering::Relaxed)

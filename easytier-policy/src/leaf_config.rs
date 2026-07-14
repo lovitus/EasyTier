@@ -1,15 +1,14 @@
 use std::{
-    fmt::Write as _,
+    collections::BTreeSet,
     net::{IpAddr, SocketAddr},
     path::Path,
 };
 
+use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{
-    ChainKind, PolicyRevision, ProxyKind, ProxyServer, ProxyVia, RuleSetKind, config::RuleSet,
-};
+use crate::{ChainKind, PolicyRevision, ProxyKind, ProxyServer, RuleSetKind, config::RuleSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMeshServer {
@@ -57,6 +56,10 @@ pub enum LeafConfigError {
     InvalidBridgeCredentials(String),
     #[error("no safe system DNS server is available")]
     NoDnsServers,
+    #[error("failed to serialize Leaf JSON config: {0}")]
+    Serialize(String),
+    #[error("failed to determine actor capability for rule {index}: {reason}")]
+    ActorCapability { index: usize, reason: String },
 }
 
 pub fn compile_leaf_config(
@@ -70,26 +73,10 @@ pub fn compile_leaf_config(
         return Err(LeafConfigError::NoDnsServers);
     }
     let document = &revision.document;
-    let mut output = String::new();
-    writeln!(output, "[General]").unwrap();
-    writeln!(output, "tun-fd = {tun_fd}").unwrap();
-    writeln!(output, "tun2socks-backend = smoltcp").unwrap();
-    writeln!(output, "always-fake-ip = *").unwrap();
-    writeln!(
-        output,
-        "dns-server = {}",
-        dns_servers
-            .iter()
-            .map(|server| format!("direct:{server}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-    .unwrap();
-    writeln!(output, "loglevel = warn\n").unwrap();
-
-    writeln!(output, "[Proxy]").unwrap();
-    writeln!(output, "DIRECT = direct").unwrap();
-    writeln!(output, "REJECT = drop").unwrap();
+    let mut outbounds = vec![
+        serde_json::json!({ "tag": "DIRECT", "protocol": "direct" }),
+        serde_json::json!({ "tag": "REJECT", "protocol": "drop" }),
+    ];
     for (name, proxy) in &document.proxies {
         let (address, port, credentials) = match &proxy.server {
             ProxyServer::Address(address) => (
@@ -118,82 +105,182 @@ pub fn compile_leaf_config(
                 )
             }
         };
-        let protocol = match proxy.kind {
-            ProxyKind::Socks5 => "socks",
-            ProxyKind::Http => "http",
-        };
-        write!(output, "{name} = {protocol}, {address}, {port}").unwrap();
+        let mut settings = serde_json::Map::new();
+        settings.insert("address".to_owned(), address.into());
+        settings.insert("port".to_owned(), port.into());
         if let Some((username, password)) = credentials {
-            write!(output, ", username={username}, password={password}").unwrap();
+            settings.insert("username".to_owned(), username.into());
+            settings.insert("password".to_owned(), password.into());
         }
-        writeln!(output).unwrap();
-        if proxy.via == ProxyVia::Mesh {
-            writeln!(
-                output,
-                "# easytier-via-mesh = {name}; resolved endpoint is consumed by the mesh dial adapter"
-            )
-            .unwrap();
+        match proxy.kind {
+            ProxyKind::Socks5 => outbounds.push(serde_json::json!({
+                "tag": name,
+                "protocol": "socks",
+                "settings": settings,
+            })),
+            ProxyKind::Http => unreachable!("policy validation rejects HTTP outbound in v1"),
         }
     }
-    writeln!(output).unwrap();
-
-    if !document.groups.is_empty() {
-        writeln!(output, "[Proxy Group]").unwrap();
-        for name in revision.group_order.iter() {
-            let group = &document.groups[name];
-            let protocol = match group.kind {
-                ChainKind::Chain => "chain",
-                ChainKind::Fallback => "fallback",
-            };
-            write!(output, "{name} = {protocol}, {}", group.members.join(", ")).unwrap();
-            if group.kind == ChainKind::Fallback {
-                // Leaf otherwise starts active probes against hard-coded public targets after the
-                // group is used. v1 intentionally uses passive per-connection fallback only.
-                write!(output, ", health-check=false").unwrap();
-            }
-            writeln!(output).unwrap();
-        }
-        writeln!(output).unwrap();
+    for name in revision.group_order.iter() {
+        let group = &document.groups[name];
+        let (protocol, settings) = match group.kind {
+            ChainKind::Chain => ("chain", serde_json::json!({ "actors": group.members })),
+            ChainKind::Fallback => (
+                "failover",
+                // Disable Leaf's active probes against hard-coded public targets. v1 intentionally
+                // uses passive per-connection failover only.
+                serde_json::json!({
+                    "actors": group.members,
+                    "healthCheck": false,
+                    "failover": true,
+                }),
+            ),
+        };
+        outbounds.push(serde_json::json!({
+            "tag": name,
+            "protocol": protocol,
+            "settings": settings,
+        }));
     }
 
-    writeln!(output, "[Rule]").unwrap();
-    for (index, rule) in document.rules.iter().enumerate() {
-        let mut parts: Vec<String> = rule.split(',').map(|part| part.trim().to_owned()).collect();
-        if parts[0].eq_ignore_ascii_case("MATCH") {
-            parts[0] = "FINAL".to_owned();
-        }
-        if parts[0].eq_ignore_ascii_case("GEOIP") {
-            let rule_set = find_single_rule_set(document.rule_sets.values(), RuleSetKind::Mmdb)
-                .ok_or(LeafConfigError::MissingRuleSet {
-                    index,
-                    kind: "mmdb",
-                })?;
-            parts[0] = "EXTERNAL".to_owned();
-            parts[1] = external_rule("mmdb", rule_set, &parts[1], base_dir)?;
-        } else if parts[0].eq_ignore_ascii_case("EXTERNAL") {
-            let (kind, code) = parts[1].split_once(':').unwrap_or(("site", &parts[1]));
-            let (rule_set_kind, leaf_kind) = match kind.to_ascii_lowercase().as_str() {
-                "site" | "geosite" => (RuleSetKind::Geosite, "site"),
-                "mmdb" | "geoip" => (RuleSetKind::Mmdb, "mmdb"),
-                _ => {
-                    return Err(LeafConfigError::MissingRuleSet {
+    let config = serde_json::json!({
+        "log": { "level": "warn" },
+        "dns": {
+            "servers": dns_servers
+                .iter()
+                .map(|server| format!("direct:{server}"))
+                .collect::<Vec<_>>(),
+        },
+        "inbounds": [{
+            "tag": "tun",
+            "protocol": "tun",
+            "settings": {
+                "fd": tun_fd,
+                "fakeDnsInclude": ["*"],
+                "tun2socks": "smoltcp",
+            },
+        }],
+        "outbounds": outbounds,
+        "router": {
+            "domainResolve": false,
+            "rules": compile_leaf_rules(revision, base_dir)?,
+        },
+    });
+    serde_json::to_string_pretty(&config)
+        .map_err(|error| LeafConfigError::Serialize(error.to_string()))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompiledLeafRule {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ip: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain_keyword: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain_suffix: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    external: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port_range: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inbound_tag: Option<Vec<String>>,
+    target: String,
+}
+
+fn compile_leaf_rules(
+    revision: &PolicyRevision,
+    base_dir: &Path,
+) -> Result<Vec<CompiledLeafRule>, LeafConfigError> {
+    let document = &revision.document;
+    let mut compiled = Vec::with_capacity(document.rules.len());
+    for (index, source) in document.rules.iter().enumerate() {
+        let parts: Vec<&str> = source.split(',').map(str::trim).collect();
+        let rule_type = parts[0].to_ascii_uppercase();
+        let target = parts.last().copied().unwrap_or_default().to_owned();
+        let mut rule = empty_leaf_rule(target.clone());
+
+        match rule_type.as_str() {
+            "IP-CIDR" => rule.ip = Some(vec![parts[1].to_owned()]),
+            "DOMAIN" => rule.domain = Some(vec![parts[1].to_owned()]),
+            "DOMAIN-SUFFIX" => rule.domain_suffix = Some(vec![parts[1].to_owned()]),
+            "DOMAIN-KEYWORD" => rule.domain_keyword = Some(vec![parts[1].to_owned()]),
+            "GEOIP" => {
+                let rule_set = find_single_rule_set(document.rule_sets.values(), RuleSetKind::Mmdb)
+                    .ok_or(LeafConfigError::MissingRuleSet {
                         index,
-                        kind: "recognized external",
-                    });
-                }
-            };
-            let rule_set = find_single_rule_set(document.rule_sets.values(), rule_set_kind).ok_or(
-                LeafConfigError::MissingRuleSet {
-                    index,
-                    kind: leaf_kind,
-                },
-            )?;
-            parts[1] = external_rule(leaf_kind, rule_set, code, base_dir)?;
+                        kind: "mmdb",
+                    })?;
+                rule.external = Some(vec![external_rule("mmdb", rule_set, parts[1], base_dir)?]);
+            }
+            "EXTERNAL" => {
+                let (kind, code) = parts[1].split_once(':').unwrap_or(("site", parts[1]));
+                let (rule_set_kind, leaf_kind) = match kind.to_ascii_lowercase().as_str() {
+                    "site" | "geosite" => (RuleSetKind::Geosite, "site"),
+                    "mmdb" | "geoip" => (RuleSetKind::Mmdb, "mmdb"),
+                    _ => {
+                        return Err(LeafConfigError::MissingRuleSet {
+                            index,
+                            kind: "recognized external",
+                        });
+                    }
+                };
+                let rule_set = find_single_rule_set(document.rule_sets.values(), rule_set_kind)
+                    .ok_or(LeafConfigError::MissingRuleSet {
+                        index,
+                        kind: leaf_kind,
+                    })?;
+                rule.external = Some(vec![external_rule(leaf_kind, rule_set, code, base_dir)?]);
+            }
+            "PORT-RANGE" => rule.port_range = Some(vec![parts[1].to_owned()]),
+            "NETWORK" => rule.network = Some(vec![parts[1].to_ascii_lowercase()]),
+            "INBOUND-TAG" => rule.inbound_tag = Some(vec![parts[1].to_owned()]),
+            // A network matcher over both supported session kinds is Leaf's non-special-cased,
+            // order-preserving representation of an unconditional MATCH/FINAL rule.
+            "MATCH" | "FINAL" => {
+                rule.network = Some(vec!["tcp".to_owned(), "udp".to_owned()]);
+            }
+            _ => unreachable!("policy validation rejects unsupported rule types"),
         }
-        writeln!(output, "{}", parts.join(", ")).unwrap();
-    }
 
-    Ok(output)
+        let supports_udp = document
+            .actor_supports_udp(&target, &mut BTreeSet::new())
+            .map_err(|error| LeafConfigError::ActorCapability {
+                index,
+                reason: error.to_string(),
+            })?;
+        if !supports_udp {
+            match rule.network.as_mut() {
+                Some(networks) if networks.iter().all(|network| network == "udp") => {
+                    // Mihomo would match this rule, skip the unsupported actor, and continue. An
+                    // impossible Leaf rule has the same result, so omit it from the runtime list.
+                    continue;
+                }
+                Some(networks) => networks.retain(|network| network == "tcp"),
+                None => rule.network = Some(vec!["tcp".to_owned()]),
+            }
+        }
+        compiled.push(rule);
+    }
+    Ok(compiled)
+}
+
+fn empty_leaf_rule(target: String) -> CompiledLeafRule {
+    CompiledLeafRule {
+        ip: None,
+        domain: None,
+        domain_keyword: None,
+        domain_suffix: None,
+        external: None,
+        port_range: None,
+        network: None,
+        inbound_tag: None,
+        target,
+    }
 }
 
 fn valid_bridge_credential(value: &str) -> bool {
@@ -310,23 +397,30 @@ rules:
             &["1.1.1.1".parse().unwrap()],
         )
         .unwrap();
-        assert!(config.contains("tun-fd = 7"));
-        assert!(config.contains("always-fake-ip = *"));
-        assert!(config.contains("dns-server = direct:1.1.1.1"));
-        assert!(
-            config.contains("native = socks, 127.0.0.1, 1080, username=alice, password=secret")
+        #[cfg(feature = "leaf-runtime")]
+        leaf::config::from_string(&config).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(config["inbounds"][0]["protocol"], "tun");
+        assert_eq!(config["inbounds"][0]["settings"]["fd"], 7);
+        assert_eq!(config["dns"]["servers"][0], "direct:1.1.1.1");
+        assert_eq!(config["outbounds"][2]["tag"], "native");
+        assert_eq!(config["outbounds"][2]["protocol"], "socks");
+        assert_eq!(config["outbounds"][3]["tag"], "final");
+        assert_eq!(config["outbounds"][3]["protocol"], "failover");
+        let rules = config["router"]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0]["target"], "DIRECT");
+        assert_eq!(
+            rules[0]["external"][0],
+            format!("site:{}/site.dat:cn", dir.path().display())
         );
-        assert!(config.contains("final = fallback, native, DIRECT, health-check=false"));
-        assert!(config.contains(&format!(
-            "EXTERNAL, site:{}/site.dat:cn, DIRECT",
-            dir.path().display()
-        )));
-        assert!(config.contains(&format!(
-            "EXTERNAL, mmdb:{}/geo.mmdb:US, final",
-            dir.path().display()
-        )));
-        assert!(config.contains("FINAL, final"));
-        assert!(!config.contains("MATCH"));
+        assert_eq!(rules[1]["target"], "final");
+        assert_eq!(
+            rules[1]["external"][0],
+            format!("mmdb:{}/geo.mmdb:US", dir.path().display())
+        );
+        assert_eq!(rules[2]["target"], "final");
+        assert_eq!(rules[2]["network"], serde_json::json!(["tcp", "udp"]));
     }
 
     #[test]
@@ -377,9 +471,92 @@ rules: ["FINAL,mesh"]
             &["1.1.1.1".parse().unwrap()],
         )
         .unwrap();
-        assert!(
-            config.contains("mesh = socks, 127.0.0.1, 32100, username=easytier, password=secret")
-        );
-        assert!(!config.contains("10.44.0.8"));
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        let mesh = config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|outbound| outbound["tag"] == "mesh")
+            .unwrap();
+        assert_eq!(mesh["protocol"], "socks");
+        assert_eq!(mesh["settings"]["address"], "127.0.0.1");
+        assert_eq!(mesh["settings"]["port"], 32100);
+        assert_eq!(mesh["settings"]["username"], "easytier");
+        assert_eq!(mesh["settings"]["password"], "secret");
+        assert!(!config.to_string().contains("10.44.0.8"));
+    }
+
+    #[test]
+    fn preserves_rule_order_and_skips_tcp_only_actors_for_udp() {
+        let source = r#"
+version: 1
+proxies:
+  tcp-only:
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    udp: false
+  udp-exit:
+    type: socks5
+    server: 127.0.0.1
+    port: 1081
+    udp: true
+rules:
+  - DOMAIN-SUFFIX,example.com,tcp-only
+  - NETWORK,udp,udp-exit
+  - DOMAIN-KEYWORD,internal,DIRECT
+  - MATCH,tcp-only
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        let config = compile_leaf_config(
+            &revision,
+            7,
+            Path::new("."),
+            &Unresolved,
+            &["1.1.1.1".parse().unwrap()],
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        let rules = config["router"]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 4);
+        assert_eq!(rules[0]["domainSuffix"][0], "example.com");
+        assert_eq!(rules[0]["target"], "tcp-only");
+        assert_eq!(rules[0]["network"], serde_json::json!(["tcp"]));
+        assert_eq!(rules[1]["network"], serde_json::json!(["udp"]));
+        assert_eq!(rules[1]["target"], "udp-exit");
+        assert_eq!(rules[2]["domainKeyword"][0], "internal");
+        assert_eq!(rules[2]["target"], "DIRECT");
+        assert_eq!(rules[3]["target"], "tcp-only");
+        assert_eq!(rules[3]["network"], serde_json::json!(["tcp"]));
+    }
+
+    #[test]
+    fn omits_impossible_udp_rule_and_keeps_the_next_rule() {
+        let source = r#"
+version: 1
+proxies:
+  tcp-only:
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    udp: false
+rules:
+  - NETWORK,udp,tcp-only
+  - MATCH,DIRECT
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        let config = compile_leaf_config(
+            &revision,
+            7,
+            Path::new("."),
+            &Unresolved,
+            &["1.1.1.1".parse().unwrap()],
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        let rules = config["router"]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0]["target"], "DIRECT");
+        assert_eq!(rules[0]["network"], serde_json::json!(["tcp", "udp"]));
     }
 }
