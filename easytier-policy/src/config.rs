@@ -18,6 +18,8 @@ const MAX_RULES: usize = 16_384;
 const MAX_ACTORS: usize = 1_024;
 const MAX_EXPANDED_CHAIN_ACTORS: usize = 32;
 const MAX_GROUP_REFERENCES: usize = 64;
+const MAX_DNS_SERVERS_PER_SET: usize = 8;
+const DEFAULT_PROXY_DNS: &str = "doh:cloudflare-dns.com@1.1.1.1";
 
 #[derive(Debug, Error)]
 pub enum PolicyError {
@@ -53,6 +55,12 @@ pub enum PolicyError {
     InvalidRule { index: usize, reason: String },
     #[error("rule-set {name} is invalid: {reason}")]
     InvalidRuleSet { name: String, reason: String },
+    #[error("DNS {set} resolver {server} is invalid: {reason}")]
+    InvalidDns {
+        set: &'static str,
+        server: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -161,8 +169,35 @@ pub struct Group {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PolicyDns {
+    /// Empty means use the safe platform resolvers supplied by EasyTier.
+    #[serde(default)]
+    pub direct: Vec<String>,
+    /// Proxy DNS is intentionally bootstrap-pinned DoH so TCP-only actors work
+    /// and the resolver hostname never needs an unclassified DNS query.
+    #[serde(default = "default_proxy_dns")]
+    pub proxy: Vec<String>,
+}
+
+impl Default for PolicyDns {
+    fn default() -> Self {
+        Self {
+            direct: Vec::new(),
+            proxy: default_proxy_dns(),
+        }
+    }
+}
+
+fn default_proxy_dns() -> Vec<String> {
+    vec![DEFAULT_PROXY_DNS.to_owned()]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyDocument {
     pub version: u32,
+    #[serde(default)]
+    pub dns: PolicyDns,
     #[serde(default, rename = "rule-sets")]
     pub rule_sets: BTreeMap<String, RuleSet>,
     #[serde(default)]
@@ -376,12 +411,39 @@ impl PolicyDocument {
             });
         }
 
+        self.validate_dns()?;
         self.validate_rule_sets(base_dir)?;
         self.validate_names()?;
         self.validate_proxies()?;
         let order = self.topological_group_order()?;
         self.validate_rules()?;
         Ok(order)
+    }
+
+    fn validate_dns(&self) -> Result<(), PolicyError> {
+        for (set, servers) in [("direct", &self.dns.direct), ("proxy", &self.dns.proxy)] {
+            if servers.len() > MAX_DNS_SERVERS_PER_SET {
+                return Err(PolicyError::Limit {
+                    kind: if set == "direct" {
+                        "direct DNS resolver"
+                    } else {
+                        "proxy DNS resolver"
+                    },
+                    limit: MAX_DNS_SERVERS_PER_SET,
+                });
+            }
+            if set == "proxy" && servers.is_empty() {
+                return Err(PolicyError::InvalidDns {
+                    set,
+                    server: "<empty>".to_owned(),
+                    reason: "at least one bootstrap-pinned DoH resolver is required".to_owned(),
+                });
+            }
+            for server in servers {
+                validate_dns_server(set, server)?;
+            }
+        }
+        Ok(())
     }
 
     fn validate_rule_sets(&self, base_dir: &Path) -> Result<(), PolicyError> {
@@ -861,6 +923,68 @@ impl PolicyDocument {
     }
 }
 
+fn validate_dns_server(set: &'static str, server: &str) -> Result<(), PolicyError> {
+    let invalid = |reason: &str| PolicyError::InvalidDns {
+        set,
+        server: server.to_owned(),
+        reason: reason.to_owned(),
+    };
+    if server.is_empty() || server.trim() != server || server.chars().any(char::is_control) {
+        return Err(invalid("resolver must be a non-empty trimmed string"));
+    }
+    if server.len() > 320 || server.to_ascii_lowercase().starts_with("direct:") {
+        return Err(invalid(
+            "use an IP, system, or doh:<domain>@<bootstrap-ip>; EasyTier assigns the resolver set",
+        ));
+    }
+    if server.eq_ignore_ascii_case("system") {
+        return if set == "direct" {
+            Ok(())
+        } else {
+            Err(invalid("system resolver is not permitted in the proxy set"))
+        };
+    }
+    if server.parse::<IpAddr>().is_ok() {
+        return if set == "direct" {
+            Ok(())
+        } else {
+            Err(invalid(
+                "proxy resolvers must use bootstrap-pinned DoH so TCP-only actors remain usable",
+            ))
+        };
+    }
+    let Some(doh) = server.strip_prefix("doh:") else {
+        return Err(invalid("unsupported resolver syntax"));
+    };
+    let Some((domain, bootstrap)) = doh.split_once('@') else {
+        return Err(invalid("DoH resolver requires an explicit bootstrap IP"));
+    };
+    if domain.is_empty() || bootstrap.is_empty() || doh.matches('@').count() != 1 {
+        return Err(invalid("DoH resolver must be doh:<domain>@<bootstrap-ip>"));
+    }
+    if bootstrap.parse::<IpAddr>().is_err() {
+        return Err(invalid("DoH bootstrap address must be an IP literal"));
+    }
+    if !valid_ascii_dns_name(domain) {
+        return Err(invalid("DoH domain is not a valid ASCII DNS name"));
+    }
+    Ok(())
+}
+
+fn valid_ascii_dns_name(domain: &str) -> bool {
+    domain.len() <= 253
+        && !domain.ends_with('.')
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
 fn valid_proxy_credential(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -912,6 +1036,39 @@ rules:
             first.group_order.as_ref(),
             ["chain", "final-tcp", "final-udp"]
         );
+        assert!(first.document.dns.direct.is_empty());
+        assert_eq!(first.document.dns.proxy, [DEFAULT_PROXY_DNS]);
+    }
+
+    #[test]
+    fn validates_isolated_direct_and_proxy_dns_sets() {
+        let source = r#"
+version: 1
+dns:
+  direct: [system, 223.5.5.5, "doh:dns.alidns.com@223.5.5.5"]
+  proxy: ["doh:cloudflare-dns.com@1.1.1.1"]
+rules: ["MATCH,DIRECT"]
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        assert_eq!(revision.document.dns.direct.len(), 3);
+        assert_eq!(revision.document.dns.proxy.len(), 1);
+    }
+
+    #[test]
+    fn rejects_proxy_dns_that_can_bypass_or_recurse() {
+        for proxy in [
+            "[]",
+            "[system]",
+            "[1.1.1.1]",
+            "[\"doh:cloudflare-dns.com\"]",
+            "[\"doh:cloudflare-dns.com@resolver.example\"]",
+        ] {
+            let source = format!("version: 1\ndns:\n  proxy: {proxy}\nrules: [\"MATCH,DIRECT\"]\n");
+            assert!(matches!(
+                PolicyRevision::parse(source, Path::new(".")),
+                Err(PolicyError::InvalidDns { set: "proxy", .. })
+            ));
+        }
     }
 
     #[test]

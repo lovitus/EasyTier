@@ -101,6 +101,25 @@ describe('PolicyEditor', () => {
     expect(model.policy_config_inline).toContain('MATCH,DIRECT')
     expect(wrapper.find('[data-header="policy.editor.nodes"]').exists()).toBe(true)
     expect(wrapper.find('[data-header="policy.editor.rules"]').exists()).toBe(true)
+    expect(wrapper.find('[data-header="policy.editor.dns"]').exists()).toBe(true)
+    expect(model.policy_config_inline).toContain('doh:cloudflare-dns.com@1.1.1.1')
+  })
+
+  it('edits direct and proxy DNS sets without losing ordered policy rules', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
+    const { model, wrapper } = mountEditor(config)
+
+    await wrapper.find<HTMLTextAreaElement>('#policy_dns_direct').setValue('223.5.5.5\ndoh:dns.alidns.com@223.5.5.5')
+    await wrapper.find<HTMLTextAreaElement>('#policy_dns_proxy').setValue('doh:dns.google@8.8.8.8')
+    await nextTick()
+
+    expect(model.policy_config_inline).toContain('direct:')
+    expect(model.policy_config_inline).toContain('223.5.5.5')
+    expect(model.policy_config_inline).toContain('doh:dns.alidns.com@223.5.5.5')
+    expect(model.policy_config_inline).toContain('doh:dns.google@8.8.8.8')
+    expect(model.policy_config_inline).toContain('MATCH,DIRECT')
   })
 
   it('does not overwrite invalid advanced YAML with the last visual document', async () => {

@@ -214,6 +214,13 @@ policy:
     nodes: 代理节点
     groups: 代理链与回退组
     rules: 顺序规则
+    dns: DNS 隔离
+    dns_direct: 直连域名解析器
+    dns_direct_placeholder: 留空则使用平台提供的安全 DNS
+    dns_direct_help: 每行一个；支持 system、IP 地址或 doh:域名@引导IP。仅当第一条命中的流量规则选择 DIRECT 时使用。
+    dns_proxy: 代理域名解析器
+    dns_proxy_help: 每行一个带固定引导 IP 的 DoH；查询跟随所选代理组，兼容仅 TCP 的代理链，失败时绝不回落到直连 DNS。
+    dns_isolation_help: DNS 与应用流量使用相同的有序域名规则选择解析器集合。某一集合失败时直接失败，不会跨集合查询；EasyTier Magic DNS 始终留在 Mesh 路径。
     rule_sets: Geo 规则数据
     advanced_yaml: 高级 YAML
     name: 名称

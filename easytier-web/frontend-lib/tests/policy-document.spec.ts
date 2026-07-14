@@ -9,6 +9,9 @@ describe('policy visual document codec', () => {
   it('round-trips mesh/native nodes, ordered groups, geo data and ordered rules', () => {
     const source = `
 version: 1
+dns:
+  direct: [223.5.5.5]
+  proxy: ["doh:cloudflare-dns.com@1.1.1.1"]
 rule-sets:
   site:
     type: geosite
@@ -55,12 +58,37 @@ rules:
       udp: true,
     })
     expect(document.groups[0].members).toEqual(['mesh-exit', 'firewall', 'DIRECT'])
+    expect(document.dns).toEqual({
+      direct: ['223.5.5.5'],
+      proxy: ['doh:cloudflare-dns.com@1.1.1.1'],
+    })
     expect(document.rules.map(rule => rule.type)).toEqual(['GEOSITE', 'GEOIP', 'NETWORK', 'MATCH'])
     expect(document.rules[1].noResolve).toBe(true)
     expect(document.ruleSets[0].sourceUrl).toBe('https://mirror.example/geosite.dat')
 
     const reparsed = parsePolicyDocument(serializePolicyDocument(document))
     expect(reparsed).toEqual(document)
+  })
+
+  it('adds safe split-DNS defaults to legacy policy documents', () => {
+    const document = parsePolicyDocument('version: 1\nrules: ["MATCH,DIRECT"]\n')
+    expect(document.dns).toEqual({
+      direct: [],
+      proxy: ['doh:cloudflare-dns.com@1.1.1.1'],
+    })
+    const serialized = serializePolicyDocument(document)
+    expect(serialized).toContain('doh:cloudflare-dns.com@1.1.1.1')
+  })
+
+  it('preserves an explicitly empty proxy DNS set for backend validation', () => {
+    const document = parsePolicyDocument(`
+version: 1
+dns:
+  proxy: []
+rules: ["MATCH,DIRECT"]
+`)
+    expect(document.dns.proxy).toEqual([])
+    expect(serializePolicyDocument(document)).toContain('proxy: []')
   })
 
   it('keeps first-match rule order when rows are reordered', () => {

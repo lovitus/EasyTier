@@ -120,6 +120,7 @@ not a non-blocking optimization and still blocks the first release.
 | POLICY-MAGIC-DNS | implemented-validation-pending | Review P1: Magic DNS must remain on the mesh path | `100.100.100.101/32` is included in the live mesh classifier only while Magic DNS is enabled. Validate queries before/after config patch and route snapshot replacement; domain/GEOSITE visibility remains the separate `SPLIT-DNS` limitation |
 | POLICY-WRITER-FAIRNESS | implemented-validation-pending | Review P2: sustained peer traffic must not starve Leaf responses | Peer and policy packets use bounded independent queues, unbiased selection and alternating bounded drain. Saturate both directions and prove bounded loss, no starvation, no unbounded memory and unchanged mesh latency |
 | POLICY-DNS-DISCOVERY | implemented-validation-pending | Review P2: loopback resolver stubs are unusable as direct Leaf DNS servers | Resolver discovery rejects loopback/link-local/multicast stubs and checks resolved systemd/NetworkManager files. Validate resolved, NetworkManager, plain resolv.conf, Android supplied DNS, empty DNS and network-change replacement |
+| POLICY-DNS-SPLIT | implementation-in-progress | Domestic/direct and foreign/proxied DNS selection without resolver leakage | The working-tree candidate emits separate resolver roles. Reference semantics are Mihomo `config/config.go::parseDNS/parseNameServerPolicy` (separate validated resolver roles), `dns/resolver.go::matchPolicy/ipExchange` (ordered first-match policy, no cross-policy fallback) and `tunnel/dns_dialer.go::DNSDialer` (resolver transport follows the selected outbound and unsupported UDP fails rather than bypassing it). EasyTier intentionally exposes only direct/proxy resolver sets, not full `nameserver-policy`: domains classified DIRECT before resolution use physical/platform resolvers; domains classified to a proxy use bootstrap-pinned DoH through that exact policy actor; either set failing must fail closed without querying the other set. `DOMAIN`/`GEOSITE` can classify a domain before resolution, while a `GEOIP`-only rule necessarily cannot choose the resolver until an address exists and therefore follows the next pre-resolution match or `MATCH`; users wanting domestic/foreign split resolution must include ordered domain/GEOSITE rules and may still use GEOIP afterward for IP traffic. One intentional difference from Mihomo `respect-rules` is required for leak prevention: Mihomo may route the DNS-server endpoint by its own metadata, while EasyTier pins a proxied DoH connection to the original queried domain's first-matching non-DIRECT actor. This prevents a later IP rule for the DoH bootstrap address from silently changing that query to DIRECT; failure of the pinned actor remains fail-closed. The pin is local to DNS transport and does not alter application first-match semantics. GUI codec tests pass locally, but the Leaf pin and compiler candidate still require profiling-beta compilation and packet captures proving direct/proxy isolation, no UDP/53 proxy leak, fail-closed resolver failure, Magic DNS mesh retention and network-generation cache replacement on Linux and Android. This is separate from `SPLIT-DNS`, which covers Magic DNS visibility. |
 | LNX-POLICY | implemented-validation-pending | Linux policy routing, source/mark bypass and fail-closed behavior | Exact Linux `38d965c2` isolated namespaces: policy table `52000` and source rule followed a DHCP-style address replacement in two seconds; normal SIGTERM removed the worker, TUN, split routes, rules, table and generated Leaf config. The same run exposed the separate `UNDERLAY-BIND-REFRESH` cache blocker. Still validate the fixed candidate, competing table/rule ownership, abrupt exit and physical-host regression |
 | MAC-UTUN | implemented-validation-pending | Traditional macOS utun transparent adapter and packaged Leaf sidecar | DMG contains signed/runnable sidecar; v4/v6 split routes install, DIRECT and proxy paths work, normal stop reverses exact owned routes |
 | MAC-ORPHAN | implemented-validation-pending | macOS parent-PID watchdog | Forced GUI/core termination removes worker within two seconds and leaves no policy route, temp config, session or repeated respawn |
@@ -134,7 +135,7 @@ not a non-blocking optimization and still blocks the first release.
 | POLICY-NO-RESOLVE-SEMANTICS | investigating | `no-resolve` currently changes compiler merge boundaries but generated Leaf config fixes `domainResolve=false`, so GEOIP/COUNTRY/IP-CIDR rules with and without the modifier behave identically for domain destinations | Mihomo resolves lazily at the first eligible IP rule and caches the result for later rules. Add an order-preserving per-rule resolve marker in the pinned Leaf fork: rules without `no-resolve` may resolve once at their exact position; rules with it must not trigger resolution. DNS failure continues scanning; direct IP destinations never resolve. Validate domain-before-IP, IP-before-domain, mixed modifiers, one-resolution-only and Android FakeDNS paths |
 | POLICY-EDITOR | implemented-validation-pending | GUI/RPC policy switch, nodes, groups, rules, fallback and rule-data controls | Desktop and Android round-trip must preserve order and explicit IDs/IPs, show validation diagnostics before start, update managed data only on explicit click and never mutate unrelated EasyTier settings |
 | POLICY-CONFIG | implemented-validation-pending | Opt-in startup and configuration across CLI, TOML, RPC, GUI and Android import | Disabled/absent mode must create no policy task, route, bridge or worker; enabled mode must use the same validated document and diagnostics; malformed or unsupported platform configuration must fail policy startup without breaking the mesh |
-| POLICY-CHAIN | implementation-in-progress | DIRECT, SOCKS, mesh actor, chain and stable fallback | Exact Linux `38d965c2` proves only basic ordered actor reachability: an unavailable native SOCKS actor allowed that individual TCP connection to use mesh, and later connections could use a newly available native actor. It does **not** prove sticky failover acceptance. The local Leaf fork now has an opt-in preference-pinned state machine: one failed request may be rescued by one gated comparison, but later requests do not inherit that backup; canonical degradation and recovery each require three differential rounds over at least 30 seconds, and all-actor high-confidence failure enters bounded Outage/Dormant handling. TCP/UDP groups share one runtime comparison gate while keeping separate health state. This implementation has not yet passed the profiling-beta build or fault matrix and must not be promoted. With remote KCP input disabled, the older exact candidate opened no new KCP sessions, TCP fell back to smoltcp at 252 Mbit/s and UoT UDP sustained 20 Mbit/s with zero loss. Still validate platform network-generation invalidation, a real multi-hop chain, simultaneous outage/recovery, many-group retry bounds and UDP actor-skip ordering |
+| POLICY-CHAIN | implementation-in-progress | DIRECT, SOCKS, mesh actor, chain and stable fallback | Exact profiling-beta `05a093e2` isolated Linux tests validate the shared TCP/UDP semantics: one gated comparison may rescue only its triggering session; persistent degradation occurs only on the third spaced preferred-failed/backup-succeeded round; recovery occurs only on the third spaced preferred-success round. With both actors stopped, a 50-request TCP burst generated no additional actor packets and the UDP burst generated only one/two primary/backup packets before the bounded gate; the UDP core remained at 31 FDs, 11 threads and 16.5 MiB RSS. This proves bounded Outage behavior and no request-rate retry storm for that artifact. It does **not** close network-generation semantics: the Leaf `StableFailover` state currently has no explicit generation token, so Linux route replacement that keeps an underlay available can retain old streak evidence. Android rebuilds the in-process runtime on a changed network key, but repeated roam/DHCP and exact evidence reset still need device validation. Until the generation gap is fixed, do not claim that observations from rapid Wi-Fi/cellular changes can never combine. TCP/UDP groups share one runtime comparison gate while keeping separate health state. With remote KCP input disabled, an older exact candidate opened no new KCP sessions, TCP fell back to smoltcp at 252 Mbit/s and UoT UDP sustained 20 Mbit/s with zero loss. Still implement and validate generation-aware evidence invalidation, a real multi-hop chain, simultaneous outage/recovery, many-group retry bounds and UDP actor-skip ordering. |
 | POLICY-KCP-UOT | implemented-validation-pending | Existing KCP-preferred mesh data plane and private UoT fallback | KCP available/unavailable/mixed-version tests; SOCKS KCP-only semantics unchanged; UDP over KCP/UoT throughput/loss; KCP state, target sockets, FDs and tasks return to baseline |
 | POLICY-UDP-LOSS | investigating | Policy UDP throughput remains below TCP and prior 50 Mbit/s runs observed loss | Separate Leaf/TUN, UoT framing, KCP, destination relay and test-actor loss with counters and profiling; do not mask loss by unbounded buffers or silently downgrade to smoltcp |
 | POLICY-LOOP-GUARD | implemented-validation-pending | Dynamic peer endpoint exclusion and retry-storm containment | Validate endpoint refresh, self/peer/mesh CIDR exclusions, more than 1000 attempted connections per second, malformed chains, worker crash and system-TUN coexistence without CPU/FD/KCP growth |
@@ -172,7 +173,8 @@ modules without hiding failures:
 6. `POLICY-UDP-LOSS` and `POLICY-PERF`: profile only after correctness is
    stable; keep or revert optimizations based on exact-artifact evidence.
 7. `GEO-ONLINE-UPDATE`, `WIN-ADAPTER`, `MAC-NE`, `IOS-ADAPTER`, `MULTI-INSTANCE`,
-   `NETNS-ADAPTER` and `SPLIT-DNS` remain explicit future work and cannot be
+   `POLICY-DNS-SPLIT`, `NETNS-ADAPTER` and `SPLIT-DNS` remain explicit future
+   work and cannot be
    implied by a Linux/macOS-traditional/Android pass.
 
 Workflow for every ledger item:
@@ -1436,6 +1438,11 @@ The product behavior should be less sensitive and preference-first:
   lower-priority member succeeding in each corresponding round. That same-round
   success is the minimum positive evidence that the local path is usable; a
   preferred-member failure by itself never advances failover;
+- all three differential rounds must belong to one unchanged, platform-reported
+  usable `network_generation`. Wi-Fi/cellular handoff, route replacement,
+  airplane mode, an elevator/no-route interval, or any other generation change
+  invalidates in-flight and accumulated differential evidence instead of
+  rotating actors;
 - any preferred-member success resets its consecutive-failure count. A round
   in which every attempted member fails is an outage signal, not a member
   failure, and does not advance the count;
@@ -1678,7 +1685,9 @@ by bypassing every destination on port 53: that would evade Leaf's FakeDNS and
 domain-rule path. Magic DNS's exact virtual address remains classified as mesh
 traffic.
 
-This is sufficient for the first version's intelligent split:
+The working-tree candidate represents the following two-set design, but it is
+not considered complete until the exact profiling-beta artifact passes packet
+capture and failure validation:
 
 ```yaml
 dns:
@@ -1690,9 +1699,16 @@ dns:
     - "doh:dns.cloudflare.com@1.1.1.1"
 ```
 
-Routing is decided from the queried domain first. DIRECT domains use the direct
-resolver set; proxied domains use the normal/proxied resolver set. FakeDNS/DNS
-sniffing preserves the domain when the application later connects to an IP.
+Routing is decided from the queried domain first. Destinations classified
+DIRECT by a pre-resolution matcher (`DOMAIN`, `DOMAIN-SUFFIX`, `GEOSITE`, and
+equivalents supported by the compiler) use the direct resolver set, while
+destinations classified to a proxy use the proxied set. `GEOIP` cannot by
+itself classify a not-yet-resolved domain; it remains useful after resolution,
+but a policy requiring split resolution must include an earlier domain/GEOSITE
+rule or rely on `MATCH`. FakeDNS/DNS sniffing then preserves the domain when the
+application later connects to an IP. Until `POLICY-DNS-SPLIT` is packet-capture
+validated, the candidate must not be described as leak-free domestic/foreign
+split DNS.
 
 Leaf does not currently provide the full Mihomo/sing-box per-domain
 `nameserver-policy` and resolver-rule feature set. Do not claim complete config

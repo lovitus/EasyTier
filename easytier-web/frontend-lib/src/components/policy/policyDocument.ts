@@ -4,6 +4,12 @@ export type PolicyRuleSetKind = 'geosite' | 'geoip' | 'mmdb'
 export type PolicyProxyKind = 'socks5' | 'http'
 export type PolicyProxyVia = 'mesh' | 'native'
 export type PolicyGroupKind = 'chain' | 'fallback'
+export const DEFAULT_POLICY_PROXY_DNS = 'doh:cloudflare-dns.com@1.1.1.1'
+
+export interface PolicyDnsSettings {
+  direct: string[]
+  proxy: string[]
+}
 
 export interface PolicyRuleSetRow {
   name: string
@@ -43,6 +49,7 @@ export interface PolicyRuleRow {
 export interface PolicyEditorDocument {
   version: number
   extra: Record<string, unknown>
+  dns: PolicyDnsSettings
   ruleSets: PolicyRuleSetRow[]
   proxies: PolicyProxyRow[]
   groups: PolicyGroupRow[]
@@ -77,6 +84,12 @@ function optionalBoolean(value: unknown, path: string): boolean {
   if (value === undefined) return false
   if (typeof value === 'boolean') return value
   throw new Error(`${path} must be a boolean`)
+}
+
+function optionalStringList(value: unknown, path: string, fallback: string[] = []): string[] {
+  if (value === undefined) return [...fallback]
+  if (!Array.isArray(value)) throw new Error(`${path} must be a sequence`)
+  return value.map((entry, index) => requiredString(entry, `${path}[${index}]`))
 }
 
 function requiredPort(value: unknown, path: string): number {
@@ -114,6 +127,7 @@ export function emptyPolicyDocument(): PolicyEditorDocument {
   return {
     version: 1,
     extra: {},
+    dns: { direct: [], proxy: [DEFAULT_POLICY_PROXY_DNS] },
     ruleSets: [],
     proxies: [],
     groups: [],
@@ -125,11 +139,16 @@ export function parsePolicyDocument(source: string): PolicyEditorDocument {
   if (source.trim().length === 0) return emptyPolicyDocument()
 
   const root = requireMap(parse(source), 'policy')
-  const knownRootFields = new Set(['version', 'rule-sets', 'proxies', 'groups', 'rules'])
+  const knownRootFields = new Set(['version', 'dns', 'rule-sets', 'proxies', 'groups', 'rules'])
   const extra = Object.fromEntries(
     Object.entries(root).filter(([key]) =>
       !knownRootFields.has(key) && !['__proto__', 'constructor', 'prototype'].includes(key)),
   )
+  const dnsValue = optionalMap(root, 'dns')
+  const dns = {
+    direct: optionalStringList(dnsValue.direct, 'dns.direct'),
+    proxy: optionalStringList(dnsValue.proxy, 'dns.proxy', [DEFAULT_POLICY_PROXY_DNS]),
+  }
   const ruleSets = Object.entries(optionalMap(root, 'rule-sets')).map(([name, raw]) => {
     const value = requireMap(raw, `rule-sets.${name}`)
     const kind = requiredString(value.type, `rule-sets.${name}.type`)
@@ -185,6 +204,7 @@ export function parsePolicyDocument(source: string): PolicyEditorDocument {
   return {
     version: requiredInteger(root.version, 'version'),
     extra,
+    dns,
     ruleSets,
     proxies,
     groups,
@@ -257,6 +277,10 @@ export function serializePolicyDocument(document: PolicyEditorDocument): string 
   const root = compact({
     ...document.extra,
     version: document.version || 1,
+    dns: compact({
+      direct: document.dns.direct.length ? document.dns.direct : undefined,
+      proxy: document.dns.proxy,
+    }),
     'rule-sets': Object.keys(ruleSets).length ? ruleSets : undefined,
     proxies: Object.keys(proxies).length ? proxies : undefined,
     groups: Object.keys(groups).length ? groups : undefined,

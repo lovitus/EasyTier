@@ -81,6 +81,7 @@ pub fn compile_leaf_config(
         return Err(LeafConfigError::NoDnsServers);
     }
     let document = &revision.document;
+    let dns_servers = compile_dns_servers(document, dns_servers);
     let mut outbounds = vec![
         serde_json::json!({ "tag": "DIRECT", "protocol": "direct" }),
         serde_json::json!({ "tag": "REJECT", "protocol": "drop" }),
@@ -156,10 +157,7 @@ pub fn compile_leaf_config(
     let config = serde_json::json!({
         "log": { "level": "warn" },
         "dns": {
-            "servers": dns_servers
-                .iter()
-                .map(|server| format!("direct:{server}"))
-                .collect::<Vec<_>>(),
+            "servers": dns_servers,
         },
         "inbounds": [{
             "tag": "tun",
@@ -178,6 +176,34 @@ pub fn compile_leaf_config(
     });
     serde_json::to_string_pretty(&config)
         .map_err(|error| LeafConfigError::Serialize(error.to_string()))
+}
+
+fn compile_dns_servers(
+    document: &crate::PolicyDocument,
+    platform_servers: &[IpAddr],
+) -> Vec<String> {
+    let direct = if document.dns.direct.is_empty() {
+        platform_servers
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        document.dns.direct.clone()
+    };
+    let mut seen = BTreeSet::new();
+    let mut servers = Vec::new();
+    for server in direct {
+        let server = format!("direct:{server}");
+        if seen.insert(server.clone()) {
+            servers.push(server);
+        }
+    }
+    for server in &document.dns.proxy {
+        if seen.insert(server.clone()) {
+            servers.push(server.clone());
+        }
+    }
+    servers
 }
 
 #[derive(Debug, Serialize)]
@@ -651,7 +677,10 @@ rules:
         let config: serde_json::Value = serde_json::from_str(&config).unwrap();
         assert_eq!(config["inbounds"][0]["protocol"], "tun");
         assert_eq!(config["inbounds"][0]["settings"]["fd"], 7);
-        assert_eq!(config["dns"]["servers"][0], "direct:1.1.1.1");
+        assert_eq!(
+            config["dns"]["servers"],
+            serde_json::json!(["direct:1.1.1.1", "doh:cloudflare-dns.com@1.1.1.1"])
+        );
         assert_eq!(config["outbounds"][2]["tag"], "native");
         assert_eq!(config["outbounds"][2]["protocol"], "socks");
         assert_eq!(config["outbounds"][3]["tag"], "final");
@@ -672,6 +701,36 @@ rules:
         );
         assert_eq!(rules[2]["target"], "final");
         assert_eq!(rules[2]["network"], serde_json::json!(["tcp", "udp"]));
+    }
+
+    #[test]
+    fn explicit_dns_sets_replace_platform_direct_and_keep_proxy_separate() {
+        let source = r#"
+version: 1
+dns:
+  direct: [223.5.5.5, "doh:dns.alidns.com@223.5.5.5"]
+  proxy: ["doh:cloudflare-dns.com@1.1.1.1", "doh:dns.google@8.8.8.8"]
+rules: ["MATCH,DIRECT"]
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        let config = compile_leaf_config(
+            &revision,
+            7,
+            Path::new("."),
+            &Unresolved,
+            &["192.0.2.53".parse().unwrap()],
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(
+            config["dns"]["servers"],
+            serde_json::json!([
+                "direct:223.5.5.5",
+                "direct:doh:dns.alidns.com@223.5.5.5",
+                "doh:cloudflare-dns.com@1.1.1.1",
+                "doh:dns.google@8.8.8.8"
+            ])
+        );
     }
 
     #[test]

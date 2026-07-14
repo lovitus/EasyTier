@@ -220,6 +220,13 @@ function updateMembers(row: PolicyGroupRow, value: string) {
   row.members = value.split(',').map(member => member.trim()).filter(Boolean)
 }
 
+function updateDnsServers(set: 'direct' | 'proxy', value: string) {
+  document.value.dns[set] = value
+    .split(/[\n,]/)
+    .map(server => server.trim())
+    .filter(Boolean)
+}
+
 function ruleNeedsOperand(type: string) {
   return !['MATCH', 'FINAL'].includes(type.toUpperCase())
 }
@@ -348,6 +355,26 @@ onMounted(() => {
         </Message>
 
         <template v-if="!parseError">
+          <Panel :header="t('policy.editor.dns')" toggleable collapsed>
+            <div class="grid gap-4 md:grid-cols-2">
+              <div class="flex flex-col gap-2">
+                <label for="policy_dns_direct" class="font-semibold">{{ t('policy.editor.dns_direct') }}</label>
+                <Textarea id="policy_dns_direct" :model-value="document.dns.direct.join('\n')" rows="4"
+                  auto-resize :placeholder="t('policy.editor.dns_direct_placeholder')"
+                  @update:model-value="updateDnsServers('direct', String($event))" />
+                <small class="text-surface-500">{{ t('policy.editor.dns_direct_help') }}</small>
+              </div>
+              <div class="flex flex-col gap-2">
+                <label for="policy_dns_proxy" class="font-semibold">{{ t('policy.editor.dns_proxy') }}</label>
+                <Textarea id="policy_dns_proxy" :model-value="document.dns.proxy.join('\n')" rows="4"
+                  auto-resize placeholder="doh:cloudflare-dns.com@1.1.1.1"
+                  @update:model-value="updateDnsServers('proxy', String($event))" />
+                <small class="text-surface-500">{{ t('policy.editor.dns_proxy_help') }}</small>
+              </div>
+            </div>
+            <Message severity="info" :closable="false">{{ t('policy.editor.dns_isolation_help') }}</Message>
+          </Panel>
+
           <Panel :header="t('policy.editor.nodes')" toggleable>
             <div class="flex flex-col gap-3">
               <DataTable :value="document.proxies" data-key="name" responsive-layout="scroll">
