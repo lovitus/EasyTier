@@ -180,7 +180,8 @@ impl InProcessLeafRuntime {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
             if Instant::now() >= deadline {
-                request_leaf_shutdown(runtime_id).await;
+                let cleanup_deadline = Instant::now() + STOP_TIMEOUT;
+                request_leaf_shutdown(runtime_id, cleanup_deadline).await;
                 spawn_late_start_reaper(runtime_id, result_rx, thread);
                 return Err("in-process Leaf readiness timed out".to_owned());
             }
@@ -193,8 +194,8 @@ impl InProcessLeafRuntime {
     }
 
     pub async fn stop(&self) {
-        request_leaf_shutdown(self.runtime_id).await;
         let deadline = Instant::now() + STOP_TIMEOUT;
+        request_leaf_shutdown(self.runtime_id, deadline).await;
         while leaf::is_running(self.runtime_id) && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -256,15 +257,34 @@ impl Drop for InProcessLeafRuntime {
     }
 }
 
-async fn request_leaf_shutdown(runtime_id: leaf::RuntimeId) {
+async fn request_leaf_shutdown(runtime_id: leaf::RuntimeId, deadline: Instant) {
     // Leaf's public shutdown API uses blocking_send internally. Keep it off Tokio worker
-    // threads so current-thread runtimes and Android lifecycle callbacks cannot panic.
-    if let Err(error) = tokio::task::spawn_blocking(move || leaf::shutdown(runtime_id)).await {
+    // threads so current-thread runtimes and Android lifecycle callbacks cannot panic. Share
+    // the caller's stop deadline so a blocked dispatch cannot make bounded shutdown unbounded.
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
         tracing::warn!(
+            runtime_id,
+            "in-process Leaf shutdown deadline elapsed before dispatch"
+        );
+        return;
+    }
+    match tokio::time::timeout(
+        remaining,
+        tokio::task::spawn_blocking(move || leaf::shutdown(runtime_id)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => tracing::warn!(
             runtime_id,
             ?error,
             "failed to dispatch in-process Leaf shutdown"
-        );
+        ),
+        Err(_) => tracing::warn!(
+            runtime_id,
+            "in-process Leaf shutdown dispatch exceeded the bounded stop deadline"
+        ),
     }
 }
 

@@ -152,6 +152,13 @@ fn destination_ip(packet: &[u8]) -> Result<IpAddr, PacketError> {
                     length: packet.len(),
                 });
             }
+            let payload_length = usize::from(u16::from_be_bytes([packet[4], packet[5]]));
+            if MIN_IPV6_HEADER + payload_length > packet.len() {
+                return Err(PacketError::Truncated {
+                    version: 6,
+                    length: packet.len(),
+                });
+            }
             let mut octets = [0u8; 16];
             octets.copy_from_slice(&packet[24..40]);
             Ok(IpAddr::V6(octets.into()))
@@ -188,6 +195,9 @@ mod unix_bridge {
         }
 
         pub async fn send_to_leaf(&self, packet: &[u8]) -> Result<(), PacketError> {
+            if packet.is_empty() {
+                return Err(PacketError::Empty);
+            }
             if packet.len() > MAX_PACKET_SIZE {
                 return Err(PacketError::TooLarge);
             }
@@ -202,6 +212,9 @@ mod unix_bridge {
         }
 
         pub fn try_send_to_leaf(&self, packet: &[u8]) -> Result<(), PacketError> {
+            if packet.is_empty() {
+                return Err(PacketError::Empty);
+            }
             if packet.len() > MAX_PACKET_SIZE {
                 return Err(PacketError::TooLarge);
             }
@@ -263,8 +276,16 @@ mod unix_bridge {
         }
 
         #[tokio::test]
-        async fn rejects_oversized_packet() {
+        async fn rejects_empty_and_oversized_packets() {
             let (bridge, _endpoint) = LeafPacketBridge::pair().unwrap();
+            assert!(matches!(
+                bridge.send_to_leaf(&[]).await,
+                Err(PacketError::Empty)
+            ));
+            assert!(matches!(
+                bridge.try_send_to_leaf(&[]),
+                Err(PacketError::Empty)
+            ));
             let packet = vec![0; MAX_PACKET_SIZE + 1];
             assert!(matches!(
                 bridge.send_to_leaf(&packet).await,
@@ -364,6 +385,16 @@ mod tests {
         assert!(matches!(
             classifier.classify(&vec![0x60; MAX_PACKET_SIZE + 1]),
             Err(PacketError::TooLarge)
+        ));
+
+        let mut truncated_ipv6 = ipv6([0; 16]);
+        truncated_ipv6[4..6].copy_from_slice(&8u16.to_be_bytes());
+        assert!(matches!(
+            classifier.classify(&truncated_ipv6),
+            Err(PacketError::Truncated {
+                version: 6,
+                length: MIN_IPV6_HEADER
+            })
         ));
     }
 }

@@ -163,11 +163,19 @@ fn validate_geosite(path: &Path) -> Result<(), GeoDataError> {
                 "Geosite data exceeds the {MAX_CATEGORIES} category limit"
             )));
         }
-        if group.domains.iter().any(|domain| domain.value.is_empty()) {
-            return Err(GeoDataError::Invalid(format!(
-                "Geosite category {} contains an empty domain",
-                group.country_code
-            )));
+        for domain in &group.domains {
+            if DomainType::try_from(domain.domain_type).is_err() {
+                return Err(GeoDataError::Invalid(format!(
+                    "Geosite category {} contains unsupported domain type {}",
+                    group.country_code, domain.domain_type
+                )));
+            }
+            if domain.value.is_empty() {
+                return Err(GeoDataError::Invalid(format!(
+                    "Geosite category {} contains an empty domain",
+                    group.country_code
+                )));
+            }
         }
         has_cn |= category == "CN" && !group.domains.is_empty();
         entries += 1;
@@ -406,6 +414,29 @@ mod tests {
         bytes.pop();
         std::fs::write(&path, bytes).unwrap();
         assert!(validate_geosite(&path).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_geosite_domain_types_before_leaf_loads_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geosite.dat");
+        write_entry(
+            &path,
+            GeoSite {
+                country_code: "CN".to_owned(),
+                domains: vec![Domain {
+                    domain_type: 99,
+                    value: "example.cn".to_owned(),
+                    attributes: Vec::new(),
+                }],
+            },
+        );
+
+        assert!(matches!(
+            validate_geosite(&path),
+            Err(GeoDataError::Invalid(message))
+                if message.contains("unsupported domain type 99")
+        ));
     }
 
     #[test]
