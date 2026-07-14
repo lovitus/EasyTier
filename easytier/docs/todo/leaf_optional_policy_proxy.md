@@ -2168,3 +2168,18 @@ Validation snapshot: `cf405e8041dd58044dcdab96905ab283f57c3e97` on `codex/profil
 - Cause: the target manifest explicitly set `android:hasCode=false`. Android requires a code-capable target process even when all executable test code lives in the separate instrumentation APK.
 - Candidate B revision: remove the explicit false flag and keep the default code-capable application boundary. Do not add an Activity, Service, Receiver, Provider, native library, or production business class. The runner remains the only executable probe code.
 - Add a package gate rejecting an explicit false `android:hasCode` value and record `probe_target_code_capable=true` in `BUILD_INFO.txt`. This is an Android instrumentation requirement, not an EasyTier policy behavior difference.
+
+### Hidden WebView selection finding and correction
+
+- Reload tracing on exact candidate `197f7a88` showed `last_network_instance_id` was read correctly and the `selectedInstanceId` setter never received an empty value. This contradicts the earlier hypothesis that PrimeVue cleared the parent model.
+- Runtime state was `document.hidden=true`, `visibilityState=hidden`, and `hasFocus=false` because the device remained PIN-locked. `RemoteManagement.shouldRefreshNow` intentionally suppresses all RPC refresh while hidden, including the first instance-list load; an object-valued Select cannot display the saved string until that list exists.
+- A semantic CDP visibility transition (`hidden=false`, standard `visibilitychange`) immediately loaded the disabled instance and displayed `android-policy-validation-17a8c165 (c17a8c16-5016-4d09-a1c3-e97c6fddcaf5)`, stopped state, full editable config, and both policy rules. No click, screenshot, storage write, or PIN bypass was used.
+- Therefore the locked/hidden `No Network Selected` DOM is expected power-saving behavior, not a user-visible restoration failure. The early parent initialization and guarded Select setter remain defensive startup-race hardening with passing component tests, but must not be claimed as the cause of this observed recovery.
+
+### Connect-only probe result: insufficient policy evidence
+
+- Exact `197f7a88` target/runner executed in UID `10258` and SELinux `u:r:untrusted_app:s0:...`. VPN-down TCP baselines succeeded for CN `180.101.50.188:443` (37 ms) and non-CN `104.16.132.229:443` (169 ms); several Google/Cloudflare DNS endpoints were excluded after baseline timeout.
+- After EasyTier created `tun0=10.245.0.2/24`, Android's VPN record included UID `10258` in `{10255-20251}` while excluding owner UID `10254`.
+- TCP connect returned success for both expected `GEOIP,CN,DIRECT` (7 ms) and expected `MATCH,REJECT` (9 ms). The TUN stack completed local TCP handshakes before an end-to-end application exchange, so connect-only cannot distinguish outbound success from policy rejection.
+- Those two VPN-up connect results are explicitly not rule evidence. Extend the same on-demand instrumentation with optional TLS SNI and certificate-verified handshake. Report raw TCP and TLS phases separately; `probe_connected=true` in TLS mode requires both phases.
+- Controlled validation pair: `180.101.50.188:443` with SNI `www.baidu.com` for CN DIRECT, and `104.16.132.229:443` with SNI `www.cloudflare.com` for non-CN REJECT. Both must complete TLS while VPN is down before any policy conclusion.

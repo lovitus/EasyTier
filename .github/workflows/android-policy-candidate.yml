@@ -180,6 +180,7 @@ jobs:
           probe_runner_signing_cert_sha256=$probe_runner_signing_cert_sha256
           probe_instrumentation=com.kkrainbow.easytier.policyprobe.PolicyProbeInstrumentation
           probe_purpose=captured-uid-network-validation
+          probe_protocols=tcp,tls
           probe_target_code_capable=true
           probe_has_runtime_components=false
           EOF
