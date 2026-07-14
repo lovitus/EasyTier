@@ -315,6 +315,42 @@ const AclManagerStub = defineComponent({
   },
 })
 
+const PolicyEditorStub = defineComponent({
+  name: 'PolicyEditor',
+  props: {
+    modelValue: { type: Object, required: true },
+  },
+  setup(props) {
+    const config = props.modelValue as NetworkConfig
+    return () => h('div', { 'data-stub': 'policy-editor' }, [
+      h('input', {
+        id: 'enable_policy_proxy',
+        type: 'checkbox',
+        checked: config.enable_policy_proxy,
+        onChange: (event: Event) => {
+          config.enable_policy_proxy = (event.target as HTMLInputElement).checked
+        },
+      }),
+      h('input', {
+        id: 'policy_config_file',
+        value: config.policy_config_file ?? '',
+        onInput: (event: Event) => {
+          config.policy_config_file = (event.target as HTMLInputElement).value
+          if (config.policy_config_file.trim()) config.policy_config_inline = ''
+        },
+      }),
+      h('textarea', {
+        id: 'policy_config_inline',
+        value: config.policy_config_inline ?? '',
+        onInput: (event: Event) => {
+          config.policy_config_inline = (event.target as HTMLTextAreaElement).value
+          if (config.policy_config_inline.trim()) config.policy_config_file = ''
+        },
+      }),
+    ])
+  },
+})
+
 function makeConfig(): NetworkConfig {
   const config = DEFAULT_NETWORK_CONFIG()
 
@@ -382,6 +418,7 @@ function mountConfig(config: NetworkConfig = makeConfig()) {
         InputText: InputTextStub,
         Panel: PanelStub,
         Password: PasswordStub,
+        PolicyEditor: PolicyEditorStub,
         SelectButton: SelectButtonStub,
         Textarea: TextareaStub,
         ToggleButton: ToggleButtonStub,

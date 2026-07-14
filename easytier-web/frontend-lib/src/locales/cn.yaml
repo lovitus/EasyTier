@@ -202,6 +202,45 @@ policy_config_inline_placeholder: "version: 1\nrules: [\"FINAL,DIRECT\"]"
 policy_outbound_interface: 物理出口接口
 policy_outbound_interface_placeholder: "Linux 必填，例如 eth0"
 policy_leaf_executable: Leaf worker 可执行文件
+policy:
+  editor:
+    title: 策略代理
+    source: 配置来源
+    inline: 可视化 / 内联
+    file: 外部文件
+    file_notice: 外部策略文件由运行时校验；切换到内联模式后可使用可视化编辑器。
+    yaml_error: 策略 YAML 无效
+    edit_error: 可视化编辑无效
+    nodes: 代理节点
+    groups: 代理链与回退组
+    rules: 顺序规则
+    rule_sets: Geo 规则数据
+    advanced_yaml: 高级 YAML
+    name: 名称
+    path: 路径
+    server: 服务器
+    port: 端口
+    credentials: 认证信息
+    instance_id: Mesh 实例 ID（可选）
+    virtual_ip: Mesh 虚拟 IP（可选）
+    group_type: 分组类型
+    members: 顺序成员
+    members_hint: proxy-a,proxy-b,DIRECT
+    rule_type: 匹配类型
+    rule_value: 匹配值
+    target: 目标
+    any: 任意流量
+    rule_set_type: 数据类型
+    order_help: 规则严格从上到下匹配；UDP 命中仅支持 TCP 的目标时会跳过，并继续检查下一条规则。
+    add_node: 添加代理节点
+    add_group: 添加分组
+    add_rule: 添加规则
+    add_rule_set: 添加 Geo 数据
+    presets: 快捷规则
+    preset_china_direct: 中国直连 / 其他优先代理
+    preset_geo_required: 请先添加一个 Geosite 文件和一个 MMDB 文件
+    preset_global: 全部使用首选目标
+    preset_direct: 全部直连
 
 enable_udp_broadcast_relay: UDP 广播中继
 enable_udp_broadcast_relay_help: "仅 Windows：捕获物理网卡上的本机 UDP 广播包并转发给 EasyTier 对等节点，帮助局域网游戏发现房间。需要管理员权限。"

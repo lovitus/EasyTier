@@ -3,6 +3,12 @@ import { NetworkConfig, NetworkInstanceRunningInfo } from '../types/network';
 
 export interface ValidateConfigResponse {
     toml_config: string;
+    policy_diagnostics?: Array<{
+        severity: string;
+        code: string;
+        path: string;
+        message: string;
+    }>;
 }
 
 export interface ListNetworkInstanceIdResponse {

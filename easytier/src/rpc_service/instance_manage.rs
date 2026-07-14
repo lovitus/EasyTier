@@ -14,10 +14,10 @@ use crate::{
                 GetNetworkInstanceConfigRequest, GetNetworkInstanceConfigResponse,
                 ListNetworkInstanceMetaRequest, ListNetworkInstanceMetaResponse,
                 ListNetworkInstanceRequest, ListNetworkInstanceResponse,
-                NetworkInstanceRunningInfoMap, NetworkMeta, RetainNetworkInstanceRequest,
-                RetainNetworkInstanceResponse, RunNetworkInstanceRequest,
-                RunNetworkInstanceResponse, ValidateConfigRequest, ValidateConfigResponse,
-                WebClientService,
+                NetworkInstanceRunningInfoMap, NetworkMeta, PolicyConfigDiagnostic,
+                RetainNetworkInstanceRequest, RetainNetworkInstanceResponse,
+                RunNetworkInstanceRequest, RunNetworkInstanceResponse, ValidateConfigRequest,
+                ValidateConfigResponse, WebClientService,
             },
         },
         rpc_types::{self, controller::BaseController},
@@ -30,6 +30,48 @@ pub struct InstanceManageRpcService {
     manager: Arc<NetworkInstanceManager>,
     hooks: Arc<dyn WebClientHooks>,
     remote_mutation_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
+fn validate_policy_config(
+    config: &dyn ConfigLoader,
+) -> anyhow::Result<Vec<PolicyConfigDiagnostic>> {
+    let Some(policy) = config
+        .get_policy_proxy_config()
+        .filter(|policy| policy.enabled)
+    else {
+        return Ok(Vec::new());
+    };
+    let resolved = crate::policy_proxy::resolve_document(&policy)?;
+    Ok(
+        easytier_policy::report_for_policy_revision(&resolved.revision)
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| PolicyConfigDiagnostic {
+                severity: match diagnostic.severity {
+                    easytier_policy::DiagnosticSeverity::Error => "error",
+                    easytier_policy::DiagnosticSeverity::Warning => "warning",
+                }
+                .to_owned(),
+                code: diagnostic.code,
+                path: diagnostic.path,
+                message: diagnostic.message,
+            })
+            .collect(),
+    )
+}
+
+#[cfg(not(all(feature = "leaf-policy-proxy", unix)))]
+fn validate_policy_config(
+    config: &dyn ConfigLoader,
+) -> anyhow::Result<Vec<PolicyConfigDiagnostic>> {
+    if config
+        .get_policy_proxy_config()
+        .is_some_and(|policy| policy.enabled)
+    {
+        anyhow::bail!("policy proxy support is not compiled for this target");
+    }
+    Ok(Vec::new())
 }
 
 impl InstanceManageRpcService {
@@ -192,8 +234,12 @@ impl WebClientService for InstanceManageRpcService {
         _: BaseController,
         req: ValidateConfigRequest,
     ) -> Result<ValidateConfigResponse, rpc_types::error::Error> {
-        let toml_config = req.config.unwrap_or_default().gen_config()?.dump();
-        Ok(ValidateConfigResponse { toml_config })
+        let config = req.config.unwrap_or_default().gen_config()?;
+        let policy_diagnostics = validate_policy_config(&config)?;
+        Ok(ValidateConfigResponse {
+            toml_config: config.dump(),
+            policy_diagnostics,
+        })
     }
 
     async fn run_network_instance(

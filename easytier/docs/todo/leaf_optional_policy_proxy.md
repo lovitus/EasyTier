@@ -505,6 +505,18 @@ Editing UX:
 
 #### GUI authoring and preflight delivery order
 
+Implementation status (2026-07-14): the first two layers are now wired into the
+shared GUI as an ACL-style collapsed **Policy Proxy** panel. The enable switch
+is inside the panel; disabled users do not see or initialize the editor. The
+inline visual editor covers mesh/native SOCKS5 actors, ordered chain/fallback
+members, ordered common rules, Geosite/MMDB file metadata, three bounded rule
+presets, and the same advanced YAML text. YAML is the only persisted source;
+invalid YAML suspends visual write-back instead of restoring an older model.
+The existing config validation RPC now invokes the runtime policy parser and
+returns structured warnings before Save/Run. The local rule-data importer,
+peer picker, and side-effect-free simulator remain explicit follow-up items;
+the UI does not fake these capabilities client-side.
+
 The validated EasyTier policy YAML remains the only source of truth. The GUI
 must never expose or persist generated Leaf configuration. Deliver the editing
 surface in three small layers rather than cloning Mihomo's full configuration

@@ -30,7 +30,7 @@ pub use packet::{LeafPacketBridge, LeafPacketEndpoint};
 pub use packet::{MeshRouteSnapshot, PacketClass, PacketClassifier, PacketError};
 pub use preflight::{
     DiagnosticSeverity, PolicyDiagnostic, PolicyPreflight, PolicyPreflightReport,
-    preflight_policy_file, preflight_policy_source,
+    preflight_policy_file, preflight_policy_source, report_for_policy_revision,
 };
 pub use supervisor::{
     ApplyResult, HealthEvent, PolicyRuntime, PolicyRuntimeFactory, PolicyStatus, PolicySupervisor,

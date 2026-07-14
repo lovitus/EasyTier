@@ -162,7 +162,17 @@ message NetworkMeta {
 
 message ValidateConfigRequest { NetworkConfig config = 1; }
 
-message ValidateConfigResponse { string toml_config = 1; }
+message PolicyConfigDiagnostic {
+  string severity = 1;
+  string code = 2;
+  string path = 3;
+  string message = 4;
+}
+
+message ValidateConfigResponse {
+  string toml_config = 1;
+  repeated PolicyConfigDiagnostic policy_diagnostics = 2;
+}
 
 message RunNetworkInstanceRequest {
   common.UUID inst_id = 1;

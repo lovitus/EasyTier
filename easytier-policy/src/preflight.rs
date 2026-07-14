@@ -51,23 +51,27 @@ pub fn preflight_policy_file(path: &Path) -> PolicyPreflight {
     preflight_result(validate_policy_file(path))
 }
 
-fn preflight_result(result: Result<PolicyRevision, PolicyError>) -> PolicyPreflight {
-    match result {
-        Ok(revision) => {
-            let diagnostics = warnings(&revision);
-            let sha256: String = revision
+pub fn report_for_policy_revision(revision: &PolicyRevision) -> PolicyPreflightReport {
+    PolicyPreflightReport {
+        valid: true,
+        revision_id: Some(revision.id.clone()),
+        sha256: Some(
+            revision
                 .digest
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
-                .collect();
-            let revision_id = revision.id.clone();
+                .collect(),
+        ),
+        diagnostics: warnings(revision),
+    }
+}
+
+fn preflight_result(result: Result<PolicyRevision, PolicyError>) -> PolicyPreflight {
+    match result {
+        Ok(revision) => {
+            let report = report_for_policy_revision(&revision);
             PolicyPreflight {
-                report: PolicyPreflightReport {
-                    valid: true,
-                    revision_id: Some(revision_id),
-                    sha256: Some(sha256),
-                    diagnostics,
-                },
+                report,
                 revision: Some(Arc::new(revision)),
             }
         }

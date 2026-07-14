@@ -91,7 +91,15 @@ function errorDetail(error: any): string {
 
 async function validateNetworkConfigOrWarn(config: NetworkTypes.NetworkConfig): Promise<boolean> {
     try {
-        await props.api.validate_config(config);
+        const response = await props.api.validate_config(config);
+        for (const diagnostic of response.policy_diagnostics ?? []) {
+            toast.add({
+                severity: diagnostic.severity === 'error' ? 'error' : 'warn',
+                summary: `Policy ${diagnostic.code}`,
+                detail: `${diagnostic.path}: ${diagnostic.message}`,
+                life: 10000,
+            });
+        }
         return true;
     } catch (error: any) {
         console.error(error);

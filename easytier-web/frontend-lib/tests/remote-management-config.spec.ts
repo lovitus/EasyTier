@@ -7,6 +7,8 @@ import {
   type NetworkConfig,
 } from '../src/types/network'
 
+const { toastAdd } = vi.hoisted(() => ({ toastAdd: vi.fn() }))
+
 const BOOLEAN_CONFIG_FIELDS = [
   'dhcp',
   'enable_vpn_portal',
@@ -121,7 +123,7 @@ vi.mock('primevue', async () => {
     Select: SelectStub,
     Tag: PassThrough,
     useConfirm: () => ({ require: vi.fn() }),
-    useToast: () => ({ add: vi.fn() }),
+    useToast: () => ({ add: toastAdd }),
   }
 })
 
@@ -269,6 +271,7 @@ function setDocumentHidden(hidden: boolean) {
 }
 
 beforeEach(() => {
+  toastAdd.mockClear()
   vi.useRealTimers()
   hiddenState = false
   Object.defineProperty(document, 'hidden', {
@@ -308,7 +311,15 @@ describe('RemoteManagement config save', () => {
       run_network: vi.fn(),
       save_config: vi.fn(async () => undefined),
       update_network_instance_state: vi.fn(),
-      validate_config: vi.fn(async () => ({ toml_config: '' })),
+      validate_config: vi.fn(async () => ({
+        toml_config: '',
+        policy_diagnostics: [{
+          severity: 'warning',
+          code: 'rule.udp_fallthrough',
+          path: 'rules[0]',
+          message: 'UDP continues with the next rule',
+        }],
+      })),
     }
 
     const wrapper = mount(RemoteManagement, {
@@ -337,6 +348,10 @@ describe('RemoteManagement config save', () => {
 
       expect(api.validate_config).toHaveBeenCalledOnce()
       expect(api.save_config).toHaveBeenCalledOnce()
+      expect(toastAdd).toHaveBeenCalledWith(expect.objectContaining({
+        severity: 'warn',
+        summary: 'Policy rule.udp_fallthrough',
+      }))
       const savedConfig = api.save_config.mock.calls[0][0] as NetworkConfig
 
       for (const field of BOOLEAN_CONFIG_FIELDS) {

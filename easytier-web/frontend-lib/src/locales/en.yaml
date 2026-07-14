@@ -201,6 +201,45 @@ policy_config_inline_placeholder: "version: 1\nrules: [\"FINAL,DIRECT\"]"
 policy_outbound_interface: Physical outbound interface
 policy_outbound_interface_placeholder: "Required on Linux, for example eth0"
 policy_leaf_executable: Leaf worker executable
+policy:
+  editor:
+    title: Policy Proxy
+    source: Configuration source
+    inline: Visual / inline
+    file: External file
+    file_notice: External policy files are validated by the runtime. Switch to inline mode to use the visual editor.
+    yaml_error: Invalid policy YAML
+    edit_error: Invalid visual edit
+    nodes: Proxy nodes
+    groups: Chains and fallback groups
+    rules: Ordered rules
+    rule_sets: Geo rule data
+    advanced_yaml: Advanced YAML
+    name: Name
+    path: Path
+    server: Server
+    port: Port
+    credentials: Credentials
+    instance_id: Mesh instance ID (optional)
+    virtual_ip: Mesh virtual IP (optional)
+    group_type: Group type
+    members: Ordered members
+    members_hint: proxy-a,proxy-b,DIRECT
+    rule_type: Match type
+    rule_value: Match value
+    target: Target
+    any: Any traffic
+    rule_set_type: Data type
+    order_help: Rules are evaluated from top to bottom. A matching UDP rule whose target is TCP-only is skipped and evaluation continues.
+    add_node: Add proxy node
+    add_group: Add group
+    add_rule: Add rule
+    add_rule_set: Add geo data
+    presets: Presets
+    preset_china_direct: China direct / overseas preferred
+    preset_geo_required: Add one Geosite file and one MMDB file first
+    preset_global: Preferred target for all traffic
+    preset_direct: Direct all traffic
 
 enable_udp_broadcast_relay: UDP Broadcast Relay
 enable_udp_broadcast_relay_help: "Windows only: capture local UDP broadcast packets from physical interfaces and forward them to EasyTier peers. Helps games to find rooms in local network. Requires administrator privileges."

@@ -4,6 +4,7 @@ import { Md5 } from 'ts-md5';
 
 export interface ValidateConfigResponse {
     toml_config: string;
+    policy_diagnostics?: Api.ValidateConfigResponse['policy_diagnostics'];
 }
 
 export interface OidcConfigResponse {
