@@ -1,7 +1,7 @@
 # Leaf Optional Policy Proxy Integration TODO
 
-**Status**: Linux candidate validated; Android single-TUN candidate awaiting packaged build and real-device validation
-**Updated**: 2026-07-13
+**Status**: Linux candidate and automated test matrix validated; Android single-TUN candidate builds, with repeatable side-by-side device packaging pending validation
+**Updated**: 2026-07-14
 
 This TODO is the design source of truth. Update it after each material design
 discussion so implementation does not depend on chat history.
@@ -168,6 +168,16 @@ its host API does not yet carry policy default routes, underlying DNS, or
 network-generation callbacks. Enabling the Cargo feature there without that
 public host contract would expose a configuration that cannot recover after a
 network change.
+
+The rolling Android policy candidate is deliberately packaged as
+`com.kkrainbow.easytier.policycandidate`, signed by the repository's stable
+candidate key, and labelled `EasyTier Policy Candidate`. It can coexist with a
+maintainer's normal EasyTier installation and subsequent exact snapshots can
+upgrade it in place. This is a validation-only packaging boundary: ordinary
+debug and release builds keep `com.kkrainbow.easytier`. The workflow verifies
+both application ID and signing-certificate digest before publishing the APK.
+This replaces the previous unusable arrangement where every GitHub runner
+generated a different Android debug key for the production package ID.
 
 ## Android implementation evidence
 

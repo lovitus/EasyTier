@@ -51,6 +51,8 @@ jobs:
           cache-targets: false
 
       - name: Build debug APK
+        env:
+          ORG_GRADLE_PROJECT_easytierPolicyCandidate: 'true'
         run: |
           cd easytier-gui
           pnpm tauri android build --debug --apk --target aarch64 --split-per-abi
@@ -65,6 +67,10 @@ jobs:
             printf '%s\n' "${apks[@]}" >&2
             exit 1
           fi
+          badging="$($ANDROID_HOME/build-tools/34.0.0/aapt dump badging "${apks[0]}")"
+          grep -Fq "package: name='com.kkrainbow.easytier.policycandidate'" <<<"$badging"
+          signer="$($ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs "${apks[0]}")"
+          grep -Fq 'Signer #1 certificate SHA-256 digest: 589080507c25cc5f136f489ada340bce870df8c97db73c0691ec2a1f2eb9fecc' <<<"$signer"
           cp "${apks[0]}" artifacts/easytier-android-policy-candidate-aarch64.apk
           cat > artifacts/BUILD_INFO.txt <<EOF
           commit_sha=$GITHUB_SHA
@@ -72,6 +78,8 @@ jobs:
           workflow_run_attempt=$GITHUB_RUN_ATTEMPT
           target=aarch64-linux-android
           profile=debug
+          application_id=com.kkrainbow.easytier.policycandidate
+          signing_cert_sha256=589080507c25cc5f136f489ada340bce870df8c97db73c0691ec2a1f2eb9fecc
           EOF
           (cd artifacts && sha256sum easytier-android-policy-candidate-aarch64.apk BUILD_INFO.txt > SHA256SUMS.txt)
 

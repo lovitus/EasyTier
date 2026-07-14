@@ -15,6 +15,11 @@ val tauriProperties = Properties().apply {
     }
 }
 
+val policyCandidateBuild = providers.gradleProperty("easytierPolicyCandidate")
+    .orNull
+    ?.toBooleanStrictOrNull()
+    ?: false
+
 val versionPattern = Regex("""^(\d+)\.(\d+)\.(\d+)$""")
 
 val tauriVersionName = tauriProperties.getProperty("tauri.android.versionName")?.ifBlank { null } ?: run {
@@ -49,7 +54,16 @@ android {
     namespace = "com.kkrainbow.easytier"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "com.kkrainbow.easytier"
+        manifestPlaceholders["appName"] = if (policyCandidateBuild) {
+            "EasyTier Policy Candidate"
+        } else {
+            "easytier-gui"
+        }
+        applicationId = if (policyCandidateBuild) {
+            "com.kkrainbow.easytier.policycandidate"
+        } else {
+            "com.kkrainbow.easytier"
+        }
         minSdk = 24
         targetSdk = 34
         versionCode = tauriVersionCode
@@ -75,6 +89,11 @@ android {
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false
+            if (policyCandidateBuild) {
+                // The rolling candidate must be independently installable and use a stable
+                // signature so subsequent exact snapshots can upgrade it in place.
+                signingConfig = signingConfigs.getByName("release")
+            }
             packaging {                jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")
                 jniLibs.keepDebugSymbols.add("*/armeabi-v7a/*.so")
                 jniLibs.keepDebugSymbols.add("*/x86/*.so")
