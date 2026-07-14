@@ -72,6 +72,13 @@ jobs:
           EOF
           chmod 600 "$android_dir/keystore.properties"
 
+      - name: Run focused persisted-selection tests
+        run: |
+          pnpm --dir easytier-web/frontend-lib codegen:proto
+          pnpm --dir easytier-web/frontend-lib exec vitest run --config vitest.config.ts \
+            tests/gui-persisted-selection.spec.ts \
+            tests/remote-management-config.spec.ts
+
       - name: Build debug APK
         env:
           ORG_GRADLE_PROJECT_easytierPolicyCandidate: 'true'
@@ -132,17 +139,27 @@ jobs:
             exit 1
           fi
           probe_runner_badging="$("$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "${probe_runner_apks[0]}")"
-          grep -Fq "package: name='com.kkrainbow.easytier.policyprobe.test'" <<<"$probe_runner_badging"
-          grep -Fq 'com.kkrainbow.easytier.policyprobe.PolicyProbeInstrumentation' <<<"$probe_runner_badging"
-          grep -Fq "targetPackage='com.kkrainbow.easytier.policyprobe'" <<<"$probe_runner_badging"
           probe_runner_manifest="$("$ANDROID_HOME/build-tools/34.0.0/aapt" dump xmltree "${probe_runner_apks[0]}" AndroidManifest.xml)"
+          if ! grep -Fq "package: name='com.kkrainbow.easytier.policyprobe.test'" <<<"$probe_runner_badging" \
+            || ! grep -Fq 'E: instrumentation' <<<"$probe_runner_manifest" \
+            || ! grep -Eq 'A: android:name.*="com\.kkrainbow\.easytier\.policyprobe\.PolicyProbeInstrumentation"' <<<"$probe_runner_manifest" \
+            || ! grep -Eq 'A: android:targetPackage.*="com\.kkrainbow\.easytier\.policyprobe"' <<<"$probe_runner_manifest"; then
+            echo 'policy probe runner package or instrumentation metadata mismatch' >&2
+            printf '%s\n' '--- runner badging ---' "$probe_runner_badging" >&2
+            printf '%s\n' '--- runner manifest ---' "$probe_runner_manifest" >&2
+            exit 1
+          fi
           if grep -Eq 'E: (activity|activity-alias|service|receiver|provider)' <<<"$probe_runner_manifest"; then
             echo 'policy probe runner must contain only instrumentation code' >&2
             exit 1
           fi
           probe_runner_signer="$("$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "${probe_runner_apks[0]}")"
           probe_runner_signing_cert_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<<"$probe_runner_signer")"
-          test "$probe_runner_signing_cert_sha256" = "$probe_signing_cert_sha256"
+          if [[ "$probe_runner_signing_cert_sha256" != "$probe_signing_cert_sha256" ]]; then
+            echo 'policy probe target and runner signer digests differ' >&2
+            printf 'target=%s\nrunner=%s\n' "$probe_signing_cert_sha256" "$probe_runner_signing_cert_sha256" >&2
+            exit 1
+          fi
           cp "${probe_runner_apks[0]}" artifacts/easytier-android-policy-probe-runner-debug.apk
 
           cat > artifacts/BUILD_INFO.txt <<EOF

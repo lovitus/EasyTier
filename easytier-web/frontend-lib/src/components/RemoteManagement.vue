@@ -142,7 +142,9 @@ const updateInstanceList = () => {
         instanceList.value = newList;
     }
 }
-watch(listInstanceIdResponse, updateInstanceList, { deep: false });
+// Keep the object-valued Select model in sync before it can render an empty value
+// for a persisted string ID returned by the parent.
+watch(listInstanceIdResponse, updateInstanceList, { deep: false, flush: 'sync' });
 watch(networkMetaCache, updateInstanceList, { deep: true });
 watch(instanceList, async (newVal) => {
     if (newVal) {
@@ -160,6 +162,12 @@ const selectedInstanceId = computed({
         return instanceList.value.find((instance) => instance.uuid === instanceId.value);
     },
     set(value: any) {
+        // PrimeVue may emit an empty model while its async options are still loading.
+        // Preserve the external ID only for that initialization window; after the
+        // first list response, an explicit user clear remains authoritative.
+        if (!value && instanceId.value && listInstanceIdResponse.value === undefined) {
+            return;
+        }
         console.log("set instanceId", value);
         instanceId.value = value ? value.uuid : undefined;
     }

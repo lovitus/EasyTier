@@ -2140,3 +2140,22 @@ Validation snapshot: `cf405e8041dd58044dcdab96905ab283f57c3e97` on `codex/profil
 - A failed connection is returned as a valid observation with successful instrumentation completion; invalid arguments remain an instrumentation failure. This prevents an intentional `MATCH,REJECT` result from being confused with a broken runner.
 - The workflow builds and signs both target and runner in the same Gradle invocation, verifies package IDs and instrumentation target, rejects runtime components, requires matching debug signer digests, and includes both APKs in `SHA256SUMS.txt`.
 - Candidate B requires one additional authoritative Android build. Linux behavior is unchanged; the already successful `f57f5599` Linux artifact remains valid for that exact snapshot, while the next snapshot must still complete the normal rolling workflow before deployment.
+
+### `f57f5599` persisted-selection validation result: incomplete fix
+
+- The exact `f57f5599` candidate upgraded successfully with byte-identical preserved configuration, then cold-launched in 783 ms without silently creating `tun0`.
+- CDP still showed `No Network Selected`. The saved ID remained `c17a8c16-5016-4d09-a1c3-e97c6fddcaf5`, and the backend returned the same UUID in `disabled_inst_ids`; persistence and backend identity were not the failure.
+- The first fix initialized the parent ref early, but `RemoteManagement` maps that string to an object-valued PrimeVue Select model while `instanceList` initially remains empty. The Select can emit an empty model before the async list arrives, and the computed setter then clears the valid parent ID.
+- Corrected boundary: ignore only an empty Select write while `list_network_instance_ids` has not produced its first response, and update `instanceList` synchronously when that response arrives. Once the first response exists, explicit user clearing remains authoritative.
+- A component-level regression test manually reproduces the early empty Select emission, asserts no `update:instanceId` is emitted, resolves a disabled-instance response, and asserts the matching object becomes selected.
+- This frontend correction remains local until the instrumentation candidate workflow finishes, so any workflow fix and this UI fix can share one additional build snapshot.
+
+### `494f7be6` instrumentation build result: package gate failure
+
+- Linux profiling run `29363296275` succeeded for exact commit `494f7be6e5b1a83837b58f1b6670758a8bc82ab0`.
+- Android policy-candidate run `29363296221` completed both `Build debug APK` and `Build captured-UID policy probe`; the custom instrumentation therefore compiled successfully.
+- The run failed only in `Package exact candidate`. Three consecutive silent `aapt dump badging`/signer assertions made the exact mismatched field unobservable, so the failure must not be described as an instrumentation compile failure.
+- Replace the brittle runner class/target assertions against badging text with explicit `aapt dump xmltree` checks for the instrumentation element, fully qualified class, and target package. Package ID remains checked through badging. Any future mismatch prints both badging and manifest; signer mismatch prints both digests.
+- The known local TypeScript test annotation was corrected from invalid `typeof INSTANCE_UUID[]` syntax to `Array<typeof INSTANCE_UUID>` before submission.
+- Batch the workflow diagnostics and the RemoteManagement startup-race correction into the next exact candidate snapshot.
+- Run the helper and RemoteManagement regression specs before the expensive Android/Rust build in the same workflow, so a frontend regression fails fast without consuming a full candidate build.

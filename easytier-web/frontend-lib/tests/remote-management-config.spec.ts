@@ -285,6 +285,53 @@ afterEach(() => {
   hiddenState = false
 })
 
+describe('RemoteManagement persisted selection', () => {
+  it('ignores an empty Select update until async instance options are loaded', async () => {
+    vi.useFakeTimers()
+    const instanceResponse = deferred<{
+      disabled_inst_ids: Array<typeof INSTANCE_UUID>
+      running_inst_ids: Array<typeof INSTANCE_UUID>
+    }>()
+    const api = makeStatusApi(vi.fn(async () => undefined))
+    api.list_network_instance_ids = vi.fn(() => instanceResponse.promise)
+
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: true,
+        },
+      },
+    })
+
+    try {
+      const select = wrapper.findComponent({ name: 'Select' })
+      select.vm.$emit('update:modelValue', undefined)
+      await nextTick()
+
+      expect(wrapper.emitted('update:instanceId')).toBeUndefined()
+
+      vi.runOnlyPendingTimers()
+      instanceResponse.resolve({
+        disabled_inst_ids: [INSTANCE_UUID],
+        running_inst_ids: [],
+      })
+      await flushPromises()
+      await nextTick()
+
+      expect(select.props('modelValue')).toMatchObject({ uuid: INSTANCE_ID })
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('RemoteManagement config save', () => {
   it('saves the current network config without dropping boolean fields', async () => {
     const config = makeFlagConfig()
