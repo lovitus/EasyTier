@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      Test-only UID container. It intentionally has no Activity, Service, Receiver,
+      Provider, native library, or application code. Validation traffic is created
+      explicitly with `run-as com.kkrainbow.easytier.policyprobe ...`.
+    -->
+    <application
+        android:allowBackup="false"
+        android:hasCode="false"
+        android:label="EasyTier Policy Probe"
+        android:supportsRtl="false" />
+</manifest>

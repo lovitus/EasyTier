@@ -2009,3 +2009,119 @@ Do not merge production integration until all gates pass:
 - Rollback validation: exact full rollback `4740e08b614dc129ef68b144e56556f9112830a3` succeeded in Linux profiling run `29349772028` and Android policy-candidate run `29349772056`, proving the rolling branch returned to the previously buildable baseline before the corrected batch is republished.
 - Remote diagnostic evidence: the current corrected source was synced to `192.168.2.160` and `cargo test --no-run --locked --package easytier-policy --features leaf-inprocess` was attempted in GNU debug mode with all required preflight, timeout, and log-separation rules. The first attempt exited with timeout code `124` while only updating the pinned `https://github.com/lovitus/leaf.git` dependency because the SSH invocation omitted the required reverse forwarding of the maintainer's `127.0.0.1:7890` proxy. Rust compilation never started, so that attempt is not code validation evidence. The corrected diagnostic must use `-R 7890:127.0.0.1:7890`; GitHub remains authoritative for deployable candidates.
 - Corrected remote diagnostic: with `-o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890` on the same SSH command, `192.168.2.160` compiled `cargo test --no-run --locked --package easytier-policy --features leaf-inprocess` successfully in GNU debug mode in 1m38s. Direct execution of `/workspace/target/debug/deps/easytier_policy-9054d8d7e9b41fa3` passed `config_validation_timeout_is_bounded` and `validation_execution_failure_removes_private_config` independently (1 passed, 0 failed, 66 filtered out each; approximately 0.05s each). This validates the targeted lifecycle logic only; deployable Linux/Android evidence still comes from GitHub.
+
+## Candidate cf405e80 build and artifact handoff (2026-07-15)
+
+- Exact candidate: `cf405e8041dd58044dcdab96905ab283f57c3e97`.
+- GitHub build evidence: Linux profiling run `29352190049` succeeded; Android policy-candidate run `29352189979` succeeded. No macOS workflow was started.
+- Release metadata: `profiling-beta` targets the exact candidate. The Linux release asset reports size `116959214` and SHA-256 `d74d573b15ce4d26a384574aaf806ed31d08af2b29a793b369b639e7d14f1cd3`; release `SHA256SUMS.txt` reports the same digest. The Android artifact is `easytier-android-policy-candidate-aarch64-cf405e8041dd58044dcdab96905ab283f57c3e97`, artifact ID `8319127623`, reported size `31339676`.
+- Download safety finding: the first Linux release download produced only `2506031` bytes with SHA-256 `b9fb6b742c59f49eceeb054fd14db7f5db070d3fb813abed2d68a350fd082756`, so validation stopped before extraction. Subsequent release/API and Actions artifact attempts encountered very low single-stream throughput or TLS handshake timeouts; bounded retries were stopped. The Android download similarly did not produce an extracted file within the bounded window. No truncated or unverified file was extracted, deployed, or installed.
+- Builder capability finding: `192.168.2.160` successfully compiled and ran the targeted Rust lifecycle tests when the `7890` reverse forward was present, but its container has no Node/pnpm and the host has no `gh`; no tools were installed or container state changed to work around that boundary.
+- Validation state: code compilation and targeted lifecycle tests are green; deployable Linux artifact verification/deployment and Android APK verification/upgrade remain pending until the GitHub artifact download path is healthy. The previously validated `08b769b4` deployment remains untouched.
+- Download probe boundary: a bounded 1 MiB HTTP Range probe against the public Linux release asset, explicitly through `127.0.0.1:7890`, returned HTTP `000`, downloaded `0` bytes, and ended with `SSL connection timeout`. Parallel range download was therefore not started. Artifact handoff remains pending rather than weakening checksum or transport requirements.
+## Candidate `cf405e80` artifact and real-device validation
+
+Validation snapshot: `cf405e8041dd58044dcdab96905ab283f57c3e97` on `codex/profiling-beta`.
+
+### Authoritative workflow results
+
+- Linux profiling workflow run `29352190049`: success.
+- Android policy-candidate workflow run `29352189979`: success.
+- No macOS workflow was run; the current validation scope remains Linux and Android.
+- The remote builder was used only for targeted GNU debug diagnostics. The deployable Linux and Android artifacts below came from GitHub workflows.
+
+### Remote-builder diagnostic
+
+- The first dependency-fetch attempt omitted the required reverse proxy and timed out; this was an operator error and is not validation evidence.
+- The corrected SSH command used `-o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890` in the same connection as the container command.
+- `cargo test --no-run --locked --package easytier-policy --features leaf-inprocess` completed successfully in GNU debug mode with all cores, incremental compilation, and the required timeout.
+- Test binary: `/workspace/target/debug/deps/easytier_policy-9054d8d7e9b41fa3`.
+- Direct execution of `config_validation_timeout_is_bounded` and `validation_execution_failure_removes_private_config` passed independently: one test passed in each invocation.
+
+### Linux artifact acquisition and integrity
+
+- GitHub's CDN repeatedly produced slow or truncated whole-file transfers. A truncated `2,506,031` byte download with SHA-256 `b9fb...2756` was rejected before extraction or deployment.
+- A bounded 1 MiB HTTP Range probe through local proxy port `7890` returned `206 Partial Content` with the expected total size. The artifact was then downloaded as 16 fixed, disjoint ranges; every range length was checked before assembly.
+- Artifact: `easytier-profiling-beta-linux-x86_64-musl.tar.gz`.
+- Exact size: `116,959,214` bytes.
+- Outer SHA-256: `d74d573b15ce4d26a384574aaf806ed31d08af2b29a793b369b639e7d14f1cd3`, matching both release metadata and `SHA256SUMS.txt`.
+- `BUILD_INFO.txt` records commit `cf405e8041dd58044dcdab96905ab283f57c3e97`, ref `codex/profiling-beta`, run `29352190049`, run number `120`, target `x86_64-unknown-linux-musl`, and Rust/Cargo `1.95`.
+- Internal SHA-256 values matched: core `86431a5e11078c4a9d25bf7c6dc41039d139f6015dabaff7fe96ac367df80f4e`, CLI `27b4381a764be2f4a14cbfc7d2b5cdf7bac1c65bf83999dfede12cdd782b8b93`, Leaf worker `550559e24d9ce64736e17229f66122ab74ed70f9627e270a208989dba965a5ae`.
+- Local ELF inspection identifies x86-64 static PIE binaries with debug information and symbol tables. Build IDs are core `577a3aa1018f40d27fa6c4a27560f46bc44cdc21`, CLI `c83d0ef6ac82d64551ffebee1c4bc0ec5b420f2d`, and Leaf worker `698218fef6acc3860a92526ccef8261e0218beea`.
+
+### Linux isolated-host deployment
+
+- The exact verified archive was copied with a temporary `.part` name to `192.168.2.160`, `192.168.1.37`, and `192.168.1.38` in parallel.
+- Each host verified the outer SHA-256 before rename and extraction into the isolated path `/tmp/easytier-policy-cf405e80`.
+- Each host independently matched all three internal binary hashes and the exact commit, workflow run, and musl target in `BUILD_INFO.txt`.
+- `easytier-core --version` returned `easytier-core 2.6.10-cf405e80` on all three hosts.
+- No EasyTier service was started and no production process was modified. The old CentOS `file` utility describes the PIE as dynamically linked; this conflicts with authoritative local ELF inspection, while the exact musl artifact executes successfully on those hosts.
+
+### Android artifact integrity and upgrade
+
+- Artifact name: `easytier-android-policy-candidate-aarch64-cf405e8041dd58044dcdab96905ab283f57c3e97`.
+- The ZIP was downloaded in 16 checked fixed ranges after a successful 1 MiB `206 Partial Content` probe.
+- ZIP size: `31,339,676` bytes; all ZIP CRC checks passed.
+- `BUILD_INFO.txt` records the exact candidate commit, workflow run `29352189979`, target `aarch64-linux-android`, debug profile, application ID `com.kkrainbow.easytier.policycandidate`, and the expected signing certificate.
+- APK size: `87,971,123` bytes; SHA-256 `053a5dbf0fbb3ab6df024af990fdf9c1bcb056d4f31e2ba04023b18e79185a4f`.
+- `apksigner` verified APK Signature Scheme v2, one RSA-3072 signer, and certificate SHA-256 `14d2d885...c38e0` matching `BUILD_INFO.txt`.
+- Before upgrade, the installed candidate was running with `tun0` at `10.245.0.2/24`. Its configuration was backed up to `pre-upgrade-config.tar` with SHA-256 `a4cdf66848dbdf04b5648b014e2f9d7a31af4627bb4cbfd44e314d496f4b0b6d`.
+- After upgrade, the on-device APK hash exactly matched the downloaded candidate; first-install time was preserved, last-update time changed, the old process stopped, and `tun0` was removed.
+- The post-install, pre-launch configuration archive was byte-for-byte identical to the backup. Android reported `revoked_by_system=false`.
+- Cold launch used the package-manager-resolved component `com.kkrainbow.easytier.policycandidate/com.kkrainbow.easytier.MainActivity` and completed in 764 ms. Launch created only the activity/WebView and foreground service: it did not silently reclaim the VPN or create `tun0`.
+
+### Android static bootstrap and mesh evidence
+
+- Preserved WebView local storage contained `app_mode`, `lang`, `last_network_instance_id`, and `networkList`, including the non-DHCP `10.245.0.2/24` instance and its policy rules.
+- Tauri command inspection established that `run_network_instance` requires `{ cfg, save }`. Calls using incorrect argument shapes failed at argument validation and did not start the network.
+- Calling `run_network_instance` with the preserved configuration and `save:false` succeeded without a manual `start_vpn` call.
+- Timing from logs: post-run event at `02:46:34.025`, non-DHCP configuration loaded at `.036`, virtual IP updated at `.037`, VPN start requested at `.038`, Android plugin `startVpn` entered at `.042`, start response at `.191`, and FD/network event at `.197`. The static bootstrap therefore begins VPN setup approximately 13 ms after the event/config path and no longer waits for runtime status aggregation.
+- `tun0` was automatically created as `10.245.0.2/24`. Plugin status reported `running=true`, IPv4 `10.245.0.2/24`, routes `0.0.0.0/0` and `::/0`, and `revokedBySystem=false`.
+- Overlay connectivity passed in both directions: Android to `10.245.0.1` was 5/5 with 0% loss and 16.373 ms average; `192.168.1.37` to Android `10.245.0.2` was 5/5 with 0% loss and 83.107 ms average.
+
+### Known limitations and deferred follow-up
+
+- ADB-shell pings to public addresses succeeded, but the shell UID bypasses the application VPN. These results are explicitly invalid as policy-routing evidence and must not be cited as a Leaf policy pass or failure. A future policy validation must originate traffic from an app UID captured by the VPN or use a controlled in-app probe.
+- The DOM still displayed `No Network Selected` despite a valid preserved `last_network_instance_id` and a successfully running instance. This is a frontend state-restoration defect, not a core/VPN startup failure. It is deferred to the next frontend batch to avoid forcing another full artifact build after the current safety batch passed.
+- The single final Android screenshot was entirely black. Because semantic WebView inspection, process state, plugin status, logs, and network checks remained available, the screenshot is recorded as inconclusive visual evidence rather than a UI pass or failure. No simulated click was used.
+- The external Leaf validation timeout and cleanup behavior has direct targeted-test evidence. End-to-end policy routing from an Android application UID remains pending.
+
+#### Android application-UID probe investigation
+
+- `TauriVpnService.createVpnInterface` adds every configured disallowed package plus its own `packageName` through `Builder.addDisallowedApplication`. Android's active VPN record independently confirms owner UID `10254` is excluded while ordinary application UIDs are captured. Consequently, `run-as com.kkrainbow.easytier.policycandidate` would bypass the VPN and is not valid policy evidence.
+- The active VPN UID ranges were `{0-10251, 10253, 10255-20251, 20253, 20255-99999}`. Via browser UID `10207` and Termux UID `10229` are therefore included; owner/profile UIDs `10254` and `20254` are excluded as expected.
+- Termux is not debuggable. Its exported `RunCommandService` requires the dangerous `com.termux.permission.RUN_COMMAND` permission, which ADB shell does not hold. The service correctly rejected the invocation; no probe ran.
+- The first Via automation command also did not run because an ADB command plus arguments was incorrectly stored as one zsh scalar. This was an operator-script error and produced no device or product result.
+- Corrected Via launches used an independent captured UID and no coordinate click. However, the device was PIN-locked: both activities remained `isSleeping=true`, and UI hierarchy contained only SystemUI/keyguard nodes. `wm dismiss-keyguard` could not bypass the PIN. These launches are inconclusive and are not policy evidence.
+- A non-destructive root-shell check returned `Permission denied`, so root cannot safely broker the protected Termux command service. No attempt was made to grant undeclared permissions, bypass the lock screen, or guess user credentials.
+- Completing this evidence requires one of: an unlocked device for semantic browser inspection, a dedicated signed probe APK whose UID is included in the VPN, or a pre-authorized command runner such as a configured Tasker/Termux integration. Until then, `GEOIP,CN,DIRECT,no-resolve` versus `MATCH,REJECT` remains unverified on Android application traffic.
+
+## Persisted selection and captured-UID probe batch
+
+### Runtime evidence and frontend boundary
+
+- Android WebView CDP showed `last_network_instance_id=c17a8c16-5016-4d09-a1c3-e97c6fddcaf5`, the same ID in the persisted `networkList`, and an empty selection control displaying `No Network Selected`.
+- Direct Tauri invocation of `list_network_instance_ids` returned UUID words `3246033942`, `1343638793`, `2713971068`, and `1876806389`, which encode the same `c17a8c16-5016-4d09-a1c3-e97c6fddcaf5` value. The backend and persisted configuration therefore agree; the missing selection is a GUI initialization defect.
+- `easytier-gui/src/pages/index.vue` initialized `instanceId` as undefined and restored it only on a later `clientRunning` false-to-true transition. Cold startup can mount `RemoteManagement` while the client is already running, so that transition is not a reliable initialization mechanism.
+- The fix resolves the normalized persisted ID synchronously when the ref is created, before `RemoteManagement` mounts. Existing transition-based restoration remains as reconnect fallback. No Leaf, policy, RPC, or VpnService lifecycle semantics are changed.
+
+### Reference test semantics
+
+- Mihomo `/Users/fanli/Documents/mihomo-rev/test/util.go::TCPing` creates an external client socket with bounded retry and closes it immediately after success.
+- Mihomo `/Users/fanli/Documents/mihomo-rev/test/clash_test.go::testPingPongWithSocksPort` separates the client socket, proxy handshake, controlled server, and bidirectional payload assertions. Externally observable semantics: traffic evidence comes from an independent client and a controlled result, not from the proxy core's own outbound request.
+- Neither the local Mihomo tree nor `/Users/fanli/Documents/singbox-withfallback` contains an Android VpnService application-UID fixture. Sing-box tests similarly construct explicit client dialers and assert concrete connection outcomes, for example `/Users/fanli/Documents/singbox-withfallback/test/shadowtls_test.go`.
+
+### EasyTier test-infrastructure difference
+
+- Android routes VPN traffic by application UID, while EasyTier's VpnService intentionally excludes the candidate application's own UID. A test command under ADB shell or the candidate UID is therefore outside the policy data plane even if its target is reachable.
+- The new `policy-probe` Gradle module is a test-only empty APK with application ID `com.kkrainbow.easytier.policyprobe`, `INTERNET`, `debuggable=true`, and no Activity, Service, Receiver, Provider, native library, or application code.
+- Validation installs the exact probe artifact and invokes a bounded socket command with `run-as com.kkrainbow.easytier.policyprobe ...`. The process then uses an independent UID included in the active VPN range without adding production code or a persistent attack surface.
+- The Android policy-candidate workflow builds and verifies both APKs in one run. It rejects a wrong package ID, non-debuggable probe, launchable activity, runtime component, missing INTERNET permission, missing signer digest, or incomplete checksums.
+- This is not a Mihomo/sing-box compatibility claim. It adapts their independent-client and bounded-observation test semantics to Android's UID-routed VpnService boundary.
+
+### Pending validation for this batch
+
+- Run the focused persisted-selection Vitest in the existing frontend-lib harness.
+- Let the authoritative Android policy-candidate workflow build both APKs and verify `BUILD_INFO.txt`, signer metadata, package IDs, manifest boundary, and checksums.
+- Upgrade the candidate on `192.168.234.227:5555`, verify the selection is restored before interaction, install the exact probe APK, confirm its UID is captured, and test controlled DIRECT and REJECT targets with bounded `run-as` commands.
+- Remove the probe APK after evidence collection. Do not use screenshots until final visual confirmation.

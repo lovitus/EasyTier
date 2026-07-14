@@ -1,3 +1,4 @@
 include ':app'
+include ':policy-probe'
 
 apply from: 'tauri.settings.gradle'

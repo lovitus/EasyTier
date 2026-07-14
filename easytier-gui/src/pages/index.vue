@@ -14,7 +14,11 @@ import { GUIRemoteClient } from '~/modules/api'
 
 import { useToast, useConfirm } from 'primevue'
 import { loadMode, saveMode, WebClientConfig, type Mode } from '~/composables/mode'
-import { saveLastNetworkInstanceId, loadLastNetworkInstanceId } from '~/composables/config'
+import {
+  loadInitialNetworkInstanceId,
+  loadLastNetworkInstanceId,
+  saveLastNetworkInstanceId,
+} from '~/composables/config'
 import ModeSwitcher from '~/components/ModeSwitcher.vue'
 import { getEasytierVersion, getServiceStatus } from '~/composables/backend'
 
@@ -232,7 +236,9 @@ useTray(true)
 let toast = useToast();
 
 const remoteClient = new GUIRemoteClient();
-const instanceId = ref<string | undefined>(undefined);
+// Restore before RemoteManagement mounts. A client that is already running may never
+// produce the false -> true transition used by the reconnect fallback below.
+const instanceId = ref<string | undefined>(loadInitialNetworkInstanceId());
 const clientRunning = ref(false);
 
 watch(instanceId, (newVal) => {
