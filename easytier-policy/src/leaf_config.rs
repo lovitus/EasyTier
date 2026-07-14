@@ -200,6 +200,18 @@ struct CompiledLeafRule {
     target: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleMergeFamily {
+    Domain,
+    Ip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuleMergeKey {
+    family: RuleMergeFamily,
+    no_resolve: bool,
+}
+
 fn compile_leaf_rules(
     revision: &PolicyRevision,
     base_dir: &Path,
@@ -235,6 +247,7 @@ fn compile_leaf_rules(
         BTreeMap::new()
     };
     let mut compiled = Vec::with_capacity(document.rules.len());
+    let mut last_merge_key = None;
     let mut compiled_geoip_cidrs = 0usize;
     for (index, source) in document.rules.iter().enumerate() {
         let parts: Vec<&str> = source.split(',').map(str::trim).collect();
@@ -244,17 +257,31 @@ fn compile_leaf_rules(
             .is_some_and(|part| part.eq_ignore_ascii_case("no-resolve"));
         let target = parts[parts.len() - 1 - usize::from(has_no_resolve)].to_owned();
         let mut rule = empty_leaf_rule(target.clone());
+        let mut merge_family = None;
 
         match rule_type.as_str() {
-            "IP-CIDR" => rule.ip = Some(vec![parts[1].to_owned()]),
-            "DOMAIN" => rule.domain = Some(vec![parts[1].to_owned()]),
-            "DOMAIN-SUFFIX" => rule.domain_suffix = Some(vec![parts[1].to_owned()]),
-            "DOMAIN-KEYWORD" => rule.domain_keyword = Some(vec![parts[1].to_owned()]),
+            "IP-CIDR" => {
+                rule.ip = Some(vec![parts[1].to_owned()]);
+                merge_family = Some(RuleMergeFamily::Ip);
+            }
+            "DOMAIN" => {
+                rule.domain = Some(vec![parts[1].to_owned()]);
+                merge_family = Some(RuleMergeFamily::Domain);
+            }
+            "DOMAIN-SUFFIX" => {
+                rule.domain_suffix = Some(vec![parts[1].to_owned()]);
+                merge_family = Some(RuleMergeFamily::Domain);
+            }
+            "DOMAIN-KEYWORD" => {
+                rule.domain_keyword = Some(vec![parts[1].to_owned()]);
+                merge_family = Some(RuleMergeFamily::Domain);
+            }
             "GEOIP" => {
                 compiled_geoip_cidrs = reserve_geoip_cidrs(
                     compiled_geoip_cidrs,
                     apply_geoip_rule(&mut rule, parts[1], &geoip_categories)?,
                 )?;
+                merge_family = Some(RuleMergeFamily::Ip);
             }
             "COUNTRY" => {
                 let rule_set = find_single_rule_set(document.rule_sets.values(), RuleSetKind::Mmdb)
@@ -273,6 +300,7 @@ fn compile_leaf_rules(
                         },
                     )?;
                 rule.external = Some(vec![external_rule("site", rule_set, parts[1], base_dir)?]);
+                merge_family = Some(RuleMergeFamily::Domain);
             }
             "EXTERNAL" => {
                 let (kind, code) = parts[1].split_once(':').unwrap_or(("site", parts[1]));
@@ -286,6 +314,7 @@ fn compile_leaf_rules(
                                 })?;
                         rule.external =
                             Some(vec![external_rule("site", rule_set, code, base_dir)?]);
+                        merge_family = Some(RuleMergeFamily::Domain);
                     }
                     "mmdb" => {
                         let rule_set =
@@ -302,6 +331,7 @@ fn compile_leaf_rules(
                             compiled_geoip_cidrs,
                             apply_geoip_rule(&mut rule, code, &geoip_categories)?,
                         )?;
+                        merge_family = Some(RuleMergeFamily::Ip);
                     }
                     _ => {
                         return Err(LeafConfigError::MissingRuleSet {
@@ -339,9 +369,89 @@ fn compile_leaf_rules(
                 None => rule.network = Some(vec!["tcp".to_owned()]),
             }
         }
-        compiled.push(rule);
+        push_compiled_rule(
+            &mut compiled,
+            &mut last_merge_key,
+            rule,
+            merge_family.map(|family| RuleMergeKey {
+                family,
+                no_resolve: has_no_resolve,
+            }),
+        );
     }
     Ok(compiled)
+}
+
+fn push_compiled_rule(
+    compiled: &mut Vec<CompiledLeafRule>,
+    last_merge_key: &mut Option<RuleMergeKey>,
+    rule: CompiledLeafRule,
+    merge_key: Option<RuleMergeKey>,
+) {
+    if let Some(merge_key) = merge_key
+        && *last_merge_key == Some(merge_key)
+        && let Some(previous) = compiled.last_mut()
+        && previous.target == rule.target
+        && previous.network == rule.network
+        && can_merge_rule_values(previous, &rule, merge_key)
+    {
+        merge_rule_values(previous, rule, merge_key);
+        return;
+    }
+
+    compiled.push(rule);
+    *last_merge_key = merge_key;
+}
+
+fn can_merge_rule_values(
+    previous: &CompiledLeafRule,
+    next: &CompiledLeafRule,
+    key: RuleMergeKey,
+) -> bool {
+    if previous.port_range.is_some()
+        || previous.inbound_tag.is_some()
+        || next.port_range.is_some()
+        || next.inbound_tag.is_some()
+    {
+        return false;
+    }
+
+    match key.family {
+        RuleMergeFamily::Domain => previous.ip.is_none() && next.ip.is_none(),
+        RuleMergeFamily::Ip => {
+            previous.domain.is_none()
+                && previous.domain_keyword.is_none()
+                && previous.domain_suffix.is_none()
+                && previous.external.is_none()
+                && next.domain.is_none()
+                && next.domain_keyword.is_none()
+                && next.domain_suffix.is_none()
+                && next.external.is_none()
+        }
+    }
+}
+
+fn merge_rule_values(
+    previous: &mut CompiledLeafRule,
+    mut next: CompiledLeafRule,
+    key: RuleMergeKey,
+) {
+    match key.family {
+        RuleMergeFamily::Domain => {
+            append_rule_values(&mut previous.domain, next.domain.take());
+            append_rule_values(&mut previous.domain_keyword, next.domain_keyword.take());
+            append_rule_values(&mut previous.domain_suffix, next.domain_suffix.take());
+            append_rule_values(&mut previous.external, next.external.take());
+        }
+        RuleMergeFamily::Ip => append_rule_values(&mut previous.ip, next.ip.take()),
+    }
+}
+
+fn append_rule_values(destination: &mut Option<Vec<String>>, source: Option<Vec<String>>) {
+    let Some(mut source) = source else {
+        return;
+    };
+    destination.get_or_insert_with(Vec::new).append(&mut source);
 }
 
 fn apply_geoip_rule(
@@ -471,6 +581,22 @@ mod tests {
         }
     }
 
+    fn compiled_rules(source: &str) -> Vec<serde_json::Value> {
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        let config = compile_leaf_config(
+            &revision,
+            7,
+            Path::new("."),
+            &Unresolved,
+            &["1.1.1.1".parse().unwrap()],
+        )
+        .unwrap();
+        serde_json::from_str::<serde_json::Value>(&config).unwrap()["router"]["rules"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+
     #[test]
     fn compiles_stable_yaml_to_strict_leaf_config() {
         let dir = tempfile::tempdir().unwrap();
@@ -561,13 +687,115 @@ rules:
         .unwrap();
         let config: serde_json::Value = serde_json::from_str(&config).unwrap();
         let rules = config["router"]["rules"].as_array().unwrap();
-        assert_eq!(rules[0]["ip"], serde_json::json!(["8.8.8.0/24"]));
+        assert_eq!(rules.len(), 2);
         assert!(
-            rules[1]["ip"]
+            rules[0]["ip"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("8.8.8.0/24"))
+        );
+        assert!(
+            rules[0]["ip"]
                 .as_array()
                 .unwrap()
                 .contains(&serde_json::json!("10.0.0.0/8"))
         );
+    }
+
+    #[test]
+    fn compacts_contiguous_domain_rules_with_the_same_target() {
+        let rules = compiled_rules(
+            r#"
+version: 1
+rules:
+  - DOMAIN,exact.example,DIRECT
+  - DOMAIN-SUFFIX,suffix.example,DIRECT
+  - DOMAIN-KEYWORD,keyword,DIRECT
+  - MATCH,REJECT
+"#,
+        );
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0]["target"], "DIRECT");
+        assert_eq!(rules[0]["domain"], serde_json::json!(["exact.example"]));
+        assert_eq!(
+            rules[0]["domainSuffix"],
+            serde_json::json!(["suffix.example"])
+        );
+        assert_eq!(rules[0]["domainKeyword"], serde_json::json!(["keyword"]));
+    }
+
+    #[test]
+    fn compacts_contiguous_geosite_categories_with_the_same_target() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("geosite.dat"), b"fixture").unwrap();
+        let source = r#"
+version: 1
+rule-sets:
+  geosite: { type: geosite, path: geosite.dat }
+proxies:
+  overseas:
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    udp: true
+rules:
+  - GEOSITE,github,overseas
+  - GEOSITE,google,overseas
+  - MATCH,DIRECT
+"#;
+        let revision = PolicyRevision::parse(source, directory.path()).unwrap();
+        let config = compile_leaf_config(
+            &revision,
+            7,
+            directory.path(),
+            &Unresolved,
+            &["1.1.1.1".parse().unwrap()],
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        let rules = config["router"]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0]["target"], "overseas");
+        assert_eq!(rules[0]["external"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn preserves_target_family_and_modifier_boundaries() {
+        let rules = compiled_rules(
+            r#"
+version: 1
+rules:
+  - DOMAIN,a.example,DIRECT
+  - DOMAIN-SUFFIX,b.example,DIRECT
+  - DOMAIN,c.example,REJECT
+  - DOMAIN,d.example,DIRECT
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT
+  - MATCH,REJECT
+"#,
+        );
+        assert_eq!(rules.len(), 6);
+        assert_eq!(rules[0]["target"], "DIRECT");
+        assert_eq!(rules[1]["target"], "REJECT");
+        assert_eq!(rules[2]["target"], "DIRECT");
+        assert_eq!(rules[3]["ip"], serde_json::json!(["10.0.0.0/8"]));
+        assert_eq!(rules[4]["ip"], serde_json::json!(["192.168.0.0/16"]));
+        assert_eq!(rules[5]["target"], "REJECT");
+    }
+
+    #[test]
+    fn compacts_large_same_target_rule_blocks() {
+        let mut source = String::from("version: 1\nrules:\n");
+        for index in 0..5_000 {
+            source.push_str(&format!(
+                "  - DOMAIN-SUFFIX,nonmatch-{index:05}.invalid,DIRECT\n"
+            ));
+        }
+        source.push_str("  - MATCH,REJECT\n");
+
+        let rules = compiled_rules(&source);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0]["domainSuffix"].as_array().unwrap().len(), 5_000);
     }
 
     #[test]
