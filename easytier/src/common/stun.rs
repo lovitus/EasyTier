@@ -815,6 +815,7 @@ impl TcpStunClient {
 
         socket2_socket.set_nonblocking(true)?;
         socket2_socket.set_reuse_address(true)?;
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
         if let Some(mark) = self.socket_mark {
             socket2_socket.set_mark(mark)?;
         }

@@ -51,6 +51,45 @@ unsafe generic implementation.
 This TODO is the design source of truth. Update it after each material design
 discussion so implementation does not depend on chat history.
 
+## Active implementation ledger
+
+Status may move to `done` only with the evidence named in the last column.
+Implementation without a matching build or real-device result remains
+`validation-pending`. New findings must receive an ID here before code changes
+start, so parallel platform work cannot disappear into chat history.
+
+| ID | Status | Scope | Required evidence / current blocker |
+| --- | --- | --- | --- |
+| BUILD-075 | failed | Exact candidate `075d3cdf`: Linux profiling, Android debug APK, macOS ARM64 DMG, full Test | Android run `29310466513` passed, but macOS run `29310489240` exposed the `MAC-COMPILE` blockers; Linux/Test results remain useful evidence but this SHA cannot be promoted |
+| BUILD-CACHE | pending | Candidate build latency | GUI workflows currently set `rust-cache cache-targets: false`; evaluate target-specific cache keys, restore hit rate and cache size after functional validation without changing artifact profiles |
+| MAC-COMPILE | in-progress | macOS policy-enabled build exposed Linux-only socket marking and an undeclared libc path | Gate TCP STUN `SO_MARK` exactly like the existing UDP/helper path, use the existing `nix::libc` dependency, scan the policy-enabled macOS surface, then require a successful ARM64 DMG build |
+| AND-VPN-OWN | validation-pending | Native persisted system-revoke marker; background restart must not reclaim VPN ownership | Real Android: first authorization, ordinary stop/start without another prompt, competing VPN revoke, background restart refusal, explicit Run recovery |
+| AND-DHCP | validation-pending | DHCP mode must not serialize an undefined virtual IP | Candidate import/start with DHCP and no explicit IPv4; no WebView exception and mesh obtains an address |
+| DESK-RELOAD | validation-pending | Transactional source-file hot reload and bounded restart | Valid edit publishes a ready candidate; malformed edit retains old revision; worker kill follows 1/2/5-second budget; no bridge/task/FD growth |
+| MAC-UTUN | validation-pending | Traditional macOS utun transparent adapter and packaged Leaf sidecar | DMG contains signed/runnable sidecar; v4/v6 split routes install, DIRECT and proxy paths work, normal stop reverses exact owned routes |
+| MAC-ORPHAN | validation-pending | macOS parent-PID watchdog | Forced GUI/core termination removes worker within two seconds and leaves no policy route, temp config, session, or repeated respawn |
+| LNX-POLICY | validation-pending | Linux policy routing, source/mark bypass, route refresh and fail-closed behavior | Isolated namespace/container tests plus physical-host mesh regression; underlay change refreshes without recursion |
+| POLICY-GEO-DNS | validation-pending | Ordered GEOIP/GEOSITE/Country and manual resource updates | Valid and damaged data, checksum/size limits, first-match semantics, no-resolve behavior, DNS cache/reload evidence |
+| POLICY-CHAIN | validation-pending | DIRECT, SOCKS, mesh actor, chain and passive fallback | TCP and UDP matrices including final non-mesh SOCKS, actor failure, outage/restore hysteresis and bounded retry |
+| POLICY-KCP-UOT | validation-pending | Existing KCP-preferred mesh data plane and private UoT fallback | KCP available/unavailable/mixed-version tests; UDP throughput/loss; KCP state, target sockets, FDs and tasks return to baseline |
+| POLICY-PERF | validation-pending | Disabled-mode overhead and enabled-mode CPU/memory/latency | Profiling comparison against the validated pre-policy binary on the same hosts and traffic traces |
+| WIN-ADAPTER | blocked | Windows transparent adapter | Leaf cannot bind an interface on Windows and no verified Wintun/WFP bypass adapter exists; remain compile/runtime gated |
+| MAC-NE | blocked | macOS Network Extension adapter | NE owns route/socket protection differently; traditional utun implementation must not be enabled in `macos-ne` builds |
+| SPLIT-DNS | known-limitation | Magic DNS and Leaf domain/GEOSITE visibility | Current design keeps Magic DNS on mesh, so Leaf cannot observe those query names; requires a dedicated split-DNS adapter |
+| DEP-RELOAD | known-limitation | Rule-data-only file changes | Source YAML digest drives reload; managed GUI updates the source reference and requests save/restart, but an externally replaced dependency alone is not hashed every five seconds |
+| HTTP-ACTOR | unsupported | HTTP CONNECT actor | Pinned Leaf build has no outbound HTTP actor; reject rather than advertise a false fallback capability |
+
+Workflow for every ledger item:
+
+1. record the finding and acceptance evidence in this table;
+2. implement a bounded module behind the existing opt-in feature/platform gate;
+3. format and statically review the whole batch before one candidate push;
+4. build the exact commit through the relevant GitHub workflows;
+5. validate the same artifact under normal, failure, recovery and resource-load
+   conditions;
+6. mark `done` only after attaching run IDs, artifact hashes and real-device
+   results; otherwise keep it pending or revert the failed candidate commit.
+
 ## Current implementation snapshot
 
 The current implementation is opt-in behind `leaf-policy-proxy`; Android adds

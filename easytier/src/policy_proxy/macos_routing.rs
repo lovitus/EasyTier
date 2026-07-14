@@ -3,6 +3,8 @@ use std::{
     process::{Command, Output},
 };
 
+use nix::libc;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RouteSpec {
     family: RouteFamily,
