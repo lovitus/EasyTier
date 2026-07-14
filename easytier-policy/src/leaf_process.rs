@@ -12,8 +12,8 @@ use std::{
 use tokio::process::{Child, Command};
 
 use crate::{
-    LeafPacketBridge, MeshServerResolver, PolicyRevision, PolicyRuntime, PolicyRuntimeFactory,
-    compile_leaf_config,
+    LeafPacketBridge, MeshServerResolver, PolicyRevision, PolicyRuntime, PolicyRuntimeBuildFuture,
+    PolicyRuntimeFactory, compile_leaf_config,
 };
 
 const LEAF_TUN_FD: RawFd = 3;
@@ -278,10 +278,7 @@ impl PolicyRuntime for LeafProcessRuntime {
 }
 
 impl PolicyRuntimeFactory for LeafProcessFactory {
-    fn build(
-        &self,
-        revision: Arc<PolicyRevision>,
-    ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn PolicyRuntime>, String>> + Send>> {
+    fn build(&self, revision: Arc<PolicyRevision>) -> PolicyRuntimeBuildFuture {
         let executable = self.executable.clone();
         let base_dir = self.base_dir.clone();
         let outbound_interface = self.outbound_interface.clone();

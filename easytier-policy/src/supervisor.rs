@@ -24,11 +24,11 @@ pub trait PolicyRuntime: Send + Sync {
     fn shutdown(self: Arc<Self>) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 }
 
+pub type PolicyRuntimeBuildFuture =
+    Pin<Box<dyn Future<Output = Result<Arc<dyn PolicyRuntime>, String>> + Send>>;
+
 pub trait PolicyRuntimeFactory: Send + Sync {
-    fn build(
-        &self,
-        revision: Arc<PolicyRevision>,
-    ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn PolicyRuntime>, String>> + Send>>;
+    fn build(&self, revision: Arc<PolicyRevision>) -> PolicyRuntimeBuildFuture;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,10 +315,7 @@ mod tests {
     struct Factory(bool);
 
     impl PolicyRuntimeFactory for Factory {
-        fn build(
-            &self,
-            revision: Arc<PolicyRevision>,
-        ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn PolicyRuntime>, String>> + Send>> {
+        fn build(&self, revision: Arc<PolicyRevision>) -> PolicyRuntimeBuildFuture {
             let succeeds = self.0;
             Box::pin(async move {
                 if succeeds {

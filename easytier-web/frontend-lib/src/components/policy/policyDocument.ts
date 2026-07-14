@@ -195,6 +195,9 @@ function compact<T extends UnknownMap>(value: T): T {
 function reserveName(target: UnknownMap, rawName: string, path: string): string {
   const name = rawName.trim()
   if (!name) throw new Error(`${path} name must not be empty`)
+  if (['__proto__', 'constructor', 'prototype'].includes(name)) {
+    throw new Error(`${path} name ${name} is reserved`)
+  }
   if (Object.prototype.hasOwnProperty.call(target, name)) {
     throw new Error(`${path} name ${name} is duplicated`)
   }

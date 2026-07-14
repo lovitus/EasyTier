@@ -33,6 +33,7 @@ pub use preflight::{
     preflight_policy_file, preflight_policy_source, report_for_policy_revision,
 };
 pub use supervisor::{
-    ApplyResult, HealthEvent, PolicyRuntime, PolicyRuntimeFactory, PolicyStatus, PolicySupervisor,
-    RetryDecision, RetryPolicy, RuntimeRestartBudget, RuntimeRestartDecision,
+    ApplyResult, HealthEvent, PolicyRuntime, PolicyRuntimeBuildFuture, PolicyRuntimeFactory,
+    PolicyStatus, PolicySupervisor, RetryDecision, RetryPolicy, RuntimeRestartBudget,
+    RuntimeRestartDecision,
 };

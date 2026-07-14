@@ -63,6 +63,15 @@ struct AssociationOwner {
     cancel: CancellationToken,
 }
 
+struct AssociationContext {
+    token: AssociationToken,
+    source_ip: Ipv4Addr,
+    control: TcpStream,
+    native_udp: UdpSocket,
+    upstream_relay: SocketAddr,
+    cancel: CancellationToken,
+}
+
 impl AssociationReservation {
     fn disarm(&mut self) {
         self.armed = false;
@@ -162,14 +171,16 @@ impl MeshUdpRelayService {
             let associations = self.associations.clone();
             tokio::spawn(async move {
                 run_stream_association(
-                    token,
-                    source_ip,
+                    AssociationContext {
+                        token,
+                        source_ip,
+                        control,
+                        native_udp,
+                        upstream_relay,
+                        cancel,
+                    },
                     kernel_listener,
                     data_plane_listener,
-                    control,
-                    native_udp,
-                    upstream_relay,
-                    cancel,
                 )
                 .await;
                 associations.remove(&token);
@@ -214,14 +225,16 @@ impl MeshUdpRelayService {
         let associations = self.associations.clone();
         tokio::spawn(async move {
             run_association(
-                token,
-                source_ip,
+                AssociationContext {
+                    token,
+                    source_ip,
+                    control,
+                    native_udp,
+                    upstream_relay,
+                    cancel,
+                },
                 origin_addr,
                 mesh_udp,
-                control,
-                native_udp,
-                upstream_relay,
-                cancel,
             )
             .await;
             associations.remove(&token);
@@ -745,15 +758,18 @@ async fn accept_uot_candidate(
 }
 
 async fn run_stream_association(
-    token: AssociationToken,
-    source_ip: Ipv4Addr,
+    context: AssociationContext,
     kernel_listener: TcpListener,
     mut data_plane_listener: DataPlaneTcpListener,
-    mut control: TcpStream,
-    native_udp: UdpSocket,
-    upstream_relay: SocketAddr,
-    cancel: CancellationToken,
 ) {
+    let AssociationContext {
+        token,
+        source_ip,
+        mut control,
+        native_udp,
+        upstream_relay,
+        cancel,
+    } = context;
     let mut setup_control_byte = [0u8; 1];
     let accepted = tokio::select! {
         _ = cancel.cancelled() => None,
@@ -865,15 +881,18 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 async fn run_association(
-    token: AssociationToken,
-    source_ip: Ipv4Addr,
+    context: AssociationContext,
     origin_addr: SocketAddr,
     mesh_udp: DataPlaneUdpSocket,
-    mut control: TcpStream,
-    native_udp: UdpSocket,
-    upstream_relay: SocketAddr,
-    cancel: CancellationToken,
 ) {
+    let AssociationContext {
+        token,
+        source_ip,
+        mut control,
+        native_udp,
+        upstream_relay,
+        cancel,
+    } = context;
     let mut mesh_packet = vec![0u8; MAX_DATAGRAM_SIZE];
     let mut native_packet = vec![0u8; MAX_DATAGRAM_SIZE - FRAME_HEADER_LEN];
     let mut control_byte = [0u8; 1];
@@ -1133,14 +1152,16 @@ mod tests {
         let relay_task = {
             let cancel = cancel.clone();
             tokio::spawn(run_stream_association(
-                token,
-                ip_a.address(),
+                AssociationContext {
+                    token,
+                    source_ip: ip_a.address(),
+                    control,
+                    native_udp,
+                    upstream_relay,
+                    cancel,
+                },
                 kernel_listener,
                 data_plane_listener,
-                control,
-                native_udp,
-                upstream_relay,
-                cancel,
             ))
         };
 

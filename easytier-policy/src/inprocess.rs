@@ -14,8 +14,8 @@ use std::{
 };
 
 use crate::{
-    LeafPacketBridge, MeshServerResolver, PolicyRevision, PolicyRuntime, PolicyRuntimeFactory,
-    compile_leaf_config,
+    LeafPacketBridge, MeshServerResolver, PolicyRevision, PolicyRuntime, PolicyRuntimeBuildFuture,
+    PolicyRuntimeFactory, compile_leaf_config,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(3);
@@ -283,10 +283,7 @@ impl PolicyRuntime for InProcessLeafRuntime {
 }
 
 impl PolicyRuntimeFactory for InProcessLeafFactory {
-    fn build(
-        &self,
-        revision: Arc<PolicyRevision>,
-    ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn PolicyRuntime>, String>> + Send>> {
+    fn build(&self, revision: Arc<PolicyRevision>) -> PolicyRuntimeBuildFuture {
         let factory = self.clone();
         Box::pin(async move {
             factory

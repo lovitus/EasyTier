@@ -133,4 +133,22 @@ rules: ["MATCH,broken"]
 
     expect(() => serializePolicyDocument(document)).toThrow('proxy name duplicate is duplicated')
   })
+
+  it('refuses object prototype actor names', () => {
+    const document = emptyPolicyDocument()
+    document.proxies.push({
+      name: '__proto__',
+      type: 'socks5',
+      via: 'native',
+      address: '127.0.0.1',
+      instanceId: '',
+      virtualIp: '',
+      port: 1080,
+      udp: false,
+      username: '',
+      password: '',
+    })
+
+    expect(() => serializePolicyDocument(document)).toThrow('proxy name __proto__ is reserved')
+  })
 })

@@ -558,7 +558,7 @@ impl PolicyDocument {
                     reason: format!("{rule_type} requires {expected_parts} fields"),
                 });
             }
-            let network = if rule_type == "NETWORK" {
+            if rule_type == "NETWORK" {
                 let network = parts[1].to_ascii_lowercase();
                 if !matches!(network.as_str(), "tcp" | "udp") {
                     return Err(PolicyError::InvalidRule {
@@ -566,10 +566,7 @@ impl PolicyDocument {
                         reason: "NETWORK requires tcp or udp".to_owned(),
                     });
                 }
-                Some(network)
-            } else {
-                None
-            };
+            }
             match rule_type.as_str() {
                 "GEOIP" => self.require_single_rule_set(index, RuleSetKind::Mmdb, "mmdb")?,
                 "GEOSITE" => {

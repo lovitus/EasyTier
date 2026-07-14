@@ -1,11 +1,21 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     pin::Pin,
     sync::{Arc, Weak},
     task::{Context, Poll},
 };
+
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
+use std::{collections::BTreeMap, net::SocketAddr};
+
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
+type PolicyForwardingContext = (
+    Arc<PacketClassifier>,
+    Arc<ArcSwapOption<LeafPacketBridge>>,
+    Arc<AtomicU64>,
+);
 
 use crate::{
     common::{
@@ -1266,11 +1276,7 @@ impl NicCtx {
     fn do_forward_nic_to_peers_task(
         &mut self,
         mut stream: Pin<Box<dyn ZCPacketStream>>,
-        #[cfg(all(feature = "leaf-policy-proxy", unix))] policy: Option<(
-            Arc<PacketClassifier>,
-            Arc<ArcSwapOption<LeafPacketBridge>>,
-            Arc<AtomicU64>,
-        )>,
+        #[cfg(all(feature = "leaf-policy-proxy", unix))] policy: Option<PolicyForwardingContext>,
     ) -> Result<(), Error> {
         // read from nic and write to corresponding tunnel
         let Some(mgr) = self.peer_mgr.upgrade() else {
@@ -1906,7 +1912,7 @@ impl NicCtx {
         }
         let (proxy_v4, _, _) =
             ProxyCidrsMonitor::diff_proxy_cidrs(peer_mgr, global_ctx, &BTreeSet::new()).await;
-        routes.extend(proxy_v4.into_iter().map(|route| cidr::IpCidr::V4(route)));
+        routes.extend(proxy_v4.into_iter().map(cidr::IpCidr::V4));
         routes.extend(
             peer_mgr
                 .list_proxy_cidrs_v6()
@@ -2925,9 +2931,9 @@ mod tests {
     };
     use crate::common::{error::Error, global_ctx::tests::get_mock_global_ctx};
 
+    use super::VirtualNic;
     #[cfg(all(feature = "leaf-policy-proxy", unix))]
-    use super::ensure_policy_mesh_credentials_confidential;
-    use super::{NicCtx, VirtualNic};
+    use super::{NicCtx, ensure_policy_mesh_credentials_confidential};
 
     async fn run_test_helper() -> Result<VirtualNic, Error> {
         let mut dev = VirtualNic::new(get_mock_global_ctx());
@@ -2990,15 +2996,18 @@ rules: ["FINAL,exit"]
             ..Default::default()
         };
 
-        assert!(NicCtx::resolve_policy_mesh_endpoints(&revision, 7, &[route.clone()]).is_err());
+        assert!(
+            NicCtx::resolve_policy_mesh_endpoints(&revision, 7, std::slice::from_ref(&route))
+                .is_err()
+        );
         let resolved = NicCtx::resolve_policy_mesh_endpoints(&revision, 8, &[route]).unwrap();
         assert_eq!(resolved["exit"].peer_id, 7);
         assert_eq!(resolved["exit"].endpoint, "10.44.0.7:1080".parse().unwrap());
     }
 
     #[cfg(all(feature = "leaf-policy-proxy", unix))]
-    #[test]
-    fn authenticated_mesh_proxy_requires_confidential_peer_rpc() {
+    #[tokio::test]
+    async fn authenticated_mesh_proxy_requires_confidential_peer_rpc() {
         let revision = easytier_policy::PolicyRevision::parse(
             r#"
 version: 1

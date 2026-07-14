@@ -14,6 +14,7 @@ pub struct KcpStream {
     sender: tokio_util::sync::PollSender<BytesMut>,
     receiver: KcpStreamReceiver,
     closed: watch::Receiver<KcpCloseStatus>,
+    send_drained: watch::Receiver<bool>,
     conn_id: ConnId,
     conn_data: Bytes,
     owner: KcpStreamOwner,
@@ -31,13 +32,14 @@ impl std::fmt::Debug for KcpStream {
 
 impl KcpStream {
     pub fn new(endpoint: &KcpEndpoint, conn_id: ConnId) -> Option<Self> {
-        let (sender, receiver, closed) = endpoint.conn_stream_parts(conn_id)?;
+        let (sender, receiver, closed, send_drained) = endpoint.conn_stream_parts(conn_id)?;
         let conn_data = endpoint.conn_data(&conn_id)?;
         let owner = endpoint.stream_owner(conn_id);
         Some(Self {
             sender: tokio_util::sync::PollSender::new(sender),
             receiver,
             closed,
+            send_drained,
             conn_id,
             conn_data,
             owner,
@@ -93,6 +95,24 @@ impl KcpStream {
             Err(_) => Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "timed out waiting for KCP graceful shutdown",
+            )),
+        }
+    }
+
+    pub async fn drain_send_buffer(&mut self, timeout: std::time::Duration) -> std::io::Result<()> {
+        self.sender.close();
+        if *self.send_drained.borrow() {
+            return Ok(());
+        }
+        match tokio::time::timeout(timeout, self.send_drained.wait_for(|drained| *drained)).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(_)) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "KCP endpoint closed before the send buffer drained",
+            )),
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out waiting for the KCP send buffer to drain",
             )),
         }
     }

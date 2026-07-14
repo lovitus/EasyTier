@@ -483,7 +483,7 @@ fn cleanup_connection_state(data: &KcpEndpointData, conn_id: ConnId) {
 
 pub(crate) struct KcpStreamOwner {
     data: std::sync::Weak<KcpEndpointData>,
-    output_sender: KcpPakcetSender,
+    output_sender: Option<KcpPakcetSender>,
     conn_id: ConnId,
     armed: bool,
 }
@@ -496,7 +496,7 @@ impl KcpStreamOwner {
     ) -> Self {
         Self {
             data,
-            output_sender,
+            output_sender: Some(output_sender),
             conn_id,
             armed: true,
         }
@@ -504,6 +504,7 @@ impl KcpStreamOwner {
 
     pub(crate) fn disarm(&mut self) {
         self.armed = false;
+        self.output_sender.take();
     }
 }
 
@@ -515,7 +516,10 @@ impl Drop for KcpStreamOwner {
         if let Some(data) = self.data.upgrade() {
             cleanup_connection_state(&data, self.conn_id);
         }
-        if let Err(error) = self.output_sender.try_send(make_rst_packet(self.conn_id)) {
+        let Some(output_sender) = self.output_sender.take() else {
+            return;
+        };
+        if let Err(error) = output_sender.try_send(make_rst_packet(self.conn_id)) {
             tracing::debug!(
                 ?error,
                 conn_id = ?self.conn_id,
@@ -909,6 +913,12 @@ impl KcpEndpoint {
                         Ok(Ok(_))
                     )
                 {
+                    if !data.state_map.contains_key(&conn_id)
+                        || !data.conn_map.contains_key(&conn_id)
+                    {
+                        close_status.send_replace(KcpCloseStatus::Forced);
+                        return;
+                    }
                     force_close_connection(&data, &output_sender, conn_id, close_retry_interval)
                         .await;
                     close_status.send_replace(KcpCloseStatus::Forced);
@@ -1004,12 +1014,14 @@ impl KcpEndpoint {
         KcpStreamSender,
         KcpStreamReceiver,
         watch::Receiver<KcpCloseStatus>,
+        watch::Receiver<bool>,
     )> {
         let mut conn = self.data.conn_map.get_mut(&conn_id)?;
         Some((
             conn.send_sender(),
             conn.recv_receiver(),
             conn.close_status_receiver(),
+            conn.send_drained_receiver(),
         ))
     }
 
@@ -1591,6 +1603,41 @@ mod tests {
         wait_until_empty(&server_endpoint).await;
         assert!(client_fin_count.load(Ordering::SeqCst) >= 2);
         assert!(server_fin_count.load(Ordering::SeqCst) >= 2);
+
+        drop(client_endpoint);
+        drop(server_endpoint);
+        tasks.join_all().await;
+    }
+
+    #[tokio::test]
+    async fn send_drain_delivers_terminal_data_before_reset_cleanup() {
+        let (client_endpoint, server_endpoint, tasks) = prepare_test().await;
+        let (connect_ret, accept_ret) = tokio::join!(
+            client_endpoint.connect(std::time::Duration::from_secs(2), 1, 3, Bytes::from("conn")),
+            server_endpoint.accept()
+        );
+        let conn_id = connect_ret.unwrap();
+        assert_eq!(conn_id, accept_ret.unwrap());
+
+        let mut client = KcpStream::new(&client_endpoint, conn_id).unwrap();
+        let mut server = KcpStream::new(&server_endpoint, conn_id).unwrap();
+        server.write_all(b"terminal").await.unwrap();
+        server
+            .drain_send_buffer(std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        drop(server);
+
+        let mut terminal = [0u8; 8];
+        client.read_exact(&mut terminal).await.unwrap();
+        assert_eq!(&terminal, b"terminal");
+        drop(client);
+
+        wait_until_empty(&client_endpoint).await;
+        wait_until_empty(&server_endpoint).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert_eq!(client_endpoint.stats().forced_cleanup_total, 0);
+        assert_eq!(server_endpoint.stats().forced_cleanup_total, 0);
 
         drop(client_endpoint);
         drop(server_endpoint);

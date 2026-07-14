@@ -1031,6 +1031,7 @@ impl Socks5Server {
 
                 select! {
                     _ = event_recv.recv() => {}
+                    _ = port_forward_list_change_notifier.notified() => {}
                     _ = tokio::time::sleep(Duration::from_secs(120)) => {}
                 }
             }

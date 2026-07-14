@@ -79,6 +79,16 @@ struct RemoteSlot {
     state: Mutex<RemoteState>,
 }
 
+struct RelaySocksContext {
+    data_plane: Arc<Socks5Server>,
+    peer_mgr: Arc<PeerManager>,
+    remote: MeshProxyTarget,
+    udp_enabled: bool,
+    password: String,
+    credentials: Option<PolicyProxyCredentials>,
+    generation: CancellationToken,
+}
+
 impl RemoteSlot {
     fn new(target: MeshProxyTarget) -> Self {
         Self {
@@ -296,13 +306,15 @@ async fn run_listener(
                     let result = relay_socks5(
                         client,
                         client_addr,
-                        data_plane,
-                        peer_mgr,
-                        remote,
-                        udp_enabled,
-                        &password,
-                        credentials.as_ref(),
-                        generation,
+                        RelaySocksContext {
+                            data_plane,
+                            peer_mgr,
+                            remote,
+                            udp_enabled,
+                            password,
+                            credentials,
+                            generation,
+                        },
                     )
                     .await;
                     if let Err(error) = result {
@@ -329,18 +341,21 @@ async fn connect_remote(
 async fn relay_socks5(
     mut client: TcpStream,
     client_addr: SocketAddr,
-    data_plane: Arc<Socks5Server>,
-    peer_mgr: Arc<PeerManager>,
-    remote: MeshProxyTarget,
-    udp_enabled: bool,
-    password: &str,
-    credentials: Option<&PolicyProxyCredentials>,
-    generation: CancellationToken,
+    context: RelaySocksContext,
 ) -> anyhow::Result<()> {
+    let RelaySocksContext {
+        data_plane,
+        peer_mgr,
+        remote,
+        udp_enabled,
+        password,
+        credentials,
+        generation,
+    } = context;
     let command = tokio::select! {
         _ = generation.cancelled() => anyhow::bail!("mesh proxy route generation changed"),
         result = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-            authenticate_local(&mut client, password).await?;
+            authenticate_local(&mut client, &password).await?;
             read_and_validate_socks_command(&mut client, udp_enabled).await
         }) => result??,
     };
@@ -349,7 +364,7 @@ async fn relay_socks5(
     match command {
         1 => {
             let mut upstream = connect_remote(&data_plane, remote.endpoint).await?;
-            negotiate_policy_proxy_auth(&mut upstream, credentials).await?;
+            negotiate_policy_proxy_auth(&mut upstream, credentials.as_ref()).await?;
             relay_socks_connect_command(&mut client, &mut upstream, request).await?;
             tokio::select! {
                 _ = generation.cancelled() => {}
@@ -364,7 +379,7 @@ async fn relay_socks5(
                 &data_plane,
                 remote.peer_id,
                 remote.endpoint,
-                credentials,
+                credentials.as_ref(),
             )
             .await?;
             relay_socks_udp(client, client_addr.ip(), association, generation).await?;

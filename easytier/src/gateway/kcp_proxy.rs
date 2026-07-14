@@ -382,6 +382,24 @@ pub struct KcpProxyDst {
 }
 
 impl KcpProxyDst {
+    async fn send_terminal_prepare_ack(
+        kcp_stream: &mut KcpStream,
+        status: ProxyPrepareAckStatus,
+    ) -> Result<()> {
+        write_proxy_prepare_ack(kcp_stream, status).await?;
+        if let Err(error) = kcp_stream
+            .drain_send_buffer(KCP_PROXY_SHUTDOWN_TIMEOUT)
+            .await
+        {
+            tracing::debug!(
+                conn_id = ?kcp_stream.conn_id(),
+                ?error,
+                "KCP terminal proxy prepare ACK did not drain before reset"
+            );
+        }
+        Ok(())
+    }
+
     pub async fn new(peer_manager: Arc<PeerManager>) -> Self {
         let mut kcp_endpoint = create_kcp_endpoint();
         kcp_endpoint.run().await;
@@ -465,8 +483,11 @@ impl KcpProxyDst {
             deny_local_virtual_occupied,
         ) {
             if ack_requested {
-                write_proxy_prepare_ack(&mut kcp_stream, ProxyPrepareAckStatus::PolicyDenied)
-                    .await?;
+                Self::send_terminal_prepare_ack(
+                    &mut kcp_stream,
+                    ProxyPrepareAckStatus::PolicyDenied,
+                )
+                .await?;
             }
             return Err(anyhow::anyhow!(
                 "dst socket {:?} is in running listeners, ignore it",
@@ -499,8 +520,11 @@ impl KcpProxyDst {
         };
         if let Err(error) = acl_handler.handle_packet(&conn_data) {
             if ack_requested {
-                write_proxy_prepare_ack(&mut kcp_stream, ProxyPrepareAckStatus::PolicyDenied)
-                    .await?;
+                Self::send_terminal_prepare_ack(
+                    &mut kcp_stream,
+                    ProxyPrepareAckStatus::PolicyDenied,
+                )
+                .await?;
             }
             return Err(error);
         }
@@ -517,7 +541,7 @@ impl KcpProxyDst {
             match tokio::time::timeout(PROXY_TARGET_CONNECT_TIMEOUT, connect).await {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
-                    write_proxy_prepare_ack(
+                    Self::send_terminal_prepare_ack(
                         &mut kcp_stream,
                         ProxyPrepareAckStatus::DestinationFailed,
                     )
@@ -525,7 +549,7 @@ impl KcpProxyDst {
                     return Err(error.into());
                 }
                 Err(error) => {
-                    write_proxy_prepare_ack(
+                    Self::send_terminal_prepare_ack(
                         &mut kcp_stream,
                         ProxyPrepareAckStatus::BusinessTimeout,
                     )
