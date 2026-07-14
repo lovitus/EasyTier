@@ -4954,7 +4954,7 @@ dependencies = [
 [[package]]
 name = "leaf"
 version = "0.1.2"
-source = "git+https://github.com/lovitus/leaf.git?rev=08c046b4184e2bcc63935c38d1750a44b9723052#08c046b4184e2bcc63935c38d1750a44b9723052"
+source = "git+https://github.com/lovitus/leaf.git?rev=73e8caa2455274caf0a63452e6552b6a663a7203#73e8caa2455274caf0a63452e6552b6a663a7203"
 dependencies = [
  "anyhow",
  "async-recursion",
