@@ -652,6 +652,18 @@ pub enum BindDev {
     Custom(String),
 }
 
+fn resolve_bind_dev(addr: &SocketAddr, dev: BindDev) -> Option<String> {
+    match dev {
+        // Binding a loopback address already pins the socket to the loopback
+        // path. SO_BINDTODEVICE is redundant there and requires privileges
+        // that ordinary Android VPN applications do not have.
+        BindDev::Auto if addr.ip().is_loopback() => None,
+        BindDev::Auto => get_interface_name_by_ip(&addr.ip()),
+        BindDev::Disabled => None,
+        BindDev::Custom(dev) => Some(dev),
+    }
+}
+
 impl From<String> for BindDev {
     fn from(value: String) -> Self {
         if value.is_empty() {
@@ -702,11 +714,7 @@ pub fn bind<B: Bindable>(
     socket_mark: Option<u32>,
 ) -> Result<B, TunnelError> {
     let _g = net_ns.map(|n| n.guard());
-    let dev = match dev {
-        BindDev::Auto => get_interface_name_by_ip(&addr.ip()),
-        BindDev::Disabled => None,
-        BindDev::Custom(s) => Some(s),
-    };
+    let dev = resolve_bind_dev(&addr, dev);
     let socket = socket2::Socket::new(socket2::Domain::for_address(addr), B::TYPE, B::PROTOCOL)?;
     setup_socket2_ext(&socket, &addr, dev, only_v6, socket_mark)?;
     B::finalize(socket)
@@ -750,6 +758,15 @@ pub mod tests {
         )
         .unwrap();
         super::apply_socket_mark(&socket, None).unwrap();
+    }
+
+    #[test]
+    fn automatic_loopback_bind_does_not_select_an_interface() {
+        let addr = "127.0.0.1:0".parse().unwrap();
+        assert_eq!(super::resolve_bind_dev(&addr, super::BindDev::Auto), None);
+
+        let addr = "[::1]:0".parse().unwrap();
+        assert_eq!(super::resolve_bind_dev(&addr, super::BindDev::Auto), None);
     }
 
     #[cfg(target_os = "linux")]

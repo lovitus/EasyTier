@@ -117,6 +117,39 @@ final cross-platform design below:
   improving the reliable mesh path; one complete frame per write is the
   validated latency/throughput boundary;
 
+## Known interaction: exit nodes and manual routes versus the policy classifier
+
+`collect_policy_mesh_routes_for` builds the classifier's mesh-route snapshot
+from the local virtual subnet, Magic DNS's fake IP, `proxy_cidrs`, and public
+IPv6 routes. It does not include `exit_nodes` or manual `routes`. Combined with
+`NicCtx::do_forward_nic_to_peers_task` classifying before forwarding, this
+produces two concrete effects when policy proxy is enabled alongside those
+features on the same node:
+
+- if this node lists remote `exit_nodes`, non-mesh-destined traffic is
+  classified `Policy` before it can reach the exit-node forwarding branch in
+  `do_forward_nic_to_peers`. The exit node is not used; traffic instead exits
+  through Leaf's own rules. The same applies to any manual route whose CIDR
+  covers non-mesh destinations (for example `0.0.0.0/0`): it coexists in the
+  kernel routing table with the policy proxy's split-default `/1` captures but
+  never wins the longest-prefix match, so it becomes inert rather than
+  conflicting;
+- if this node sets `enable_exit_node=true` and relays another peer's traffic
+  through its unmarked gateway sockets (`gateway/tcp_proxy.rs`,
+  `gateway/udp_proxy.rs`, `gateway/icmp_proxy.rs`), that egress traffic is
+  captured by this node's own split-default routes, re-enters its own TUN, and
+  is classified `Policy` a second time before finally leaving through Leaf's
+  marked, bypass-table-routed egress. This is one bounded extra hop, not
+  unbounded recursion, and uses the same bounded Leaf input queue and mesh
+  bridge admission limits as ordinary policy traffic; it is not a resource
+  leak. It does mean the other peer's relayed traffic is subject to this
+  node's Leaf domain/rule/FakeDNS configuration.
+
+Neither interaction produces a routing loop, a crash, or unbounded resource
+growth. This was discussed with the maintainer on 2026-07-13: both effects
+match expectations and are accepted as-is. No further handling, classifier
+change, or documentation-visible warning is planned for this interaction.
+
 Not yet implemented in this spike: policy file hot reload, HTTP CONNECT actor
 adaptation, a bundled exit-node SOCKS5 UDP service, instance-netns worker
 ownership, and desktop non-Linux TUN adapters. Proxy credentials for native and
@@ -1245,6 +1278,25 @@ rule-sets:
     sha256: "optional expected digest"
 ```
 
+The recommended interoperable defaults follow the MetaCubeX example data
+layout without copying its automatic-download behavior:
+
+- `geosite.dat` from the versioned `MetaCubeX/meta-rules-dat` release is the
+  default Geosite import candidate;
+- `country-lite.mmdb` from the same release is the default country GeoIP MMDB
+  import candidate;
+- `geoip-lite.dat` and `GeoLite2-ASN.mmdb` are optional compatibility data.
+  They are not loaded unless a future rule kind explicitly needs them;
+- the upstream `latest` URLs are discovery defaults shown by the GUI/import
+  command, not implicit runtime dependencies. An import records the resolved
+  release, digest, size, and import time before atomically publishing it.
+
+This keeps the familiar `GEOSITE,cn`, `GEOSITE,geolocation-!cn`,
+`GEOIP,private`, and country-code rule model while preserving EasyTier's
+offline-first contract. The recommended starting order is private/LAN and
+mesh-owned destinations first, then China DIRECT rules, then non-China policy
+groups, and finally `MATCH`.
+
 - Releases may bundle a documented, versioned default `site.dat` snapshot.
 - Desktop/server users may point to a local absolute or config-relative file.
 - GUI/mobile users may import a file or explicitly request a one-time URL
@@ -1263,6 +1315,25 @@ rule-sets:
   do not silently substitute another online source.
 - Load only referenced geosite groups into a bounded immutable index and swap
   it atomically. Do not repeatedly scan the complete file on every connection.
+
+### Overseas egress validation topology
+
+Two existing overseas hosts are assigned local-only validation aliases
+`overseas-egress-a` and `overseas-egress-b`. Their real hostnames remain in the
+git-excluded local environment and must not appear in repository logs,
+fixtures, reports, or scripts.
+
+Validation uses them as independent mesh SOCKS exits and then as an ordered
+fallback group. It must cover:
+
+- `GEOSITE,cn` and private/mesh destinations remaining DIRECT;
+- `GEOSITE,geolocation-!cn` and selected country GeoIP categories using the
+  preferred overseas exit;
+- failure of the preferred exit falling back to the second exit without
+  aggressive switching during a general network outage;
+- TCP, native SOCKS UDP ASSOCIATE, EasyTier KCP-backed mesh SOCKS, and UoT;
+- recovery after the preferred exit returns, using the existing conservative
+  health window rather than migrating established flows.
 
 ### TCP-only final actors and UDP fallback
 
