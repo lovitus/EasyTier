@@ -58,27 +58,83 @@ Implementation without a matching build or real-device result remains
 `validation-pending`. New findings must receive an ID here before code changes
 start, so parallel platform work cannot disappear into chat history.
 
+Status meanings:
+
+- `investigating`: the symptom is real, but the fault boundary has not been
+  isolated; do not implement a speculative fix;
+- `implementation-pending`: the required behavior and acceptance boundary are
+  known, but production code is incomplete;
+- `implemented-validation-pending`: production code exists, but the exact
+  artifact has not passed the required failure/recovery or real-device matrix;
+- `blocked`: a required platform primitive or validated design is missing;
+- `known-limitation` / `unsupported`: deliberate product boundaries, not work
+  that may silently be treated as complete;
+- `done`: implementation and the named evidence both exist.
+
 | ID | Status | Scope | Required evidence / current blocker |
 | --- | --- | --- | --- |
 | BUILD-075 | failed | Exact candidate `075d3cdf`: Linux profiling, Android debug APK, macOS ARM64 DMG, full Test | Android run `29310466513` passed, but macOS run `29310489240` exposed the `MAC-COMPILE` blockers; Linux/Test results remain useful evidence but this SHA cannot be promoted |
 | BUILD-CACHE | validation-pending | Candidate build latency | Profiling already cached musl targets; macOS test and Android candidate now use platform-specific target caches with failure caching. Compare the next two identical-path builds for restore/save success and wall-time improvement without profile or artifact changes |
-| MAC-COMPILE | in-progress | macOS policy-enabled build exposed Linux-only socket marking and an undeclared libc path | Gate TCP STUN `SO_MARK` exactly like the existing UDP/helper path, use the existing `nix::libc` dependency, scan the policy-enabled macOS surface, then require a successful ARM64 DMG build |
-| AND-SIGNING | in-progress | Stable signing identity for rolling Android policy candidates | GitHub Secrets restore a dedicated candidate-only keystore; APK cert must be `14d2d885ce1bc361923a493210865f86390ffcd32eb2b555042bbd1a8b6c38e0`; after the one-time signer migration, two consecutive workflow APKs must upgrade with `adb install -r` while preserving config and VPN authorization |
+| BUILD-NEXT | implementation-pending | Exact replacement candidate after `075d3cdf` | Commit the complete code plus this ledger as one snapshot, run format/static checks, then push the same SHA to the macOS test and profiling-beta workflows. Do not validate artifacts produced from different SHAs |
+| MAC-COMPILE | implemented-validation-pending | macOS policy-enabled build exposed Linux-only socket marking and an undeclared libc path | `14a6a17f` gates TCP STUN `SO_MARK` and imports `nix::libc`; require a successful ARM64 DMG workflow for the final candidate SHA before closing |
+| AND-SIGNING | implemented-validation-pending | Stable signing identity for rolling Android policy candidates | GitHub Secrets restore a dedicated candidate-only keystore; APK cert must be `14d2d885ce1bc361923a493210865f86390ffcd32eb2b555042bbd1a8b6c38e0`; after the one-time signer migration, two consecutive workflow APKs must upgrade with `adb install -r` while preserving config and VPN authorization |
 | AND-VPN-OWN | done | Native persisted system-revoke marker; background restart must not reclaim VPN ownership | Android candidate run `29310466513`: three 0.67-0.87 second stop/start cycles succeeded; Clash takeover set `revoked_by_system=true`; force-stop/cold-start retained Clash ownership and showed stopped; explicit Run reclaimed VPN and cleared the marker |
 | AND-DHCP | done | DHCP mode must not serialize an undefined virtual IP | Android candidate run `29310466513` on `192.168.234.227`: imported config kept `dhcp=true` with no explicit IPv4; repeated starts obtained `10.245.0.2/24` and `10.245.0.3/24` without WebView or native serialization errors |
-| DESK-RELOAD | validation-pending | Transactional source-file hot reload and bounded restart | Valid edit publishes a ready candidate; malformed edit retains old revision; worker kill follows 1/2/5-second budget; no bridge/task/FD growth |
-| MAC-UTUN | validation-pending | Traditional macOS utun transparent adapter and packaged Leaf sidecar | DMG contains signed/runnable sidecar; v4/v6 split routes install, DIRECT and proxy paths work, normal stop reverses exact owned routes |
-| MAC-ORPHAN | validation-pending | macOS parent-PID watchdog | Forced GUI/core termination removes worker within two seconds and leaves no policy route, temp config, session, or repeated respawn |
-| LNX-POLICY | validation-pending | Linux policy routing, source/mark bypass, route refresh and fail-closed behavior | Isolated namespace/container tests plus physical-host mesh regression; underlay change refreshes without recursion |
-| POLICY-GEO-DNS | validation-pending | Ordered GEOIP/GEOSITE/Country and manual resource updates | Valid and damaged data, checksum/size limits, first-match semantics, no-resolve behavior, DNS cache/reload evidence |
-| POLICY-CHAIN | validation-pending | DIRECT, SOCKS, mesh actor, chain and passive fallback | TCP and UDP matrices including final non-mesh SOCKS, actor failure, outage/restore hysteresis and bounded retry |
-| POLICY-KCP-UOT | validation-pending | Existing KCP-preferred mesh data plane and private UoT fallback | KCP available/unavailable/mixed-version tests; UDP throughput/loss; KCP state, target sockets, FDs and tasks return to baseline |
-| POLICY-PERF | validation-pending | Disabled-mode overhead and enabled-mode CPU/memory/latency | Profiling comparison against the validated pre-policy binary on the same hosts and traffic traces |
+| AND-MESH-ICMP | investigating | Android policy-enabled mesh path after VPN revoke/reclaim | External IPv4 and DNS passed, but the first `10.245.0.1` ICMP run lost 5/5 packets. Confirm the remote TUN/peer state, then A/B the same Android config with only policy mode disabled before assigning a root cause |
+| AND-NETWORK-CHANGE | implemented-validation-pending | Wi-Fi roam, DHCP renew, Wi-Fi/mobile-data/airplane-mode transitions | Repeated transitions must update DNS/network generation, stop without restart storms while offline, recover once after connectivity returns, preserve mesh routes, and not reclaim VPN after another app owns it |
+| AND-POLICY-UI | implemented-validation-pending | Android policy editor, import/preflight and managed rule data | Validate the collapsible editor without coordinate automation, config import/export, diagnostics, manual update buttons and persistence across process death and signed APK upgrade |
+| DESK-RELOAD | implemented-validation-pending | Transactional source-file hot reload and bounded restart | Valid edit publishes a ready candidate; malformed edit retains old revision; worker kill follows 1/2/5-second budget; no bridge/task/FD growth |
+| POLICY-ROUTE-REFRESH | implemented-validation-pending | Review P1: underlay bypass routes must track address/default-route changes | The supervisor now refreshes the namespace-bound routing guard on relevant events and at most every five seconds, retaining fail-closed state on error. Validate DHCP renew, interface index change, default-route loss/restore and no recursive underlay capture |
+| POLICY-MAGIC-DNS | implemented-validation-pending | Review P1: Magic DNS must remain on the mesh path | `100.100.100.101/32` is included in the live mesh classifier only while Magic DNS is enabled. Validate queries before/after config patch and route snapshot replacement; domain/GEOSITE visibility remains the separate `SPLIT-DNS` limitation |
+| POLICY-WRITER-FAIRNESS | implemented-validation-pending | Review P2: sustained peer traffic must not starve Leaf responses | Peer and policy packets use bounded independent queues, unbiased selection and alternating bounded drain. Saturate both directions and prove bounded loss, no starvation, no unbounded memory and unchanged mesh latency |
+| POLICY-DNS-DISCOVERY | implemented-validation-pending | Review P2: loopback resolver stubs are unusable as direct Leaf DNS servers | Resolver discovery rejects loopback/link-local/multicast stubs and checks resolved systemd/NetworkManager files. Validate resolved, NetworkManager, plain resolv.conf, Android supplied DNS, empty DNS and network-change replacement |
+| LNX-POLICY | implemented-validation-pending | Linux policy routing, source/mark bypass and fail-closed behavior | Isolated namespace/container tests plus physical-host mesh regression; include stale cleanup, competing table/rule ownership, abrupt exit, underlay change and route restoration |
+| MAC-UTUN | implemented-validation-pending | Traditional macOS utun transparent adapter and packaged Leaf sidecar | DMG contains signed/runnable sidecar; v4/v6 split routes install, DIRECT and proxy paths work, normal stop reverses exact owned routes |
+| MAC-ORPHAN | implemented-validation-pending | macOS parent-PID watchdog | Forced GUI/core termination removes worker within two seconds and leaves no policy route, temp config, session or repeated respawn |
+| POLICY-GEODATA | implemented-validation-pending | Managed `geosite.dat`, `geoip-lite.dat` and optional Country MMDB | Validate MetaCubeX-compatible category semantics, manual-only downloads, TLS/size/checksum limits, atomic replacement, damaged/old file retention and no automatic network update. ASN MMDB remains out of v1 because no actor consumes it |
+| POLICY-RULES | implemented-validation-pending | Ordered first-match GEOIP/GEOSITE/COUNTRY/IP/domain rules | Compare ordering, `no-resolve`, missing category, duplicate resource and UDP actor-skip behavior with the pinned Mihomo references; preflight and runtime must produce the same result |
+| POLICY-EDITOR | implemented-validation-pending | GUI/RPC policy switch, nodes, groups, rules, fallback and rule-data controls | Desktop and Android round-trip must preserve order and explicit IDs/IPs, show validation diagnostics before start, update managed data only on explicit click and never mutate unrelated EasyTier settings |
+| POLICY-CONFIG | implemented-validation-pending | Opt-in startup and configuration across CLI, TOML, RPC, GUI and Android import | Disabled/absent mode must create no policy task, route, bridge or worker; enabled mode must use the same validated document and diagnostics; malformed or unsupported platform configuration must fail policy startup without breaking the mesh |
+| POLICY-CHAIN | implemented-validation-pending | DIRECT, SOCKS, mesh actor, chain and passive fallback | TCP and UDP matrices including final non-mesh SOCKS, actor failure, simultaneous network outage, restore hysteresis, bounded retry and no fallback oscillation |
+| POLICY-KCP-UOT | implemented-validation-pending | Existing KCP-preferred mesh data plane and private UoT fallback | KCP available/unavailable/mixed-version tests; SOCKS KCP-only semantics unchanged; UDP over KCP/UoT throughput/loss; KCP state, target sockets, FDs and tasks return to baseline |
+| POLICY-UDP-LOSS | investigating | Policy UDP throughput remains below TCP and prior 50 Mbit/s runs observed loss | Separate Leaf/TUN, UoT framing, KCP, destination relay and test-actor loss with counters and profiling; do not mask loss by unbounded buffers or silently downgrade to smoltcp |
+| POLICY-LOOP-GUARD | implemented-validation-pending | Dynamic peer endpoint exclusion and retry-storm containment | Validate endpoint refresh, self/peer/mesh CIDR exclusions, more than 1000 attempted connections per second, malformed chains, worker crash and system-TUN coexistence without CPU/FD/KCP growth |
+| POLICY-LEAF-EMBED | investigating | Android in-process Leaf global runtime registry and shutdown ownership | Stress multiple start/stop and late-registration cancellation; prove unique runtime IDs, no FD double-close, no blocking call on async workers, and no process-global state leak between instances |
+| POLICY-PERF | validation-pending | Disabled-mode overhead and enabled-mode CPU/memory/latency | Profiling comparison against the validated pre-policy binary on the same hosts and traffic traces; report TUN copy/syscalls, Leaf queues, KCP/UoT, RSS, tasks, FDs, latency and battery/idle wakeups |
 | WIN-ADAPTER | blocked | Windows transparent adapter | Leaf cannot bind an interface on Windows and no verified Wintun/WFP bypass adapter exists; remain compile/runtime gated |
 | MAC-NE | blocked | macOS Network Extension adapter | NE owns route/socket protection differently; traditional utun implementation must not be enabled in `macos-ne` builds |
+| IOS-ADAPTER | blocked | iOS Network Extension transparent policy adapter | Requires an NE-owned packet-flow adapter and protected outbound sockets; do not reuse the traditional macOS route implementation or advertise policy mode until implemented and device-validated |
+| MULTI-INSTANCE | known-limitation | More than one policy-enabled network in one core process | Process-global route ownership and Leaf runtime assumptions permit one active policy instance; additional networks keep the normal EasyTier path. A future design must isolate route tables, runtime IDs, ports and cleanup before lifting this limit |
+| NETNS-ADAPTER | known-limitation | Policy mode inside an EasyTier instance netns | Desktop policy startup rejects configured instance netns because worker, route and outbound-interface ownership are not yet namespace-complete; do not silently run the worker in the host namespace |
 | SPLIT-DNS | known-limitation | Magic DNS and Leaf domain/GEOSITE visibility | Current design keeps Magic DNS on mesh, so Leaf cannot observe those query names; requires a dedicated split-DNS adapter |
 | DEP-RELOAD | known-limitation | Rule-data-only file changes | Source YAML digest drives reload; managed GUI updates the source reference and requests save/restart, but an externally replaced dependency alone is not hashed every five seconds |
 | HTTP-ACTOR | unsupported | HTTP CONNECT actor | Pinned Leaf build has no outbound HTTP actor; reject rather than advertise a false fallback capability |
+
+## Current execution queue
+
+Work is batched by dependency so one expensive build validates several completed
+modules without hiding failures:
+
+1. `BUILD-NEXT`: finish static review and produce one exact candidate containing
+   the macOS compile fix, stable Android signing workflow and this ledger.
+2. `MAC-COMPILE` and `AND-SIGNING`: establish usable macOS/Android artifacts;
+   do not start feature expansion until both artifacts can be repeatedly
+   installed and launched.
+3. `AND-MESH-ICMP`, `POLICY-ROUTE-REFRESH`, `POLICY-MAGIC-DNS`,
+   `POLICY-WRITER-FAIRNESS` and `POLICY-DNS-DISCOVERY`: close correctness risks
+   before throughput tuning. The Android ICMP result must first be repeated
+   against a remote node with a verified TUN address.
+4. `POLICY-GEODATA`, `POLICY-RULES`, `POLICY-EDITOR`, `POLICY-CONFIG`,
+   `POLICY-CHAIN` and `POLICY-KCP-UOT`: validate the user-visible policy
+   contract as one coherent functional matrix.
+5. `AND-NETWORK-CHANGE`, `DESK-RELOAD`, `LNX-POLICY`, `MAC-UTUN`,
+   `MAC-ORPHAN`, `POLICY-LOOP-GUARD` and `POLICY-LEAF-EMBED`: run abnormal
+   lifecycle, route ownership and resource-leak tests.
+6. `POLICY-UDP-LOSS` and `POLICY-PERF`: profile only after correctness is
+   stable; keep or revert optimizations based on exact-artifact evidence.
+7. `WIN-ADAPTER`, `MAC-NE`, `IOS-ADAPTER`, `MULTI-INSTANCE`,
+   `NETNS-ADAPTER` and `SPLIT-DNS` remain explicit future work and cannot be
+   implied by a Linux/macOS-traditional/Android pass.
 
 Workflow for every ledger item:
 
