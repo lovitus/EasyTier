@@ -95,6 +95,7 @@ Status meanings:
 | MAC-UTUN | implemented-validation-pending | Traditional macOS utun transparent adapter and packaged Leaf sidecar | DMG contains signed/runnable sidecar; v4/v6 split routes install, DIRECT and proxy paths work, normal stop reverses exact owned routes |
 | MAC-ORPHAN | implemented-validation-pending | macOS parent-PID watchdog | Forced GUI/core termination removes worker within two seconds and leaves no policy route, temp config, session or repeated respawn |
 | POLICY-GEODATA | implemented-validation-pending | Bundled `geosite.dat`, `geoip-lite.dat` and optional Country MMDB | GeoSite/GeoIP are pinned MetaCubeX snapshots embedded in the core and materialized only when a matching rule lacks an explicit same-kind rule set. Validate parser/category semantics, digest and atomic materialization, read-only config fallback, explicit override and no network dependency. Country MMDB remains optional; ASN MMDB remains out of v1 because no actor consumes it |
+| POLICY-GEO-MATCHER-PERF | implemented-validation-pending | Indexed GeoSite/GeoIP new-session matching comparable to mainstream proxy engines | The original Leaf router consumed about 16.8 CPU seconds for 200 concurrent `GEOSITE,CN` decisions versus 0.12-0.22 CPU seconds for the `MATCH` baseline. The pinned EasyTier Leaf fork replaces 112,008 linear suffix conditions with label-boundary hash lookups and merges 7,500 GeoIP CIDRs into sorted ranges with binary search. Re-run the exact A/B workload and reject the patch if GeoSite remains a material CPU hotspot or changes first-match semantics |
 | POLICY-RULES | implemented-validation-pending | Ordered first-match GEOIP/GEOSITE/COUNTRY/IP/domain rules | Compare ordering, `no-resolve`, missing category, duplicate resource and UDP actor-skip behavior with the pinned Mihomo references; preflight and runtime must produce the same result |
 | POLICY-EDITOR | implemented-validation-pending | GUI/RPC policy switch, nodes, groups, rules, fallback and rule-data controls | Desktop and Android round-trip must preserve order and explicit IDs/IPs, show validation diagnostics before start, update managed data only on explicit click and never mutate unrelated EasyTier settings |
 | POLICY-CONFIG | implemented-validation-pending | Opt-in startup and configuration across CLI, TOML, RPC, GUI and Android import | Disabled/absent mode must create no policy task, route, bridge or worker; enabled mode must use the same validated document and diagnostics; malformed or unsupported platform configuration must fail policy startup without breaking the mesh |
@@ -1701,6 +1702,14 @@ groups, and finally `MATCH`.
 - Load only referenced GeoIP DAT categories into the generated immutable Leaf
   rule list. Geosite and Country MMDB continue through Leaf's native external
   matcher and are not reparsed per connection by EasyTier.
+- This keeps file I/O and protobuf parsing out of connection and packet hot
+  paths. EasyTier pins a minimal Leaf fork that indexes the expanded data:
+  suffix/full domains use case-insensitive label-boundary hash lookup, keywords
+  retain their ordered substring semantics, and IPv4/IPv6 CIDRs are merged into
+  sorted ranges queried by binary search. This is intentionally smaller than
+  Mihomo's succinct/MPH matcher while removing the same linear-scan bottleneck.
+  `POLICY-GEO-MATCHER-PERF` remains validation-pending until the exact baseline,
+  GeoSite and GeoIP workloads are rerun with the profiling beta artifact.
 
 ### Overseas egress validation topology
 

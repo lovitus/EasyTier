@@ -36,8 +36,8 @@ uuid = { version = "1", features = ["serde"] }
 libc = "0.2"
 
 [target.'cfg(unix)'.dependencies.leaf]
-git = "https://github.com/eycorsican/leaf.git"
-rev = "1d20301570395cff1db5f3e316222b0ec3b4732e"
+git = "https://github.com/lovitus/leaf.git"
+rev = "2f99d4f45eb99fe729c004797299279230cd4b30"
 optional = true
 default-features = false
 features = [
