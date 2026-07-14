@@ -192,7 +192,6 @@ function normalizeRoute(route: any): any {
     feature_flag: normalizeFeatureFlag(firstDefined(route.feature_flag, route.featureFlag)),
     next_hop_peer_id_latency_first: firstDefined(route.next_hop_peer_id_latency_first, route.nextHopPeerIdLatencyFirst),
     cost_latency_first: firstDefined(route.cost_latency_first, route.costLatencyFirst),
-    path_latency_latency_first: firstDefined(route.path_latency_latency_first, route.pathLatencyLatencyFirst),
   }
 }
 
@@ -432,20 +431,10 @@ export function latencyMs(info: PeerRoutePair) {
     minLatencyUs = Math.min(minLatencyUs ?? latencyUs, latencyUs)
   }
 
-  if (minLatencyUs !== undefined)
-    return `${Math.ceil(minLatencyUs / 1000)}ms`
+  if (minLatencyUs === undefined)
+    return ''
 
-  // Relay destinations have no direct PeerConn on this node. Match the CLI by
-  // displaying the cumulative latency from the latency-first route table.
-  const routeCost = numericValue(info.route?.cost)
-  const pathLatency = numericValue(firstDefined(
-    info.route?.path_latency_latency_first,
-    (info.route as any)?.pathLatencyLatencyFirst,
-  ))
-  if (routeCost !== undefined && routeCost > 1 && pathLatency !== undefined && pathLatency > 0)
-    return `${Math.ceil(pathLatency)}ms`
-
-  return ''
+  return `${Math.ceil(minLatencyUs / 1000)}ms`
 }
 
 export function lossRate(info: PeerRoutePair) {
