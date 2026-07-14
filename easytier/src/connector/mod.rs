@@ -89,7 +89,10 @@ async fn set_bind_addr_for_peer_connector(
         return;
     }
 
-    let ips = global_ctx.get_ip_collector().collect_ip_addrs().await;
+    let ips = global_ctx
+        .get_ip_collector()
+        .collect_local_ip_addrs_now()
+        .await;
     if is_ipv4 {
         let mut bind_addrs = vec![];
         for ipv4 in ips.interface_ipv4s {

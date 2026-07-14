@@ -40,12 +40,13 @@ Current implementation references:
   engine.
 
 **Status**: Linux candidate and automated test matrix validated; exact Android
-side-by-side candidate established a Stealth-protected mesh and in-process
-policy runtime on a real device. DHCP-empty and native persisted VPN-revocation
-fixes plus the macOS utun/process-sidecar adapter are implemented and pending a
-single replacement candidate build and repeat validation. Windows and macOS
-Network Extension adapters remain disabled rather than falling through to an
-unsafe generic implementation.
+candidate `38d965c2` established a Stealth-protected mesh and in-process policy
+runtime on a real device. Android DIRECT/REJECT and bundled GeoIP decisions,
+plus bidirectional mesh ICMP and mesh TCP while policy mode remained enabled,
+have data-plane evidence. Remaining first-version blockers are lifecycle,
+network-change, failure/recovery and resource-cleanup tests rather than large
+rule-set performance. Windows and macOS Network Extension adapters remain
+disabled rather than falling through to an unsafe generic implementation.
 **Updated**: 2026-07-14
 
 This TODO is the design source of truth. Update it after each material design
@@ -67,9 +68,35 @@ Status meanings:
 - `implemented-validation-pending`: production code exists, but the exact
   artifact has not passed the required failure/recovery or real-device matrix;
 - `blocked`: a required platform primitive or validated design is missing;
+- `post-v1-optimization`: the behavior is correct and bounded for the first
+  release, but measured scale or throughput remains below the project's target;
+  keep the benchmark and optimization task active without delaying the first
+  functional release;
 - `known-limitation` / `unsupported`: deliberate product boundaries, not work
   that may silently be treated as complete;
 - `done`: implementation and the named evidence both exist.
+
+First-version release gating is intentionally narrower than completion of this
+whole TODO. The first release is blocked by incorrect rule/route behavior,
+unsafe VPN ownership, unrecovered network changes, loop or retry storms,
+crashes, unbounded CPU/RSS/FD/task growth, broken KCP/UoT/chain behavior, or
+resources that do not return to baseline after bounded cleanup. It is not
+blocked by a measured but bounded performance gap that appears only with large
+or unusually interleaved policies. Those performance gaps remain mandatory
+`post-v1-optimization` work and retain their reproducible benchmarks, but are
+implemented and validated independently after the functional candidate is
+frozen. Common bundled GeoSite/GeoIP policies and ordinary custom rule sets
+must still remain usable and free of catastrophic CPU, memory or startup cost
+in the first release.
+
+`post-v1-optimization` is a parallel delivery lane, not a waiver. Those rows
+must remain open with their benchmark inputs and acceptance thresholds, and
+optimization continues after the first functional candidate is frozen. A
+failed optimization experiment reverts only its isolated optimization commit;
+it must not delay or destabilize a candidate that already passes the functional,
+security and lifecycle release gates. Conversely, a panic, wrong first-match
+result, unbounded growth, retry storm or common-policy performance collapse is
+not a non-blocking optimization and still blocks the first release.
 
 | ID | Status | Scope | Required evidence / current blocker |
 | --- | --- | --- | --- |
@@ -79,32 +106,35 @@ Status meanings:
 | MAC-COMPILE | implemented-validation-pending | macOS policy-enabled build exposed Linux-only socket marking and an undeclared libc path | `14a6a17f` gates TCP STUN `SO_MARK` and imports `nix::libc`; require a successful ARM64 DMG workflow for the final candidate SHA before closing |
 | AND-SIGNING | implemented-validation-pending | Stable signing identity for rolling Android policy candidates | GitHub Secrets restore a dedicated candidate-only keystore; APK cert must be `14d2d885ce1bc361923a493210865f86390ffcd32eb2b555042bbd1a8b6c38e0`; after the one-time signer migration, two consecutive workflow APKs must upgrade with `adb install -r` while preserving config and VPN authorization |
 | AND-VPN-OWN | done | Native persisted system-revoke marker; background restart must not reclaim VPN ownership | Android candidate run `29310466513`: three 0.67-0.87 second stop/start cycles succeeded; Clash takeover set `revoked_by_system=true`; force-stop/cold-start retained Clash ownership and showed stopped; explicit Run reclaimed VPN and cleared the marker |
-| AND-VPN-COLD-SYNC | investigating | A persisted enabled core can display running after app process restart while no VpnService/TUN exists | Exact `ed0f36d3` device evidence showed `no_tun=false`, `revoked_by_system=false`, a running core and no VPN NetworkAgent/TUN/TauriVpnService. `onMounted` registers listeners but does not reconcile an already-running instance. Preserve the no-silent-reclaim rule after system revocation, but explicitly reconcile when ownership is still granted; validate cold process restart, system revoke, explicit Run and competing VPN ownership |
+| AND-VPN-COLD-SYNC | done | A persisted enabled core must not display running while no VpnService/TUN exists | Exact Android `38d965c2`: after five application-process death/cold-launch cycles, the UI consistently showed stopped with no TUN and did not silently reclaim VPN ownership. Explicit Run restored `tun0` in 0.508-0.829 seconds in all five valid samples; a separate force-stop/cold-launch recovery restored it in about 0.5 seconds. The earlier `ed0f36d3` running-without-TUN state is not present in the replacement candidate |
 | AND-DHCP | done | DHCP mode must not serialize an undefined virtual IP | Android candidate run `29310466513` on `192.168.234.227`: imported config kept `dhcp=true` with no explicit IPv4; repeated starts obtained `10.245.0.2/24` and `10.245.0.3/24` without WebView or native serialization errors |
-| AND-MESH-ICMP | investigating | Android policy-enabled mesh path after VPN revoke/reclaim | External IPv4 and DNS passed, but the first `10.245.0.1` ICMP run lost 5/5 packets. Confirm the remote TUN/peer state, then A/B the same Android config with only policy mode disabled before assigning a root cause |
-| AND-NETWORK-CHANGE | implemented-validation-pending | Wi-Fi roam, DHCP renew, Wi-Fi/mobile-data/airplane-mode transitions | Repeated transitions must update DNS/network generation, stop without restart storms while offline, recover once after connectivity returns, preserve mesh routes, and not reclaim VPN after another app owns it |
-| AND-POLICY-UI | implemented-validation-pending | Android policy editor, import/preflight and managed rule data | Validate the collapsible editor without coordinate automation, config import/export, diagnostics, manual update buttons and persistence across process death and signed APK upgrade |
-| GEO-RESOURCE-UX | implemented-validation-pending | GeoSite/GeoIP should work without path, digest or first-run download fields | The editor now reports the pinned bundled GeoSite/GeoIP snapshots as built in and keeps Country MMDB optional. Empty built-in rows remain editor-local and are not serialized. Validate default presets, explicit same-kind override, Android upgrade persistence and no path/SHA prompts |
+| AND-MESH-ICMP | done | Android policy-enabled mesh path after VPN revoke/reclaim | Exact `38d965c2` APK and musl peer: after restoring the previously absent remote `10.245.0.1`, Android→Linux and Linux→Android each passed 5/5 ICMP with policy mode enabled; Android mesh TCP to `10.245.0.1:25480` returned HTTP 200 in 24 ms. The earlier 5/5 loss was an invalid fixture with no remote peer, not a policy-path defect |
+| AND-NETWORK-CHANGE | implemented-validation-pending | Wi-Fi roam, DHCP renew, Wi-Fi/mobile-data/airplane-mode transitions | Exact Android `38d965c2` survived a 12-second Wi-Fi loss with the same process and TUN ifindex, no policy runtime restart, bounded roughly one-per-second peer reconnect attempts, 3.2% sampled CPU after recovery and 5/5 restored mesh ICMP. Still validate repeated roam/DHCP, longer offline, mobile-data/airplane transitions, DNS generation replacement and competing VPN ownership before closing |
+| UNDERLAY-BIND-REFRESH | implemented-validation-pending | Active connector bind addresses must not reuse the 60-second peer-advertisement cache after DHCP/address changes | Exact Linux `38d965c2` refreshed policy table `52000` and its source rule from `172.32.1.1` to `.3` in two seconds, but manual reconnect then retried the removed `.1` bind address until the shared `IPCollector` cache refreshed. A separate 12-second link outage cached an empty source set and blocked otherwise healthy reconnects until the same timeout. Underlay validation and connector bind selection now perform a fresh local-interface collection while peer advertisement/STUN caching remains unchanged. Validate immediate TCP/UDP/QUIC reconnect after address replacement and offline restore, bounded retries and no connector-creation CPU regression |
+| AND-POLICY-UI | implemented-validation-pending | Android policy editor, import/preflight and managed rule data | Exact Android `38d965c2` CDP inspection proved the collapsible editor restores ordered `GEOIP,CN,DIRECT,no-resolve` plus `MATCH,REJECT`, keeps the no-resolve checkbox selected and preserves configuration across repeated process death. Still validate malformed diagnostics, import/export and signed replacement upgrade before closing |
+| GEO-RESOURCE-UX | implemented-validation-pending | GeoSite/GeoIP should work without path, digest or first-run download fields | Exact Android `38d965c2` shows the pinned GeoSite and GeoIP snapshots as built in and verified, with no name/path/SHA input; only optional Country MMDB exposes its trusted-source URL and explicit download action. Bundled GeoIP already passed a real CN/non-CN decision. Still validate explicit same-kind override, read-only materialization failure and signed upgrade persistence |
 | GEO-ONLINE-UPDATE | planned-next-version | Online replacement currently does not reliably attach the downloaded resource to the saved policy | Keep online replacement unavailable for bundled GeoSite/GeoIP in this version. The next version must make explicit update atomically replace and activate a validated snapshot, preserve the old snapshot on any failure, and cover save/restart/Android upgrade before exposing the action again |
 | POLICY-OUTBOUND-UX | implemented-validation-pending | Outbound interface was an unconditional free-text field | Target-side RPC now reports platform applicability and active physical interfaces. Linux/traditional macOS use a selector and recommended route match; Android hides the field because VpnService owns the path; unsupported platforms report unavailable. Validate multiple physical interfaces, active system VPN, network changes, stale selections and old-server RPC failure |
-| DESK-RELOAD | implemented-validation-pending | Transactional source-file hot reload and bounded restart | Valid edit publishes a ready candidate; malformed edit retains old revision; worker kill follows 1/2/5-second budget; no bridge/task/FD growth |
+| DESK-RELOAD | implemented-validation-pending | Transactional source-file hot reload and bounded restart | Exact Linux `38d965c2`: a forced Leaf worker death kept mesh ICMP at 50/50, recovered a new worker in 1.359 seconds, retained 9 core threads and reduced core FDs from 33 to 32; post-recovery TCP reached 1.31 Gbit/s and UoT UDP 10 Mbit/s had zero loss. A malformed `MATCH,missing-actor` edit retained the same worker/revision and working data plane, with an explicit candidate-rejected warning. Still validate repeated crash budgets, valid revision replacement and no bridge/task/FD growth over a longer loop |
 | POLICY-ROUTE-REFRESH | implemented-validation-pending | Review P1: underlay bypass routes must track address/default-route changes | The supervisor now refreshes the namespace-bound routing guard on relevant events and at most every five seconds, retaining fail-closed state on error. Validate DHCP renew, interface index change, default-route loss/restore and no recursive underlay capture |
 | POLICY-MAGIC-DNS | implemented-validation-pending | Review P1: Magic DNS must remain on the mesh path | `100.100.100.101/32` is included in the live mesh classifier only while Magic DNS is enabled. Validate queries before/after config patch and route snapshot replacement; domain/GEOSITE visibility remains the separate `SPLIT-DNS` limitation |
 | POLICY-WRITER-FAIRNESS | implemented-validation-pending | Review P2: sustained peer traffic must not starve Leaf responses | Peer and policy packets use bounded independent queues, unbiased selection and alternating bounded drain. Saturate both directions and prove bounded loss, no starvation, no unbounded memory and unchanged mesh latency |
 | POLICY-DNS-DISCOVERY | implemented-validation-pending | Review P2: loopback resolver stubs are unusable as direct Leaf DNS servers | Resolver discovery rejects loopback/link-local/multicast stubs and checks resolved systemd/NetworkManager files. Validate resolved, NetworkManager, plain resolv.conf, Android supplied DNS, empty DNS and network-change replacement |
-| LNX-POLICY | implemented-validation-pending | Linux policy routing, source/mark bypass and fail-closed behavior | Isolated namespace/container tests plus physical-host mesh regression; include stale cleanup, competing table/rule ownership, abrupt exit, underlay change and route restoration |
+| LNX-POLICY | implemented-validation-pending | Linux policy routing, source/mark bypass and fail-closed behavior | Exact Linux `38d965c2` isolated namespaces: policy table `52000` and source rule followed a DHCP-style address replacement in two seconds; normal SIGTERM removed the worker, TUN, split routes, rules, table and generated Leaf config. The same run exposed the separate `UNDERLAY-BIND-REFRESH` cache blocker. Still validate the fixed candidate, competing table/rule ownership, abrupt exit and physical-host regression |
 | MAC-UTUN | implemented-validation-pending | Traditional macOS utun transparent adapter and packaged Leaf sidecar | DMG contains signed/runnable sidecar; v4/v6 split routes install, DIRECT and proxy paths work, normal stop reverses exact owned routes |
 | MAC-ORPHAN | implemented-validation-pending | macOS parent-PID watchdog | Forced GUI/core termination removes worker within two seconds and leaves no policy route, temp config, session or repeated respawn |
 | POLICY-GEODATA | implemented-validation-pending | Bundled `geosite.dat`, `geoip-lite.dat` and optional Country MMDB | GeoSite/GeoIP are pinned MetaCubeX snapshots embedded in the core and materialized only when a matching rule lacks an explicit same-kind rule set. Validate parser/category semantics, digest and atomic materialization, read-only config fallback, explicit override and no network dependency. Country MMDB remains optional; ASN MMDB remains out of v1 because no actor consumes it |
 | POLICY-GEO-MATCHER-PERF | implemented-validation-pending | Indexed GeoSite/GeoIP new-session matching comparable to mainstream proxy engines | The original Leaf router consumed about 16.8 CPU seconds for 200 concurrent `GEOSITE,CN` decisions versus 0.12-0.22 CPU seconds for the `MATCH` baseline. Exact candidate `8e85c83b` reduced GeoSite to 17/19/22 ticks and GeoIP to 9/15/18 ticks, overlapping the 11-23 tick MATCH baselines, without increasing startup time or RSS. Android materialized the pinned GeoSite/GeoIP snapshots with exact digests. Final status still requires the replacement candidate after `POLICY-PREFLIGHT-MODIFIER` |
-| POLICY-RULE-SCALE | implemented-validation-pending | Thousands of ordered custom rules must not restore Leaf's linear-scan cost | Exact candidate `8e85c83b`, 200 concurrent new connections with a tail match: 0 rules 13/16/20 ticks, 1K rules 19/24/22, 5K rules 26/32/38, 16K rules 70/64/68. This proves that indexed Geo matchers alone do not remove the top-level ordered scan. The compiler candidate coalesces only contiguous same-target, same-family, same-`no-resolve` and same-effective-network blocks into one indexed Leaf rule. Validate 1K/5K/16K same-target blocks again, plus alternating-target and mixed-family worst cases; preserve boundaries across target, family, modifier and UDP capability changes. Do not claim zero overhead for arbitrary interleaved first-match policies |
-| POLICY-GEOSITE-LOAD-SCALE | implemented-validation-pending | Selecting many or all GeoSite categories must have bounded startup time and RSS | Leaf fork `08c046b4` plus build fix `73e8caa2` groups selected categories by file, scans each file once per compiled Leaf rule and folds duplicate full/suffix entries into indexed sets. Benchmark 1/10/100/all categories, including categories split across different targets, and compare startup time/RSS with Mihomo before closing |
-| POLICY-GEOSITE-REGEX | implemented-validation-pending | GeoSite regex entries must not be silently ignored | Leaf fork `08c046b4` plus build fix `73e8caa2` preserves regex-domain entries and compiles regex plus escaped keyword matchers into a case-insensitive `RegexSet`; builds without regex retain the old keyword fallback and emit a warning for regex entries. Validate all 364 regex entries in the pinned snapshot against Mihomo category results and benchmark large keyword sets |
-| POLICY-RULES | implemented-validation-pending | Ordered first-match GEOIP/GEOSITE/COUNTRY/IP/domain rules | Compare ordering, `no-resolve`, missing category, duplicate resource and UDP actor-skip behavior with the pinned Mihomo references; preflight and runtime must produce the same result |
+| POLICY-RULE-SCALE | post-v1-optimization | Thousands of ordered custom rules must retain first-match semantics without restoring Leaf's linear-scan cost | Exact candidate `38d965c2`, 200 concurrent tail decisions: 16K contiguous same-target suffix rules compile into one matcher and consume 9/9/12 ticks versus the 0-rule 9/9/11 baseline, with 1.19 s startup and 15.6 MiB RSS. Alternating-target suffix rules cannot currently be coalesced and consume 60/60/62 ticks at 16K. Preserve target/family/modifier/network boundaries, but do not claim zero overhead for arbitrary interleaved first-match policies. Compare a bounded ordered-block index with Mihomo before changing semantics; this bounded scale gap does not block the first functional release |
+| POLICY-DOMAIN-KEYWORD-SCALE | post-v1-optimization | Large custom/GeoSite keyword sets must use a mainstream multi-pattern matcher | Exact candidate `38d965c2` incorrectly folds escaped keywords into one `RegexSet`: 5K and 16K same-target keywords consume about 4.17 CPU seconds per 200 tail decisions and reach about 59.8/117.7 MiB RSS. Replace keyword matching with a bounded Aho-Corasick or equivalent indexed matcher; keep real regex entries in bounded RegexSet chunks. Re-run 1K/5K/16K correctness, startup, RSS and CPU comparisons against Mihomo. Keep this optimization active, but do not couple it to first-release lifecycle fixes |
+| POLICY-GEOSITE-LOAD-SCALE | post-v1-optimization | Selecting many or all GeoSite categories must have bounded startup time and RSS | Exact candidate `38d965c2`: all 1,473 categories targeting one actor scan once and start in 1.16 s at 25.6 MiB RSS with near-baseline match CPU. Alternating targets produce one compiled rule per category, rescan the same DAT repeatedly, take 36.8 s to start and then expose the keyword/top-level scan cost. Cache each validated GeoSite file once per config load and project selected categories into ordered matchers without changing first-match behavior; compare all-category same/alternating/mixed policies with Mihomo after the first functional candidate is frozen |
+| POLICY-GEOSITE-REGEX | post-v1-optimization | GeoSite regex entries must not be silently ignored or make large keyword sets pathological | Leaf fork `08c046b4` plus build fix `73e8caa2` preserves regex-domain entries, but combining regexes with escaped plain keywords in one `RegexSet` failed the large-keyword acceptance benchmark. Separate keyword and regex engines, bound regex set compilation, validate all 364 regex entries in the pinned snapshot against Mihomo category results and reject invalid/oversized data without panic. Incorrect regex semantics remain blocking; matcher throughput tuning does not |
+| POLICY-RULES | implemented-validation-pending | Ordered first-match GEOIP/GEOSITE/COUNTRY/IP/domain rules | Exact Android `38d965c2` A/B proved `MATCH,DIRECT` permits both probes, `MATCH,REJECT` blocks both, and `GEOIP,CN,DIRECT,no-resolve` permits the CN probe while the following `MATCH,REJECT` blocks the non-CN probe. Still compare domain ordering, per-rule resolve, missing category, duplicate resource and UDP actor-skip behavior with the pinned Mihomo references before closing |
 | POLICY-PREFLIGHT-MODIFIER | implemented-validation-pending | Android preflight treated trailing `no-resolve` as an actor and panicked on a missing group | `ed0f36d3` extracts the actor before optional modifiers and makes unknown actor capability queries return `UnknownReference` instead of indexing. Require policy unit tests plus real Android `GEOIP,CN,DIRECT,no-resolve` preflight/start without process restart or SIGABRT |
+| POLICY-NO-RESOLVE-SEMANTICS | investigating | `no-resolve` currently changes compiler merge boundaries but generated Leaf config fixes `domainResolve=false`, so GEOIP/COUNTRY/IP-CIDR rules with and without the modifier behave identically for domain destinations | Mihomo resolves lazily at the first eligible IP rule and caches the result for later rules. Add an order-preserving per-rule resolve marker in the pinned Leaf fork: rules without `no-resolve` may resolve once at their exact position; rules with it must not trigger resolution. DNS failure continues scanning; direct IP destinations never resolve. Validate domain-before-IP, IP-before-domain, mixed modifiers, one-resolution-only and Android FakeDNS paths |
 | POLICY-EDITOR | implemented-validation-pending | GUI/RPC policy switch, nodes, groups, rules, fallback and rule-data controls | Desktop and Android round-trip must preserve order and explicit IDs/IPs, show validation diagnostics before start, update managed data only on explicit click and never mutate unrelated EasyTier settings |
 | POLICY-CONFIG | implemented-validation-pending | Opt-in startup and configuration across CLI, TOML, RPC, GUI and Android import | Disabled/absent mode must create no policy task, route, bridge or worker; enabled mode must use the same validated document and diagnostics; malformed or unsupported platform configuration must fail policy startup without breaking the mesh |
-| POLICY-CHAIN | implemented-validation-pending | DIRECT, SOCKS, mesh actor, chain and passive fallback | TCP and UDP matrices including final non-mesh SOCKS, actor failure, simultaneous network outage, restore hysteresis, bounded retry and no fallback oscillation |
+| POLICY-CHAIN | implementation-in-progress | DIRECT, SOCKS, mesh actor, chain and stable fallback | Exact Linux `38d965c2` proves only basic ordered actor reachability: an unavailable native SOCKS actor allowed that individual TCP connection to use mesh, and later connections could use a newly available native actor. It does **not** prove sticky failover acceptance. The local Leaf fork now has an opt-in preference-pinned state machine: one failed request may be rescued by one gated comparison, but later requests do not inherit that backup; canonical degradation and recovery each require three differential rounds over at least 30 seconds, and all-actor high-confidence failure enters bounded Outage/Dormant handling. TCP/UDP groups share one runtime comparison gate while keeping separate health state. This implementation has not yet passed the profiling-beta build or fault matrix and must not be promoted. With remote KCP input disabled, the older exact candidate opened no new KCP sessions, TCP fell back to smoltcp at 252 Mbit/s and UoT UDP sustained 20 Mbit/s with zero loss. Still validate platform network-generation invalidation, a real multi-hop chain, simultaneous outage/recovery, many-group retry bounds and UDP actor-skip ordering |
 | POLICY-KCP-UOT | implemented-validation-pending | Existing KCP-preferred mesh data plane and private UoT fallback | KCP available/unavailable/mixed-version tests; SOCKS KCP-only semantics unchanged; UDP over KCP/UoT throughput/loss; KCP state, target sockets, FDs and tasks return to baseline |
 | POLICY-UDP-LOSS | investigating | Policy UDP throughput remains below TCP and prior 50 Mbit/s runs observed loss | Separate Leaf/TUN, UoT framing, KCP, destination relay and test-actor loss with counters and profiling; do not mask loss by unbounded buffers or silently downgrade to smoltcp |
 | POLICY-LOOP-GUARD | implemented-validation-pending | Dynamic peer endpoint exclusion and retry-storm containment | Validate endpoint refresh, self/peer/mesh CIDR exclusions, more than 1000 attempted connections per second, malformed chains, worker crash and system-TUN coexistence without CPU/FD/KCP growth |
@@ -856,11 +886,14 @@ fail-closed.
 
 Runtime recovery:
 
-- one member fails while another succeeds: per-connection fallback, then
-  conservative member degradation;
+- one member fails while another succeeds: one group-owned comparative attempt
+  may rescue the current connection, but selection stays pinned until three
+  differential rounds over at least 30 seconds confirm member-specific failure;
 - all members fail or platform network changes: enter Outage, freeze preference,
   and do not churn through nodes;
-- network returns: probe the original preferred member first;
+- network returns: probe the original preferred member first; require three
+  successful rounds plus a 30-second hold-down before upgrading from a genuinely
+  degraded member;
 - existing TCP streams/UDP associations never migrate or replay; new sessions
   use the recovered schedule;
 - Leaf task/runtime failure gets at most three supervised restarts with bounded
@@ -1382,15 +1415,37 @@ The product behavior should be less sensitive and preference-first:
 
 - configured member order is the primary preference; RTT does not continuously
   reorder healthy members;
-- an individual new TCP connection or UDP association may immediately try the
-  next member after its bounded connect/setup timeout, without globally marking
-  the preferred member unhealthy;
-- globally degrade a member only after three consecutive failed health rounds;
+- the group remains pinned to its current preferred member while that member is
+  healthy or merely suspect. One application failure must never change the
+  group selection;
+- at most one group-owned comparative attempt may try the next configured
+  member after the preferred member's bounded connect/setup failure. Other
+  callers fail fast; they do not each walk the group;
+- a successful comparative attempt may rescue that individual new TCP
+  connection or UDP association, but it is only one differential observation
+  and does not globally switch the group;
+- after that rescue the group enters `Suspect`: later new sessions do not
+  inherit the backup and do not each retry the full group. They fail fast until
+  the next 15-second observation point, where exactly one gated request may
+  compare the pinned actor with an alternative;
+- globally degrade the preferred member only after three consecutive,
+  independent failed observation rounds spanning at least 30 seconds, with a
+  lower-priority member succeeding in each corresponding round. That same-round
+  success is the minimum positive evidence that the local path is usable; a
+  preferred-member failure by itself never advances failover;
+- any preferred-member success resets its consecutive-failure count. A round
+  in which every attempted member fails is an outage signal, not a member
+  failure, and does not advance the count;
 - recover/upgrade only after three consecutive successful health rounds and a
-  minimum 30-second hold-down;
-- healthy checks run every 30 seconds while the group has recent activity;
-  degraded members may be probed every 10 seconds with one half-open probe;
-- add 0-500 ms jitter so nodes do not probe simultaneously;
+  minimum 30-second hold-down. A successful preferred-member probe may rescue
+  that one new session, but it does not immediately change the actor used by
+  later sessions;
+- comparisons are application-demand driven rather than periodic background
+  traffic. A suspect or degraded group permits at most one comparison every 15
+  seconds, which yields three independent rounds over at least 30 seconds;
+- add 0-500 ms jitter before any later background health-check implementation
+  so nodes do not probe simultaneously. The v1 demand-driven path must not add
+  a wakeup timer merely to satisfy this future requirement;
 - existing TCP streams and UDP associations never migrate. Only new sessions
   use the updated schedule;
 - short interruption during application reconnect is accepted. Avoid duplicating
@@ -1411,7 +1466,8 @@ member unhealthy or rotate through the entire group.
 Maintain a local `network_generation` supplied by platform connectivity/route
 events. When generation changes or the platform reports no validated network:
 
-- enter group state `Outage` for an initial 3-second grace period;
+- fail policy traffic closed immediately while retaining the last stable
+  selection as lifecycle state where the platform adapter can preserve it;
 - cancel/ignore health results and connection attempts created under the old
   generation;
 - do not increment member failure counters;
@@ -1419,6 +1475,16 @@ events. When generation changes or the platform reports no validated network:
 - do not walk every fallback member for each new application connection;
 - keep existing streams/UDP associations until their normal owners close them;
 - rebind/protect native sockets for the new platform network before probing.
+
+The current desktop candidate preserves the running Leaf runtime and its
+pinned actor when both the old and refreshed underlay remain usable; it updates
+the source-bypass routes in place. It stops Leaf only when the underlay becomes
+unusable and starts it once after recovery. Android must rebuild the in-process
+runtime when VpnService reports a different underlying network/DNS generation;
+that rebuild currently starts from configured actor order rather than restoring
+the previous in-memory actor. Treat Android actor-state handoff as a validation
+gap: the rebuild itself must remain one-shot and must not convert the outage
+into accumulated member failures or a retry storm.
 
 Consensus failure also enters `Outage`: when all previously usable members fail
 in the same health window and there is no independent evidence that local
@@ -1429,7 +1495,7 @@ During `Outage`:
 - new policy connections fail fast or wait behind one bounded readiness gate;
   they must not create a retry storm;
 - run at most one jittered recovery probe for the group, with backoff
-  `1s -> 2s -> 5s -> 10s`;
+  `1s -> 2s -> 5s -> 10s -> 30s -> 60s`;
 - probe the original preferred member first after connectivity returns;
 - leave `Outage` only after the platform network is usable and a probe succeeds;
 - restoring the original preferred member does not count as a failback switch.
@@ -1465,8 +1531,14 @@ spawn an unowned retry task.
 
 After recovery, switch away from the original preferred member only when there
 is positive differential evidence: another member succeeds while the preferred
-member reaches its normal three-round failure threshold. If all members still
-fail together, remain in `Outage` and do not churn.
+member reaches its normal three-round, minimum-30-second failure threshold. If
+all members still fail together, remain in `Outage` and do not churn. The final
+cross-platform handoff contract must clear old-generation in-flight
+observations while preserving the pinned member and its last stable health; a
+generation change must never count as a proxy failure or an automatic reason to
+select another member. The Android runtime-rebuild gap documented above remains
+open until that state can be handed across runtimes without adding public
+configuration or process-global unbounded state.
 
 Do not rely on one public connectivity URL as the sole global-outage signal.
 Combine platform network state, network generation, route/source availability,

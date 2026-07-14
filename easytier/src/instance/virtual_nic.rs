@@ -2199,6 +2199,11 @@ impl NicCtx {
             let initial_active = active.lock().await.is_some();
             let mut restart_budget = RuntimeRestartBudget::default();
             let mut next_restart = tokio::time::Instant::now();
+            let mut underlay_available = if let Some(routing) = routing.upgrade() {
+                routing.lock().await.has_usable_underlay()
+            } else {
+                return;
+            };
             let mut dormant = !initial_active
                 && schedule_policy_runtime_restart(&mut restart_budget, &mut next_restart);
             let mut last_route_refresh = tokio::time::Instant::now();
@@ -2246,15 +2251,58 @@ impl NicCtx {
                     let Some(routing) = routing.upgrade() else {
                         break;
                     };
-                    match routing.lock().await.refresh() {
-                        Ok(true) => tracing::info!(
-                            "refreshed policy underlay routes after network change"
-                        ),
+                    let (refresh_result, refreshed_underlay_available) = {
+                        let mut routing = routing.lock().await;
+                        let result = routing.refresh();
+                        (result, routing.has_usable_underlay())
+                    };
+                    match refresh_result {
+                        Ok(true) => {
+                            let was_underlay_available = underlay_available;
+                            underlay_available = refreshed_underlay_available;
+                            if was_underlay_available && underlay_available {
+                                tracing::info!(
+                                    "refreshed policy underlay routes after network change"
+                                );
+                            } else if was_underlay_available {
+                                stop_policy_active_runtime(&active, &bridge, &bridge_updates).await;
+                                active_since = None;
+                                restart_budget.reset();
+                                dormant = true;
+                                tracing::info!(
+                                    "policy underlay default route is unavailable; policy traffic is fail-closed without consuming restart budget"
+                                );
+                            } else if underlay_available {
+                                restart_budget.reset();
+                                dormant = false;
+                                next_restart = tokio::time::Instant::now();
+                                tracing::info!(
+                                    "policy underlay default route recovered; rebuilding the policy runtime once"
+                                );
+                            }
+                        }
                         Ok(false) => {}
-                        Err(error) => tracing::warn!(
-                            ?error,
-                            "failed to refresh policy underlay routes; state is tracked and the update will be retried"
-                        ),
+                        Err(error) => {
+                            if underlay_available && !refreshed_underlay_available {
+                                underlay_available = false;
+                                stop_policy_active_runtime(
+                                    &active,
+                                    &bridge,
+                                    &bridge_updates,
+                                )
+                                .await;
+                                active_since = None;
+                                restart_budget.reset();
+                                dormant = true;
+                                tracing::info!(
+                                    "policy underlay address is unavailable; policy traffic is fail-closed without consuming restart budget"
+                                );
+                            }
+                            tracing::warn!(
+                                ?error,
+                                "failed to refresh policy underlay routes; state is tracked and the update will be retried"
+                            );
+                        }
                     }
                     match Self::collect_policy_mesh_routes_for(
                         &global_ctx,
@@ -2286,6 +2334,10 @@ impl NicCtx {
                         &mut next_restart,
                     );
                     tracing::warn!("Leaf policy worker exited; non-mesh traffic is fail-closed");
+                }
+
+                if !underlay_available {
+                    continue;
                 }
 
                 let has_active = active.lock().await.is_some();

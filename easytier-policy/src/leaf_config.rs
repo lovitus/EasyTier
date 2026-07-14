@@ -135,12 +135,14 @@ pub fn compile_leaf_config(
             ChainKind::Chain => ("chain", serde_json::json!({ "actors": group.members })),
             ChainKind::Fallback => (
                 "failover",
-                // Disable Leaf's active probes against hard-coded public targets. v1 intentionally
-                // uses passive per-connection failover only.
+                // EasyTier uses Leaf's preference-first, bounded passive state machine. It avoids
+                // hard-coded public probes and changes the pinned actor only after differential
+                // evidence across multiple observation windows.
                 serde_json::json!({
                     "actors": group.members,
                     "healthCheck": false,
                     "failover": true,
+                    "stableFailover": true,
                 }),
             ),
         };
@@ -197,6 +199,8 @@ struct CompiledLeafRule {
     network: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inbound_tag: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolve_domain: Option<bool>,
     target: String,
 }
 
@@ -258,11 +262,13 @@ fn compile_leaf_rules(
         let target = parts[parts.len() - 1 - usize::from(has_no_resolve)].to_owned();
         let mut rule = empty_leaf_rule(target.clone());
         let mut merge_family = None;
+        let mut resolve_domain = false;
 
         match rule_type.as_str() {
             "IP-CIDR" => {
                 rule.ip = Some(vec![parts[1].to_owned()]);
                 merge_family = Some(RuleMergeFamily::Ip);
+                resolve_domain = !has_no_resolve;
             }
             "DOMAIN" => {
                 rule.domain = Some(vec![parts[1].to_owned()]);
@@ -282,6 +288,7 @@ fn compile_leaf_rules(
                     apply_geoip_rule(&mut rule, parts[1], &geoip_categories)?,
                 )?;
                 merge_family = Some(RuleMergeFamily::Ip);
+                resolve_domain = !has_no_resolve;
             }
             "COUNTRY" => {
                 let rule_set = find_single_rule_set(document.rule_sets.values(), RuleSetKind::Mmdb)
@@ -290,6 +297,7 @@ fn compile_leaf_rules(
                         kind: "mmdb",
                     })?;
                 rule.external = Some(vec![external_rule("mmdb", rule_set, parts[1], base_dir)?]);
+                resolve_domain = !has_no_resolve;
             }
             "GEOSITE" => {
                 let rule_set =
@@ -325,6 +333,7 @@ fn compile_leaf_rules(
                                 })?;
                         rule.external =
                             Some(vec![external_rule("mmdb", rule_set, code, base_dir)?]);
+                        resolve_domain = !has_no_resolve;
                     }
                     "geoip" | "geoip-dat" => {
                         compiled_geoip_cidrs = reserve_geoip_cidrs(
@@ -332,6 +341,7 @@ fn compile_leaf_rules(
                             apply_geoip_rule(&mut rule, code, &geoip_categories)?,
                         )?;
                         merge_family = Some(RuleMergeFamily::Ip);
+                        resolve_domain = !has_no_resolve;
                     }
                     _ => {
                         return Err(LeafConfigError::MissingRuleSet {
@@ -351,6 +361,7 @@ fn compile_leaf_rules(
             }
             _ => unreachable!("policy validation rejects unsupported rule types"),
         }
+        rule.resolve_domain = resolve_domain.then_some(true);
 
         let supports_udp = document
             .actor_supports_udp(&target, &mut BTreeSet::new())
@@ -393,6 +404,7 @@ fn push_compiled_rule(
         && let Some(previous) = compiled.last_mut()
         && previous.target == rule.target
         && previous.network == rule.network
+        && previous.resolve_domain == rule.resolve_domain
         && can_merge_rule_values(previous, &rule, merge_key)
     {
         merge_rule_values(previous, rule, merge_key);
@@ -491,6 +503,7 @@ fn empty_leaf_rule(target: String) -> CompiledLeafRule {
         port_range: None,
         network: None,
         inbound_tag: None,
+        resolve_domain: None,
         target,
     }
 }
@@ -643,6 +656,8 @@ rules:
         assert_eq!(config["outbounds"][2]["protocol"], "socks");
         assert_eq!(config["outbounds"][3]["tag"], "final");
         assert_eq!(config["outbounds"][3]["protocol"], "failover");
+        assert_eq!(config["outbounds"][3]["settings"]["stableFailover"], true);
+        assert_eq!(config["outbounds"][3]["settings"]["healthCheck"], false);
         let rules = config["router"]["rules"].as_array().unwrap();
         assert_eq!(rules.len(), 3);
         assert_eq!(rules[0]["target"], "DIRECT");
@@ -722,6 +737,56 @@ rules:
             serde_json::json!(["suffix.example"])
         );
         assert_eq!(rules[0]["domainKeyword"], serde_json::json!(["keyword"]));
+    }
+
+    #[test]
+    fn preserves_per_rule_domain_resolution_semantics() {
+        let rules = compiled_rules(
+            r#"
+version: 1
+rules:
+  - IP-CIDR,203.0.113.0/24,DIRECT
+  - IP-CIDR,198.51.100.0/24,DIRECT,no-resolve
+  - MATCH,REJECT
+"#,
+        );
+
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0]["resolveDomain"], true);
+        assert!(rules[1].get("resolveDomain").is_none());
+        assert!(rules[2].get("resolveDomain").is_none());
+    }
+
+    #[test]
+    fn external_geoip_honors_no_resolve() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::geodata::write_test_geoip(
+            &directory.path().join("geoip.dat"),
+            "GOOGLE",
+            vec![(vec![8, 8, 8, 0], 24)],
+        );
+        let source = r#"
+version: 1
+rule-sets:
+  geoip: { type: geoip, path: geoip.dat }
+rules:
+  - EXTERNAL,geoip:google,DIRECT
+  - EXTERNAL,geoip:google,REJECT,no-resolve
+  - MATCH,REJECT
+"#;
+        let revision = PolicyRevision::parse(source, directory.path()).unwrap();
+        let config = compile_leaf_config(
+            &revision,
+            7,
+            directory.path(),
+            &Unresolved,
+            &["1.1.1.1".parse().unwrap()],
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        let rules = config["router"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["resolveDomain"], true);
+        assert!(rules[1].get("resolveDomain").is_none());
     }
 
     #[test]
