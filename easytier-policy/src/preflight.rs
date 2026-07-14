@@ -149,7 +149,9 @@ fn warnings(revision: &PolicyRevision) -> Vec<PolicyDiagnostic> {
     }
     for (index, source) in revision.document.rules.iter().enumerate() {
         let parts: Vec<&str> = source.split(',').map(str::trim).collect();
-        let target = parts.last().copied().unwrap_or_default();
+        let Some(target) = rule_target(&parts) else {
+            continue;
+        };
         if !matches!(
             revision
                 .document
@@ -186,6 +188,17 @@ fn warnings(revision: &PolicyRevision) -> Vec<PolicyDiagnostic> {
         });
     }
     diagnostics
+}
+
+fn rule_target<'a>(parts: &'a [&str]) -> Option<&'a str> {
+    let modifier_count = usize::from(
+        parts
+            .last()
+            .is_some_and(|part| part.eq_ignore_ascii_case("no-resolve")),
+    );
+    parts
+        .get(parts.len().checked_sub(1 + modifier_count)?)
+        .copied()
 }
 
 #[cfg(test)]
@@ -279,5 +292,20 @@ rules:
             "rule.udp_actor_unreachable"
         );
         assert_eq!(preflight.report.diagnostics[0].path, "rules[0]");
+    }
+
+    #[test]
+    fn accepts_no_resolve_without_treating_modifier_as_actor() {
+        let preflight = preflight_policy_source(
+            r#"
+version: 1
+rules:
+  - GEOIP,lan,DIRECT,no-resolve
+  - MATCH,DIRECT
+"#,
+            Path::new("."),
+        );
+        assert!(preflight.report.valid);
+        assert!(preflight.report.diagnostics.is_empty());
     }
 }

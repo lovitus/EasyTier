@@ -822,10 +822,15 @@ impl PolicyDocument {
         if let Some(proxy) = self.proxies.get(actor) {
             return Ok(proxy.udp && proxy.kind == ProxyKind::Socks5);
         }
+        let Some(group) = self.groups.get(actor) else {
+            return Err(PolicyError::UnknownReference {
+                owner: "UDP capability check".to_owned(),
+                reference: actor.to_owned(),
+            });
+        };
         if !visited.insert(actor.to_owned()) {
             return Err(PolicyError::Cycle(actor.to_owned()));
         }
-        let group = &self.groups[actor];
         let support = match group.kind {
             ChainKind::Chain => {
                 let mut all = true;
@@ -1150,6 +1155,19 @@ rules: ["COUNTRY,CN,DIRECT"]
                 Path::new("."),
             ),
             Err(PolicyError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_actor_capability_is_an_error_instead_of_a_panic() {
+        let revision =
+            PolicyRevision::parse("version: 1\nrules: [\"MATCH,DIRECT\"]\n", Path::new("."))
+                .unwrap();
+        assert!(matches!(
+            revision
+                .document
+                .actor_supports_udp("missing", &mut BTreeSet::new()),
+            Err(PolicyError::UnknownReference { reference, .. }) if reference == "missing"
         ));
     }
 
