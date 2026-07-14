@@ -199,7 +199,7 @@ policy_config_file_placeholder: "policy/default.yaml (desktop)"
 policy_config_inline: Inline policy YAML
 policy_config_inline_placeholder: "version: 1\nrules: [\"FINAL,DIRECT\"]"
 policy_outbound_interface: Physical outbound interface
-policy_outbound_interface_placeholder: "Required on desktop policy mode, for example eth0 or en0"
+policy_outbound_interface_placeholder: Select the interface that reaches the Internet
 policy_leaf_executable: Leaf worker executable
 policy:
   editor:
@@ -238,8 +238,23 @@ policy:
     add_rule_set: Add standard geo data
     managed_source: Managed source
     update_rule_data: Download and verify
-    rule_data_help: GeoSite, GeoIP, and Country MMDB are updated only when requested. Downloads are size- and format-checked and their SHA-256 is recorded; save and restart the instance to apply them. Leaf does not support ASN data, so no non-functional ASN option is exposed.
+    rule_data_help: EasyTier owns each resource name, storage path, and digest. Use the default MetaCubeX source or replace only its source URL; a successful download must pass size and format validation before it atomically replaces the current file. Save and restart the instance to apply it.
     rule_data_updated: "{type} updated ({size}); save and restart the instance to apply it"
+    rule_data_source: Resource source URL
+    rule_data_source_help: The shown MetaCubeX URL is the default. Edit it only when using a trusted custom mirror.
+    resource_geosite: GeoSite domains
+    resource_geoip: GeoIP country data
+    resource_mmdb: Country MMDB
+    status: Status
+    installed: Installed and verified
+    installed_unverified: Configured; update once to verify
+    not_installed: Not installed
+    recommended: Recommended
+    refresh_interfaces: Refresh interfaces
+    outbound_required: "{platform} desktop policy routing requires a physical outbound interface. EasyTier lists active physical interfaces; do not select the EasyTier TUN or another VPN interface."
+    outbound_automatic: "{platform} policy mode obtains its network path from the host VPN service; no outbound interface is required."
+    outbound_unavailable: "Transparent policy routing is not available on {platform}; an outbound interface value would have no effect."
+    outbound_load_failed: Failed to list outbound interfaces
     presets: Presets
     preset_china_direct: China direct / overseas preferred
     preset_geo_required: Download Geosite and GeoIP data first

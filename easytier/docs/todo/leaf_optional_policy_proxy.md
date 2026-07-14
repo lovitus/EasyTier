@@ -83,6 +83,8 @@ Status meanings:
 | AND-MESH-ICMP | investigating | Android policy-enabled mesh path after VPN revoke/reclaim | External IPv4 and DNS passed, but the first `10.245.0.1` ICMP run lost 5/5 packets. Confirm the remote TUN/peer state, then A/B the same Android config with only policy mode disabled before assigning a root cause |
 | AND-NETWORK-CHANGE | implemented-validation-pending | Wi-Fi roam, DHCP renew, Wi-Fi/mobile-data/airplane-mode transitions | Repeated transitions must update DNS/network generation, stop without restart storms while offline, recover once after connectivity returns, preserve mesh routes, and not reclaim VPN after another app owns it |
 | AND-POLICY-UI | implemented-validation-pending | Android policy editor, import/preflight and managed rule data | Validate the collapsible editor without coordinate automation, config import/export, diagnostics, manual update buttons and persistence across process death and signed APK upgrade |
+| GEO-RESOURCE-UX | implemented-validation-pending | Managed Geo resource UI exposes internal name, path and mutable SHA-256 | The editor now exposes three fixed identities and only a default/custom HTTPS source plus update status. Uninstalled rows remain editor-local; successful bounded download, parser validation, hashing and atomic replacement commit the system-owned path/digest. Validate default and custom sources, failed-download retention, damaged data, Android upgrade persistence and no empty rule-set serialization |
+| POLICY-OUTBOUND-UX | implemented-validation-pending | Outbound interface was an unconditional free-text field | Target-side RPC now reports platform applicability and active physical interfaces. Linux/traditional macOS use a selector and recommended route match; Android hides the field because VpnService owns the path; unsupported platforms report unavailable. Validate multiple physical interfaces, active system VPN, network changes, stale selections and old-server RPC failure |
 | DESK-RELOAD | implemented-validation-pending | Transactional source-file hot reload and bounded restart | Valid edit publishes a ready candidate; malformed edit retains old revision; worker kill follows 1/2/5-second budget; no bridge/task/FD growth |
 | POLICY-ROUTE-REFRESH | implemented-validation-pending | Review P1: underlay bypass routes must track address/default-route changes | The supervisor now refreshes the namespace-bound routing guard on relevant events and at most every five seconds, retaining fail-closed state on error. Validate DHCP renew, interface index change, default-route loss/restore and no recursive underlay capture |
 | POLICY-MAGIC-DNS | implemented-validation-pending | Review P1: Magic DNS must remain on the mesh path | `100.100.100.101/32` is included in the live mesh classifier only while Magic DNS is enabled. Validate queries before/after config patch and route snapshot replacement; domain/GEOSITE visibility remains the separate `SPLIT-DNS` limitation |
@@ -124,9 +126,9 @@ modules without hiding failures:
    `POLICY-WRITER-FAIRNESS` and `POLICY-DNS-DISCOVERY`: close correctness risks
    before throughput tuning. The Android ICMP result must first be repeated
    against a remote node with a verified TUN address.
-4. `POLICY-GEODATA`, `POLICY-RULES`, `POLICY-EDITOR`, `POLICY-CONFIG`,
-   `POLICY-CHAIN` and `POLICY-KCP-UOT`: validate the user-visible policy
-   contract as one coherent functional matrix.
+4. `GEO-RESOURCE-UX`, `POLICY-OUTBOUND-UX`, `POLICY-GEODATA`, `POLICY-RULES`, `POLICY-EDITOR`,
+   `POLICY-CONFIG`, `POLICY-CHAIN` and `POLICY-KCP-UOT`: validate the
+   user-visible policy contract as one coherent functional matrix.
 5. `AND-NETWORK-CHANGE`, `DESK-RELOAD`, `LNX-POLICY`, `MAC-UTUN`,
    `MAC-ORPHAN`, `POLICY-LOOP-GUARD` and `POLICY-LEAF-EMBED`: run abnormal
    lifecycle, route ownership and resource-leak tests.
@@ -762,6 +764,11 @@ Leaf assigns an implicit priority to `NETWORK`, Geosite, or GeoIP rules.
 The generated baseline is deterministic and inspectable. A typical country
 split uses Geosite for domain categories and GeoIP DAT for IP categories;
 Country MMDB remains an explicit third matcher for ISO country rules:
+
+The visual editor owns the map names, paths and digests shown below. Users do
+not enter them; they choose only the fixed resource and, when necessary, a
+custom `source-url`. Advanced YAML keeps these fields for reproducibility and
+backward compatibility.
 
 ```yaml
 rule-sets:
@@ -1654,18 +1661,27 @@ rule-sets:
     type: geosite
     path: "rules/geosite.dat"
     update: manual
-    sha256: "optional expected digest"
+    sha256: "EasyTier-generated digest"
+    source-url: "optional trusted custom HTTPS mirror"
   geoip:
     type: geoip
     path: "rules/geoip-lite.dat"
     update: manual
-    sha256: "optional expected digest"
+    sha256: "EasyTier-generated digest"
+    source-url: "optional trusted custom HTTPS mirror"
   country:
     type: mmdb
     path: "rules/country-lite.mmdb"
     update: manual
-    sha256: "optional expected digest"
+    sha256: "EasyTier-generated digest"
+    source-url: "optional trusted custom HTTPS mirror"
 ```
+
+When `source-url` is absent, EasyTier uses its built-in MetaCubeX URL. A manual
+update writes a private temporary file, enforces the size limit, parses the
+resource, computes the digest, atomically replaces the managed file and only
+then commits `path`/`sha256` to the policy document. A failed update preserves
+the previous file and document state.
 
 The recommended interoperable defaults follow the MetaCubeX example data
 layout without copying its automatic-download behavior:

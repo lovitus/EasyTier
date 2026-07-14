@@ -2,11 +2,21 @@ import { describe, expect, it, vi } from 'vitest'
 import type * as Api from '../src/modules/api'
 import {
   ensureManagedRuleDataRows,
+  managedRuleDataRows,
   updateManagedRuleData,
 } from '../src/components/policy/managedRuleData'
 import { emptyPolicyDocument } from '../src/components/policy/policyDocument'
 
 describe('managed Geo rule data', () => {
+  it('shows fixed uninstalled resources without serializing empty rule sets', () => {
+    const document = emptyPolicyDocument()
+
+    const rows = managedRuleDataRows(document)
+
+    expect(rows.map(row => row.type)).toEqual(['geosite', 'geoip', 'mmdb'])
+    expect(document.ruleSets).toEqual([])
+  })
+
   it('adds exactly one row for every supported resource', () => {
     const document = emptyPolicyDocument()
     ensureManagedRuleDataRows(document)
@@ -30,10 +40,34 @@ describe('managed Geo rule data', () => {
 
     await updateManagedRuleData(api, 'instance-id', row)
 
-    expect(update).toHaveBeenCalledWith('instance-id', 'geoip')
+    expect(update).toHaveBeenCalledWith('instance-id', 'geoip', undefined)
     expect(row.path).toBe('/managed/geoip-lite.dat')
     expect(row.sha256).toBe('a'.repeat(64))
     expect(row.update).toBe('manual')
+    expect(row.sourceUrl).toBe('')
+  })
+
+  it('persists only an explicitly selected custom source', async () => {
+    const document = emptyPolicyDocument()
+    ensureManagedRuleDataRows(document)
+    const row = document.ruleSets[0]
+    row.sourceUrl = 'https://mirror.example/geosite.dat'
+    const update = vi.fn(async () => ({
+      path: '/managed/geosite.dat',
+      sha256: 'c'.repeat(64),
+      size: 4096,
+      source_url: 'https://mirror.example/geosite.dat',
+    }))
+    const api = { update_policy_rule_data: update } as unknown as Api.RemoteClient
+
+    await updateManagedRuleData(api, 'instance-id', row)
+
+    expect(update).toHaveBeenCalledWith(
+      'instance-id',
+      'geosite',
+      'https://mirror.example/geosite.dat',
+    )
+    expect(row.sourceUrl).toBe('https://mirror.example/geosite.dat')
   })
 
   it('preserves the prior file reference when the update fails', async () => {

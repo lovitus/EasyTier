@@ -7,9 +7,10 @@ use crate::{
         api::manage::{
             CollectNetworkInfoRequest, CollectNetworkInfoResponse, DeleteNetworkInstanceRequest,
             GetNetworkInstanceConfigRequest, ListNetworkInstanceMetaRequest,
-            ListNetworkInstanceRequest, NetworkConfig, NetworkMeta, RunNetworkInstanceRequest,
-            UpdatePolicyRuleDataRequest, UpdatePolicyRuleDataResponse, ValidateConfigRequest,
-            ValidateConfigResponse, WebClientService,
+            ListNetworkInstanceRequest, ListPolicyOutboundInterfacesRequest,
+            ListPolicyOutboundInterfacesResponse, NetworkConfig, NetworkMeta,
+            RunNetworkInstanceRequest, UpdatePolicyRuleDataRequest, UpdatePolicyRuleDataResponse,
+            ValidateConfigRequest, ValidateConfigResponse, WebClientService,
         },
         rpc_types::controller::BaseController,
     },
@@ -53,6 +54,7 @@ where
         identify: T,
         inst_id: Uuid,
         resource: String,
+        source_url: Option<String>,
     ) -> Result<UpdatePolicyRuleDataResponse, RemoteClientError<E>> {
         let client = self
             .get_rpc_client(identify)
@@ -63,7 +65,24 @@ where
                 UpdatePolicyRuleDataRequest {
                     inst_id: Some(inst_id.into()),
                     resource,
+                    source_url,
                 },
+            )
+            .await
+            .map_err(RemoteClientError::RpcError)
+    }
+
+    async fn handle_list_policy_outbound_interfaces(
+        &self,
+        identify: T,
+    ) -> Result<ListPolicyOutboundInterfacesResponse, RemoteClientError<E>> {
+        let client = self
+            .get_rpc_client(identify)
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        client
+            .list_policy_outbound_interfaces(
+                BaseController::default(),
+                ListPolicyOutboundInterfacesRequest {},
             )
             .await
             .map_err(RemoteClientError::RpcError)

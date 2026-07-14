@@ -1,4 +1,4 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, reactive } from 'vue'
 import PolicyEditor from '../src/components/policy/PolicyEditor.vue'
@@ -50,10 +50,10 @@ const TextareaStub = defineComponent({
   },
 })
 
-function mountEditor(config: NetworkConfig) {
+function mountEditor(config: NetworkConfig, api?: import('../src/modules/api').RemoteClient) {
   const model = reactive(config) as NetworkConfig
   const wrapper = mount(PolicyEditor, {
-    props: { modelValue: model },
+    props: { modelValue: model, api },
     global: {
       directives: { tooltip: () => {} },
       stubs: {
@@ -103,5 +103,48 @@ describe('PolicyEditor', () => {
     expect(model.policy_config_inline).toBe('version: [')
     expect(wrapper.text()).toContain('policy.editor.yaml_error')
     expect(wrapper.find('[data-header="policy.editor.nodes"]').exists()).toBe(false)
+  })
+
+  it('selects the recommended desktop outbound interface instead of requiring text input', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
+    const api = {
+      list_policy_outbound_interfaces: vi.fn(async () => ({
+        platform: 'linux',
+        required: true,
+        supported: true,
+        interfaces: [
+          { name: 'eth1', addresses: ['192.0.2.2/24'], recommended: false },
+          { name: 'eth0', addresses: ['192.0.2.1/24'], recommended: true },
+        ],
+      })),
+    } as unknown as import('../src/modules/api').RemoteClient
+
+    const { model } = mountEditor(config, api)
+    await flushPromises()
+
+    expect(api.list_policy_outbound_interfaces).toHaveBeenCalledOnce()
+    expect(model.policy_outbound_interface).toBe('eth0')
+  })
+
+  it('does not request an outbound interface on Android policy mode', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
+    const api = {
+      list_policy_outbound_interfaces: vi.fn(async () => ({
+        platform: 'android',
+        required: false,
+        supported: true,
+        interfaces: [],
+      })),
+    } as unknown as import('../src/modules/api').RemoteClient
+
+    const { model, wrapper } = mountEditor(config, api)
+    await flushPromises()
+
+    expect(model.policy_outbound_interface).toBe('')
+    expect(wrapper.text()).toContain('policy.editor.outbound_automatic')
   })
 })

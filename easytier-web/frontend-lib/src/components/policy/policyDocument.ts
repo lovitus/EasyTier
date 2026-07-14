@@ -11,6 +11,7 @@ export interface PolicyRuleSetRow {
   path: string
   update: string
   sha256: string
+  sourceUrl: string
 }
 
 export interface PolicyProxyRow {
@@ -139,6 +140,7 @@ export function parsePolicyDocument(source: string): PolicyEditorDocument {
       path: requiredString(value.path, `rule-sets.${name}.path`),
       update: optionalString(value.update, `rule-sets.${name}.update`) || 'manual',
       sha256: optionalString(value.sha256, `rule-sets.${name}.sha256`),
+      sourceUrl: optionalString(value['source-url'], `rule-sets.${name}.source-url`),
     }
   })
   const proxies = Object.entries(optionalMap(root, 'proxies')).map(([name, raw]) => {
@@ -218,6 +220,7 @@ export function serializePolicyDocument(document: PolicyEditorDocument): string 
       path: row.path,
       update: row.update || 'manual',
       sha256: row.sha256,
+      'source-url': row.sourceUrl,
     })
   }
 

@@ -200,7 +200,7 @@ policy_config_file_placeholder: "policy/default.yaml（桌面）"
 policy_config_inline: 内联策略 YAML
 policy_config_inline_placeholder: "version: 1\nrules: [\"FINAL,DIRECT\"]"
 policy_outbound_interface: 物理出口接口
-policy_outbound_interface_placeholder: "桌面策略模式必填，例如 eth0 或 en0"
+policy_outbound_interface_placeholder: 选择可访问外网的物理接口
 policy_leaf_executable: Leaf worker 可执行文件
 policy:
   editor:
@@ -239,8 +239,23 @@ policy:
     add_rule_set: 添加标准 Geo 数据
     managed_source: 官方数据源
     update_rule_data: 下载并校验
-    rule_data_help: GeoSite、GeoIP 和 Country MMDB 只在点击时更新；下载会经过大小与格式校验并计算 SHA-256，成功后请保存并重新运行实例应用新数据。ASN 数据当前不受 Leaf 支持，因而不提供假开关。
+    rule_data_help: 资源名称、保存路径和摘要均由 EasyTier 管理。默认使用 MetaCubeX 来源；只有使用自定义镜像时才修改来源 URL。下载必须通过大小和格式校验，成功后才会原子替换旧文件；保存并重新运行实例后生效。
     rule_data_updated: "{type} 已更新（{size}），请保存并重新运行实例"
+    rule_data_source: 资源来源 URL
+    rule_data_source_help: 当前显示的是 MetaCubeX 默认地址；仅在使用可信自定义镜像时修改。
+    resource_geosite: GeoSite 域名数据
+    resource_geoip: GeoIP 国家数据
+    resource_mmdb: Country MMDB
+    status: 状态
+    installed: 已安装并验证
+    installed_unverified: 已配置；更新一次以完成校验
+    not_installed: 未安装
+    recommended: 推荐
+    refresh_interfaces: 刷新接口
+    outbound_required: "{platform} 桌面策略路由必须选择物理出口接口。EasyTier 只列出活动物理接口；不要选择 EasyTier TUN 或其他 VPN 接口。"
+    outbound_automatic: "{platform} 策略模式由系统 VPN 服务提供网络路径，不需要填写出口接口。"
+    outbound_unavailable: "{platform} 尚不支持透明策略路由，填写出口接口不会生效。"
+    outbound_load_failed: 无法获取出口接口列表
     presets: 快捷规则
     preset_china_direct: 中国直连 / 其他优先代理
     preset_geo_required: 请先下载 Geosite 和 GeoIP 数据

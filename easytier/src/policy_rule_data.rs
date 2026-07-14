@@ -21,7 +21,7 @@ pub(crate) enum PolicyRuleDataResource {
 }
 
 impl PolicyRuleDataResource {
-    fn source_url(self) -> &'static str {
+    fn default_source_url(self) -> &'static str {
         match self {
             Self::Geosite => {
                 "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
@@ -73,16 +73,17 @@ pub(crate) struct PolicyRuleDataUpdate {
     pub path: PathBuf,
     pub sha256: String,
     pub size: u64,
-    pub source_url: &'static str,
+    pub source_url: String,
 }
 
 pub(crate) async fn update_policy_rule_data(
     config_dir: PathBuf,
     instance_id: Uuid,
     resource: PolicyRuleDataResource,
+    source_url: Option<String>,
 ) -> anyhow::Result<PolicyRuleDataUpdate> {
     tokio::task::spawn_blocking(move || {
-        update_policy_rule_data_sync(&config_dir, instance_id, resource)
+        update_policy_rule_data_sync(&config_dir, instance_id, resource, source_url.as_deref())
     })
     .await
     .context("policy rule data update task failed")?
@@ -92,7 +93,9 @@ fn update_policy_rule_data_sync(
     config_dir: &Path,
     instance_id: Uuid,
     resource: PolicyRuleDataResource,
+    source_url: Option<&str>,
 ) -> anyhow::Result<PolicyRuleDataUpdate> {
+    let source_url = validated_source_url(resource, source_url)?;
     let target_dir = config_dir
         .join("policy-rule-data")
         .join(instance_id.to_string());
@@ -112,8 +115,8 @@ fn update_policy_rule_data_sync(
     let mut pending = PendingFile::new(temporary_path.clone());
     let file = create_private_file(&temporary_path)?;
     let mut writer = BoundedWriter::new(file, MAX_RULE_DATA_BYTES);
-    let uri = http_req::uri::Uri::try_from(resource.source_url())
-        .context("parsing built-in policy rule data URL")?;
+    let uri = http_req::uri::Uri::try_from(source_url.as_str())
+        .context("parsing policy rule data URL")?;
     let response = Request::new(&uri)
         .header(
             "User-Agent",
@@ -122,12 +125,7 @@ fn update_policy_rule_data_sync(
         .redirect_policy(RedirectPolicy::Limit(5))
         .timeout(Duration::from_secs(120))
         .send(&mut writer)
-        .with_context(|| {
-            format!(
-                "downloading policy rule data from {}",
-                resource.source_url()
-            )
-        })?;
+        .with_context(|| format!("downloading policy rule data from {}", source_url))?;
     ensure!(
         response.status_code().is_success(),
         "policy rule data download returned HTTP {}",
@@ -151,8 +149,36 @@ fn update_policy_rule_data_sync(
         path: target_path,
         sha256,
         size,
-        source_url: resource.source_url(),
+        source_url,
     })
+}
+
+fn validated_source_url(
+    resource: PolicyRuleDataResource,
+    source_url: Option<&str>,
+) -> anyhow::Result<String> {
+    let source_url = source_url
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .unwrap_or_else(|| resource.default_source_url());
+    let parsed = url::Url::parse(source_url).context("parsing policy rule data source URL")?;
+    ensure!(
+        parsed.scheme() == "https",
+        "policy rule data source must use HTTPS"
+    );
+    ensure!(
+        parsed.host_str().is_some(),
+        "policy rule data source must include a host"
+    );
+    ensure!(
+        parsed.username().is_empty() && parsed.password().is_none(),
+        "policy rule data source must not contain embedded credentials"
+    );
+    ensure!(
+        parsed.fragment().is_none(),
+        "policy rule data source must not contain a URL fragment"
+    );
+    Ok(parsed.to_string())
 }
 
 fn create_private_file(path: &Path) -> anyhow::Result<File> {
@@ -308,9 +334,30 @@ mod tests {
         for (name, file_name) in resources {
             let resource = name.parse::<PolicyRuleDataResource>().unwrap();
             assert_eq!(resource.file_name(), file_name);
-            assert!(resource.source_url().ends_with(file_name));
+            assert!(resource.default_source_url().ends_with(file_name));
         }
         assert!("asn".parse::<PolicyRuleDataResource>().is_err());
+    }
+
+    #[test]
+    fn custom_sources_are_https_urls_without_credentials_or_fragments() {
+        let resource = PolicyRuleDataResource::Geoip;
+        assert_eq!(
+            validated_source_url(resource, None).unwrap(),
+            resource.default_source_url()
+        );
+        assert_eq!(
+            validated_source_url(resource, Some(" https://rules.example/geoip.dat ")).unwrap(),
+            "https://rules.example/geoip.dat"
+        );
+        assert!(validated_source_url(resource, Some("http://rules.example/geoip.dat")).is_err());
+        assert!(
+            validated_source_url(resource, Some("https://user@rules.example/geoip.dat")).is_err()
+        );
+        assert!(
+            validated_source_url(resource, Some("https://rules.example/geoip.dat#fragment"))
+                .is_err()
+        );
     }
 
     #[test]

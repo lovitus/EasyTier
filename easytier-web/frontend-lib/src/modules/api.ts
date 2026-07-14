@@ -20,6 +20,19 @@ export interface UpdatePolicyRuleDataResponse {
     source_url: string;
 }
 
+export interface PolicyOutboundInterface {
+    name: string;
+    addresses: string[];
+    recommended: boolean;
+}
+
+export interface ListPolicyOutboundInterfacesResponse {
+    platform: string;
+    required: boolean;
+    supported: boolean;
+    interfaces: PolicyOutboundInterface[];
+}
+
 export interface ListNetworkInstanceIdResponse {
     running_inst_ids: Array<UUID>,
     disabled_inst_ids: Array<UUID>,
@@ -70,7 +83,8 @@ export interface GetNetworkMetasResponse {
 
 export interface RemoteClient {
     validate_config(config: NetworkConfig): Promise<ValidateConfigResponse>;
-    update_policy_rule_data?(inst_id: string, resource: PolicyRuleDataResource): Promise<UpdatePolicyRuleDataResponse>;
+    update_policy_rule_data?(inst_id: string, resource: PolicyRuleDataResource, source_url?: string): Promise<UpdatePolicyRuleDataResponse>;
+    list_policy_outbound_interfaces?(): Promise<ListPolicyOutboundInterfacesResponse>;
     run_network(config: NetworkConfig, save: boolean): Promise<undefined>;
     get_network_info(inst_id: string): Promise<NetworkInstanceRunningInfo | undefined>;
     list_network_instance_ids(): Promise<ListNetworkInstanceIdResponse>;

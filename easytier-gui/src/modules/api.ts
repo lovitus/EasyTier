@@ -7,8 +7,11 @@ export class GUIRemoteClient implements Api.RemoteClient {
     async validate_config(config: NetworkTypes.NetworkConfig): Promise<Api.ValidateConfigResponse> {
         return backend.validateConfig(config);
     }
-    async update_policy_rule_data(instanceId: string, resource: Api.PolicyRuleDataResource): Promise<Api.UpdatePolicyRuleDataResponse> {
-        return backend.updatePolicyRuleData(instanceId, resource);
+    async update_policy_rule_data(instanceId: string, resource: Api.PolicyRuleDataResource, sourceUrl?: string): Promise<Api.UpdatePolicyRuleDataResponse> {
+        return backend.updatePolicyRuleData(instanceId, resource, sourceUrl);
+    }
+    async list_policy_outbound_interfaces(): Promise<Api.ListPolicyOutboundInterfacesResponse> {
+        return backend.listPolicyOutboundInterfaces();
     }
     async run_network(config: NetworkTypes.NetworkConfig, save: boolean): Promise<undefined> {
         if (type() === 'android') {

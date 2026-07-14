@@ -177,6 +177,7 @@ message ValidateConfigResponse {
 message UpdatePolicyRuleDataRequest {
   common.UUID inst_id = 1;
   string resource = 2;
+  optional string source_url = 3;
 }
 
 message UpdatePolicyRuleDataResponse {
@@ -184,6 +185,21 @@ message UpdatePolicyRuleDataResponse {
   string sha256 = 2;
   uint64 size = 3;
   string source_url = 4;
+}
+
+message PolicyOutboundInterface {
+  string name = 1;
+  repeated string addresses = 2;
+  bool recommended = 3;
+}
+
+message ListPolicyOutboundInterfacesRequest {}
+
+message ListPolicyOutboundInterfacesResponse {
+  string platform = 1;
+  bool required = 2;
+  repeated PolicyOutboundInterface interfaces = 3;
+  bool supported = 4;
 }
 
 message RunNetworkInstanceRequest {
@@ -230,6 +246,8 @@ service WebClientService {
   rpc ValidateConfig(ValidateConfigRequest) returns (ValidateConfigResponse) {}
   rpc UpdatePolicyRuleData(UpdatePolicyRuleDataRequest)
       returns (UpdatePolicyRuleDataResponse) {}
+  rpc ListPolicyOutboundInterfaces(ListPolicyOutboundInterfacesRequest)
+      returns (ListPolicyOutboundInterfacesResponse) {}
   rpc RunNetworkInstance(RunNetworkInstanceRequest)
       returns (RunNetworkInstanceResponse) {}
   rpc RetainNetworkInstance(RetainNetworkInstanceRequest)

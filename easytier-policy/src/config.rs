@@ -82,6 +82,12 @@ pub struct RuleSet {
     pub update: String,
     #[serde(default)]
     pub sha256: Option<String>,
+    #[serde(
+        default,
+        rename = "source-url",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_url: Option<String>,
 }
 
 fn manual_update() -> String {

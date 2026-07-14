@@ -102,11 +102,16 @@ export async function validateConfig(cfg: NetworkConfig) {
   return await invoke<ValidateConfigResponse>('validate_config', { config: NetworkTypes.toBackendNetworkConfig(cfg) })
 }
 
-export async function updatePolicyRuleData(instanceId: string, resource: string) {
+export async function updatePolicyRuleData(instanceId: string, resource: string, sourceUrl?: string) {
   return await invoke<Api.UpdatePolicyRuleDataResponse>('update_policy_rule_data', {
     instanceId,
     resource,
+    sourceUrl,
   })
+}
+
+export async function listPolicyOutboundInterfaces() {
+  return await invoke<Api.ListPolicyOutboundInterfacesResponse>('list_policy_outbound_interfaces')
 }
 
 export async function getConfig(instanceId: string) {

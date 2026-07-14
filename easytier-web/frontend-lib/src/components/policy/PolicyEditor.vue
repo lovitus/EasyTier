@@ -13,7 +13,7 @@ import {
   SelectButton,
   Textarea,
 } from 'primevue'
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type * as Api from '../../modules/api'
 import type { NetworkConfig } from '../../types/network'
@@ -30,8 +30,7 @@ import {
 } from './policyDocument'
 import {
   MANAGED_RULE_DATA,
-  MANAGED_RULE_DATA_TYPES,
-  ensureManagedRuleDataRows,
+  managedRuleDataRows,
   updateManagedRuleData,
 } from './managedRuleData'
 
@@ -40,11 +39,15 @@ const props = defineProps<{ api?: Api.RemoteClient }>()
 const { t } = useI18n()
 
 const document = ref<PolicyEditorDocument>(emptyPolicyDocument())
+const ruleDataRows = ref<PolicyRuleSetRow[]>(managedRuleDataRows(document.value))
 const parseError = ref('')
 const editError = ref('')
 const ruleDataMessage = ref('')
 const ruleDataError = ref('')
 const updatingRuleData = ref<PolicyRuleSetKind | ''>('')
+const outboundInfo = ref<Api.ListPolicyOutboundInterfacesResponse>()
+const outboundLoading = ref(false)
+const outboundError = ref('')
 let lastSerialized = ''
 
 const sourceOptions = computed(() => [
@@ -53,7 +56,12 @@ const sourceOptions = computed(() => [
 ])
 const proxyViaOptions = ['mesh', 'native']
 const groupTypeOptions = ['fallback', 'chain']
-const ruleSetTypeOptions: PolicyRuleSetKind[] = MANAGED_RULE_DATA_TYPES
+const outboundOptions = computed(() => (outboundInfo.value?.interfaces ?? []).map(item => ({
+  label: item.addresses.length
+    ? `${item.name} (${item.addresses.join(', ')})${item.recommended ? ` · ${t('policy.editor.recommended')}` : ''}`
+    : `${item.name}${item.recommended ? ` · ${t('policy.editor.recommended')}` : ''}`,
+  value: item.name,
+})))
 const ruleTypeOptions = [
   'GEOSITE', 'GEOIP', 'COUNTRY', 'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD', 'IP-CIDR',
   'NETWORK', 'PORT-RANGE', 'INBOUND-TAG', 'EXTERNAL', 'MATCH',
@@ -100,6 +108,7 @@ watch(
     try {
       const parsed = parsePolicyDocument(source)
       document.value = parsed
+      ruleDataRows.value = managedRuleDataRows(parsed)
       lastSerialized = serializePolicyDocument(parsed)
       parseError.value = ''
       editError.value = ''
@@ -125,10 +134,6 @@ watch(document, value => {
   }
 }, { deep: true })
 
-function addRuleSets() {
-  ensureManagedRuleDataRows(document.value)
-}
-
 async function updateRuleData(row: PolicyRuleSetRow) {
   const api = props.api
   if (!api?.update_policy_rule_data || !config.value.instance_id || updatingRuleData.value) return
@@ -137,6 +142,7 @@ async function updateRuleData(row: PolicyRuleSetRow) {
   ruleDataError.value = ''
   try {
     const result = await updateManagedRuleData(api, config.value.instance_id, row)
+    if (!document.value.ruleSets.includes(row)) document.value.ruleSets.push(row)
     const size = Number(result.size)
     ruleDataMessage.value = t('policy.editor.rule_data_updated', {
       type: row.type,
@@ -149,6 +155,12 @@ async function updateRuleData(row: PolicyRuleSetRow) {
   finally {
     updatingRuleData.value = ''
   }
+}
+
+function removeRuleData(row: PolicyRuleSetRow) {
+  const index = document.value.ruleSets.indexOf(row)
+  if (index >= 0) document.value.ruleSets.splice(index, 1)
+  ruleDataRows.value = managedRuleDataRows(document.value)
 }
 
 function addProxy() {
@@ -224,6 +236,54 @@ function ruleSupportsNoResolve(type: string) {
 function managedRuleDataSource(type: PolicyRuleSetKind) {
   return MANAGED_RULE_DATA[type].source
 }
+
+function ruleDataSource(row: PolicyRuleSetRow) {
+  return row.sourceUrl.trim() || managedRuleDataSource(row.type)
+}
+
+function setRuleDataSource(row: PolicyRuleSetRow, value: string) {
+  const source = value.trim()
+  row.sourceUrl = source === managedRuleDataSource(row.type) ? '' : source
+}
+
+function isManagedRuleDataInstalled(row: PolicyRuleSetRow) {
+  return Boolean(row.path.trim())
+}
+
+function managedRuleDataStatus(row: PolicyRuleSetRow) {
+  if (!row.path.trim()) return t('policy.editor.not_installed')
+  return row.sha256.trim()
+    ? t('policy.editor.installed')
+    : t('policy.editor.installed_unverified')
+}
+
+async function loadOutboundInterfaces() {
+  if (!props.api?.list_policy_outbound_interfaces || outboundLoading.value) return
+  outboundLoading.value = true
+  outboundError.value = ''
+  try {
+    const result = await props.api.list_policy_outbound_interfaces()
+    outboundInfo.value = result
+    if (result.required && !config.value.policy_outbound_interface?.trim()) {
+      const recommended = result.interfaces.find(item => item.recommended)
+      if (recommended) config.value.policy_outbound_interface = recommended.name
+    }
+  }
+  catch (error) {
+    outboundError.value = error instanceof Error ? error.message : String(error)
+  }
+  finally {
+    outboundLoading.value = false
+  }
+}
+
+watch(() => config.value.enable_policy_proxy, enabled => {
+  if (enabled) void loadOutboundInterfaces()
+})
+
+onMounted(() => {
+  if (config.value.enable_policy_proxy) void loadOutboundInterfaces()
+})
 </script>
 
 <template>
@@ -242,12 +302,27 @@ function managedRuleDataSource(type: PolicyRuleSetKind) {
           <SelectButton v-model="sourceMode" :options="sourceOptions" option-label="label" option-value="value"
             :allow-empty="false" />
         </div>
-        <div class="flex flex-col gap-2 grow min-w-64">
+        <div v-if="outboundInfo?.required" class="flex flex-col gap-2 grow min-w-64">
           <label for="policy_outbound_interface">{{ t('policy_outbound_interface') }}</label>
-          <InputText id="policy_outbound_interface" v-model="config.policy_outbound_interface"
-            :placeholder="t('policy_outbound_interface_placeholder')" />
+          <div class="flex gap-2">
+            <Select id="policy_outbound_interface" v-model="config.policy_outbound_interface"
+              :options="outboundOptions" option-label="label" option-value="value"
+              :placeholder="t('policy_outbound_interface_placeholder')" class="grow" />
+            <Button icon="pi pi-refresh" severity="secondary" outlined :loading="outboundLoading"
+              :aria-label="t('policy.editor.refresh_interfaces')" @click="loadOutboundInterfaces" />
+          </div>
+          <small class="text-surface-500">{{ t('policy.editor.outbound_required', { platform: outboundInfo.platform }) }}</small>
         </div>
-        <div class="flex flex-col gap-2 grow min-w-64">
+        <Message v-else-if="outboundInfo?.supported" severity="info" :closable="false">
+          {{ t('policy.editor.outbound_automatic', { platform: outboundInfo.platform }) }}
+        </Message>
+        <Message v-else-if="outboundInfo" severity="warn" :closable="false">
+          {{ t('policy.editor.outbound_unavailable', { platform: outboundInfo.platform }) }}
+        </Message>
+        <Message v-if="outboundError" severity="warn" :closable="false">
+          {{ t('policy.editor.outbound_load_failed') }}: {{ outboundError }}
+        </Message>
+        <div v-if="outboundInfo?.required" class="flex flex-col gap-2 grow min-w-64">
           <label for="policy_leaf_executable">{{ t('policy_leaf_executable') }}</label>
           <InputText id="policy_leaf_executable" v-model="config.policy_leaf_executable"
             placeholder="easytier-leaf-worker" />
@@ -398,23 +473,29 @@ function managedRuleDataSource(type: PolicyRuleSetKind) {
               <Message severity="info" :closable="false">{{ t('policy.editor.rule_data_help') }}</Message>
               <Message v-if="ruleDataMessage" severity="success" :closable="false">{{ ruleDataMessage }}</Message>
               <Message v-if="ruleDataError" severity="error" :closable="false">{{ ruleDataError }}</Message>
-              <DataTable :value="document.ruleSets" data-key="name" responsive-layout="scroll">
-                <Column field="name" :header="t('policy.editor.name')">
-                  <template #body="{ data }"><InputText v-model="data.name" /></template>
-                </Column>
+              <DataTable :value="ruleDataRows" data-key="type" responsive-layout="scroll">
                 <Column field="type" :header="t('policy.editor.rule_set_type')">
-                  <template #body="{ data }"><Select v-model="data.type" :options="ruleSetTypeOptions" /></template>
-                </Column>
-                <Column field="path" :header="t('policy.editor.path')">
-                  <template #body="{ data }"><InputText v-model="data.path" class="w-full min-w-56" /></template>
-                </Column>
-                <Column field="sha256" header="SHA-256">
-                  <template #body="{ data }"><InputText v-model="data.sha256" class="w-full min-w-64" /></template>
+                  <template #body="{ data }">
+                    <div class="flex flex-col gap-1">
+                      <span class="font-semibold">{{ t(`policy.editor.resource_${data.type}`) }}</span>
+                      <span class="text-xs text-surface-500">{{ data.type }}</span>
+                    </div>
+                  </template>
                 </Column>
                 <Column :header="t('policy.editor.managed_source')">
                   <template #body="{ data }">
-                    <div class="flex flex-col gap-2 min-w-56">
-                      <span class="text-xs break-all text-surface-500">{{ managedRuleDataSource(data.type) }}</span>
+                    <InputText :model-value="ruleDataSource(data)" class="w-full min-w-96"
+                      :aria-label="t('policy.editor.rule_data_source')"
+                      @update:model-value="setRuleDataSource(data, String($event))" />
+                    <small class="text-surface-500">{{ t('policy.editor.rule_data_source_help') }}</small>
+                  </template>
+                </Column>
+                <Column :header="t('policy.editor.status')">
+                  <template #body="{ data }">
+                    <div class="flex flex-col gap-2 min-w-36">
+                      <span :class="isManagedRuleDataInstalled(data) ? 'text-green-600' : 'text-surface-500'">
+                        {{ managedRuleDataStatus(data) }}
+                      </span>
                       <Button icon="pi pi-refresh" :label="t('policy.editor.update_rule_data')" size="small"
                         :loading="updatingRuleData === data.type"
                         :disabled="!props.api?.update_policy_rule_data || !config.instance_id || Boolean(updatingRuleData)"
@@ -423,14 +504,12 @@ function managedRuleDataSource(type: PolicyRuleSetKind) {
                   </template>
                 </Column>
                 <Column header-style="width: 4rem">
-                  <template #body="{ index }">
-                    <Button icon="pi pi-trash" severity="danger" text @click="removeAt(document.ruleSets, index)" />
+                  <template #body="{ data }">
+                    <Button v-if="isManagedRuleDataInstalled(data)" icon="pi pi-trash" severity="danger" text
+                      @click="removeRuleData(data)" />
                   </template>
                 </Column>
               </DataTable>
-              <Button icon="pi pi-plus" :label="t('policy.editor.add_rule_set')" class="self-start"
-                :disabled="ruleSetTypeOptions.every(type => document.ruleSets.some(row => row.type === type))"
-                @click="addRuleSets" />
             </div>
           </Panel>
         </template>

@@ -15,6 +15,7 @@ rule-sets:
     path: rules/geosite.dat
     update: manual
     sha256: abcdef
+    source-url: https://mirror.example/geosite.dat
   country:
     type: mmdb
     path: rules/country.mmdb
@@ -56,6 +57,7 @@ rules:
     expect(document.groups[0].members).toEqual(['mesh-exit', 'firewall', 'DIRECT'])
     expect(document.rules.map(rule => rule.type)).toEqual(['GEOSITE', 'GEOIP', 'NETWORK', 'MATCH'])
     expect(document.rules[1].noResolve).toBe(true)
+    expect(document.ruleSets[0].sourceUrl).toBe('https://mirror.example/geosite.dat')
 
     const reparsed = parsePolicyDocument(serializePolicyDocument(document))
     expect(reparsed).toEqual(document)

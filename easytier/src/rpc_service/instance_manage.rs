@@ -14,9 +14,11 @@ use crate::{
                 GetNetworkInstanceConfigRequest, GetNetworkInstanceConfigResponse,
                 ListNetworkInstanceMetaRequest, ListNetworkInstanceMetaResponse,
                 ListNetworkInstanceRequest, ListNetworkInstanceResponse,
+                ListPolicyOutboundInterfacesRequest, ListPolicyOutboundInterfacesResponse,
                 NetworkInstanceRunningInfoMap, NetworkMeta, PolicyConfigDiagnostic,
-                RetainNetworkInstanceRequest, RetainNetworkInstanceResponse,
-                RunNetworkInstanceRequest, RunNetworkInstanceResponse, UpdatePolicyRuleDataRequest,
+                PolicyOutboundInterface, RetainNetworkInstanceRequest,
+                RetainNetworkInstanceResponse, RunNetworkInstanceRequest,
+                RunNetworkInstanceResponse, UpdatePolicyRuleDataRequest,
                 UpdatePolicyRuleDataResponse, ValidateConfigRequest, ValidateConfigResponse,
                 WebClientService,
             },
@@ -274,21 +276,79 @@ impl WebClientService for InstanceManageRpcService {
             let resource = req
                 .resource
                 .parse::<crate::policy_rule_data::PolicyRuleDataResource>()?;
-            let update =
-                crate::policy_rule_data::update_policy_rule_data(config_dir, instance_id, resource)
-                    .await?;
+            let update = crate::policy_rule_data::update_policy_rule_data(
+                config_dir,
+                instance_id,
+                resource,
+                req.source_url,
+            )
+            .await?;
             Ok(UpdatePolicyRuleDataResponse {
                 path: update.path.to_string_lossy().into_owned(),
                 sha256: update.sha256,
                 size: update.size,
-                source_url: update.source_url.to_owned(),
+                source_url: update.source_url,
             })
         }
         #[cfg(not(feature = "leaf-policy-proxy"))]
         {
-            let _ = (config_dir, req.resource);
+            let _ = (config_dir, req.resource, req.source_url);
             Err(anyhow::anyhow!("policy rule data support is not compiled for this target").into())
         }
+    }
+
+    async fn list_policy_outbound_interfaces(
+        &self,
+        _: BaseController,
+        _: ListPolicyOutboundInterfacesRequest,
+    ) -> Result<ListPolicyOutboundInterfacesResponse, rpc_types::error::Error> {
+        let required = cfg!(all(
+            feature = "leaf-policy-proxy",
+            any(
+                target_os = "linux",
+                all(target_os = "macos", not(feature = "macos-ne"))
+            )
+        ));
+        let supported =
+            required || cfg!(all(feature = "leaf-policy-mobile", target_os = "android"));
+        let interfaces = if required {
+            let preferred_ip = crate::common::network::local_ipv4().await.ok();
+            let mut interfaces = crate::common::network::IPCollector::collect_interfaces(
+                crate::common::netns::NetNS::new(None),
+                true,
+            )
+            .await
+            .into_iter()
+            .map(|interface| PolicyOutboundInterface {
+                recommended: preferred_ip.is_some_and(|preferred| {
+                    interface
+                        .ips
+                        .iter()
+                        .any(|address| address.ip() == std::net::IpAddr::V4(preferred))
+                }),
+                addresses: interface.ips.iter().map(ToString::to_string).collect(),
+                name: interface.name,
+            })
+            .collect::<Vec<_>>();
+            interfaces.sort_by(|left, right| {
+                right
+                    .recommended
+                    .cmp(&left.recommended)
+                    .then_with(|| left.name.cmp(&right.name))
+            });
+            if interfaces.len() == 1 {
+                interfaces[0].recommended = true;
+            }
+            interfaces
+        } else {
+            Vec::new()
+        };
+        Ok(ListPolicyOutboundInterfacesResponse {
+            platform: std::env::consts::OS.to_owned(),
+            required,
+            interfaces,
+            supported,
+        })
     }
 
     async fn run_network_instance(
