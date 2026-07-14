@@ -105,6 +105,7 @@ fn diagnostic_for_error(error: &PolicyError) -> PolicyDiagnostic {
         PolicyError::InvalidRuleSet { name, .. } => {
             ("rule_set.invalid", format!("rule-sets.{name}"))
         }
+        PolicyError::InvalidDns { set, .. } => ("dns.resolver_invalid", format!("dns.{set}")),
     };
     PolicyDiagnostic {
         severity: DiagnosticSeverity::Error,
@@ -307,5 +308,23 @@ rules:
         );
         assert!(preflight.report.valid);
         assert!(preflight.report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn invalid_dns_preflight_reports_the_exact_resolver_role() {
+        // Mihomo config/config.go::{parseNameServer,parseDNS} rejects an invalid
+        // resolver before runtime construction. EasyTier additionally reports
+        // its smaller direct/proxy role so the editor can focus the exact set.
+        for (set, value) in [
+            ("direct", "https://dns.example/dns-query"),
+            ("proxy", "system"),
+        ] {
+            let source =
+                format!("version: 1\ndns:\n  {set}: [\"{value}\"]\nrules: [\"MATCH,DIRECT\"]\n");
+            let report = preflight_policy_source(source, Path::new(".")).report;
+            assert!(!report.valid);
+            assert_eq!(report.diagnostics[0].code, "dns.resolver_invalid");
+            assert_eq!(report.diagnostics[0].path, format!("dns.{set}"));
+        }
     }
 }

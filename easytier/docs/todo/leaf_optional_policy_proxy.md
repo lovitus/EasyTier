@@ -38,6 +38,13 @@ Current implementation references:
   routes; the private guard records each successful route and rolls it back in
   reverse order. It does not copy Mihomo's full route-set or auto-redirect
   engine.
+- DNS configuration error handling was checked against Mihomo
+  `config/config.go::parseNameServer` and `config/config.go::parseDNS`. Mihomo
+  rejects malformed or missing resolver roles before constructing the runtime
+  and preserves DNS-specific context in the returned error. EasyTier follows
+  that fail-before-runtime boundary, but intentionally reports the smaller
+  stable `dns.direct` or `dns.proxy` field path because its v1 schema exposes
+  two resolver roles rather than Mihomo's full nameserver-policy surface.
 
 **Status**: Linux candidate and automated test matrix validated; exact Android
 candidate `38d965c2` established a Stealth-protected mesh and in-process policy
