@@ -1421,6 +1421,9 @@ The product behavior should be less sensitive and preference-first:
 - at most one group-owned comparative attempt may try the next configured
   member after the preferred member's bounded connect/setup failure. Other
   callers fail fast; they do not each walk the group;
+- one comparison or outage probe has one group-level `fail_timeout` budget;
+  actor count cannot multiply the timeout. Within that budget alternatives are
+  tried in configured order;
 - a successful comparative attempt may rescue that individual new TCP
   connection or UDP association, but it is only one differential observation
   and does not globally switch the group;
@@ -1436,6 +1439,9 @@ The product behavior should be less sensitive and preference-first:
 - any preferred-member success resets its consecutive-failure count. A round
   in which every attempted member fails is an outage signal, not a member
   failure, and does not advance the count;
+- TCP and UDP classify failure to establish the configured proxy transport as
+  actor-unavailable. Destination refusal, ACL/policy and other business errors
+  remain outside actor health, so a dead destination cannot rotate exits;
 - recover/upgrade only after three consecutive successful health rounds and a
   minimum 30-second hold-down. A successful preferred-member probe may rescue
   that one new session, but it does not immediately change the actor used by
