@@ -153,12 +153,7 @@ async fn bind_device_sources(
         return Vec::new();
     }
 
-    // A cached empty or removed source can otherwise block every reconnect
-    // for the advertisement cache lifetime after a network transition.
-    let ips = global_ctx
-        .get_ip_collector()
-        .collect_local_ip_addrs_now()
-        .await;
+    let ips = global_ctx.get_ip_collector().collect_ip_addrs().await;
     if remote_addr.is_ipv4() {
         ips.interface_ipv4s
             .into_iter()

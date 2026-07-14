@@ -58,10 +58,6 @@ impl PolicyRoutingGuard {
         Ok(false)
     }
 
-    pub(crate) fn has_usable_underlay(&self) -> bool {
-        true
-    }
-
     fn remove_all(&mut self) {
         for route in self.installed.drain(..).rev() {
             if let Err(error) = delete_route(&self.tun_interface, &route) {

@@ -4954,9 +4954,8 @@ dependencies = [
 [[package]]
 name = "leaf"
 version = "0.1.2"
-source = "git+https://github.com/lovitus/leaf.git?rev=8685a5fa73ac2a8e70d6753b782a6fb84ab802c7#8685a5fa73ac2a8e70d6753b782a6fb84ab802c7"
+source = "git+https://github.com/lovitus/leaf.git?rev=73e8caa2455274caf0a63452e6552b6a663a7203#73e8caa2455274caf0a63452e6552b6a663a7203"
 dependencies = [
- "aho-corasick",
  "anyhow",
  "async-recursion",
  "async-socks5",
