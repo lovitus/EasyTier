@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     ChainKind, PolicyRevision, ProxyKind, ProxyServer, RuleSetKind,
-    config::RuleSet,
+    config::{RuleSet, verify_rule_set_file},
     geodata::{lan_cidrs, load_geoip_categories},
 };
 
@@ -68,6 +68,8 @@ pub enum LeafConfigError {
     ActorCapability { index: usize, reason: String },
     #[error("failed to load GeoIP rule data: {0}")]
     GeoipData(String),
+    #[error("rule-set {name} failed compile-time integrity check: {reason}")]
+    RuleSetIntegrity { name: String, reason: String },
 }
 
 pub fn compile_leaf_config(
@@ -80,6 +82,7 @@ pub fn compile_leaf_config(
     if dns_servers.is_empty() {
         return Err(LeafConfigError::NoDnsServers);
     }
+    verify_revision_rule_sets(revision, base_dir)?;
     let document = &revision.document;
     let dns_servers = compile_dns_servers(document, dns_servers);
     let mut outbounds = vec![
@@ -578,11 +581,28 @@ fn resolved_rule_set_path(rule_set: &RuleSet, base_dir: &Path) -> std::path::Pat
     }
 }
 
+fn verify_revision_rule_sets(
+    revision: &PolicyRevision,
+    base_dir: &Path,
+) -> Result<(), LeafConfigError> {
+    for (name, rule_set) in &revision.document.rule_sets {
+        let path = resolved_rule_set_path(rule_set, base_dir);
+        verify_rule_set_file(&path, rule_set.sha256.as_deref()).map_err(|reason| {
+            LeafConfigError::RuleSetIntegrity {
+                name: name.clone(),
+                reason,
+            }
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
 
     use crate::PolicyRevision;
+    use sha2::{Digest, Sha256};
 
     use super::*;
 
@@ -701,6 +721,33 @@ rules:
         );
         assert_eq!(rules[2]["target"], "final");
         assert_eq!(rules[2]["network"], serde_json::json!(["tcp", "udp"]));
+    }
+
+    #[test]
+    fn revalidates_pinned_rule_data_before_compiling_leaf() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("geosite.dat");
+        fs::write(&path, b"validated fixture").unwrap();
+        let sha256 = format!("{:x}", Sha256::digest(b"validated fixture"));
+        let source = format!(
+            "version: 1\nrule-sets:\n  site: {{ type: geosite, path: geosite.dat, sha256: {sha256} }}\nrules: [\"GEOSITE,CN,DIRECT\", \"MATCH,REJECT\"]\n"
+        );
+        let revision = PolicyRevision::parse(source, directory.path()).unwrap();
+
+        fs::write(path, b"changed after preflight").unwrap();
+        let error = compile_leaf_config(
+            &revision,
+            7,
+            directory.path(),
+            &Unresolved,
+            &["1.1.1.1".parse().unwrap()],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            LeafConfigError::RuleSetIntegrity { name, reason }
+                if name == "site" && reason == "sha256 mismatch"
+        ));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Read as _,
+    io::Read,
     net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -193,6 +193,9 @@ fn default_proxy_dns() -> Vec<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Mihomo config/config.go::UnmarshalRawConfig intentionally accepts unknown YAML fields.
+// EasyTier's narrower v1 instead follows sing-box option/options.go::Options::
+// UnmarshalJSONContext: an unsupported field must fail instead of looking effective.
 #[serde(deny_unknown_fields)]
 pub struct PolicyDocument {
     pub version: u32,
@@ -356,6 +359,59 @@ pub fn reload_policy_file_if_changed_with_rule_set_provider(
     .map(Some)
 }
 
+/// Revalidate the exact rule-data dependency used to construct a Leaf runtime.
+///
+/// Mihomo component/resource/fetcher.go::{Initial,loadBuf} hashes and parses new
+/// bytes before replacing the active strategy. EasyTier has a static Leaf config,
+/// so policy preflight and runtime compilation share the same bounded file check.
+pub(crate) fn verify_rule_set_file(
+    path: &Path,
+    expected_sha256: Option<&str>,
+) -> Result<(), String> {
+    let metadata = fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err("rule data must be a non-empty regular file".to_owned());
+    }
+    if metadata.len() > MAX_RULE_SET_BYTES {
+        return Err(format!("rule data exceeds {MAX_RULE_SET_BYTES} bytes"));
+    }
+    let Some(expected) = expected_sha256 else {
+        return Ok(());
+    };
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("sha256 must contain exactly 64 hexadecimal characters".to_owned());
+    }
+
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let actual = sha256_reader_bounded(file, MAX_RULE_SET_BYTES)?;
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err("sha256 mismatch".to_owned());
+    }
+    Ok(())
+}
+
+fn sha256_reader_bounded(mut reader: impl Read, limit: u64) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let length = reader
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if length == 0 {
+            break;
+        }
+        total = total
+            .checked_add(length as u64)
+            .ok_or_else(|| "rule data size overflow while hashing".to_owned())?;
+        if total > limit {
+            return Err(format!("rule data exceeds {limit} bytes while hashing"));
+        }
+        digest.update(&buffer[..length]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 impl PolicyDocument {
     fn uses_rule_set_kind(&self, kind: RuleSetKind) -> bool {
         self.rules.iter().any(|rule| {
@@ -469,56 +525,12 @@ impl PolicyDocument {
                     reason: "path contains a delimiter unsupported by Leaf".to_owned(),
                 });
             }
-            let metadata = fs::metadata(&path).map_err(|error| PolicyError::InvalidRuleSet {
-                name: name.clone(),
-                reason: format!("{}: {error}", path.display()),
+            verify_rule_set_file(&path, rule_set.sha256.as_deref()).map_err(|reason| {
+                PolicyError::InvalidRuleSet {
+                    name: name.clone(),
+                    reason,
+                }
             })?;
-            if !metadata.is_file() || metadata.len() == 0 {
-                return Err(PolicyError::InvalidRuleSet {
-                    name: name.clone(),
-                    reason: "rule data must be a non-empty regular file".to_owned(),
-                });
-            }
-            if metadata.len() > MAX_RULE_SET_BYTES {
-                return Err(PolicyError::InvalidRuleSet {
-                    name: name.clone(),
-                    reason: format!("rule data exceeds {MAX_RULE_SET_BYTES} bytes"),
-                });
-            }
-            if let Some(expected) = &rule_set.sha256 {
-                if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                    return Err(PolicyError::InvalidRuleSet {
-                        name: name.clone(),
-                        reason: "sha256 must contain exactly 64 hexadecimal characters".to_owned(),
-                    });
-                }
-                let mut file =
-                    fs::File::open(&path).map_err(|error| PolicyError::InvalidRuleSet {
-                        name: name.clone(),
-                        reason: error.to_string(),
-                    })?;
-                let mut digest = Sha256::new();
-                let mut buffer = [0u8; 64 * 1024];
-                loop {
-                    let length =
-                        file.read(&mut buffer)
-                            .map_err(|error| PolicyError::InvalidRuleSet {
-                                name: name.clone(),
-                                reason: error.to_string(),
-                            })?;
-                    if length == 0 {
-                        break;
-                    }
-                    digest.update(&buffer[..length]);
-                }
-                let actual = format!("{:x}", digest.finalize());
-                if !actual.eq_ignore_ascii_case(expected) {
-                    return Err(PolicyError::InvalidRuleSet {
-                        name: name.clone(),
-                        reason: "sha256 mismatch".to_owned(),
-                    });
-                }
-            }
         }
         Ok(())
     }
@@ -1481,6 +1493,25 @@ rules: ["FINAL,http"]
             PolicyRevision::parse(source, Path::new(".")),
             Err(PolicyError::InvalidRule { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_fields_instead_of_silently_ignoring_them() {
+        for source in [
+            "version: 1\nmode: direct\nrules: [\"MATCH,DIRECT\"]\n",
+            "version: 1\nfuture-policy-option: true\nrules: [\"MATCH,DIRECT\"]\n",
+        ] {
+            assert!(matches!(
+                PolicyRevision::parse(source, Path::new(".")),
+                Err(PolicyError::Yaml(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn bounds_rule_data_while_hashing_instead_of_trusting_prior_metadata() {
+        let error = sha256_reader_bounded(std::io::Cursor::new(b"12345"), 4).unwrap_err();
+        assert_eq!(error, "rule data exceeds 4 bytes while hashing");
     }
 
     #[test]

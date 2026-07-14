@@ -148,21 +148,33 @@ fn warnings(revision: &PolicyRevision) -> Vec<PolicyDiagnostic> {
             });
         }
     }
+    let mut udp_reachable = true;
     for (index, source) in revision.document.rules.iter().enumerate() {
+        if !udp_reachable {
+            break;
+        }
         let parts: Vec<&str> = source.split(',').map(str::trim).collect();
         let Some(target) = rule_target(&parts) else {
             continue;
         };
-        if !matches!(
-            revision
-                .document
-                .actor_supports_udp(target, &mut BTreeSet::new()),
-            Ok(false)
-        ) {
-            continue;
-        }
         let network =
             (parts[0].eq_ignore_ascii_case("NETWORK")).then(|| parts[1].to_ascii_lowercase());
+        let supports_udp = match revision
+            .document
+            .actor_supports_udp(target, &mut BTreeSet::new())
+        {
+            Ok(supports_udp) => supports_udp,
+            Err(_) => continue,
+        };
+        if supports_udp {
+            // Mihomo tunnel/tunnel.go::match returns at the first matched actor that supports
+            // the session network. Only an unconditional, UDP-capable rule makes later UDP
+            // diagnostics unreachable; a TCP-only match must fall through.
+            if unconditionally_matches_udp(&parts[0], network.as_deref()) {
+                udp_reachable = false;
+            }
+            continue;
+        }
         if network.as_deref() == Some("tcp") {
             continue;
         }
@@ -189,6 +201,12 @@ fn warnings(revision: &PolicyRevision) -> Vec<PolicyDiagnostic> {
         });
     }
     diagnostics
+}
+
+fn unconditionally_matches_udp(rule_type: &str, network: Option<&str>) -> bool {
+    network == Some("udp")
+        || rule_type.eq_ignore_ascii_case("MATCH")
+        || rule_type.eq_ignore_ascii_case("FINAL")
 }
 
 fn rule_target<'a>(parts: &'a [&str]) -> Option<&'a str> {
@@ -245,7 +263,7 @@ rules: ["MATCH,exit"]
     }
 
     #[test]
-    fn reports_udp_fallthrough_without_rejecting_ordered_rules() {
+    fn reports_udp_fallthrough_only_until_an_unconditional_udp_rule() {
         let preflight = preflight_policy_source(
             r#"
 version: 1
@@ -263,11 +281,9 @@ rules:
             Path::new("."),
         );
         assert!(preflight.report.valid);
-        assert_eq!(preflight.report.diagnostics.len(), 2);
+        assert_eq!(preflight.report.diagnostics.len(), 1);
         assert_eq!(preflight.report.diagnostics[0].code, "rule.udp_fallthrough");
         assert_eq!(preflight.report.diagnostics[0].path, "rules[0]");
-        assert_eq!(preflight.report.diagnostics[1].code, "rule.udp_fallthrough");
-        assert_eq!(preflight.report.diagnostics[1].path, "rules[2]");
     }
 
     #[test]
@@ -293,6 +309,32 @@ rules:
             "rule.udp_actor_unreachable"
         );
         assert_eq!(preflight.report.diagnostics[0].path, "rules[0]");
+    }
+
+    #[test]
+    fn tcp_only_unconditional_match_keeps_later_udp_diagnostics_reachable() {
+        let preflight = preflight_policy_source(
+            r#"
+version: 1
+proxies:
+  tcp-only:
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    udp: false
+rules:
+  - NETWORK,udp,tcp-only
+  - MATCH,tcp-only
+"#,
+            Path::new("."),
+        );
+        assert!(preflight.report.valid);
+        assert_eq!(preflight.report.diagnostics.len(), 2);
+        assert_eq!(
+            preflight.report.diagnostics[0].code,
+            "rule.udp_actor_unreachable"
+        );
+        assert_eq!(preflight.report.diagnostics[1].code, "rule.udp_fallthrough");
     }
 
     #[test]
