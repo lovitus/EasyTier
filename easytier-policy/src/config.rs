@@ -698,7 +698,16 @@ impl PolicyDocument {
             let has_no_resolve = parts
                 .last()
                 .is_some_and(|part| part.eq_ignore_ascii_case("no-resolve"));
-            let modifier_allowed = matches!(rule_type.as_str(), "IP-CIDR" | "GEOIP" | "COUNTRY");
+            let modifier_allowed = matches!(rule_type.as_str(), "IP-CIDR" | "GEOIP" | "COUNTRY")
+                || (rule_type == "EXTERNAL"
+                    && matches!(
+                        parts[1]
+                            .split_once(':')
+                            .map_or("site", |(kind, _)| kind)
+                            .to_ascii_lowercase()
+                            .as_str(),
+                        "mmdb" | "geoip" | "geoip-dat"
+                    ));
             if parts.len() != base_parts + usize::from(has_no_resolve)
                 || (has_no_resolve && !modifier_allowed)
             {
@@ -1205,6 +1214,36 @@ rules: ["EXTERNAL,site:cn,DIRECT"]
         let source = "version: 1\nrules: [\"EXTERNAL,unknown:cn,DIRECT\"]\n";
         assert!(matches!(
             PolicyRevision::parse(source, Path::new(".")),
+            Err(PolicyError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn no_resolve_is_limited_to_external_ip_rule_sets() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::geodata::write_test_geoip(
+            &directory.path().join("geoip.dat"),
+            "GOOGLE",
+            vec![(vec![8, 8, 8, 0], 24)],
+        );
+        let geoip = r#"
+version: 1
+rule-sets:
+  geoip: { type: geoip, path: geoip.dat }
+rules:
+  - EXTERNAL,geoip:google,DIRECT,no-resolve
+  - MATCH,REJECT
+"#;
+        PolicyRevision::parse(geoip, directory.path()).unwrap();
+
+        let geosite = r#"
+version: 1
+rules:
+  - EXTERNAL,site:cn,DIRECT,no-resolve
+  - MATCH,REJECT
+"#;
+        assert!(matches!(
+            PolicyRevision::parse(geosite, directory.path()),
             Err(PolicyError::InvalidRule { .. })
         ));
     }
