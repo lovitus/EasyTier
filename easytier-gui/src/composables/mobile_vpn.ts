@@ -3,7 +3,7 @@ import { addPluginListener } from '@tauri-apps/api/core'
 import { Utils } from 'easytier-frontend-lib'
 import { get_vpn_status, prepare_vpn, start_vpn, stop_vpn } from 'tauri-plugin-vpnservice-api'
 import { setTunFd, updateMobileNetwork } from './backend'
-import { getRoutesForVpn, getStaticVpnBootstrap } from './vpn_routes'
+import { getRoutesForVpn } from './vpn_routes'
 
 interface vpnStatus {
   running: boolean
@@ -287,35 +287,31 @@ async function applyNetworkInstanceChange(instanceId: string, epoch: number, for
     console.log('vpn service skipped because no_tun is enabled', instanceId)
     return
   }
-  const staticBootstrap = getStaticVpnBootstrap(config)
   let curNetworkInfo: NetworkTypes.NetworkInstanceRunningInfo | undefined
-  if (!staticBootstrap) {
-    for (const delay of NETWORK_INFO_RETRY_DELAYS) {
-      if (delay > 0) {
-        await new Promise(resolve => setTimeout(resolve, delay))
-      }
-      if (vpnRevokedBySystem || epoch !== vpnOperationEpoch) {
-        return
-      }
+  for (const delay of NETWORK_INFO_RETRY_DELAYS) {
+    if (delay > 0) {
+      await new Promise(resolve => setTimeout(resolve, delay))
+    }
+    if (vpnRevokedBySystem || epoch !== vpnOperationEpoch) {
+      return
+    }
 
-      curNetworkInfo = (await collectNetworkInfo(instanceId)).info?.map?.[instanceId]
-      if (curNetworkInfo && !curNetworkInfo.error_msg?.length) {
-        break
-      }
+    curNetworkInfo = (await collectNetworkInfo(instanceId)).info?.map?.[instanceId]
+    if (curNetworkInfo && !curNetworkInfo.error_msg?.length) {
+      break
     }
   }
   if (vpnRevokedBySystem || epoch !== vpnOperationEpoch) {
     return
   }
-  if (!staticBootstrap && (!curNetworkInfo || curNetworkInfo?.error_msg?.length)) {
+  if (!curNetworkInfo || curNetworkInfo?.error_msg?.length) {
     console.warn('vpn service skipped because network info is unavailable', instanceId, curNetworkInfo?.error_msg)
     await doStopVpn()
     return
   }
 
   const virtualIpv4Address = curNetworkInfo?.my_node_info?.virtual_ipv4?.address
-  const virtual_ip = staticBootstrap?.ipv4Addr
-    ?? (virtualIpv4Address ? Utils.ipv4ToString(virtualIpv4Address) : '')
+  const virtual_ip = virtualIpv4Address ? Utils.ipv4ToString(virtualIpv4Address) : ''
 
   if (config.dhcp && (!virtual_ip || !virtual_ip.length)) {
     console.log('DHCP enabled but no IP yet, will retry in', DHCP_POLLING_INTERVAL, 'ms')
@@ -330,13 +326,12 @@ async function applyNetworkInstanceChange(instanceId: string, epoch: number, for
     return
   }
 
-  let network_length = staticBootstrap?.networkLength
-    ?? curNetworkInfo?.my_node_info?.virtual_ipv4.network_length
-  if (network_length === undefined) {
+  let network_length = curNetworkInfo?.my_node_info?.virtual_ipv4.network_length
+  if (!network_length) {
     network_length = 24
   }
 
-  const routes = staticBootstrap?.routes ?? getRoutesForVpn(curNetworkInfo?.routes, config)
+  const routes = getRoutesForVpn(curNetworkInfo?.routes, config)
 
   const dns = config.enable_magic_dns ? '100.100.100.101' : undefined
 
