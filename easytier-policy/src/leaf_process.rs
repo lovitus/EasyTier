@@ -109,6 +109,8 @@ impl LeafProcessRuntime {
             command.arg("-b").arg(interface);
         }
         let parent_pid = unsafe { libc::getpid() };
+        #[cfg(target_os = "macos")]
+        command.arg("--parent-pid").arg(parent_pid.to_string());
         unsafe {
             command.pre_exec(move || {
                 configure_parent_death(parent_pid)?;

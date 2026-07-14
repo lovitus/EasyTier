@@ -196,11 +196,11 @@ enable_policy_proxy: 启用策略路由
 enable_policy_proxy_help: 使用可选 Leaf 策略引擎透明处理非 Mesh 流量；Mesh 路由和 Peer 端点始终保留原 EasyTier 数据路径。
 policy_config_file: 策略文件
 policy_config_file_help: 桌面/Linux 使用的 EasyTier 策略 YAML 路径，与内联策略互斥；TOML 中的相对路径按网络配置文件目录解析。
-policy_config_file_placeholder: "policy/default.yaml（桌面/Linux）"
+policy_config_file_placeholder: "policy/default.yaml（桌面）"
 policy_config_inline: 内联策略 YAML
 policy_config_inline_placeholder: "version: 1\nrules: [\"FINAL,DIRECT\"]"
 policy_outbound_interface: 物理出口接口
-policy_outbound_interface_placeholder: "Linux 必填，例如 eth0"
+policy_outbound_interface_placeholder: "桌面策略模式必填，例如 eth0 或 en0"
 policy_leaf_executable: Leaf worker 可执行文件
 policy:
   editor:

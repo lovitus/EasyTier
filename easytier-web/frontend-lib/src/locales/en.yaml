@@ -195,11 +195,11 @@ enable_policy_proxy: Enable Policy Routing
 enable_policy_proxy_help: Transparently route non-mesh traffic with the optional Leaf policy engine. Mesh routes and peer endpoints always stay on the ordinary EasyTier data path.
 policy_config_file: Policy file
 policy_config_file_help: Desktop/Linux path to the EasyTier policy YAML. It is mutually exclusive with inline policy; relative TOML paths are resolved from the network config directory.
-policy_config_file_placeholder: "policy/default.yaml (desktop/Linux)"
+policy_config_file_placeholder: "policy/default.yaml (desktop)"
 policy_config_inline: Inline policy YAML
 policy_config_inline_placeholder: "version: 1\nrules: [\"FINAL,DIRECT\"]"
 policy_outbound_interface: Physical outbound interface
-policy_outbound_interface_placeholder: "Required on Linux, for example eth0"
+policy_outbound_interface_placeholder: "Required on desktop policy mode, for example eth0 or en0"
 policy_leaf_executable: Leaf worker executable
 policy:
   editor:

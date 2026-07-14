@@ -16,6 +16,7 @@ fn run() -> Result<(), String> {
     let mut check = false;
     let mut outbound_interface = None;
     let mut single_thread = false;
+    let mut parent_pid = None;
     while let Some(arg) = args.next() {
         match arg.to_string_lossy().as_ref() {
             "-c" => {
@@ -30,6 +31,15 @@ fn run() -> Result<(), String> {
                     .map(|value| value.to_string_lossy().into_owned());
             }
             "--single-thread" => single_thread = true,
+            "--parent-pid" => {
+                parent_pid = Some(
+                    args.next()
+                        .ok_or_else(|| "missing --parent-pid value".to_owned())?
+                        .to_string_lossy()
+                        .parse::<libc::pid_t>()
+                        .map_err(|_| "invalid --parent-pid value".to_owned())?,
+                );
+            }
             other => return Err(format!("unknown worker argument: {other}")),
         }
     }
@@ -43,6 +53,9 @@ fn run() -> Result<(), String> {
     if let Some(interface) = outbound_interface {
         // The worker is a dedicated process; this cannot affect EasyTier's environment.
         unsafe { std::env::set_var("OUTBOUND_INTERFACE", interface) };
+    }
+    if let Some(parent_pid) = parent_pid {
+        start_parent_watchdog(parent_pid)?;
     }
     let runtime_opt = if single_thread {
         leaf::RuntimeOption::SingleThread
@@ -65,6 +78,30 @@ fn run() -> Result<(), String> {
         },
     )
     .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn start_parent_watchdog(parent_pid: libc::pid_t) -> Result<(), String> {
+    if parent_pid <= 1 || unsafe { libc::getppid() } != parent_pid {
+        return Err("EasyTier parent exited while starting Leaf".to_owned());
+    }
+    std::thread::Builder::new()
+        .name("easytier-leaf-parent-watch".to_owned())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if unsafe { libc::getppid() } != parent_pid {
+                    std::process::exit(0);
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("failed to start Leaf parent watchdog: {error}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_parent_watchdog(_parent_pid: libc::pid_t) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -97,7 +134,22 @@ fn validate_outbound_interface(interface: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn validate_outbound_interface(interface: &str) -> Result<(), String> {
+    use std::ffi::CString;
+
+    let interface =
+        CString::new(interface).map_err(|_| "outbound interface contains a NUL byte".to_owned())?;
+    if unsafe { libc::if_nametoindex(interface.as_ptr()) } == 0 {
+        return Err(format!(
+            "policy outbound interface does not exist: {}",
+            interface.to_string_lossy()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn validate_outbound_interface(_interface: &str) -> Result<(), String> {
     Ok(())
 }

@@ -118,11 +118,23 @@ struct Cli {
     )]
     config_dir: Option<PathBuf>,
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ))]
     #[arg(long, env = "ET_POLICY_PROXY_CONFIG")]
     policy_config: Option<PathBuf>,
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ))]
     #[arg(
         long,
         env = "ET_POLICY_LEAF_EXECUTABLE",
@@ -130,7 +142,13 @@ struct Cli {
     )]
     policy_leaf_executable: PathBuf,
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ))]
     #[arg(long, env = "ET_POLICY_OUTBOUND_INTERFACE")]
     policy_outbound_interface: Option<String>,
 
@@ -1502,11 +1520,25 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
 
     #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
     let mut cli = cli;
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        target_os = "macos",
+        not(feature = "macos-ne")
+    ))]
+    let cli = cli;
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ))]
     if let Some(policy_file) = cli.policy_config.clone() {
+        #[cfg(target_os = "linux")]
         if cli.network_options.socket_mark.is_none() {
             cli.network_options.socket_mark = Some(crate::policy_proxy::POLICY_SOCKET_MARK);
         }
+        #[cfg(target_os = "linux")]
         crate::common::dns::set_control_plane_socket_mark(cli.network_options.socket_mark);
         let outbound_interface = cli.policy_outbound_interface.clone().ok_or_else(|| {
             anyhow::anyhow!("--policy-config requires --policy-outbound-interface")

@@ -149,6 +149,11 @@ impl NetworkInstanceManager {
             .is_some_and(|policy| policy.enabled)
             && !cfg!(any(
                 all(feature = "leaf-policy-proxy", target_os = "linux"),
+                all(
+                    feature = "leaf-policy-proxy",
+                    target_os = "macos",
+                    not(feature = "macos-ne")
+                ),
                 all(feature = "leaf-policy-mobile", target_os = "android")
             ))
         {

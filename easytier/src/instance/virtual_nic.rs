@@ -63,7 +63,13 @@ use crate::common::ifcfg::RegistryManager;
 #[cfg(all(feature = "leaf-policy-proxy", unix))]
 use crate::gateway::socks5::Socks5Server;
 
-#[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+#[cfg(all(
+    feature = "leaf-policy-proxy",
+    any(
+        target_os = "linux",
+        all(target_os = "macos", not(feature = "macos-ne"))
+    )
+))]
 use easytier_policy::LeafProcessRuntime;
 #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
 use easytier_policy::{InProcessLeafFactory, InProcessLeafRuntime};
@@ -81,7 +87,10 @@ struct PolicyNicContext {
     dropped_packets: Arc<AtomicU64>,
     bridge_updates: tokio::sync::watch::Sender<Option<Arc<LeafPacketBridge>>>,
     active: Arc<Mutex<Option<PolicyActiveRuntime>>>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(
+        target_os = "linux",
+        all(target_os = "macos", not(feature = "macos-ne"))
+    ))]
     routing: Arc<Mutex<crate::policy_proxy::PolicyRoutingGuard>>,
     _lease: crate::policy_proxy::PolicyInstanceLease,
 }
@@ -1963,7 +1972,13 @@ impl NicCtx {
         Ok(MeshRouteSnapshot::new(routes))
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ))]
     async fn start_policy_proxy(
         &mut self,
         ipv4_addr: Option<cidr::Ipv4Inet>,
@@ -2064,7 +2079,13 @@ impl NicCtx {
         Ok(())
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ))]
     async fn build_policy_runtime(
         config: &crate::policy_proxy::PolicyProcessConfig,
         revision: Arc<easytier_policy::PolicyRevision>,
@@ -2100,7 +2121,13 @@ impl NicCtx {
         })
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ))]
     #[allow(clippy::too_many_arguments)]
     async fn reload_policy_runtime_if_changed(
         config: &crate::policy_proxy::PolicyProcessConfig,
@@ -2138,7 +2165,13 @@ impl NicCtx {
         Ok(Some(candidate_revision))
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ))]
     fn run_policy_route_updater(
         &mut self,
         ipv4_addr: Option<cidr::Ipv4Inet>,
@@ -2894,9 +2927,21 @@ impl NicCtx {
             self.nic.lock().await.link_up().await?;
         }
 
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        #[cfg(all(
+            feature = "leaf-policy-proxy",
+            any(
+                target_os = "linux",
+                all(target_os = "macos", not(feature = "macos-ne"))
+            )
+        ))]
         let policy_config = crate::policy_proxy::configured_for(self.global_ctx.config.as_ref())?;
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        #[cfg(all(
+            feature = "leaf-policy-proxy",
+            any(
+                target_os = "linux",
+                all(target_os = "macos", not(feature = "macos-ne"))
+            )
+        ))]
         let policy_lease = if policy_config.is_some() {
             match crate::policy_proxy::acquire_instance() {
                 Ok(lease) => Some(lease),
@@ -2911,9 +2956,21 @@ impl NicCtx {
         } else {
             None
         };
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        #[cfg(all(
+            feature = "leaf-policy-proxy",
+            any(
+                target_os = "linux",
+                all(target_os = "macos", not(feature = "macos-ne"))
+            )
+        ))]
         let policy_owns_default_route = policy_lease.is_some();
-        #[cfg(not(all(feature = "leaf-policy-proxy", target_os = "linux")))]
+        #[cfg(not(all(
+            feature = "leaf-policy-proxy",
+            any(
+                target_os = "linux",
+                all(target_os = "macos", not(feature = "macos-ne"))
+            )
+        )))]
         let policy_owns_default_route = false;
 
         self.run_proxy_cidrs_route_updater().await?;
@@ -2923,7 +2980,13 @@ impl NicCtx {
         self.run_public_ipv6_addr_updater(policy_owns_default_route)
             .await?;
 
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        #[cfg(all(
+            feature = "leaf-policy-proxy",
+            any(
+                target_os = "linux",
+                all(target_os = "macos", not(feature = "macos-ne"))
+            )
+        ))]
         if let (Some(policy_config), Some(policy_lease)) = (policy_config, policy_lease) {
             self.start_policy_proxy(ipv4_addr, ipv6_addr, policy_config.clone(), policy_lease)
                 .await?;
@@ -2938,7 +3001,13 @@ impl NicCtx {
         drop(nic);
 
         let (stream, sink) = tunnel.split();
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        #[cfg(all(
+            feature = "leaf-policy-proxy",
+            any(
+                target_os = "linux",
+                all(target_os = "macos", not(feature = "macos-ne"))
+            )
+        ))]
         let policy_io = self.policy.as_ref().map(|policy| {
             (
                 policy.classifier.clone(),
@@ -2948,23 +3017,54 @@ impl NicCtx {
         });
         self.do_forward_nic_to_peers_task(
             stream,
-            #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+            #[cfg(all(
+                feature = "leaf-policy-proxy",
+                any(
+                    target_os = "linux",
+                    all(target_os = "macos", not(feature = "macos-ne"))
+                )
+            ))]
             policy_io.clone(),
-            #[cfg(all(feature = "leaf-policy-proxy", unix, not(target_os = "linux")))]
+            #[cfg(all(
+                feature = "leaf-policy-proxy",
+                unix,
+                not(any(
+                    target_os = "linux",
+                    all(target_os = "macos", not(feature = "macos-ne"))
+                ))
+            ))]
             None,
         )?;
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        #[cfg(all(
+            feature = "leaf-policy-proxy",
+            any(
+                target_os = "linux",
+                all(target_os = "macos", not(feature = "macos-ne"))
+            )
+        ))]
         let policy_bridge_updates = self
             .policy
             .as_ref()
             .map(|policy| policy.bridge_updates.subscribe());
-        #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+        #[cfg(all(
+            feature = "leaf-policy-proxy",
+            any(
+                target_os = "linux",
+                all(target_os = "macos", not(feature = "macos-ne"))
+            )
+        ))]
         if let Some(bridge_updates) = policy_bridge_updates {
             self.do_forward_peers_and_policy_to_nic(sink, bridge_updates, tun_offload_enabled);
         } else {
             self.do_forward_peers_to_nic_with_mode(sink, tun_offload_enabled);
         }
-        #[cfg(not(all(feature = "leaf-policy-proxy", target_os = "linux")))]
+        #[cfg(not(all(
+            feature = "leaf-policy-proxy",
+            any(
+                target_os = "linux",
+                all(target_os = "macos", not(feature = "macos-ne"))
+            )
+        )))]
         self.do_forward_peers_to_nic_with_mode(sink, tun_offload_enabled);
 
         Ok(())

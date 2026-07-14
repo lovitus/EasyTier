@@ -118,6 +118,15 @@ jobs:
               find "./easytier/third_party/${ARCH_DIR}" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) -exec cp {} ./easytier-gui/src-tauri/ \;
           fi
 
+      - name: Build Leaf policy sidecar
+        if: contains(matrix.GUI_TARGET, 'darwin')
+        run: |
+          set -euo pipefail
+          cargo build --release --target "$GUI_TARGET" --package easytier-policy --bin easytier-leaf-worker --features leaf-worker
+          mkdir -p easytier-gui/src-tauri/binaries
+          cp "target/$GUI_TARGET/release/easytier-leaf-worker" \
+            "easytier-gui/src-tauri/binaries/easytier-leaf-worker-$GUI_TARGET"
+
       - name: Build GUI
         if: matrix.GUI_TARGET != ''
         uses: tauri-apps/tauri-action@v0

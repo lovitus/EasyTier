@@ -15,11 +15,15 @@ use tokio::{
 
 use crate::common::config::{ConfigLoader, PolicyProxyConfig};
 
+#[cfg(all(target_os = "macos", not(feature = "macos-ne")))]
+mod macos_routing;
 mod mesh_socks_bridge;
 mod mesh_udp_relay;
 #[cfg(target_os = "linux")]
 mod policy_routing;
 
+#[cfg(all(target_os = "macos", not(feature = "macos-ne")))]
+pub(crate) use macos_routing::PolicyRoutingGuard;
 pub(crate) use mesh_socks_bridge::{MeshProxyBridgeSet, MeshProxyTarget};
 pub(crate) use mesh_udp_relay::{MeshUdpRelayService, RemoteUdpAssociation};
 #[cfg(target_os = "linux")]
@@ -287,7 +291,7 @@ fn resolve_instance_config(config: PolicyProxyConfig) -> anyhow::Result<PolicyPr
     let outbound_interface = config
         .outbound_interface
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("policy_proxy requires outbound_interface on Linux"))?;
+        .ok_or_else(|| anyhow::anyhow!("policy_proxy requires outbound_interface"))?;
     let leaf_executable = resolve_executable(
         config
             .leaf_executable

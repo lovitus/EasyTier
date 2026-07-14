@@ -30,8 +30,22 @@ Current implementation references:
   user action. EasyTier additionally persists a system-revoked marker because
   its mesh instance may remain enabled after Android transfers TUN ownership;
   WebView reload or process synchronization must not silently reclaim it.
+- macOS outbound binding and transparent-route ownership were checked against
+  Mihomo `component/dialer/bind_darwin.go` and
+  `listener/sing_tun/server.go`. Both implementations bind native egress
+  sockets with `IP_BOUND_IF`/`IPV6_BOUND_IF`. EasyTier intentionally keeps its
+  existing TUN and installs only two IPv4 and optional two IPv6 split-default
+  routes; the private guard records each successful route and rolls it back in
+  reverse order. It does not copy Mihomo's full route-set or auto-redirect
+  engine.
 
-**Status**: Linux candidate and automated test matrix validated; exact Android side-by-side candidate established a Stealth-protected mesh and in-process policy runtime on a real device. DHCP-empty and persisted VPN-revocation fixes are pending a replacement candidate build and repeat validation.
+**Status**: Linux candidate and automated test matrix validated; exact Android
+side-by-side candidate established a Stealth-protected mesh and in-process
+policy runtime on a real device. DHCP-empty and native persisted VPN-revocation
+fixes plus the macOS utun/process-sidecar adapter are implemented and pending a
+single replacement candidate build and repeat validation. Windows and macOS
+Network Extension adapters remain disabled rather than falling through to an
+unsafe generic implementation.
 **Updated**: 2026-07-14
 
 This TODO is the design source of truth. Update it after each material design
@@ -46,14 +60,19 @@ final cross-platform design below:
 - an absent or disabled `[policy_proxy]` envelope creates no Leaf process,
   policy task, default route, packet mux, bridge, timer, or session table. The
   Linux process-level `--policy-config` override remains supported;
-- enabled mode requires `bind_device=true`, an explicit physical
+- desktop enabled mode requires `bind_device=true`, an explicit physical
   `--policy-outbound-interface`, no configured instance netns, and one active
   policy instance per process. If a process hosts additional networks, they
   keep the ordinary NIC path rather than failing or inheriting policy routes;
 - `easytier-leaf-worker` is a pinned, separately supervised Leaf process. It
-  validates `SO_BINDTODEVICE` without sending traffic, uses at most four worker
+  validates Linux `SO_BINDTODEVICE` or the macOS interface index without
+  sending traffic, uses at most four worker
   threads, and is restarted at most three times per unchanged endpoint
   generation;
+- Linux sidecars use `PR_SET_PDEATHSIG`; macOS sidecars receive the exact
+  parent PID and stop from a one-second watchdog if reparented. This keeps
+  abrupt GUI/core termination from leaving an orphan Leaf runtime on either
+  desktop adapter;
 - the TUN owner classifies mesh destinations through an immutable IPv4/IPv6
   prefix trie. Mesh packets retain the existing VirtualNic path; other packets
   enter Leaf through a bounded Unix datagram bridge;
@@ -366,7 +385,7 @@ All launch surfaces map to one configuration:
 enabled = true
 config_file = "policy/default.yaml"
 # config_inline = "..."        # GUI/RPC/mobile alternative
-outbound_interface = "eth0"    # Linux only
+outbound_interface = "eth0"    # desktop policy mode; use en0 on macOS
 # leaf_executable = "easytier-leaf-worker"
 ```
 
@@ -380,13 +399,13 @@ outbound_interface = "eth0"    # Linux only
 - resource and breaker limits are internal validated defaults in v1 rather
   than a large user-facing tuning surface.
 
-Implemented Linux spike launch surfaces:
+Implemented desktop process-runtime launch surfaces:
 
 ```text
 CLI:
   easytier-core --config config.toml \
     --policy-config policy/default.yaml \
-    --policy-outbound-interface eth0
+    --policy-outbound-interface eth0 # use en0 on macOS
 
 Environment:
   ET_POLICY_PROXY_CONFIG=/path/to/policy.yaml
@@ -398,9 +417,10 @@ Advanced worker override:
 ```
 
 For the spike, supplying `--policy-config` or `ET_POLICY_PROXY_CONFIG` enables
-policy mode. Omitting both disables it completely. Linux also requires the
-physical outbound interface. The worker override is for packaging and testing;
-normal packages place `easytier-leaf-worker` beside/on the executable path.
+policy mode. Omitting both disables it completely. Linux and the traditional
+macOS utun backend require the physical outbound interface. The worker override
+is for packaging and testing; normal macOS packages place
+`easytier-leaf-worker` beside the GUI executable.
 The current candidate reads the same envelope from ordinary network TOML,
 protobuf/RPC, and GUI configuration. CLI/environment process overrides still
 win. Relative policy paths resolve from the network TOML directory; GUI and
@@ -470,7 +490,7 @@ Use the same abstract `PlatformPolicyTun` contract on every supported target:
 | --- | --- | --- |
 | Linux | existing TUN/netns backend | socket mark + policy rule or verified physical-interface binding |
 | Windows | Wintun/service backend | physical interface/route or WFP-compatible socket bypass |
-| macOS | utun/Network Extension backend | NE flow/socket ownership and route exclusion |
+| macOS | existing utun backend (implemented); Network Extension remains gated | `IP_BOUND_IF`/`IPV6_BOUND_IF` plus owned split-default routes |
 | Android | existing VpnService | EasyTier service package/UID exclusion and/or `protect(fd)` |
 | iOS/OHOS/other mobile | platform VPN extension | feature remains compile-gated until sole-TUN ownership and socket bypass pass the same tests |
 
