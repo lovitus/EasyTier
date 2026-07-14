@@ -100,7 +100,7 @@ function parseRule(source: unknown, index: number): PolicyRuleRow {
   return {
     type: (parts[0] || 'MATCH').toUpperCase(),
     operand: parts.slice(1, -1).join(','),
-    target: parts.at(-1) || 'DIRECT',
+    target: parts[parts.length - 1] || 'DIRECT',
   }
 }
 
@@ -195,7 +195,9 @@ function compact<T extends UnknownMap>(value: T): T {
 function reserveName(target: UnknownMap, rawName: string, path: string): string {
   const name = rawName.trim()
   if (!name) throw new Error(`${path} name must not be empty`)
-  if (Object.hasOwn(target, name)) throw new Error(`${path} name ${name} is duplicated`)
+  if (Object.prototype.hasOwnProperty.call(target, name)) {
+    throw new Error(`${path} name ${name} is duplicated`)
+  }
   return name
 }
 
