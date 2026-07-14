@@ -230,14 +230,19 @@ policy:
     target: Target
     any: Any traffic
     rule_set_type: Data type
-    order_help: Rules are evaluated from top to bottom. A matching UDP rule whose target is TCP-only is skipped and evaluation continues.
+    no_resolve: No DNS resolve
+    order_help: Rules are evaluated from top to bottom. GEOIP uses geoip-lite.dat categories, while COUNTRY uses Country MMDB. A matching UDP rule whose target is TCP-only is skipped and evaluation continues.
     add_node: Add proxy node
     add_group: Add group
     add_rule: Add rule
-    add_rule_set: Add geo data
+    add_rule_set: Add standard geo data
+    managed_source: Managed source
+    update_rule_data: Download and verify
+    rule_data_help: GeoSite, GeoIP, and Country MMDB are updated only when requested. Downloads are size- and format-checked and their SHA-256 is recorded; save and restart the instance to apply them. Leaf does not support ASN data, so no non-functional ASN option is exposed.
+    rule_data_updated: "{type} updated ({size}); save and restart the instance to apply it"
     presets: Presets
     preset_china_direct: China direct / overseas preferred
-    preset_geo_required: Add one Geosite file and one MMDB file first
+    preset_geo_required: Download Geosite and GeoIP data first
     preset_global: Preferred target for all traffic
     preset_direct: Direct all traffic
 

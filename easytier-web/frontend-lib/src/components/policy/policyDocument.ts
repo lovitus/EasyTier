@@ -1,6 +1,6 @@
 import { parse, stringify } from 'yaml'
 
-export type PolicyRuleSetKind = 'geosite' | 'mmdb'
+export type PolicyRuleSetKind = 'geosite' | 'geoip' | 'mmdb'
 export type PolicyProxyKind = 'socks5' | 'http'
 export type PolicyProxyVia = 'mesh' | 'native'
 export type PolicyGroupKind = 'chain' | 'fallback'
@@ -36,6 +36,7 @@ export interface PolicyRuleRow {
   type: string
   operand: string
   target: string
+  noResolve: boolean
 }
 
 export interface PolicyEditorDocument {
@@ -90,17 +91,21 @@ function requiredInteger(value: unknown, path: string): number {
 function parseRule(source: unknown, index: number): PolicyRuleRow {
   if (typeof source !== 'string') throw new Error(`rules[${index}] must be a string`)
   const parts = source.split(',').map(part => part.trim())
+  const noResolve = parts[parts.length - 1]?.toLowerCase() === 'no-resolve'
+  if (noResolve) parts.pop()
   if (parts.length <= 2) {
     return {
       type: (parts[0] || 'MATCH').toUpperCase(),
       operand: '',
       target: parts[1] || 'DIRECT',
+      noResolve,
     }
   }
   return {
     type: (parts[0] || 'MATCH').toUpperCase(),
     operand: parts.slice(1, -1).join(','),
     target: parts[parts.length - 1] || 'DIRECT',
+    noResolve,
   }
 }
 
@@ -111,7 +116,7 @@ export function emptyPolicyDocument(): PolicyEditorDocument {
     ruleSets: [],
     proxies: [],
     groups: [],
-    rules: [{ type: 'MATCH', operand: '', target: 'DIRECT' }],
+    rules: [{ type: 'MATCH', operand: '', target: 'DIRECT', noResolve: false }],
   }
 }
 
@@ -127,7 +132,7 @@ export function parsePolicyDocument(source: string): PolicyEditorDocument {
   const ruleSets = Object.entries(optionalMap(root, 'rule-sets')).map(([name, raw]) => {
     const value = requireMap(raw, `rule-sets.${name}`)
     const kind = requiredString(value.type, `rule-sets.${name}.type`)
-    if (!['geosite', 'mmdb'].includes(kind)) throw new Error(`rule-sets.${name}.type is unsupported`)
+    if (!['geosite', 'geoip', 'mmdb'].includes(kind)) throw new Error(`rule-sets.${name}.type is unsupported`)
     return {
       name,
       type: kind as PolicyRuleSetKind,
@@ -241,9 +246,10 @@ export function serializePolicyDocument(document: PolicyEditorDocument): string 
 
   const rules = document.rules.map(row => {
     const type = row.type.trim().toUpperCase()
-    return row.operand.trim()
+    const base = row.operand.trim()
       ? `${type},${row.operand.trim()},${row.target.trim()}`
       : `${type},${row.target.trim()}`
+    return row.noResolve ? `${base},no-resolve` : base
   })
   const root = compact({
     ...document.extra,

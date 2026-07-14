@@ -18,6 +18,9 @@ rule-sets:
   country:
     type: mmdb
     path: rules/country.mmdb
+  geoip:
+    type: geoip
+    path: rules/geoip.dat
 proxies:
   mesh-exit:
     type: socks5
@@ -38,7 +41,7 @@ groups:
     members: [mesh-exit, firewall, DIRECT]
 rules:
   - GEOSITE,CN,DIRECT
-  - GEOIP,CN,DIRECT
+  - GEOIP,CN,DIRECT,no-resolve
   - NETWORK,udp,preferred
   - MATCH,preferred
 `
@@ -52,6 +55,7 @@ rules:
     })
     expect(document.groups[0].members).toEqual(['mesh-exit', 'firewall', 'DIRECT'])
     expect(document.rules.map(rule => rule.type)).toEqual(['GEOSITE', 'GEOIP', 'NETWORK', 'MATCH'])
+    expect(document.rules[1].noResolve).toBe(true)
 
     const reparsed = parsePolicyDocument(serializePolicyDocument(document))
     expect(reparsed).toEqual(document)
@@ -59,12 +63,12 @@ rules:
 
   it('keeps first-match rule order when rows are reordered', () => {
     const document = emptyPolicyDocument()
-    document.rules.unshift({ type: 'GEOIP', operand: 'CN', target: 'DIRECT' })
-    document.rules.unshift({ type: 'GEOSITE', operand: 'CN', target: 'preferred' })
+    document.rules.unshift({ type: 'GEOIP', operand: 'CN', target: 'DIRECT', noResolve: true })
+    document.rules.unshift({ type: 'GEOSITE', operand: 'CN', target: 'preferred', noResolve: false })
 
     const serialized = serializePolicyDocument(document)
     expect(serialized.indexOf('GEOSITE,CN,preferred')).toBeLessThan(serialized.indexOf('GEOIP,CN,DIRECT'))
-    expect(serialized.indexOf('GEOIP,CN,DIRECT')).toBeLessThan(serialized.indexOf('MATCH,DIRECT'))
+    expect(serialized.indexOf('GEOIP,CN,DIRECT,no-resolve')).toBeLessThan(serialized.indexOf('MATCH,DIRECT'))
   })
 
   it('does not emit empty optional credentials or geo sections', () => {
@@ -96,7 +100,7 @@ future-option:
   enabled: true
 rules: ["MATCH,DIRECT"]
 `)
-    document.rules.unshift({ type: 'NETWORK', operand: 'udp', target: 'DIRECT' })
+    document.rules.unshift({ type: 'NETWORK', operand: 'udp', target: 'DIRECT', noResolve: false })
 
     const serialized = serializePolicyDocument(document)
     expect(serialized).toContain('future-option:')

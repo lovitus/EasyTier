@@ -20,7 +20,9 @@ leaf-inprocess = ["leaf-runtime"]
 [dependencies]
 arc-swap = "1.7"
 cidr = "0.3"
+maxminddb = "0.24.0"
 prefix-trie = { version = "0.7", features = ["cidr"] }
+prost = "0.14.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

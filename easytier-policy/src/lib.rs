@@ -5,6 +5,7 @@
 //! runtimes attach through narrow traits in later integration layers.
 
 mod config;
+mod geodata;
 #[cfg(all(unix, feature = "leaf-inprocess"))]
 mod inprocess;
 mod leaf_config;
@@ -18,6 +19,7 @@ pub use config::{
     ChainKind, PolicyDocument, PolicyError, PolicyMode, PolicyRevision, Proxy, ProxyKind,
     ProxyServer, ProxyVia, RuleSetKind, validate_policy_file,
 };
+pub use geodata::{ManagedRuleDataKind, validate_managed_rule_data};
 #[cfg(all(unix, feature = "leaf-inprocess"))]
 pub use inprocess::{InProcessLeafFactory, InProcessLeafRuntime};
 pub use leaf_config::{

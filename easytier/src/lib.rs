@@ -35,6 +35,8 @@ pub mod instance;
 mod peer_center;
 #[cfg(all(feature = "leaf-policy-proxy", unix))]
 pub mod policy_proxy;
+#[cfg(feature = "leaf-policy-proxy")]
+mod policy_rule_data;
 mod vpn_portal;
 
 pub mod common;

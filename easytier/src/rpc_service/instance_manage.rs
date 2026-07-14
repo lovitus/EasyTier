@@ -16,8 +16,9 @@ use crate::{
                 ListNetworkInstanceRequest, ListNetworkInstanceResponse,
                 NetworkInstanceRunningInfoMap, NetworkMeta, PolicyConfigDiagnostic,
                 RetainNetworkInstanceRequest, RetainNetworkInstanceResponse,
-                RunNetworkInstanceRequest, RunNetworkInstanceResponse, ValidateConfigRequest,
-                ValidateConfigResponse, WebClientService,
+                RunNetworkInstanceRequest, RunNetworkInstanceResponse, UpdatePolicyRuleDataRequest,
+                UpdatePolicyRuleDataResponse, ValidateConfigRequest, ValidateConfigResponse,
+                WebClientService,
             },
         },
         rpc_types::{self, controller::BaseController},
@@ -240,6 +241,54 @@ impl WebClientService for InstanceManageRpcService {
             toml_config: config.dump(),
             policy_diagnostics,
         })
+    }
+
+    async fn update_policy_rule_data(
+        &self,
+        _: BaseController,
+        req: UpdatePolicyRuleDataRequest,
+    ) -> Result<UpdatePolicyRuleDataResponse, rpc_types::error::Error> {
+        let instance_id: uuid::Uuid = req
+            .inst_id
+            .ok_or_else(|| anyhow::anyhow!("instance id is required"))?
+            .into();
+        if self
+            .manager
+            .get_instance_config_control(&instance_id)
+            .is_none()
+        {
+            return Err(anyhow::anyhow!(
+                "instance {instance_id} must be saved before updating Geo rule data"
+            )
+            .into());
+        }
+        let config_dir = self
+            .manager
+            .get_config_dir()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("managed config directory is unavailable"))?;
+        let _mutation_guard = self.remote_mutation_lock.lock().await;
+
+        #[cfg(feature = "leaf-policy-proxy")]
+        {
+            let resource = req
+                .resource
+                .parse::<crate::policy_rule_data::PolicyRuleDataResource>()?;
+            let update =
+                crate::policy_rule_data::update_policy_rule_data(config_dir, instance_id, resource)
+                    .await?;
+            Ok(UpdatePolicyRuleDataResponse {
+                path: update.path.to_string_lossy().into_owned(),
+                sha256: update.sha256,
+                size: update.size,
+                source_url: update.source_url.to_owned(),
+            })
+        }
+        #[cfg(not(feature = "leaf-policy-proxy"))]
+        {
+            let _ = (config_dir, req.resource);
+            Err(anyhow::anyhow!("policy rule data support is not compiled for this target").into())
+        }
     }
 
     async fn run_network_instance(

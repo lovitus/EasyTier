@@ -15,6 +15,7 @@ import {
 } from 'primevue'
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import type * as Api from '../../modules/api'
 import type { NetworkConfig } from '../../types/network'
 import {
   emptyPolicyDocument,
@@ -25,14 +26,25 @@ import {
   type PolicyProxyRow,
   type PolicyRuleRow,
   type PolicyRuleSetRow,
+  type PolicyRuleSetKind,
 } from './policyDocument'
+import {
+  MANAGED_RULE_DATA,
+  MANAGED_RULE_DATA_TYPES,
+  ensureManagedRuleDataRows,
+  updateManagedRuleData,
+} from './managedRuleData'
 
 const config = defineModel<NetworkConfig>({ required: true })
+const props = defineProps<{ api?: Api.RemoteClient }>()
 const { t } = useI18n()
 
 const document = ref<PolicyEditorDocument>(emptyPolicyDocument())
 const parseError = ref('')
 const editError = ref('')
+const ruleDataMessage = ref('')
+const ruleDataError = ref('')
+const updatingRuleData = ref<PolicyRuleSetKind | ''>('')
 let lastSerialized = ''
 
 const sourceOptions = computed(() => [
@@ -41,14 +53,14 @@ const sourceOptions = computed(() => [
 ])
 const proxyViaOptions = ['mesh', 'native']
 const groupTypeOptions = ['fallback', 'chain']
-const ruleSetTypeOptions = ['geosite', 'mmdb']
+const ruleSetTypeOptions: PolicyRuleSetKind[] = MANAGED_RULE_DATA_TYPES
 const ruleTypeOptions = [
-  'GEOSITE', 'GEOIP', 'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD', 'IP-CIDR',
+  'GEOSITE', 'GEOIP', 'COUNTRY', 'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD', 'IP-CIDR',
   'NETWORK', 'PORT-RANGE', 'INBOUND-TAG', 'EXTERNAL', 'MATCH',
 ]
 const hasCountryRuleData = computed(() =>
   document.value.ruleSets.some(ruleSet => ruleSet.type === 'geosite' && ruleSet.path.trim())
-  && document.value.ruleSets.some(ruleSet => ruleSet.type === 'mmdb' && ruleSet.path.trim()),
+  && document.value.ruleSets.some(ruleSet => ruleSet.type === 'geoip' && ruleSet.path.trim()),
 )
 const actorOptions = computed(() => [
   'DIRECT',
@@ -113,15 +125,30 @@ watch(document, value => {
   }
 }, { deep: true })
 
-function addRuleSet() {
-  const row: PolicyRuleSetRow = {
-    name: `geosite${document.value.ruleSets.length + 1}`,
-    type: 'geosite',
-    path: '',
-    update: 'manual',
-    sha256: '',
+function addRuleSets() {
+  ensureManagedRuleDataRows(document.value)
+}
+
+async function updateRuleData(row: PolicyRuleSetRow) {
+  const api = props.api
+  if (!api?.update_policy_rule_data || !config.value.instance_id || updatingRuleData.value) return
+  updatingRuleData.value = row.type
+  ruleDataMessage.value = ''
+  ruleDataError.value = ''
+  try {
+    const result = await updateManagedRuleData(api, config.value.instance_id, row)
+    const size = Number(result.size)
+    ruleDataMessage.value = t('policy.editor.rule_data_updated', {
+      type: row.type,
+      size: Number.isFinite(size) ? `${(size / 1024 / 1024).toFixed(1)} MiB` : String(result.size),
+    })
   }
-  document.value.ruleSets.push(row)
+  catch (error) {
+    ruleDataError.value = error instanceof Error ? error.message : String(error)
+  }
+  finally {
+    updatingRuleData.value = ''
+  }
 }
 
 function addProxy() {
@@ -150,7 +177,7 @@ function addGroup() {
 }
 
 function addRule() {
-  const row: PolicyRuleRow = { type: 'GEOSITE', operand: 'CN', target: 'DIRECT' }
+  const row: PolicyRuleRow = { type: 'GEOSITE', operand: 'CN', target: 'DIRECT', noResolve: false }
   const finalIndex = document.value.rules.findIndex(rule => ['MATCH', 'FINAL'].includes(rule.type))
   if (finalIndex < 0) document.value.rules.push(row)
   else document.value.rules.splice(finalIndex, 0, row)
@@ -165,16 +192,16 @@ function applyPreset(preset: 'china-direct' | 'global' | 'direct') {
   const target = preferredTarget()
   if (preset === 'china-direct') {
     document.value.rules = [
-      { type: 'GEOSITE', operand: 'CN', target: 'DIRECT' },
-      { type: 'GEOIP', operand: 'CN', target: 'DIRECT' },
-      { type: 'MATCH', operand: '', target },
+      { type: 'GEOSITE', operand: 'CN', target: 'DIRECT', noResolve: false },
+      { type: 'GEOIP', operand: 'CN', target: 'DIRECT', noResolve: true },
+      { type: 'MATCH', operand: '', target, noResolve: false },
     ]
   }
   else if (preset === 'global') {
-    document.value.rules = [{ type: 'MATCH', operand: '', target }]
+    document.value.rules = [{ type: 'MATCH', operand: '', target, noResolve: false }]
   }
   else {
-    document.value.rules = [{ type: 'MATCH', operand: '', target: 'DIRECT' }]
+    document.value.rules = [{ type: 'MATCH', operand: '', target: 'DIRECT', noResolve: false }]
   }
 }
 
@@ -188,6 +215,14 @@ function updateMembers(row: PolicyGroupRow, value: string) {
 
 function ruleNeedsOperand(type: string) {
   return !['MATCH', 'FINAL'].includes(type.toUpperCase())
+}
+
+function ruleSupportsNoResolve(type: string) {
+  return ['IP-CIDR', 'GEOIP', 'COUNTRY'].includes(type.toUpperCase())
+}
+
+function managedRuleDataSource(type: PolicyRuleSetKind) {
+  return MANAGED_RULE_DATA[type].source
 }
 </script>
 
@@ -343,6 +378,11 @@ function ruleNeedsOperand(type: string) {
                     <Select v-model="data.target" :options="actorOptions" editable class="w-full min-w-40" />
                   </template>
                 </Column>
+                <Column :header="t('policy.editor.no_resolve')" header-style="width: 7rem">
+                  <template #body="{ data }">
+                    <Checkbox v-if="ruleSupportsNoResolve(data.type)" v-model="data.noResolve" binary />
+                  </template>
+                </Column>
                 <Column header-style="width: 4rem">
                   <template #body="{ index }">
                     <Button icon="pi pi-trash" severity="danger" text @click="removeAt(document.rules, index)" />
@@ -355,6 +395,9 @@ function ruleNeedsOperand(type: string) {
 
           <Panel :header="t('policy.editor.rule_sets')" toggleable collapsed>
             <div class="flex flex-col gap-3">
+              <Message severity="info" :closable="false">{{ t('policy.editor.rule_data_help') }}</Message>
+              <Message v-if="ruleDataMessage" severity="success" :closable="false">{{ ruleDataMessage }}</Message>
+              <Message v-if="ruleDataError" severity="error" :closable="false">{{ ruleDataError }}</Message>
               <DataTable :value="document.ruleSets" data-key="name" responsive-layout="scroll">
                 <Column field="name" :header="t('policy.editor.name')">
                   <template #body="{ data }"><InputText v-model="data.name" /></template>
@@ -368,6 +411,17 @@ function ruleNeedsOperand(type: string) {
                 <Column field="sha256" header="SHA-256">
                   <template #body="{ data }"><InputText v-model="data.sha256" class="w-full min-w-64" /></template>
                 </Column>
+                <Column :header="t('policy.editor.managed_source')">
+                  <template #body="{ data }">
+                    <div class="flex flex-col gap-2 min-w-56">
+                      <span class="text-xs break-all text-surface-500">{{ managedRuleDataSource(data.type) }}</span>
+                      <Button icon="pi pi-refresh" :label="t('policy.editor.update_rule_data')" size="small"
+                        :loading="updatingRuleData === data.type"
+                        :disabled="!props.api?.update_policy_rule_data || !config.instance_id || Boolean(updatingRuleData)"
+                        @click="updateRuleData(data)" />
+                    </div>
+                  </template>
+                </Column>
                 <Column header-style="width: 4rem">
                   <template #body="{ index }">
                     <Button icon="pi pi-trash" severity="danger" text @click="removeAt(document.ruleSets, index)" />
@@ -375,7 +429,8 @@ function ruleNeedsOperand(type: string) {
                 </Column>
               </DataTable>
               <Button icon="pi pi-plus" :label="t('policy.editor.add_rule_set')" class="self-start"
-                @click="addRuleSet" />
+                :disabled="ruleSetTypeOptions.every(type => document.ruleSets.some(row => row.type === type))"
+                @click="addRuleSets" />
             </div>
           </Panel>
         </template>

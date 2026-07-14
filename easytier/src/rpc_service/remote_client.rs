@@ -8,7 +8,8 @@ use crate::{
             CollectNetworkInfoRequest, CollectNetworkInfoResponse, DeleteNetworkInstanceRequest,
             GetNetworkInstanceConfigRequest, ListNetworkInstanceMetaRequest,
             ListNetworkInstanceRequest, NetworkConfig, NetworkMeta, RunNetworkInstanceRequest,
-            ValidateConfigRequest, ValidateConfigResponse, WebClientService,
+            UpdatePolicyRuleDataRequest, UpdatePolicyRuleDataResponse, ValidateConfigRequest,
+            ValidateConfigResponse, WebClientService,
         },
         rpc_types::controller::BaseController,
     },
@@ -41,6 +42,27 @@ where
                 BaseController::default(),
                 ValidateConfigRequest {
                     config: Some(config),
+                },
+            )
+            .await
+            .map_err(RemoteClientError::RpcError)
+    }
+
+    async fn handle_update_policy_rule_data(
+        &self,
+        identify: T,
+        inst_id: Uuid,
+        resource: String,
+    ) -> Result<UpdatePolicyRuleDataResponse, RemoteClientError<E>> {
+        let client = self
+            .get_rpc_client(identify)
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        client
+            .update_policy_rule_data(
+                BaseController::default(),
+                UpdatePolicyRuleDataRequest {
+                    inst_id: Some(inst_id.into()),
+                    resource,
                 },
             )
             .await

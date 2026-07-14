@@ -231,14 +231,19 @@ policy:
     target: 目标
     any: 任意流量
     rule_set_type: 数据类型
-    order_help: 规则严格从上到下匹配；UDP 命中仅支持 TCP 的目标时会跳过，并继续检查下一条规则。
+    no_resolve: 不解析域名
+    order_help: 规则严格从上到下匹配；GEOIP 使用 geoip-lite.dat 分类，COUNTRY 使用 Country MMDB；UDP 命中仅支持 TCP 的目标时会跳过，并继续检查下一条规则。
     add_node: 添加代理节点
     add_group: 添加分组
     add_rule: 添加规则
-    add_rule_set: 添加 Geo 数据
+    add_rule_set: 添加标准 Geo 数据
+    managed_source: 官方数据源
+    update_rule_data: 下载并校验
+    rule_data_help: GeoSite、GeoIP 和 Country MMDB 只在点击时更新；下载会经过大小与格式校验并计算 SHA-256，成功后请保存并重新运行实例应用新数据。ASN 数据当前不受 Leaf 支持，因而不提供假开关。
+    rule_data_updated: "{type} 已更新（{size}），请保存并重新运行实例"
     presets: 快捷规则
     preset_china_direct: 中国直连 / 其他优先代理
-    preset_geo_required: 请先添加一个 Geosite 文件和一个 MMDB 文件
+    preset_geo_required: 请先下载 Geosite 和 GeoIP 数据
     preset_global: 全部使用首选目标
     preset_direct: 全部直连
 

@@ -11,6 +11,15 @@ export interface ValidateConfigResponse {
     }>;
 }
 
+export type PolicyRuleDataResource = 'geosite' | 'geoip' | 'mmdb';
+
+export interface UpdatePolicyRuleDataResponse {
+    path: string;
+    sha256: string;
+    size: number | string;
+    source_url: string;
+}
+
 export interface ListNetworkInstanceIdResponse {
     running_inst_ids: Array<UUID>,
     disabled_inst_ids: Array<UUID>,
@@ -61,6 +70,7 @@ export interface GetNetworkMetasResponse {
 
 export interface RemoteClient {
     validate_config(config: NetworkConfig): Promise<ValidateConfigResponse>;
+    update_policy_rule_data?(inst_id: string, resource: PolicyRuleDataResource): Promise<UpdatePolicyRuleDataResponse>;
     run_network(config: NetworkConfig, save: boolean): Promise<undefined>;
     get_network_info(inst_id: string): Promise<NetworkInstanceRunningInfo | undefined>;
     list_network_instance_ids(): Promise<ListNetworkInstanceIdResponse>;

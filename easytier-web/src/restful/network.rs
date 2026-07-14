@@ -138,6 +138,22 @@ impl NetworkApi {
             .into())
     }
 
+    async fn handle_update_policy_rule_data(
+        auth_session: AuthSession,
+        State(client_mgr): AppState,
+        Path((machine_id, inst_id, resource)): Path<(uuid::Uuid, uuid::Uuid, String)>,
+    ) -> Result<Json<UpdatePolicyRuleDataResponse>, HttpHandleError> {
+        Ok(client_mgr
+            .handle_update_policy_rule_data(
+                (Self::get_user_id(&auth_session)?, machine_id),
+                inst_id,
+                resource,
+            )
+            .await
+            .map_err(convert_error)?
+            .into())
+    }
+
     async fn handle_run_network_instance(
         auth_session: AuthSession,
         State(client_mgr): AppState,
@@ -425,6 +441,10 @@ impl NetworkApi {
             .route(
                 "/api/v1/machines/:machine-id/validate-config",
                 post(Self::handle_validate_config),
+            )
+            .route(
+                "/api/v1/machines/:machine-id/networks/:inst-id/policy-rule-data/:resource",
+                post(Self::handle_update_policy_rule_data),
             )
             .route(
                 "/api/v1/machines/:machine-id/networks",

@@ -14,9 +14,11 @@ import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AclManager from './acl/AclManager.vue'
 import PolicyEditor from './policy/PolicyEditor.vue'
+import type * as Api from '../modules/api'
 import UrlListInput from './UrlListInput.vue'
 
 const props = defineProps<{
+  api?: Api.RemoteClient
   configInvalid?: boolean
   hostname?: string
 }>()
@@ -602,7 +604,7 @@ const instanceRecvBpsLimitInput = computed<string>({
           <Divider />
 
           <Panel :header="t('policy.editor.title')" toggleable collapsed>
-            <PolicyEditor v-model="curNetwork" />
+            <PolicyEditor v-model="curNetwork" :api="props.api" />
           </Panel>
 
           <Divider />

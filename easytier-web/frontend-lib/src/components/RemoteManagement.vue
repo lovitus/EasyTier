@@ -838,7 +838,7 @@ onUnmounted(() => {
 
                 <Divider />
 
-                <Config :cur-network="currentNetworkConfig" :config-invalid="!currentNetworkConfig"
+                <Config :cur-network="currentNetworkConfig" :api="props.api" :config-invalid="!currentNetworkConfig"
                     @run-network="saveAndRunNewNetwork"></Config>
             </div>
 

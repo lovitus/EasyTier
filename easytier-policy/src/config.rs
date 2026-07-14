@@ -68,6 +68,7 @@ pub enum PolicyMode {
 #[serde(rename_all = "kebab-case")]
 pub enum RuleSetKind {
     Geosite,
+    Geoip,
     Mmdb,
 }
 
@@ -541,10 +542,10 @@ impl PolicyDocument {
                 });
             }
             let rule_type = parts[0].to_ascii_uppercase();
-            let expected_parts = match rule_type.as_str() {
+            let base_parts = match rule_type.as_str() {
                 "MATCH" | "FINAL" => 2,
-                "IP-CIDR" | "DOMAIN" | "DOMAIN-SUFFIX" | "DOMAIN-KEYWORD" | "GEOIP" | "GEOSITE"
-                | "EXTERNAL" | "PORT-RANGE" | "NETWORK" | "INBOUND-TAG" => 3,
+                "IP-CIDR" | "DOMAIN" | "DOMAIN-SUFFIX" | "DOMAIN-KEYWORD" | "GEOIP" | "COUNTRY"
+                | "GEOSITE" | "EXTERNAL" | "PORT-RANGE" | "NETWORK" | "INBOUND-TAG" => 3,
                 _ => {
                     return Err(PolicyError::InvalidRule {
                         index,
@@ -552,10 +553,23 @@ impl PolicyDocument {
                     });
                 }
             };
-            if parts.len() != expected_parts {
+            let has_no_resolve = parts
+                .last()
+                .is_some_and(|part| part.eq_ignore_ascii_case("no-resolve"));
+            let modifier_allowed = matches!(rule_type.as_str(), "IP-CIDR" | "GEOIP" | "COUNTRY");
+            if parts.len() != base_parts + usize::from(has_no_resolve)
+                || (has_no_resolve && !modifier_allowed)
+            {
                 return Err(PolicyError::InvalidRule {
                     index,
-                    reason: format!("{rule_type} requires {expected_parts} fields"),
+                    reason: format!(
+                        "{rule_type} requires {base_parts} fields{}",
+                        if modifier_allowed {
+                            " with an optional no-resolve modifier"
+                        } else {
+                            ""
+                        }
+                    ),
                 });
             }
             if rule_type == "NETWORK" {
@@ -568,7 +582,18 @@ impl PolicyDocument {
                 }
             }
             match rule_type.as_str() {
-                "GEOIP" => self.require_single_rule_set(index, RuleSetKind::Mmdb, "mmdb")?,
+                "GEOIP" => self.require_geoip_source(index, parts[1])?,
+                "COUNTRY" => {
+                    if parts[1].len() != 2
+                        || !parts[1].bytes().all(|byte| byte.is_ascii_alphabetic())
+                    {
+                        return Err(PolicyError::InvalidRule {
+                            index,
+                            reason: "COUNTRY requires a two-letter ISO country code".to_owned(),
+                        });
+                    }
+                    self.require_single_rule_set(index, RuleSetKind::Mmdb, "mmdb")?;
+                }
                 "GEOSITE" => {
                     self.require_single_rule_set(index, RuleSetKind::Geosite, "geosite")?
                 }
@@ -584,8 +609,10 @@ impl PolicyDocument {
                         "site" | "geosite" => {
                             self.require_single_rule_set(index, RuleSetKind::Geosite, "geosite")?
                         }
-                        "mmdb" | "geoip" => {
-                            self.require_single_rule_set(index, RuleSetKind::Mmdb, "mmdb")?
+                        "mmdb" => self.require_single_rule_set(index, RuleSetKind::Mmdb, "mmdb")?,
+                        "geoip" => self.require_geoip_source(index, code)?,
+                        "geoip-dat" => {
+                            self.require_single_rule_set(index, RuleSetKind::Geoip, "geoip")?
                         }
                         _ => {
                             return Err(PolicyError::InvalidRule {
@@ -597,7 +624,7 @@ impl PolicyDocument {
                 }
                 _ => {}
             }
-            let target = parts.last().copied().unwrap_or_default();
+            let target = parts[parts.len() - 1 - usize::from(has_no_resolve)];
             if !self.actor_exists(target) {
                 return Err(PolicyError::UnknownReference {
                     owner: format!("rule {index}"),
@@ -627,6 +654,13 @@ impl PolicyDocument {
             index,
             reason: format!("rule requires exactly one {label} rule-set"),
         })
+    }
+
+    fn require_geoip_source(&self, index: usize, code: &str) -> Result<(), PolicyError> {
+        if code.eq_ignore_ascii_case("lan") {
+            return Ok(());
+        }
+        self.require_single_rule_set(index, RuleSetKind::Geoip, "geoip")
     }
 
     fn actor_exists(&self, name: &str) -> bool {
@@ -809,12 +843,43 @@ version: 1
 rule-sets:
   first: { type: mmdb, path: first.mmdb }
   second: { type: mmdb, path: second.mmdb }
-rules: ["GEOIP,CN,DIRECT"]
+rules: ["COUNTRY,CN,DIRECT"]
 "#;
         assert!(matches!(
             PolicyRevision::parse(source, directory.path()),
             Err(PolicyError::InvalidRule { .. })
         ));
+    }
+
+    #[test]
+    fn geoip_lan_is_builtin_but_other_categories_require_geoip_data() {
+        PolicyRevision::parse(
+            "version: 1\nrules: [\"GEOIP,lan,DIRECT,no-resolve\", \"MATCH,DIRECT\"]\n",
+            Path::new("."),
+        )
+        .unwrap();
+        assert!(matches!(
+            PolicyRevision::parse(
+                "version: 1\nrules: [\"GEOIP,google,DIRECT,no-resolve\", \"MATCH,DIRECT\"]\n",
+                Path::new("."),
+            ),
+            Err(PolicyError::InvalidRule { .. })
+        ));
+    }
+
+    #[test]
+    fn country_is_explicitly_distinct_from_geoip_dat() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("country.mmdb"), b"fixture").unwrap();
+        let source = r#"
+version: 1
+rule-sets:
+  country: { type: mmdb, path: country.mmdb }
+rules:
+  - COUNTRY,CN,DIRECT,no-resolve
+  - MATCH,DIRECT
+"#;
+        PolicyRevision::parse(source, directory.path()).unwrap();
     }
 
     #[test]

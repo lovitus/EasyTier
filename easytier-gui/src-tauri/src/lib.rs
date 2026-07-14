@@ -5,8 +5,8 @@ mod elevate;
 
 use anyhow::Context;
 use easytier::proto::api::manage::{
-    CollectNetworkInfoResponse, ValidateConfigResponse, WebClientService,
-    WebClientServiceClientFactory,
+    CollectNetworkInfoResponse, UpdatePolicyRuleDataResponse, ValidateConfigResponse,
+    WebClientService, WebClientServiceClientFactory,
 };
 use easytier::rpc_service::remote_client::{
     GetNetworkMetasResponse, ListNetworkInstanceIdsJsonResp, ListNetworkProps, RemoteClientManager,
@@ -323,6 +323,21 @@ async fn validate_config(
 ) -> Result<ValidateConfigResponse, String> {
     get_client_manager!()?
         .handle_validate_config(app, config)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn update_policy_rule_data(
+    app: AppHandle,
+    instance_id: String,
+    resource: String,
+) -> Result<UpdatePolicyRuleDataResponse, String> {
+    let instance_id = instance_id
+        .parse()
+        .map_err(|e: uuid::Error| e.to_string())?;
+    get_client_manager!()?
+        .handle_update_policy_rule_data(app, instance_id, resource)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1462,6 +1477,7 @@ pub fn run_gui() -> std::process::ExitCode {
             update_network_config_state,
             save_network_config,
             validate_config,
+            update_policy_rule_data,
             get_config,
             load_configs,
             get_network_metas,

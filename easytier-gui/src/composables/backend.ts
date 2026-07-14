@@ -102,6 +102,13 @@ export async function validateConfig(cfg: NetworkConfig) {
   return await invoke<ValidateConfigResponse>('validate_config', { config: NetworkTypes.toBackendNetworkConfig(cfg) })
 }
 
+export async function updatePolicyRuleData(instanceId: string, resource: string) {
+  return await invoke<Api.UpdatePolicyRuleDataResponse>('update_policy_rule_data', {
+    instanceId,
+    resource,
+  })
+}
+
 export async function getConfig(instanceId: string) {
   const config = await invoke<NetworkConfig>('get_config', { instanceId })
   return NetworkTypes.normalizeNetworkConfig(config)

@@ -453,11 +453,15 @@ version: 1
 rule-sets:
   geosite:
     type: geosite
-    path: rules/site.dat
+    path: rules/geosite.dat
     update: manual
   geoip:
+    type: geoip
+    path: rules/geoip-lite.dat
+    update: manual
+  country:
     type: mmdb
-    path: rules/geo.mmdb
+    path: rules/country-lite.mmdb
     update: manual
 
 proxies:
@@ -491,7 +495,7 @@ groups:
 
 rules:
   - "GEOSITE,CN,DIRECT"
-  - "GEOIP,CN,DIRECT"
+  - "GEOIP,CN,DIRECT,no-resolve"
   - "NETWORK,udp,final-udp"
   - "MATCH,final-tcp"
 ```
@@ -509,13 +513,16 @@ Implementation status (2026-07-14): the first two layers are now wired into the
 shared GUI as an ACL-style collapsed **Policy Proxy** panel. The enable switch
 is inside the panel; disabled users do not see or initialize the editor. The
 inline visual editor covers mesh/native SOCKS5 actors, ordered chain/fallback
-members, ordered common rules, Geosite/MMDB file metadata, three bounded rule
+members, ordered common rules, Geosite/GeoIP DAT/Country MMDB metadata, three bounded rule
 presets, and the same advanced YAML text. YAML is the only persisted source;
 invalid YAML suspends visual write-back instead of restoring an older model.
 The existing config validation RPC now invokes the runtime policy parser and
-returns structured warnings before Save/Run. The local rule-data importer,
-peer picker, and side-effect-free simulator remain explicit follow-up items;
-the UI does not fake these capabilities client-side.
+returns structured warnings before Save/Run. The rule-data panel can explicitly
+download the three fixed MetaCubeX resources into the saved instance's private
+configuration directory. It validates size and format, computes SHA-256, and
+atomically replaces the active file before updating YAML. Peer picker and the
+side-effect-free simulator remain explicit follow-up items; the UI does not
+fake these capabilities client-side.
 
 The validated EasyTier policy YAML remains the only source of truth. The GUI
 must never expose or persist generated Leaf configuration. Deliver the editing
@@ -535,12 +542,13 @@ UI:
    Rules use an ordered table with drag/reorder and an advanced raw-rule cell.
    Unsupported health knobs are shown as fixed runtime behavior, not invented
    as fields that the current schema cannot consume.
-3. **Local rule-data manager.** Desktop/server can select a local file; mobile
-   imports into the application's private policy directory. Each entry shows
-   source label, resolved local path, kind, size, SHA-256, validation time, and
-   active/previous snapshot. MetaCubeX release URLs are optional one-shot
-   presets only. Download/import uses staging, bounded size, format/digest
-   validation, and atomic replacement; failure retains the previous snapshot.
+3. **Local rule-data manager.** Advanced YAML can continue to reference a local
+   file. The shared GUI additionally offers explicit one-shot updates for the
+   fixed MetaCubeX `geosite.dat`, `geoip-lite.dat`, and `country-lite.mmdb`
+   sources. Download uses a private staging file, a 256 MiB limit, format
+   validation, SHA-256 calculation, and atomic replacement. A failed update
+   neither replaces the existing file nor changes its YAML path/digest. There
+   is no automatic update, subscription, ASN database, or source fallback.
 
 The editor also provides a side-effect-free policy simulator. Given a domain
 or IP, TCP/UDP, and optional destination port, it reports the matched rule,
@@ -584,7 +592,8 @@ preset: the persisted `rules` list is authoritative, and neither EasyTier nor
 Leaf assigns an implicit priority to `NETWORK`, Geosite, or GeoIP rules.
 
 The generated baseline is deterministic and inspectable. A typical country
-split uses one imported Geosite file and one imported country MMDB:
+split uses Geosite for domain categories and GeoIP DAT for IP categories;
+Country MMDB remains an explicit third matcher for ISO country rules:
 
 ```yaml
 rule-sets:
@@ -594,6 +603,11 @@ rule-sets:
     update: manual
     sha256: "<verified digest>"
   geoip:
+    type: geoip
+    path: rules/geoip-lite.dat
+    update: manual
+    sha256: "<verified digest>"
+  country:
     type: mmdb
     path: rules/country-lite.mmdb
     update: manual
@@ -601,28 +615,27 @@ rule-sets:
 
 rules:
   - "GEOSITE,CN,DIRECT"
-  - "GEOIP,CN,DIRECT"
+  - "GEOIP,CN,DIRECT,no-resolve"
+  - "COUNTRY,JP,overseas,no-resolve"
   - "NETWORK,udp,overseas-udp"
   - "GEOSITE,geolocation-!cn,overseas"
   - "MATCH,overseas"
 ```
 
-The two data sources are ordered alternatives, not an intersection. Leaf uses
+The three matcher families are ordered alternatives, not an intersection. Leaf uses
 first-match semantics: the first matching rule selects the actor and evaluation
 stops. The persisted order is entirely user-defined: EasyTier does not force
-Geosite before GeoIP, GeoIP before Geosite, or `NETWORK,udp` into a fixed
+Geosite before GeoIP/Country, GeoIP before Geosite, or `NETWORK,udp` into a fixed
 position. The example first lets Chinese domain and IP rules select `DIRECT`,
-then sends the remaining UDP traffic to `overseas-udp`; moving any rule changes
-the result exactly as the displayed order implies. MMDB GeoIP remains useful
-for literal-IP traffic, missing domain attribution, and address-based policy,
-but it is not consulted after an earlier rule has matched. Neither source
+then applies the explicit JP Country MMDB rule and sends the remaining UDP
+traffic to `overseas-udp`; moving any rule changes the result exactly as the
+displayed order implies. `GEOIP,<tag>` always reads a category from
+`geoip-lite.dat`; `COUNTRY,<ISO>` always reads `country-lite.mmdb`; and
+`GEOIP,lan` is a built-in Mihomo-compatible special-network matcher. There is
+no automatic DAT-to-MMDB fallback, so a rule never changes meaning according
+to which files happen to exist. None of these sources
 replaces the protected mesh/private route snapshot, and a final rule remains
-mandatory so an unknown destination never receives an implicit action. The
-current Leaf compiler emits `GEOIP` as an MMDB external rule, so
-`country-lite.mmdb` is used here; `geoip-lite.dat` is not loaded in parallel
-unless a separately validated Leaf DAT reader is implemented. Loading two
-different country databases with overlapping semantics would create precedence
-ambiguity rather than additional safety.
+mandatory so an unknown destination never receives an implicit action.
 
 If every target is UDP-capable, the user may omit the explicit `NETWORK,udp`
 rule and let the same ordered domain/IP rules handle both transports. For a
@@ -645,11 +658,11 @@ owned by the mesh. The preview labels these rules as protected defaults; users
 may inspect them, but unsafe removal requires the advanced editor and a
 preflight warning.
 
-The resource page offers the official MetaCubeX release assets only as explicit
-one-shot import presets. It does not copy Mihomo's `geox-url` auto-download or
-subscription behavior. The selected release URL is resolved once, downloaded
-to staging, bounded by size, format-checked, hashed, and atomically promoted;
-the GUI then writes the local path and digest shown above. Runtime startup is
+The resource page offers three fixed MetaCubeX `latest` release assets only as
+explicit one-shot update actions. It does not copy Mihomo's `geox-url`
+auto-download or subscription behavior. A requested file is downloaded to
+staging, bounded by size, format-checked, hashed, and atomically promoted; the
+GUI then writes the local path and digest shown above. Runtime startup is
 offline and never follows a `latest` URL.
 - every edit has Validate, Diff, Apply, and Roll Back actions;
 - desktop watches the local file with a 500 ms debounce; GUI/mobile applies an
@@ -1393,7 +1406,7 @@ groups:
 
 rules:
   - GEOSITE,cn,DIRECT
-  - GEOIP,private,DIRECT
+  - GEOIP,private,DIRECT,no-resolve
   - DOMAIN-SUFFIX,example.com,chained-egress
   - MATCH,asia-primary
 ```
@@ -1460,11 +1473,10 @@ application chain is TCP-only (for example because it contains HTTP CONNECT),
 DNS may still use DoH through that TCP chain. Raw UDP DNS must instead use a
 UDP-capable chain or the configured direct resolver set.
 
-### Geosite data ownership and updates
+### Geo rule-data ownership and updates
 
-Geosite data is local configuration data, not an implicit online service.
-EasyTier/Leaf must never force-download or auto-refresh it from a hard-coded
-URL.
+Geo rule data is local configuration data, not an implicit online service.
+EasyTier/Leaf never downloads or refreshes it merely because policy mode starts.
 
 Supported sources:
 
@@ -1472,7 +1484,17 @@ Supported sources:
 rule-sets:
   geosite:
     type: geosite
-    path: "rules/site.dat"
+    path: "rules/geosite.dat"
+    update: manual
+    sha256: "optional expected digest"
+  geoip:
+    type: geoip
+    path: "rules/geoip-lite.dat"
+    update: manual
+    sha256: "optional expected digest"
+  country:
+    type: mmdb
+    path: "rules/country-lite.mmdb"
     update: manual
     sha256: "optional expected digest"
 ```
@@ -1483,40 +1505,34 @@ layout without copying its automatic-download behavior:
 Reference: <https://wiki.metacubex.one/example/conf/#__tabbed_1_1> and the
 versioned assets published by <https://github.com/MetaCubeX/meta-rules-dat>.
 
-- `geosite.dat` from the versioned `MetaCubeX/meta-rules-dat` release is the
-  default Geosite import candidate;
-- `country-lite.mmdb` from the same release is the default country GeoIP MMDB
-  import candidate;
-- `geoip-lite.dat` and `GeoLite2-ASN.mmdb` are optional compatibility data.
-  They are not loaded unless a future rule kind explicitly needs them;
-- the upstream `latest` URLs are discovery defaults shown by the GUI/import
-  command, not implicit runtime dependencies. An import records the resolved
-  release, digest, size, and import time before atomically publishing it.
+- `GEOSITE,<tag>` always uses `geosite.dat`;
+- `GEOIP,<tag>` always uses `geoip-lite.dat`, except built-in `GEOIP,lan`;
+- `COUNTRY,<ISO>` always uses `country-lite.mmdb`;
+- `GeoLite2-ASN.mmdb` is not exposed because the pinned Leaf matcher does not
+  support ASN rules and expanding it in EasyTier would add a second complex
+  matcher with no current user-facing rule contract;
+- the three upstream `latest` URLs are fixed one-shot GUI update sources, not
+  runtime dependencies. A successful update records the local path, digest,
+  and size in the edited YAML only after the staged file validates and is
+  atomically published.
 
 This keeps the familiar `GEOSITE,cn`, `GEOSITE,geolocation-!cn`,
-`GEOIP,private`, and country-code rule model while preserving EasyTier's
+`GEOIP,private`, and explicit `COUNTRY,CN` model while preserving EasyTier's
 offline-first contract. The recommended starting order is private/LAN and
 mesh-owned destinations first, then China DIRECT rules, then non-China policy
 groups, and finally `MATCH`.
 
-- Releases may bundle a documented, versioned default `site.dat` snapshot.
 - Desktop/server users may point to a local absolute or config-relative file.
-- GUI/mobile users may import a file or explicitly request a one-time URL
-  download.
-- Optional subscriptions are opt-in and store their URL, interval, expected
-  signature/hash policy, and last successful version. They are not enabled by
-  merely referencing a geosite category.
+- GUI/mobile users may explicitly request one of the three fixed one-time
+  updates after the instance configuration has been saved.
 - Startup and policy reload use the last validated local snapshot and never
   block waiting for the network.
-- Download/import writes to a staging file, enforces size limits, validates the
-  format and optional digest/signature, then atomically replaces the active
-  snapshot.
-- Keep at least one previous validated snapshot for rollback. Failed updates do
-  not invalidate the running policy.
-- Report source, digest, data version/time, and last update result in status;
-  do not silently substitute another online source.
-- Load only referenced geosite groups into a bounded immutable index and swap
-  it atomically. Do not repeatedly scan the complete file on every connection.
+- Download writes to a private staging file, enforces file/category/CIDR limits,
+  validates the expected format, computes its digest, and atomically replaces
+  the active snapshot. Failed updates preserve the current file and YAML.
+- Load only referenced GeoIP DAT categories into the generated immutable Leaf
+  rule list. Geosite and Country MMDB continue through Leaf's native external
+  matcher and are not reparsed per connection by EasyTier.
 
 ### Overseas egress validation topology
 
@@ -1657,8 +1673,6 @@ Do not merge production integration until all gates pass:
   dynamic plugin ABI is unnecessary.
 - Which Leaf features can be disabled to reduce package size and attack
   surface.
-- Whether geosite-compatible data must be converted during build or loaded in
-  Leaf's native rule format.
 - The smallest packet-endpoint API that lets existing VirtualNic and Leaf share
   PolicyTunMux without exposing the raw TUN FD or Leaf types to EasyTier core.
 - Whether Android should additionally enable Leaf's existing per-socket

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     net::{IpAddr, SocketAddr},
     path::Path,
 };
@@ -8,7 +8,11 @@ use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{ChainKind, PolicyRevision, ProxyKind, ProxyServer, RuleSetKind, config::RuleSet};
+use crate::{
+    ChainKind, PolicyRevision, ProxyKind, ProxyServer, RuleSetKind,
+    config::RuleSet,
+    geodata::{lan_cidrs, load_geoip_categories},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMeshServer {
@@ -60,6 +64,8 @@ pub enum LeafConfigError {
     Serialize(String),
     #[error("failed to determine actor capability for rule {index}: {reason}")]
     ActorCapability { index: usize, reason: String },
+    #[error("failed to load GeoIP rule data: {0}")]
+    GeoipData(String),
 }
 
 pub fn compile_leaf_config(
@@ -197,11 +203,43 @@ fn compile_leaf_rules(
     base_dir: &Path,
 ) -> Result<Vec<CompiledLeafRule>, LeafConfigError> {
     let document = &revision.document;
+    let geoip_rule_set = find_single_rule_set(document.rule_sets.values(), RuleSetKind::Geoip);
+    let requested_geoip_categories = document
+        .rules
+        .iter()
+        .filter_map(|source| {
+            let parts = source.split(',').map(str::trim).collect::<Vec<_>>();
+            match parts.first()?.to_ascii_uppercase().as_str() {
+                "GEOIP" => Some(parts.get(1)?.to_ascii_uppercase()),
+                "EXTERNAL" => {
+                    let (kind, code) = parts.get(1)?.split_once(':')?;
+                    matches!(kind.to_ascii_lowercase().as_str(), "geoip" | "geoip-dat")
+                        .then(|| code.to_ascii_uppercase())
+                }
+                _ => None,
+            }
+        })
+        .filter(|code| code != "LAN")
+        .collect::<BTreeSet<_>>();
+    let geoip_categories = if let Some(rule_set) = geoip_rule_set
+        && !requested_geoip_categories.is_empty()
+    {
+        load_geoip_categories(
+            &resolved_rule_set_path(rule_set, base_dir),
+            &requested_geoip_categories,
+        )
+        .map_err(|error| LeafConfigError::GeoipData(error.to_string()))?
+    } else {
+        BTreeMap::new()
+    };
     let mut compiled = Vec::with_capacity(document.rules.len());
     for (index, source) in document.rules.iter().enumerate() {
         let parts: Vec<&str> = source.split(',').map(str::trim).collect();
         let rule_type = parts[0].to_ascii_uppercase();
-        let target = parts.last().copied().unwrap_or_default().to_owned();
+        let has_no_resolve = parts
+            .last()
+            .is_some_and(|part| part.eq_ignore_ascii_case("no-resolve"));
+        let target = parts[parts.len() - 1 - usize::from(has_no_resolve)].to_owned();
         let mut rule = empty_leaf_rule(target.clone());
 
         match rule_type.as_str() {
@@ -210,6 +248,9 @@ fn compile_leaf_rules(
             "DOMAIN-SUFFIX" => rule.domain_suffix = Some(vec![parts[1].to_owned()]),
             "DOMAIN-KEYWORD" => rule.domain_keyword = Some(vec![parts[1].to_owned()]),
             "GEOIP" => {
+                apply_geoip_rule(&mut rule, parts[1], &geoip_categories)?;
+            }
+            "COUNTRY" => {
                 let rule_set = find_single_rule_set(document.rule_sets.values(), RuleSetKind::Mmdb)
                     .ok_or(LeafConfigError::MissingRuleSet {
                         index,
@@ -229,22 +270,35 @@ fn compile_leaf_rules(
             }
             "EXTERNAL" => {
                 let (kind, code) = parts[1].split_once(':').unwrap_or(("site", parts[1]));
-                let (rule_set_kind, leaf_kind) = match kind.to_ascii_lowercase().as_str() {
-                    "site" | "geosite" => (RuleSetKind::Geosite, "site"),
-                    "mmdb" | "geoip" => (RuleSetKind::Mmdb, "mmdb"),
+                match kind.to_ascii_lowercase().as_str() {
+                    "site" | "geosite" => {
+                        let rule_set =
+                            find_single_rule_set(document.rule_sets.values(), RuleSetKind::Geosite)
+                                .ok_or(LeafConfigError::MissingRuleSet {
+                                    index,
+                                    kind: "geosite",
+                                })?;
+                        rule.external =
+                            Some(vec![external_rule("site", rule_set, code, base_dir)?]);
+                    }
+                    "mmdb" => {
+                        let rule_set =
+                            find_single_rule_set(document.rule_sets.values(), RuleSetKind::Mmdb)
+                                .ok_or(LeafConfigError::MissingRuleSet {
+                                    index,
+                                    kind: "mmdb",
+                                })?;
+                        rule.external =
+                            Some(vec![external_rule("mmdb", rule_set, code, base_dir)?]);
+                    }
+                    "geoip" | "geoip-dat" => apply_geoip_rule(&mut rule, code, &geoip_categories)?,
                     _ => {
                         return Err(LeafConfigError::MissingRuleSet {
                             index,
                             kind: "recognized external",
                         });
                     }
-                };
-                let rule_set = find_single_rule_set(document.rule_sets.values(), rule_set_kind)
-                    .ok_or(LeafConfigError::MissingRuleSet {
-                        index,
-                        kind: leaf_kind,
-                    })?;
-                rule.external = Some(vec![external_rule(leaf_kind, rule_set, code, base_dir)?]);
+                }
             }
             "PORT-RANGE" => rule.port_range = Some(vec![parts[1].to_owned()]),
             "NETWORK" => rule.network = Some(vec![parts[1].to_ascii_lowercase()]),
@@ -277,6 +331,23 @@ fn compile_leaf_rules(
         compiled.push(rule);
     }
     Ok(compiled)
+}
+
+fn apply_geoip_rule(
+    rule: &mut CompiledLeafRule,
+    code: &str,
+    geoip_categories: &BTreeMap<String, Vec<String>>,
+) -> Result<(), LeafConfigError> {
+    if code.eq_ignore_ascii_case("lan") {
+        rule.ip = Some(lan_cidrs());
+    } else {
+        let code = code.to_ascii_uppercase();
+        rule.ip =
+            Some(geoip_categories.get(&code).cloned().ok_or_else(|| {
+                LeafConfigError::GeoipData(format!("category {code} is missing"))
+            })?);
+    }
+    Ok(())
 }
 
 fn empty_leaf_rule(target: String) -> CompiledLeafRule {
@@ -327,6 +398,14 @@ fn external_rule(
         return Err(LeafConfigError::InvalidRuleSetPath(path.into_owned()));
     }
     Ok(format!("{kind}:{path}:{code}"))
+}
+
+fn resolved_rule_set_path(rule_set: &RuleSet, base_dir: &Path) -> std::path::PathBuf {
+    if rule_set.path.is_absolute() {
+        rule_set.path.clone()
+    } else {
+        base_dir.join(&rule_set.path)
+    }
 }
 
 #[cfg(test)]
@@ -395,7 +474,7 @@ groups:
     members: [native, DIRECT]
 rules:
   - GEOSITE,cn,DIRECT
-  - GEOIP,US,final
+  - COUNTRY,US,final,no-resolve
   - MATCH,final
 "#;
         let revision = PolicyRevision::parse(source, dir.path()).unwrap();
@@ -431,6 +510,43 @@ rules:
         );
         assert_eq!(rules[2]["target"], "final");
         assert_eq!(rules[2]["network"], serde_json::json!(["tcp", "udp"]));
+    }
+
+    #[test]
+    fn compiles_geoip_dat_categories_without_dns_or_mmdb() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::geodata::write_test_geoip(
+            &dir.path().join("geoip.dat"),
+            "GOOGLE",
+            vec![(vec![8, 8, 8, 0], 24)],
+        );
+        let source = r#"
+version: 1
+rule-sets:
+  geoip: { type: geoip, path: geoip.dat }
+rules:
+  - GEOIP,google,DIRECT,no-resolve
+  - GEOIP,lan,DIRECT,no-resolve
+  - MATCH,REJECT
+"#;
+        let revision = PolicyRevision::parse(source, dir.path()).unwrap();
+        let config = compile_leaf_config(
+            &revision,
+            7,
+            dir.path(),
+            &Unresolved,
+            &["1.1.1.1".parse().unwrap()],
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        let rules = config["router"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["ip"], serde_json::json!(["8.8.8.0/24"]));
+        assert!(
+            rules[1]["ip"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("10.0.0.0/8"))
+        );
     }
 
     #[test]
