@@ -411,7 +411,7 @@ mod tests {
             PolicyRevision::parse(
                 format!(
                     "version: 1\nrules: [\"DOMAIN,{}.invalid,DIRECT\", \"FINAL,DIRECT\"]\n",
-                    uuid::Uuid::new_v4()
+                    uuid::Uuid::from_u128(0x8ee5_6f6a_5db0_4f71_a8f0_3a53_7cb4_88e2)
                 ),
                 dir.path(),
             )

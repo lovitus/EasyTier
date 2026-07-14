@@ -52,6 +52,13 @@ jobs:
       - name: Build optimized binaries with symbols
         run: |
           set -euo pipefail
+          timeout 600 cargo test \
+            --locked \
+            --target "$TARGET" \
+            --package easytier-policy \
+            --lib \
+            --no-default-features \
+            --no-run
           timeout 900 cargo test \
             --locked \
             --target "$TARGET" \
