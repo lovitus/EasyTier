@@ -53,7 +53,7 @@ jobs:
 
       - name: Build pinned HEV static libraries
         env:
-          HEV_SERVER_COMMIT: 97e74f1
+          HEV_SERVER_COMMIT: 97e74f1068bd924e740032382cdc94ca83741ae6
         run: |
           set -euo pipefail
           hev_src="$RUNNER_TEMP/hev-socks5-server"

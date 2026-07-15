@@ -1579,7 +1579,7 @@ policy schema 兼容变更：
 
 ### 36.1 精确 HEV fork
 
-- server fork 当前集成 commit 更新为 97e74f1。
+- server fork 当前集成 commit 更新为 97e74f1068bd924e740032382cdc94ca83741ae6。
 - ab5deaa 包含 UDP ASSOCIATE 零端口修复。
 - 97e74f1 进一步把 src/core submodule URL 改为 lovitus/hev-socks5-core；否则干净 CI 无法从上游 URL 获取 fork-only commit cd8793a。
 - profiling 和 Android candidate workflow 均固定 fetch 97e74f1 并递归初始化 submodule，不跟随可变分支头。
