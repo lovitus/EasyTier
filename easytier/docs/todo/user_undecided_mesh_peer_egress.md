@@ -1650,3 +1650,45 @@ policy schema 兼容变更：
   - closure改为 Option<u16>。
   - MeshProxyTarget只读暴露 endpoints()，显式旧配置测试断言候选切片只有 10.44.0.7:1080。
 - 这些都是 schema传播的测试断点，不改变运行时连接或回退语义。
+
+## 39. 2026-07-15 Android HEV 精确候选实机证据与运行时包自排除修复
+
+> 本 TODO 仍属于“用户未决定是否实现原生 mesh egress”的方案记录；本节只闭环当前 HEV 过渡后端，不把 HEV 固化为最终数据面。
+
+### 39.1 参考实现与有意差异
+
+- Android 参考：`/Users/fanli/Documents/clashmeta-android-rev/service/src/main/java/com/github/kr328/clash/service/TunService.kt`，`TunService` 创建 `VpnService.Builder` 时使用运行时 `packageName` 参与 access-control 集合，而不是硬编码 application id；`AcceptSelected` 将自身加入 allowed 集，`DenySelected` 则从 disallowed 集移除自身。
+- EasyTier 有意不同：Mihomo/ClashMeta 的 native core 可以对 underlay socket 使用 Android `VpnService.protect()`；当前嵌入的 HEV SOCKS server 直接创建 egress socket，没有可注入的 `protect()` 回调。若 EasyTier/HEV 所在应用仍被 VPN 捕获，HEV DIRECT 会重新进入 TUN 并形成回环。
+- 因此 EasyTier 的兼容边界是：`TauriVpnService` 必须无条件把自身运行时 `packageName` 加入 disallowed 集；调用者仍可增加其他排除项，但不能移除当前宿主。失败行为从“application-id suffix/flavor 下可能回环”收窄为“当前宿主始终绕过 Android VPN”。
+- 修复位置：`tauri-plugin-vpnservice/android/src/main/java/TauriVpnService.kt::mergeDisallowedApplications` 与 `createVpnInterface`；前端 `easytier-gui/src/composables/mobile_vpn.ts::doStartVpn` 不再硬编码 `com.kkrainbow.easytier`。
+- 兼容测试：`tauri-plugin-vpnservice/android/src/test/java/ExampleUnitTest.kt` 覆盖运行时包自动加入及已存在时去重。
+
+### 39.2 精确候选与构建证据
+
+- 候选 SHA：`0aa7c3dbd691d1f1c9fa2ff0559657485c177356`（以下实机数据面证据尚不包含本节 runtime-package 修复，修复需下一次批量 Android workflow 重建）。
+- Android workflow `29413722793` 成功；下载制品的 `SHA256SUMS.txt`、`BUILD_INFO.txt`、commit SHA、target、HEV 完整 pin 和签名均已核对。
+- Linux workflow `29413722615` 的 HEV musl sidecar、优化构建、metadata、bundle、artifact upload 和 profiling prerelease 均成功；GitHub runner 当时只停留在 post-cache 收尾。
+
+### 39.3 Android 真实自动链路
+
+- 设备：`192.168.234.227:5555`，Wi-Fi 始终保持开启；未使用截图或坐标点击。
+- 通过 WebView CDP 调用应用已有 Tauri/Rust API，启用持久化实例 `c17a8c16-5016-4d09-a1c3-e97c6fddcaf5`。
+- `post_run_network_instance` 触发应用自己的 Android VPN 流程；生成路由为 `0.0.0.0/0`、`::/0`，底层 DNS 为 `fda9:52cf:9966::1`、`192.168.234.1`，network key 为 Wi-Fi 代际键。
+- `tun0` 建立为 `10.245.0.2/24`，内置 HEV 自动监听 `[::]:11080`。
+- TCP：Mac 经 `192.168.234.227:11080` 使用 SOCKS5 访问 Cloudflare trace，HTTP 200，总耗时约 0.80 秒。
+- UDP：标准 `UDP ASSOCIATE 0.0.0.0:0` 成功，HEV 返回随机 UDP relay `0.0.0.0:46318`；经该 relay 向 `1.1.1.1:53` 查询 `example.com`，41 ms 获得 2 个答案。该证据同时覆盖 fork 的零端口修复。
+
+### 39.4 端口冲突、所有权和停止清理
+
+- 正常停止后 HEV 监听与 VPN/TUN 均释放，应用线程从运行态回到 59。
+- 使用独立 Android `toybox nc` 占用 TCP `11080` 后重新启动相同实例，HEV 自动选择 `[::]:11081`。
+- `11081` 上 TCP SOCKS 访问返回 HTTP 200；UDP ASSOCIATE 返回随机 relay `0.0.0.0:47447`，DNS 查询 6 ms 获得 2 个答案。
+- 停止实例后 `[::]:11081` 被释放，线程由 67 回到 59；外部占用者的 `11080` 保持存活，证明 EasyTier 只清理自己拥有的候选端口。
+- 为候选 application-id suffix 手工二次 restart VPN 时曾留下 VPN/TUN，日志显示前端 operation epoch 忽略了迟到 stop；HEV 本身及其监听已经停止。该人工路径不是正常用户路径，随后显式 `stop_vpn` 完整清理。runtime-package 修复使下一候选无需该二次 restart，应重新验证正常单路径 stop。
+
+### 39.5 UDP-over-TCP / KCP 当前边界
+
+- 当前 HEV 过渡后端默认使用标准 SOCKS5 `UDP ASSOCIATE`，没有默认使用 UoT 或 KCP。
+- HEV 的 `FWD UDP` 是其私有 UDP-over-TCP 扩展，不等同于 SagerNet UoT；Leaf 标准 SOCKS outbound 不会自动协商该扩展。
+- EasyTier `enable_kcp_proxy` 是 underlay/代理能力，不等于 Leaf-to-HEV 的 UDP 自动 KCP，当前验证配置也未启用。
+- 首版维持 native UDP：DNS 可独立使用 DoH/DoT/TCP；QUIC、语音和游戏避免 UoT 队头阻塞或叠加 KCP 重传。后续若用户决定实现，应在 egress 抽象下增加显式 `native`/`tcp`（或兼容 UoT）模式，不做无法可靠判定失败的静默逐包切换。

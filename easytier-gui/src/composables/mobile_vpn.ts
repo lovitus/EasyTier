@@ -132,7 +132,9 @@ async function doStartVpn(instanceId: string, ipv4Addr: string, cidr: number, ro
     ipv4Addr: `${ipv4Addr}/${cidr}`,
     routes,
     dns,
-    disallowedApplications: ['com.kkrainbow.easytier'],
+    // TauriVpnService always adds its runtime package name. Keeping identity in
+    // Android avoids breaking application-id suffixes and downstream flavors.
+    disallowedApplications: [],
     mtu: 1300,
   }
 

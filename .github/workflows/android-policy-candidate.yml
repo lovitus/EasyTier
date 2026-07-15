@@ -112,6 +112,10 @@ jobs:
           cd easytier-gui
           pnpm tauri android build --debug --apk --target aarch64 --split-per-abi
 
+      - name: Run Android VPN service unit tests
+        working-directory: easytier-gui/src-tauri/gen/android
+        run: ./gradlew testDebugUnitTest
+
       - name: Build captured-UID policy probe
         run: |
           cd easytier-gui/src-tauri/gen/android

@@ -18,6 +18,11 @@ import java.util.concurrent.ConcurrentHashMap
 
 import app.tauri.plugin.JSObject
 
+internal fun mergeDisallowedApplications(
+    requested: Array<String>,
+    runtimePackageName: String,
+): Array<String> = requested.plus(runtimePackageName).distinct().toTypedArray()
+
 class TauriVpnService : VpnService() {
     companion object {
         @JvmField var triggerCallback: (String, JSObject) -> Unit = { _, _ -> }
@@ -371,7 +376,14 @@ class TauriVpnService : VpnService() {
         var ipv4Addr = args?.getString(IPV4_ADDR) ?: "10.126.126.1/24"
         var dns: String? = args?.getString(DNS)
         var routes = args?.getStringArray(ROUTES) ?: emptyArray()
-        var disallowedApplications = args?.getStringArray(DISALLOWED_APPLICATIONS) ?: emptyArray()
+        // ClashMeta Android derives VPN access-control identity from the runtime
+        // packageName in TunService. EasyTier intentionally excludes that package:
+        // HEV opens direct sockets without an Android VpnService.protect() hook, so
+        // including this process in the VPN would feed its egress back into the TUN.
+        var disallowedApplications = mergeDisallowedApplications(
+            args?.getStringArray(DISALLOWED_APPLICATIONS) ?: emptyArray(),
+            packageName,
+        )
 
         println("vpn create vpn interface. mtu: $mtu, ipv4Addr: $ipv4Addr, dns:" +
             "$dns, routes: ${java.util.Arrays.toString(routes)}," +
