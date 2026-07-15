@@ -490,7 +490,16 @@ fn capture_route(destination: IpAddr, ifindex: u32) -> RouteMessage {
 fn fail_closed_route(family: AddressFamily) -> RouteMessage {
     let mut route = base_route(family, 0, POLICY_TABLE);
     route.header.kind = RouteType::Unreachable;
-    route.attributes.push(RouteAttribute::Priority(u32::MAX));
+    // Linux reserves the maximum IPv6 metric for its implicit unreachable
+    // sentinel. An explicit IPv6 route with that metric fails with EEXIST,
+    // including on the CentOS 7 / Linux 3.10 validation hosts. MAX - 1 keeps
+    // EasyTier's terminal route last without colliding with the kernel route.
+    let priority = if family == AddressFamily::Inet6 {
+        u32::MAX - 1
+    } else {
+        u32::MAX
+    };
+    route.attributes.push(RouteAttribute::Priority(priority));
     route
 }
 
@@ -649,6 +658,12 @@ mod tests {
         assert_eq!(route.header.kind, RouteType::Unreachable);
         assert_eq!(route.header.destination_prefix_length, 0);
         assert_eq!(route_table(&route), POLICY_TABLE);
+        assert_eq!(route_priority(&route), Some(u32::MAX));
+
+        let ipv6 = fail_closed_route(AddressFamily::Inet6);
+        assert_eq!(ipv6.header.kind, RouteType::Unreachable);
+        assert_eq!(route_table(&ipv6), POLICY_TABLE);
+        assert_eq!(route_priority(&ipv6), Some(u32::MAX - 1));
     }
 
     #[test]
