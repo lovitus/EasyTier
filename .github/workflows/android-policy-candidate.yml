@@ -45,6 +45,18 @@ jobs:
           pnpm-build-filter: ''
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify Android VPN lifecycle contracts
+        run: |
+          set -euo pipefail
+          rustc --edition 2024 --test \
+            easytier-gui/src-tauri/src/vpn_stop_dispatch.rs \
+            -o "$RUNNER_TEMP/vpn-stop-dispatch-test"
+          "$RUNNER_TEMP/vpn-stop-dispatch-test"
+          rustc --edition 2024 --test \
+            tauri-plugin-vpnservice/tests/native_command_contract.rs \
+            -o "$RUNNER_TEMP/vpn-native-command-contract-test"
+          "$RUNNER_TEMP/vpn-native-command-contract-test"
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: android-policy-candidate-aarch64

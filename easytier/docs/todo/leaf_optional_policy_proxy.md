@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> This file is the architecture and compatibility record, not the current execution board.
+> Use `leaf_v1_release_gates.md` for current P0 gates, `leaf_validation_journal.md` for exact-SHA evidence, and `leaf_post_v1_backlog.md` for deferred work.
+> Documentation-only edits remain local and must not trigger a workflow.
+
 # Leaf Optional Policy Proxy Integration TODO
 
 ## Mandatory reference policy

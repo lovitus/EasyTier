@@ -36,25 +36,25 @@ impl<R: Runtime> Vpnservice<R> {
 
     pub fn prepare_vpn(&self, payload: VoidRequest) -> crate::Result<Status> {
         self.0
-            .run_mobile_plugin("prepareVpn", payload)
+            .run_mobile_plugin(crate::PREPARE_VPN_COMMAND, payload)
             .map_err(Into::into)
     }
 
     pub fn start_vpn(&self, payload: StartVpnRequest) -> crate::Result<Status> {
         self.0
-            .run_mobile_plugin("startVpn", payload)
+            .run_mobile_plugin(crate::START_VPN_COMMAND, payload)
             .map_err(Into::into)
     }
 
     pub fn stop_vpn(&self, payload: VoidRequest) -> crate::Result<Status> {
         self.0
-            .run_mobile_plugin("stopVpn", payload)
+            .run_mobile_plugin(crate::STOP_VPN_COMMAND, payload)
             .map_err(Into::into)
     }
 
     pub fn get_vpn_status(&self, payload: VoidRequest) -> crate::Result<VpnStatus> {
         self.0
-            .run_mobile_plugin("getVpnStatus", payload)
+            .run_mobile_plugin(crate::GET_VPN_STATUS_COMMAND, payload)
             .map_err(Into::into)
     }
 }

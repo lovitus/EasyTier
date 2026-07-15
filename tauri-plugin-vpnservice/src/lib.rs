@@ -4,6 +4,15 @@ use tauri::{
 };
 
 #[cfg(mobile)]
+pub(crate) const PREPARE_VPN_COMMAND: &str = "prepareVpn";
+#[cfg(mobile)]
+pub(crate) const START_VPN_COMMAND: &str = "startVpn";
+#[cfg(mobile)]
+pub(crate) const STOP_VPN_COMMAND: &str = "stopVpn";
+#[cfg(mobile)]
+pub(crate) const GET_VPN_STATUS_COMMAND: &str = "getVpnStatus";
+
+#[cfg(mobile)]
 use tauri::Manager;
 
 #[cfg(mobile)]
