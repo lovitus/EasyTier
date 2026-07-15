@@ -16,6 +16,7 @@ mod error;
 mod models;
 
 pub use error::{Error, Result};
+pub use models::VoidRequest;
 
 /// Extensions to [`tauri::App`], [`tauri::AppHandle`] and [`tauri::Window`] to access the vpnservice APIs.
 #[cfg(mobile)]

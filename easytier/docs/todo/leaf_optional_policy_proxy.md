@@ -2425,3 +2425,70 @@ The preferred initial-release boundary is therefore: retain the proven outage/re
 - Android `04660cac` real-device validation confirmed the runtime package fix before the next build: owner UID `10254` was excluded from VPN range, logcat reported `disallowedApplications: [com.kkrainbow.easytier.policycandidate]`, direct HEV TCP to `.160:22` succeeded, and standard UDP ASSOCIATE DNS returned two answers. Normal stop removed TUN and `11080` while retaining the app PID.
 - The first Android port-fallback attempt selected `11081` and passed TCP/UDP, but exposed a narrower ownership violation: the readiness loop connected to the unrelated `nc` listener on `11080` before observing that the failed HEV candidate thread had exited, causing `nc` to terminate. The fix performs a no-connect bind preflight for the configured address and, for an unspecified IPv4 listener, a separate IPv6 wildcard probe. Added `occupied_candidate_is_rejected_without_connecting_to_owner`; final device validation must prove the blocker remains alive.
 - Workflows `29420113157` and `29420113320` for intermediate commit `5ad94cf4` failed before producing artifacts. Linux correctly rejected an uncommitted lockfile change under `--locked`; Android compiled Linux-only `libc::getpid` because the local variable lacked a target guard. The follow-up removes the new dependency entirely, uses a narrow Linux-only libc FFI for parent-death setup, and keeps Android free of that code path.
+
+### 2026-07-15: `61c6f313` HEV Linux/Android 精确候选最终验收
+
+结论边界：固定提交 `61c6f313559cedce3453970e2729c6eb7035e48a` 的 HEV 集成已通过 Linux 与 Android 首版所需的精确制品、TCP/UDP、端口归属和生命周期验证。当前没有剩余的 Linux/Android HEV 专项发布阻塞；这不代表 Windows/macOS/OHOS 等平台的 EasyTier 集成已经验证，也不替代长期重复资源回基线或仍公开的高级 Leaf 能力矩阵。
+
+精确构建与制品：
+
+- Linux workflow [29420954296](https://github.com/lovitus/EasyTier/actions/runs/29420954296) 成功，目标 `x86_64-unknown-linux-musl`，HEV 固定为 `97e74f1068bd924e740032382cdc94ca83741ae6`，Rust `1.95.0`。
+- Linux 外层 tar SHA-256 为 `d714ada314cfc06859fd32e4dba6846e07876326246d3c6c1eb3bf848b7f4d6d`；内层 `easytier-core` 为 `eeaebd3150d82c5fd1182ac81fb90307e560ab390bb05156e1b486ae591b37ac`，Leaf worker 为 `41af69169683054cbb0df1cb7d913a1df9e7f5e67644058618ccbe385d99a317`，HEV worker 为 `66b012c24de869a401fbcf2503f626da5577769a54376316010bfab21e6517a9`。
+- Linux core Build ID 为 `68245d1a9aca511cf9d614ef894ee42b45d3c8f7`，`.debug_info`、`.debug_line`、`.symtab` 均存在，内外层 SHA256 清单均通过。
+- Android workflow [29420954300](https://github.com/lovitus/EasyTier/actions/runs/29420954300) 成功，包括固定 HEV 静态库、持久选择定向测试、debug APK、VPN service 单元测试和 captured-UID probe。
+- Android APK SHA-256 为 `a92193b96aee53feb146352ce93109916586c6d4820818b29ee0d06e114b3983`；BUILD_INFO 为 `be0d23b61ad878431ceec8f092e89f46440f4844c0309ad42e339732e7f7c155`。应用 ID 为 `com.kkrainbow.easytier.policycandidate`，签名 SHA-256 为 `14d2d885ce1bc361923a493210865f86390ffcd32eb2b555042bbd1a8b6c38e0`。
+
+Linux namespace 实机结果（CentOS 7 / Linux 3.10 验证机 `192.168.1.37`）：
+
+- 正常启动时 core、Leaf、HEV 分别为 9、4、2 个线程，RSS 约为 14.3 MiB、5.5 MiB、0.25 MiB；HEV 监听 11080。
+- Leaf JSON 与 HEV 私有 YAML/临时目录在 listener ready 后均已删除。进程参数仍保留历史路径用于诊断，但路径本身不可再读取。
+- 标准 SOCKS5 TCP 到 `192.168.1.37:22` 获得 OpenSSH banner；UDP ASSOCIATE 到本地 UDP echo 成功。
+- `SIGTERM` core 后 core、Leaf、HEV、11080、TUN、策略规则、table 52000 和私有配置全部回基线。
+- 使用不接受连接的独立 Python listener 占用 11080 后，blocker 在 EasyTier 启动、TCP/UDP 探测和停止后始终存活；HEV 选择 11081，且停止只释放 11081。这证明 no-connect bind preflight 不再触碰外部 listener owner。
+- `SIGKILL` core 后 Leaf 和 HEV 均通过 parent-death ownership 退出，11080、TUN 和私有配置消失。策略规则/table 按既有 crash recovery 边界保留。
+- 随后用 25100-25104 启动同一精确制品，成功接管残留 table，规则未重复；正常停止后规则和 table 52000 清空。
+
+Android 实机结果（`192.168.234.227:5555`，全程保持 Wi-Fi 开启并使用 Activity/CDP 自动化，不使用截图或模拟点击）：
+
+- 通过 `pm install -r -t` 覆盖安装；`firstInstallTime` 保持 `2026-07-14 15:25:47`，完整 `app_webview` tar 在安装前后 SHA-256 均为 `2f4730faa4f9b8f9efda4907076206239445e2686cd05d646d6202269f4cb74f`。
+- 持久实例 `c17a8c16-5016-4d09-a1c3-e97c6fddcaf5` 正常启动，TUN 为 `10.245.0.2/24`。应用 owner UID 为 `10254`；VPN UID 范围为 `{0-10253, 10255-20253, 20255-99999}`，日志明确包含 `disallowedApplications: [com.kkrainbow.easytier.policycandidate]`。
+- HEV 11080 上 TCP 到 `192.168.2.160:22` 成功并获得 OpenSSH banner；UDP ASSOCIATE 到 `1.1.1.1:53` 成功并获得 2 个 DNS answer。
+- 正常停止后 GUI PID 保持不变，线程回到 58，TUN 与 11080 释放。
+- 使用 Android 自带 `nc` 占用 11080 后，`/proc/net/tcp6` 同时显示 UID 2000 的 11080 与应用 UID 10254 的 11081；blocker PID 在 EasyTier 启动和停止后始终存活。
+- HEV 11081 上 TCP 与 UDP 再次通过；停止只释放 11081 和 TUN。移除 blocker 后 11080 也释放，最终 GUI 保持运行、无 TUN、无 11080-11082，Wi-Fi 仍启用并连接。
+
+HEV UDP 承载语义：
+
+- 当前 HEV 只实现标准 SOCKS5 `CONNECT` 和 `UDP ASSOCIATE`，不会默认启用或协商 UoT/KCP。
+- `via: mesh` 场景中，Leaf 到 HEV virtual IP 的 SOCKS UDP 数据报由 EasyTier overlay 承载，实际 peer transport 可为 EasyTier 已建立的 TCP/QUIC/WS/WG/UDP 等连接；这已经避免要求公网直接暴露 HEV UDP 端口，但协议层仍不是 UoT/KCP。
+- HEV 到最终目标仍为原生 UDP。KCP 本身依赖 UDP，不能解决出口完全禁 UDP；UoT 需要明确兼容的远端，不能与普通 HEV SOCKS5 server 静默协商。
+- 首版保持 HEV 标准 UDP over mesh；未来如加入 UoT，应作为支持端明确声明的可选 outbound 能力，不把 KCP 或 UoT塞进默认 HEV 路径。
+
+剩余边界：
+
+- HEV 的 Linux/Android 首版验收已经闭环，不需要继续为这两个平台阻塞当前候选。
+- 整个 Leaf 第一版仍需按最终公开能力边界决定是否继续验证 chain/fallback、UDP/KCP/UoT、split DNS 等高级矩阵，或在首版隐藏/标为实验性。
+- 长期重复 Wi-Fi/DHCP/地址切换、stop/start、Leaf/HEV crash 后 RSS、FD、线程和任务回基线仍属于独立耐久性证据，不应被本轮有限次数生命周期验证替代。
+- Windows/macOS/OHOS 等平台仍需针对 EasyTier 宿主集成做构建与运行验证；本轮只证明固定 HEV fork 和当前 Linux/Android 宿主路径达到首版门槛。
+
+### 2026-07-15: Android 第 10 轮重复 stop 暴露 WebView 队列不能拥有 VPN 关闭
+
+精确参考与外部语义：
+
+- Clash Meta Android `/Users/fanli/Documents/clashmeta-android-rev/service/src/main/java/com/github/kr328/clash/service/TunService.kt` 的 `runtime` 在 `finally { withContext(NonCancellable) { tun.close(); stopSelf() } }` 中由原生 service 关闭 TUN；`onDestroy()` 再请求 runtime 停止并同步等待 coroutine 退出。外部可观察语义是不依赖 Activity/WebView 事件队列完成 VPN FD ownership 清理。
+- EasyTier 当前 `easytier-gui/src-tauri/src/lib.rs::GUIClientManager::{post_stop_network_instances_hook,notify_vpn_stop_if_no_tun}` 在 core 停止后只 `app.emit("vpn_service_stop", "")`；`easytier-gui/src/composables/event.ts::onVpnServiceStop` 再调用 `syncMobileVpnService()`，后者排队到 `mobile_vpn.ts::vpnOperationTail`，最终才调用 plugin `stop_vpn()`。
+- 仓库已有原生 Rust plugin 路径：`tauri-plugin-vpnservice/src/mobile.rs::Vpnservice::stop_vpn` 通过 `run_mobile_plugin("stop_vpn", ...)` 调用 `VpnServicePlugin.kt::stopVpn`，后者执行 `TauriVpnService.stopByUser()`、关闭 `ParcelFileDescriptor` 并 `stopService()`。因此不需要新增组件或把 shutdown 重写到 HEV/Leaf。
+
+精确故障证据：
+
+- 固定候选 `61c6f313559cedce3453970e2729c6eb7035e48a` 在同一 Android GUI PID `4099` 中执行 10 轮 start/stop；每轮均完成真实 HEV TCP 和 UDP ASSOCIATE。
+- 第 1-9 轮停止后线程每次回到 58、FD 每次精确回到 232；停止态 RSS 从 193560 KiB 小幅上升后在约 195888 KiB 平台化，没有线性线程/FD增长。
+- 第 10 轮 core、Leaf/HEV 和 11080 已停止，但 TUN 与 Android VPN NetworkAgent 超过 11 秒仍存在，FD 为 233。日志只有全局 `Received event 'vpn_service_stop'`，没有随后应出现的 `stop vpn`/`VpnServicePlugin.stopVpn`。
+- `dumpsys activity services` 显示 `TauriVpnService` 仍为 `startRequested=true`；`dumpsys connectivity` 显示 network 249、owner UID 10254 的 VPN 仍连接。`am force-stop` 后 TUN/NetworkAgent 清除且 Wi-Fi 保持连接。
+
+修复边界：
+
+- Android core stop hook 必须先通过 Rust `VpnserviceExt::stop_vpn` 同步关闭原生 VPN，再保留现有前端 event 作为状态同步和 native-call-failure fallback。WebView operation queue 不再拥有安全关键的 TUN FD 清理。
+- 新代 start 语义不变；只有 `get_enabled_instances_with_tun_ids()` 为空时执行 native stop。存在任一启用 TUN 实例时不得关闭当前 VPN。
+- native stop 失败时仍必须 emit 前端 event，避免同时丢失 fallback；命令返回 native 错误，不得静默报告成功。
+- 增加 dispatcher 单元测试，覆盖存在 TUN 时不调用、无 TUN 时 native-before-frontend，以及 native 失败仍执行 frontend fallback。修复后必须用精确 Android APK 重跑同进程 10 轮资源回基线。

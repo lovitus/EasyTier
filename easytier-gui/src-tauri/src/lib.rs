@@ -35,6 +35,9 @@ use uuid::Uuid;
 
 use tauri::{AppHandle, Emitter, Manager as _};
 
+#[cfg(target_os = "android")]
+use tauri_plugin_vpnservice::{VoidRequest, VpnserviceExt as _};
+
 #[cfg(not(target_os = "android"))]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
@@ -1021,6 +1024,27 @@ mod manager {
                 .filter_map(|c| c.config.instance_id().parse::<uuid::Uuid>().ok())
         }
 
+        fn dispatch_vpn_stop_if_no_tun<NativeStop, FrontendFallback>(
+            has_tun: bool,
+            stop_native: NativeStop,
+            notify_frontend: FrontendFallback,
+        ) -> Result<(), String>
+        where
+            NativeStop: FnOnce() -> Result<(), String>,
+            FrontendFallback: FnOnce() -> Result<(), String>,
+        {
+            if has_tun {
+                return Ok(());
+            }
+
+            // Clash Meta's TunService closes its TUN in the native service's
+            // NonCancellable finally block before stopSelf(). Android VPN FD
+            // ownership must likewise not depend on EasyTier's WebView queue.
+            let native_result = stop_native();
+            let frontend_result = notify_frontend();
+            native_result.and(frontend_result)
+        }
+
         #[cfg(target_os = "android")]
         pub(super) async fn disable_instances_with_tun(
             &self,
@@ -1042,11 +1066,19 @@ mod manager {
 
         pub(super) fn notify_vpn_stop_if_no_tun(&self, app: &AppHandle) -> Result<(), String> {
             let has_tun = self.get_enabled_instances_with_tun_ids().any(|_| true);
-            if !has_tun {
-                app.emit("vpn_service_stop", "")
-                    .map_err(|e| e.to_string())?;
-            }
-            Ok(())
+            Self::dispatch_vpn_stop_if_no_tun(
+                has_tun,
+                || {
+                    #[cfg(target_os = "android")]
+                    app.vpnservice()
+                        .stop_vpn(VoidRequest {})
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())?;
+
+                    Ok(())
+                },
+                || app.emit("vpn_service_stop", "").map_err(|e| e.to_string()),
+            )
         }
 
         pub(super) async fn pre_run_network_instance_hook(
@@ -1264,8 +1296,67 @@ mod manager {
 
     #[cfg(test)]
     mod tests {
-        use super::{PersistedConfigSource, StoredGuiConfig};
+        use super::{GUIClientManager, PersistedConfigSource, StoredGuiConfig};
         use easytier::proto::api::manage::NetworkConfig;
+        use std::cell::RefCell;
+
+        #[test]
+        fn vpn_stop_dispatch_does_nothing_while_a_tun_instance_remains() {
+            let calls = RefCell::new(Vec::new());
+            GUIClientManager::dispatch_vpn_stop_if_no_tun(
+                true,
+                || {
+                    calls.borrow_mut().push("native");
+                    Ok::<(), String>(())
+                },
+                || {
+                    calls.borrow_mut().push("frontend");
+                    Ok::<(), String>(())
+                },
+            )
+            .unwrap();
+
+            assert!(calls.borrow().is_empty());
+        }
+
+        #[test]
+        fn vpn_stop_dispatch_closes_native_before_notifying_frontend() {
+            let calls = RefCell::new(Vec::new());
+            GUIClientManager::dispatch_vpn_stop_if_no_tun(
+                false,
+                || {
+                    calls.borrow_mut().push("native");
+                    Ok(())
+                },
+                || {
+                    calls.borrow_mut().push("frontend");
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+            assert_eq!(*calls.borrow(), ["native", "frontend"]);
+        }
+
+        #[test]
+        fn vpn_stop_dispatch_keeps_frontend_fallback_after_native_failure() {
+            let calls = RefCell::new(Vec::new());
+            let error = GUIClientManager::dispatch_vpn_stop_if_no_tun(
+                false,
+                || {
+                    calls.borrow_mut().push("native");
+                    Err("native stop failed".to_string())
+                },
+                || {
+                    calls.borrow_mut().push("frontend");
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+
+            assert_eq!(error, "native stop failed");
+            assert_eq!(*calls.borrow(), ["native", "frontend"]);
+        }
 
         #[test]
         fn stored_gui_config_defaults_missing_source_to_legacy() {
