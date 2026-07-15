@@ -8,11 +8,17 @@ use std::{
 
 use anyhow::{Context, ensure};
 use easytier_policy::{ManagedRuleDataKind, RuleSet, RuleSetKind, validate_managed_rule_data};
-use http_req::request::{RedirectPolicy, Request};
+use reqwest::{
+    Url,
+    blocking::Client,
+    redirect::{Action, Attempt, Policy},
+};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const MAX_RULE_DATA_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_RULE_DATA_REDIRECTS: usize = 5;
+const RULE_DATA_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const BUILTIN_SNAPSHOT: &str = "metacubex-4178770b";
 const BUILTIN_GEOSITE_SHA256: &str =
     "0f464192b311ee9b8a2cdc309118928c532b6b5982b486c6a42060db671e3038";
@@ -250,25 +256,27 @@ fn update_policy_rule_data_sync(
         resource.file_name(),
         Uuid::new_v4()
     ));
+    let mut response = policy_rule_data_client()?
+        .get(source_url.as_str())
+        .send()
+        .with_context(|| format!("downloading policy rule data from {source_url}"))?;
+    ensure!(
+        response.status().is_success(),
+        "policy rule data download returned HTTP {}",
+        response.status()
+    );
+    if let Some(content_length) = response.content_length() {
+        ensure!(
+            content_length <= MAX_RULE_DATA_BYTES,
+            "policy rule data declares {content_length} bytes, exceeding the 256 MiB limit"
+        );
+    }
+
     let mut pending = PendingFile::new(temporary_path.clone());
     let file = create_private_file(&temporary_path)?;
     let mut writer = BoundedWriter::new(file, MAX_RULE_DATA_BYTES);
-    let uri = http_req::uri::Uri::try_from(source_url.as_str())
-        .context("parsing policy rule data URL")?;
-    let response = Request::new(&uri)
-        .header(
-            "User-Agent",
-            concat!("easytier/", env!("CARGO_PKG_VERSION")),
-        )
-        .redirect_policy(RedirectPolicy::Limit(5))
-        .timeout(Duration::from_secs(120))
-        .send(&mut writer)
-        .with_context(|| format!("downloading policy rule data from {}", source_url))?;
-    ensure!(
-        response.status_code().is_success(),
-        "policy rule data download returned HTTP {}",
-        response.status_code()
-    );
+    io::copy(&mut response, &mut writer)
+        .with_context(|| format!("reading policy rule data from {source_url}"))?;
 
     let (mut file, size) = writer.finish();
     ensure!(size > 0, "policy rule data download is empty");
@@ -291,6 +299,42 @@ fn update_policy_rule_data_sync(
     })
 }
 
+// Reference semantics:
+// - Mihomo component/resource/vehicle.go::HTTPVehicle.Read downloads through
+//   component/http/http.go::HttpRequest.
+// - github.com/metacubex/http@v0.1.6/client.go::Client.do resolves Location before
+//   policy evaluation, shares one context deadline across the chain, and strips
+//   sensitive headers across hosts; defaultCheckRedirect stops after ten requests.
+// EasyTier intentionally keeps its existing five-redirect and HTTPS-only contract
+// because managed rule data controls policy behavior. A rejected hop, timeout, bad
+// status, oversized body, or validation error leaves the installed file untouched.
+fn policy_rule_data_client() -> anyhow::Result<Client> {
+    Client::builder()
+        .user_agent(concat!("easytier/", env!("CARGO_PKG_VERSION")))
+        .timeout(RULE_DATA_DOWNLOAD_TIMEOUT)
+        .https_only(true)
+        .referer(false)
+        .redirect(Policy::custom(policy_rule_data_redirect))
+        .build()
+        .context("building policy rule data HTTP client")
+}
+
+fn policy_rule_data_redirect(attempt: Attempt<'_>) -> Action {
+    if attempt.previous().len() > MAX_RULE_DATA_REDIRECTS {
+        return attempt.error(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("policy rule data redirect limit of {MAX_RULE_DATA_REDIRECTS} exceeded"),
+        ));
+    }
+    if let Err(error) = validate_policy_rule_data_url(attempt.url()) {
+        return attempt.error(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsafe policy rule data redirect: {error}"),
+        ));
+    }
+    attempt.follow()
+}
+
 fn validated_source_url(
     resource: PolicyRuleDataResource,
     source_url: Option<&str>,
@@ -299,7 +343,12 @@ fn validated_source_url(
         .map(str::trim)
         .filter(|source| !source.is_empty())
         .unwrap_or_else(|| resource.default_source_url());
-    let parsed = url::Url::parse(source_url).context("parsing policy rule data source URL")?;
+    let parsed = Url::parse(source_url).context("parsing policy rule data source URL")?;
+    validate_policy_rule_data_url(&parsed)?;
+    Ok(parsed.to_string())
+}
+
+fn validate_policy_rule_data_url(parsed: &Url) -> anyhow::Result<()> {
     ensure!(
         parsed.scheme() == "https",
         "policy rule data source must use HTTPS"
@@ -316,7 +365,7 @@ fn validated_source_url(
         parsed.fragment().is_none(),
         "policy rule data source must not contain a URL fragment"
     );
-    Ok(parsed.to_string())
+    Ok(())
 }
 
 fn create_private_file(path: &Path) -> anyhow::Result<File> {
@@ -513,6 +562,25 @@ mod tests {
             validated_source_url(resource, Some("https://rules.example/geoip.dat#fragment"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn redirect_targets_preserve_url_safety_and_five_hop_limit() {
+        for target in [
+            "http://rules.example/geoip.dat",
+            "https://user@rules.example/geoip.dat",
+            "https://rules.example/geoip.dat#fragment",
+        ] {
+            assert!(validate_policy_rule_data_url(&Url::parse(target).unwrap()).is_err());
+        }
+        assert!(
+            validate_policy_rule_data_url(
+                &Url::parse("https://cdn.example/releases/geoip.dat").unwrap()
+            )
+            .is_ok()
+        );
+        assert!(MAX_RULE_DATA_REDIRECTS >= 5);
+        assert!(MAX_RULE_DATA_REDIRECTS < 6);
     }
 
     #[test]

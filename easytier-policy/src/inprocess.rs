@@ -24,6 +24,12 @@ static NEXT_RUNTIME_ID: AtomicU32 = AtomicU32::new(1);
 static RESERVED_RUNTIME_IDS: LazyLock<Mutex<HashSet<leaf::RuntimeId>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[derive(Clone)]
 pub struct InProcessLeafFactory {
     base_dir: PathBuf,
@@ -92,44 +98,29 @@ impl InProcessLeafRuntime {
         revision: Arc<PolicyRevision>,
     ) -> Result<Arc<Self>, String> {
         let (bridge, endpoint) = LeafPacketBridge::pair().map_err(|error| error.to_string())?;
-        let endpoint_fd = endpoint.into_raw_fd();
-        let fd_identity = match fd_identity(endpoint_fd) {
-            Ok(identity) => identity,
-            Err(error) => {
-                unsafe {
-                    libc::close(endpoint_fd);
-                }
-                return Err(error);
-            }
-        };
+        let packet_fd = LeafPacketFd::new(endpoint.into_raw_fd())?;
+        let endpoint_fd = packet_fd.raw_fd();
         let config =
             match compile_leaf_config(&revision, endpoint_fd, base_dir, resolver, dns_servers) {
                 Ok(config) => config,
-                Err(error) => {
-                    close_if_same_fd(endpoint_fd, fd_identity);
-                    return Err(error.to_string());
-                }
+                Err(error) => return Err(error.to_string()),
             };
         let mut config = match leaf::config::from_string(&config) {
             Ok(config) => config,
-            Err(error) => {
-                close_if_same_fd(endpoint_fd, fd_identity);
-                return Err(format!("Leaf rejected generated config: {error}"));
-            }
+            Err(error) => return Err(format!("Leaf rejected generated config: {error}")),
         };
         disable_embedded_leaf_logger(&mut config);
 
-        let runtime_id = match allocate_runtime_id() {
-            Ok(runtime_id) => runtime_id,
-            Err(error) => {
-                close_if_same_fd(endpoint_fd, fd_identity);
-                return Err(error);
-            }
-        };
+        let runtime_reservation = allocate_runtime_id()?;
+        let runtime_id = runtime_reservation.runtime_id();
         let (result_tx, result_rx) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
             .name(format!("easytier-leaf-{runtime_id}"))
             .spawn(move || {
+                // These guards deliberately live for the complete blocking Leaf runtime. They
+                // also clean up when Leaf panics or the OS rejects thread creation.
+                let _runtime_reservation = runtime_reservation;
+                let _packet_fd = packet_fd;
                 let runtime_opt = if worker_threads == 1 {
                     leaf::RuntimeOption::SingleThread
                 } else {
@@ -143,16 +134,10 @@ impl InProcessLeafRuntime {
                     },
                 )
                 .map_err(|error| error.to_string());
-                close_if_same_fd(endpoint_fd, fd_identity);
-                RESERVED_RUNTIME_IDS.lock().unwrap().remove(&runtime_id);
                 let _ = result_tx.send(result.clone());
                 result
             })
-            .map_err(|error| {
-                RESERVED_RUNTIME_IDS.lock().unwrap().remove(&runtime_id);
-                close_if_same_fd(endpoint_fd, fd_identity);
-                format!("failed to start in-process Leaf thread: {error}")
-            })?;
+            .map_err(|error| format!("failed to start in-process Leaf thread: {error}"))?;
 
         let deadline = Instant::now() + START_TIMEOUT;
         loop {
@@ -199,7 +184,7 @@ impl InProcessLeafRuntime {
         while leaf::is_running(self.runtime_id) && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        let thread = self.thread.lock().unwrap().take();
+        let thread = lock_unpoisoned(&self.thread).take();
         if let Some(thread) = thread {
             if thread.is_finished() {
                 let _ = tokio::task::spawn_blocking(move || thread.join()).await;
@@ -221,27 +206,60 @@ fn spawn_late_start_reaper(
     result_rx: mpsc::Receiver<Result<(), String>>,
     thread: JoinHandle<Result<(), String>>,
 ) {
-    std::thread::Builder::new()
+    // sing-box box.go::Start closes partially started services before returning an error. An
+    // EasyTier in-process Leaf can register after our readiness deadline, so its cleanup owner
+    // must outlive the failed start future even if the OS refuses another dedicated thread.
+    let reaper = Arc::new(Mutex::new(Some(LateStartReaper {
+        runtime_id,
+        result_rx,
+        thread,
+    })));
+    let thread_reaper = reaper.clone();
+    let spawn_result = std::thread::Builder::new()
         .name(format!("easytier-leaf-reaper-{runtime_id}"))
         .spawn(move || {
-            loop {
-                // Leaf registers the runtime near the end of synchronous startup. A shutdown
-                // issued before registration is otherwise lost and would leave a late runtime
-                // detached from its EasyTier owner.
-                if leaf::is_running(runtime_id) {
-                    let _ = leaf::shutdown(runtime_id);
-                }
-                match result_rx.recv_timeout(Duration::from_millis(25)) {
-                    Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                }
+            if let Some(reaper) = lock_unpoisoned(&thread_reaper).take() {
+                reaper.run();
             }
-            if leaf::is_running(runtime_id) {
-                let _ = leaf::shutdown(runtime_id);
+        });
+    if let Err(error) = spawn_result {
+        tracing::warn!(
+            runtime_id,
+            %error,
+            "failed to start dedicated in-process Leaf reaper; using blocking-pool fallback"
+        );
+        if let Some(reaper) = lock_unpoisoned(&reaper).take() {
+            drop(tokio::task::spawn_blocking(move || reaper.run()));
+        } else {
+            tracing::error!(runtime_id, "in-process Leaf reaper ownership was lost");
+        }
+    }
+}
+
+struct LateStartReaper {
+    runtime_id: leaf::RuntimeId,
+    result_rx: mpsc::Receiver<Result<(), String>>,
+    thread: JoinHandle<Result<(), String>>,
+}
+
+impl LateStartReaper {
+    fn run(self) {
+        loop {
+            // Leaf registers the runtime near the end of synchronous startup. A shutdown issued
+            // before registration is otherwise lost and would leave a late runtime detached.
+            if leaf::is_running(self.runtime_id) {
+                let _ = leaf::shutdown(self.runtime_id);
             }
-            let _ = thread.join();
-        })
-        .expect("failed to start in-process Leaf cleanup thread");
+            match self.result_rx.recv_timeout(Duration::from_millis(25)) {
+                Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+        if leaf::is_running(self.runtime_id) {
+            let _ = leaf::shutdown(self.runtime_id);
+        }
+        let _ = self.thread.join();
+    }
 }
 
 impl Drop for InProcessLeafRuntime {
@@ -320,12 +338,30 @@ fn disable_embedded_leaf_logger(config: &mut leaf::config::Config) {
     config.log.mut_or_insert_default().level = leaf::config::log::Level::NONE.into();
 }
 
-fn allocate_runtime_id() -> Result<leaf::RuntimeId, String> {
-    let mut reserved = RESERVED_RUNTIME_IDS.lock().unwrap();
+struct RuntimeIdReservation {
+    runtime_id: leaf::RuntimeId,
+}
+
+impl RuntimeIdReservation {
+    fn runtime_id(&self) -> leaf::RuntimeId {
+        self.runtime_id
+    }
+}
+
+impl Drop for RuntimeIdReservation {
+    fn drop(&mut self) {
+        lock_unpoisoned(&RESERVED_RUNTIME_IDS).remove(&self.runtime_id);
+    }
+}
+
+fn allocate_runtime_id() -> Result<RuntimeIdReservation, String> {
+    let mut reserved = lock_unpoisoned(&RESERVED_RUNTIME_IDS);
     for _ in 0..u16::MAX {
         let candidate = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed) as u16;
         if candidate != 0 && !leaf::is_running(candidate) && reserved.insert(candidate) {
-            return Ok(candidate);
+            return Ok(RuntimeIdReservation {
+                runtime_id: candidate,
+            });
         }
     }
     Err("no free in-process Leaf runtime ID".to_owned())
@@ -335,6 +371,35 @@ fn allocate_runtime_id() -> Result<leaf::RuntimeId, String> {
 struct FdIdentity {
     device: libc::dev_t,
     inode: libc::ino_t,
+}
+
+struct LeafPacketFd {
+    fd: RawFd,
+    identity: FdIdentity,
+}
+
+impl LeafPacketFd {
+    fn new(fd: RawFd) -> Result<Self, String> {
+        match fd_identity(fd) {
+            Ok(identity) => Ok(Self { fd, identity }),
+            Err(error) => {
+                unsafe {
+                    libc::close(fd);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn raw_fd(&self) -> RawFd {
+        self.fd
+    }
+}
+
+impl Drop for LeafPacketFd {
+    fn drop(&mut self) {
+        close_if_same_fd(self.fd, self.identity);
+    }
 }
 
 fn fd_identity(fd: RawFd) -> Result<FdIdentity, String> {
@@ -365,6 +430,7 @@ fn close_if_same_fd(fd: RawFd, expected: FdIdentity) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::IntoRawFd;
 
     fn unresolved_mesh(
         _proxy_name: &str,
@@ -424,5 +490,47 @@ mod tests {
         let mut config = leaf::config::Config::new();
         disable_embedded_leaf_logger(&mut config);
         assert_eq!(config.log.level, leaf::config::log::Level::NONE.into());
+    }
+
+    #[test]
+    fn runtime_id_reservation_is_released_by_drop() {
+        let reservation = allocate_runtime_id().unwrap();
+        let runtime_id = reservation.runtime_id();
+        assert!(lock_unpoisoned(&RESERVED_RUNTIME_IDS).contains(&runtime_id));
+        drop(reservation);
+        assert!(!lock_unpoisoned(&RESERVED_RUNTIME_IDS).contains(&runtime_id));
+    }
+
+    #[test]
+    fn packet_fd_guard_closes_an_unclaimed_descriptor() {
+        let (socket, _peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        let fd = socket.into_raw_fd();
+        let guard = LeafPacketFd::new(fd).unwrap();
+        assert_eq!(guard.raw_fd(), fd);
+        drop(guard);
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    }
+
+    #[test]
+    fn late_start_reaper_retains_and_joins_start_thread() {
+        let reservation = allocate_runtime_id().unwrap();
+        let runtime_id = reservation.runtime_id();
+        drop(reservation);
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_completed = completed.clone();
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || {
+            thread_completed.store(true, Ordering::Release);
+            let result = Ok(());
+            let _ = result_tx.send(result.clone());
+            result
+        });
+        LateStartReaper {
+            runtime_id,
+            result_rx,
+            thread,
+        }
+        .run();
+        assert!(completed.load(Ordering::Acquire));
     }
 }

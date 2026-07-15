@@ -19,7 +19,7 @@
 - For rapid, targeted logic preflight on the remote builder, prefer the GNU debug target with the smallest feature set that still contains the code under test. Set `CARGO_PROFILE_TEST_OPT_LEVEL=0`, `CARGO_PROFILE_TEST_DEBUG=0`, and `CARGO_INCREMENTAL=1`; then use `cargo test --no-run` followed by the exact test binary. This path is diagnostic only: deployable validation artifacts must still come from the profiling beta workflow, and old CentOS validation hosts must still receive musl binaries.
 - Do not increase test threads for tests that share ports, namespaces, UPnP state, routes, or other host-global network state. Parallelize independent test binaries or nextest hash partitions across runners instead, while keeping each network-sensitive partition at `--test-threads 1`.
 - ALWAYS wrap long-running cargo commands with `timeout` to prevent indefinite hangs from deadlocked tests or stalled builds. Use: `timeout 600 cargo check ...`, `timeout 1800 cargo build ...`, `timeout 600 cargo test ...` (per test binary), `timeout 1800 cargo test ...` (full suite). Adjust upward if needed but NEVER run cargo without a timeout on the remote builder.
-- Before starting any cargo command in the remote builder container, check that no other cargo/rustc process is already running: `ssh root@192.168.2.160 'docker exec easytier-debug-builder bash -c "if pgrep -x cargo >/dev/null || pgrep -x rustc >/dev/null; then pgrep -a -x cargo; pgrep -a -x rustc; echo BLOCKED; else echo CLEAR; fi"'`. If BLOCKED, investigate before killing only confirmed stale process IDs; broad `pkill -f` patterns can match the inspection shell itself.
+- Before starting any cargo command in the remote builder container, check that no other cargo/rustc process is already running using the keepalive SSH options plus `-o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890`. If BLOCKED, investigate before killing only confirmed stale process IDs; broad `pkill -f` patterns can match the inspection shell itself.
 - Manual validation builds on the remote builder must not use `--release` or release/profile optimized builds. Use dev/debug builds for all manual testing; release/profile optimized artifacts may only be produced by GitHub workflows.
 - The remote validation hosts `192.168.2.160`, `192.168.1.37`, and `192.168.1.38` run old CentOS 7 / Linux 3.10 userspace. GNU debug binaries from the builder require newer glibc and must not be used there; use non-release `--target x86_64-unknown-linux-musl` binaries for manual validation on these hosts.
 - Use `10.20.0.65` for the KR validation host. Do not write the host's public domain name in repository docs, scripts, logs, or reports.
@@ -44,32 +44,38 @@ Whenever the remote builder is used for targeted diagnostics or as a GitHub fall
 
 ```bash
 # ===== STEP 0: Pre-flight — check for stale cargo locks =====
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 root@192.168.2.160 \
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 \
+  -o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890 root@192.168.2.160 \
   'docker exec easytier-debug-builder bash -c "if pgrep -x cargo >/dev/null || pgrep -x rustc >/dev/null; then pgrep -a -x cargo; pgrep -a -x rustc; echo BLOCKED; else echo CLEAR; fi"'
 # If BLOCKED → investigate and clean up FIRST. Do NOT proceed.
 
 # ===== STEP 1: Build (separate from execution) =====
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 root@192.168.2.160 \
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 \
+  -o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890 root@192.168.2.160 \
   'docker exec easytier-debug-builder bash -c "cd /workspace && CARGO_BUILD_JOBS=\$(nproc) timeout 1800 cargo CMD ARGS > /tmp/easytier_build.log 2>&1; echo EXIT_CODE=\$?"'
 # CMD = build | check | test --no-run | nextest archive
 # timeout: 600 for check, 1800 for build/full-test-suite
 
 # ===== STEP 2: Read build result =====
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 root@192.168.2.160 \
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 \
+  -o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890 root@192.168.2.160 \
   'docker exec easytier-debug-builder tail -50 /tmp/easytier_build.log'
 # Check EXIT_CODE. If non-zero → fix errors and retry from Step 0.
 
 # ===== STEP 3: Run test binary directly (only if Step 1 was test --no-run) =====
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 root@192.168.2.160 \
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 \
+  -o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890 root@192.168.2.160 \
   'docker exec easytier-debug-builder bash -c "timeout 300 /workspace/target/debug/deps/easytier-* TEST_FILTER --nocapture > /tmp/easytier_test.log 2>&1; echo EXIT_CODE=\$?"'
 # Adjust timeout: 120 for unit tests, 300 for integration/network tests, 600 for benchmarks
 
 # ===== STEP 4: Read test result =====
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 root@192.168.2.160 \
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 \
+  -o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890 root@192.168.2.160 \
   'docker exec easytier-debug-builder tail -50 /tmp/easytier_test.log'
 ```
 
 Key invariants:
+- The maintainer's local `127.0.0.1:7890` proxy is always available. Do not test for or report it as missing; forward it to the remote builder on every SSH step that may run Cargo.
 - NEVER combine steps into one SSH call — each step is a separate ssh invocation
 - NEVER pipe docker exec to tail/head/grep — redirect to file, then read the file
 - NEVER omit timeout — every cargo/docker exec command has a timeout
