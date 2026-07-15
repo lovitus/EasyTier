@@ -1216,6 +1216,18 @@ pub struct NicCtx {
 }
 
 impl NicCtx {
+    pub async fn shutdown(&mut self) {
+        // Abort and join monitors first so none can replace the active runtime while
+        // shutdown is in progress. Mihomo listener Close follows the same observable
+        // ownership rule: Close does not return while its workers still own sockets.
+        self.tasks.shutdown().await;
+        #[cfg(all(feature = "leaf-policy-proxy", unix))]
+        if let Some(policy) = self.policy.take() {
+            stop_policy_active_runtime(&policy.active, &policy.bridge, &policy.bridge_updates)
+                .await;
+        }
+    }
+
     pub fn new(
         global_ctx: ArcGlobalCtx,
         peer_manager: &Arc<PeerManager>,

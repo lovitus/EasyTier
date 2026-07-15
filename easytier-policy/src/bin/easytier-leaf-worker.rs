@@ -50,6 +50,7 @@ fn run() -> Result<(), String> {
     if check {
         return leaf::test_config(&config).map_err(|error| error.to_string());
     }
+    let config = take_runtime_config(&config)?;
     if let Some(interface) = outbound_interface {
         // The worker is a dedicated process; this cannot affect EasyTier's environment.
         unsafe { std::env::set_var("OUTBOUND_INTERFACE", interface) };
@@ -73,11 +74,21 @@ fn run() -> Result<(), String> {
     leaf::start(
         0,
         leaf::StartOptions {
-            config: leaf::Config::File(config),
+            config: leaf::Config::Str(config),
             runtime_opt,
         },
     )
     .map_err(|error| error.to_string())
+}
+
+fn take_runtime_config(path: &str) -> Result<String, String> {
+    let config = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read private Leaf config: {error}"))?;
+    // Leaf Config::Str preserves the same parser semantics while ensuring proxy
+    // credentials are not left in a named file if the parent is killed.
+    std::fs::remove_file(path)
+        .map_err(|error| format!("failed to unlink private Leaf config: {error}"))?;
+    Ok(config)
 }
 
 #[cfg(target_os = "macos")]
@@ -152,4 +163,19 @@ fn validate_outbound_interface(interface: &str) -> Result<(), String> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn validate_outbound_interface(_interface: &str) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn runtime_config_is_unlinked_after_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("leaf.json");
+        std::fs::write(&path, "{\"log\":{\"level\":\"warn\"}}").unwrap();
+
+        let config = super::take_runtime_config(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(config, "{\"log\":{\"level\":\"warn\"}}");
+        assert!(!path.exists());
+    }
 }

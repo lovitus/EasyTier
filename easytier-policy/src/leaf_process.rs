@@ -159,12 +159,21 @@ impl LeafProcessRuntime {
 
         tokio::time::sleep(Duration::from_millis(250)).await;
         match child.try_wait() {
-            Ok(None) => Ok(Arc::new(Self {
-                revision_id: revision.id.clone(),
-                bridge: Arc::new(bridge),
-                child: Mutex::new(Some(child)),
-                config_path,
-            })),
+            Ok(None) => {
+                if let Err(error) = remove_private_config(&config_path) {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(format!(
+                        "failed to remove private Leaf config after readiness: {error}"
+                    ));
+                }
+                Ok(Arc::new(Self {
+                    revision_id: revision.id.clone(),
+                    bridge: Arc::new(bridge),
+                    child: Mutex::new(Some(child)),
+                    config_path,
+                }))
+            }
             Ok(Some(status)) => {
                 let _ = std::fs::remove_file(&config_path);
                 Err(format!("Leaf exited during readiness ({status})"))
@@ -405,6 +414,14 @@ fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
+fn remove_private_config(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, os::unix::fs::PermissionsExt as _, time::Instant};
@@ -421,7 +438,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn starts_and_stops_isolated_worker_and_removes_config() {
+    async fn starts_worker_without_retaining_private_config_and_stops_it() {
         let dir = tempfile::tempdir().unwrap();
         let executable = dir.path().join("fake-leaf");
         fs::write(
@@ -439,7 +456,7 @@ mod tests {
                 .await
                 .unwrap();
         let config_path = runtime.config_path.clone();
-        assert!(config_path.exists());
+        assert!(!config_path.exists());
         assert!(runtime.is_running());
         runtime.stop().await;
         assert!(!runtime.is_running());

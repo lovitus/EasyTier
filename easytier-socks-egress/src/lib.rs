@@ -15,7 +15,6 @@ use std::{
 };
 
 use anyhow::{Context as _, bail};
-use tempfile::TempDir;
 use tokio::{net::TcpStream, process::Child};
 
 pub const DEFAULT_PORT_CANDIDATES: [u16; 3] = [11080, 11081, 11082];
@@ -98,7 +97,6 @@ impl ProcessConfig {
 pub struct ProcessRuntime {
     child: Child,
     endpoint: SocketAddr,
-    _private_dir: TempDir,
 }
 
 impl ProcessRuntime {
@@ -125,13 +123,19 @@ impl ProcessRuntime {
             )
             .await
             {
-                Ok((child, endpoint)) => {
+                Ok((mut child, endpoint)) => {
+                    // HEV parses the complete YAML in
+                    // hev-config.c::hev_config_init_from_file before opening the listener. Do
+                    // not retain configuration on disk after readiness: it may eventually
+                    // contain credentials, and a SIGKILL cannot run TempDir::drop.
+                    if let Err(error) = private_dir.close() {
+                        let _ = child.start_kill();
+                        let _ = child.wait().await;
+                        return Err(error)
+                            .context("failed to remove private HEV configuration directory");
+                    }
                     tracing::info!(%endpoint, "HEV SOCKS egress started");
-                    return Ok(Self {
-                        child,
-                        endpoint,
-                        _private_dir: private_dir,
-                    });
+                    return Ok(Self { child, endpoint });
                 }
                 Err(error) => failures.push(format!("{port}: {error:#}")),
             }
@@ -207,12 +211,19 @@ async fn start_candidate(
     listen_address: IpAddr,
     port: u16,
 ) -> anyhow::Result<(Child, SocketAddr)> {
-    let mut child = tokio::process::Command::new(executable)
+    let parent_pid = unsafe { libc::getpid() };
+    let mut command = tokio::process::Command::new(executable);
+    command
         .arg(config_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    #[cfg(target_os = "linux")]
+    unsafe {
+        command.pre_exec(move || configure_parent_death(parent_pid));
+    }
+    let mut child = command
         .spawn()
         .with_context(|| format!("failed to execute {}", executable.display()))?;
     let readiness_ip = match listen_address {
@@ -244,6 +255,24 @@ async fn start_candidate(
         }
         tokio::time::sleep(READY_INTERVAL).await;
     }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_parent_death(parent_pid: libc::pid_t) -> std::io::Result<()> {
+    // sing-box cmd/sing-box/cmd_run_userns_linux.go::runInUserNamespaceIfNeeded
+    // (b789a2e6) uses Pdeathsig=SIGKILL for the same externally owned child
+    // invariant. HEV has no state that must outlive EasyTier, so guarantee that a
+    // killed parent cannot leave a listener behind.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::getppid() } != parent_pid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "EasyTier parent exited while starting HEV",
+        ));
+    }
+    Ok(())
 }
 
 fn render_hev_config(config: &SocksEgressConfig, port: u16) -> String {

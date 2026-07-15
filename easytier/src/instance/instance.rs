@@ -824,15 +824,10 @@ impl Instance {
         arc_nic_ctx: ArcNicCtx,
         packet_recv: Arc<Mutex<PacketRecvChanReceiver>>,
     ) {
-        #[cfg(feature = "magic-dns")]
-        if let Some(old_ctx) = arc_nic_ctx.lock().await.take()
-            && let Some(dns_runner) = old_ctx.magic_dns
-        {
-            dns_runner.dns_runner_cancel_token.cancel();
-            tracing::debug!("cancelling dns runner task");
-            let ret = dns_runner.dns_runner_task.await;
-            tracing::debug!("dns runner task cancelled, ret: {:?}", ret);
-        };
+        let old_ctx = arc_nic_ctx.lock().await.take();
+        if let Some(old_ctx) = old_ctx {
+            Self::shutdown_nic_ctx_container(old_ctx).await;
+        }
 
         let mut tasks = JoinSet::new();
         tasks.spawn(async move {
@@ -847,6 +842,22 @@ impl Instance {
             .replace(NicCtxContainer::new_with_any(tasks));
 
         tracing::debug!("nic ctx cleared.");
+    }
+
+    #[cfg(feature = "tun")]
+    async fn shutdown_nic_ctx_container(mut old_ctx: NicCtxContainer) {
+        #[cfg(feature = "magic-dns")]
+        if let Some(dns_runner) = old_ctx.magic_dns.take() {
+            dns_runner.dns_runner_cancel_token.cancel();
+            tracing::debug!("cancelling dns runner task");
+            let ret = dns_runner.dns_runner_task.await;
+            tracing::debug!("dns runner task cancelled, ret: {:?}", ret);
+        }
+        if let Some(nic_ctx) = old_ctx.nic_ctx.take()
+            && let Ok(mut nic_ctx) = nic_ctx.downcast::<NicCtx>()
+        {
+            nic_ctx.shutdown().await;
+        }
     }
 
     #[cfg(feature = "magic-dns")]
@@ -1817,16 +1828,21 @@ impl Instance {
 
     pub async fn clear_resources(&mut self) {
         // Mihomo runtime/listener Close waits for owned workers and sockets to
-        // stop. Do the same before this instance runtime calls
-        // shutdown_background(); cancellation from Drop alone can be left
-        // unpolled and would orphan the external HEV process.
+        // stop. Stop the NIC and policy runtime first, then HEV, before this
+        // instance runtime calls shutdown_background(); Drop-only cancellation can
+        // otherwise remain unpolled and leak workers or private config.
+        #[cfg(feature = "tun")]
+        {
+            let old_ctx = self.nic_ctx.lock().await.take();
+            if let Some(old_ctx) = old_ctx {
+                Self::shutdown_nic_ctx_container(old_ctx).await;
+            }
+        }
         #[cfg(feature = "leaf-policy-proxy")]
         if let Some(socks_egress) = self.socks_egress.take() {
             socks_egress.shutdown().await;
         }
         self.peer_manager.clear_resources().await;
-        #[cfg(feature = "tun")]
-        let _ = self.nic_ctx.lock().await.take();
     }
 }
 
