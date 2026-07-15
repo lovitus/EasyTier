@@ -2492,3 +2492,18 @@ HEV UDP 承载语义：
 - 新代 start 语义不变；只有 `get_enabled_instances_with_tun_ids()` 为空时执行 native stop。存在任一启用 TUN 实例时不得关闭当前 VPN。
 - native stop 失败时仍必须 emit 前端 event，避免同时丢失 fallback；命令返回 native 错误，不得静默报告成功。
 - 增加 dispatcher 单元测试，覆盖存在 TUN 时不调用、无 TUN 时 native-before-frontend，以及 native 失败仍执行 frontend fallback。修复后必须用精确 Android APK 重跑同进程 10 轮资源回基线。
+
+#### `e8f7e745` 实机预检发现 Rust mobile wrapper 命令名不匹配
+
+- 精确 Android APK `e8f7e74549f83791ed43a6f692ff7a034bab070d` 的 workflow、签名、SHA256 与覆盖安装均通过；APK SHA-256 为 `191d6588c4a02869bf6be9463399a39d95286f42a6223521896cfee2fdb3ccb2`。
+- 第 1 轮 stop 时，新增 Rust native-first 路径明确返回 `No command stop_vpn found for plugin com.plugin.vpnservice.VpnServicePlugin`。dispatcher 随后仍 emit frontend fallback，旧 JS 路径成功执行 `VpnServicePlugin.stopVpn` 并清理 TUN/HEV，所以设备没有残留，但命令正确报告失败，候选不能接受。
+- 根因是 `tauri-plugin-vpnservice/src/mobile.rs::Vpnservice::{prepare_vpn,start_vpn,stop_vpn,get_vpn_status}` 把 snake_case 公共 API 名直接传给 `run_mobile_plugin`；Android `VpnServicePlugin.kt` 注册的原生命令分别为 `prepareVpn`、`startVpn`、`stopVpn`、`getVpnStatus`，iOS 已存在的 `ExamplePlugin.swift::getVpnStatus` 也使用 camelCase。
+- 兼容边界：guest JS 的 `plugin:vpnservice|stop_vpn`、权限名和 Rust 方法名继续保持 snake_case；只修正 Rust wrapper 到原生 plugin method 的内部映射。修复后 direct Rust stop 必须在实机日志中进入 `stop vpn in plugin`，且 `update_network_config_state` 不再返回 command-not-found。
+
+#### Linux `61c6f313` 10 轮重复生命周期回基线
+
+- 在 `192.168.1.37` 的隔离 namespace 中，使用精确 musl 制品连续执行 10 轮 start、真实 SOCKS TCP、UDP ASSOCIATE、`SIGTERM` stop；listener 端口基数从 25110 每轮递增 10，所有协议端口均显式指定。
+- core 每轮固定 9 线程、36 FD，RSS 范围 13992-14444 KiB；Leaf 固定 4 线程、11 FD，RSS 5540-5552 KiB；HEV 固定 2 线程、12 FD，RSS 272-280 KiB。没有线程、FD 或 RSS 递增趋势。
+- 10 轮 TCP 均获得 OpenSSH banner，UDP echo 均成功；每轮 core 停止约 200 ms。
+- 每轮停止后均确认无 core/Leaf/HEV 进程、11080-11082、TUN、policy rule、table 52000、Leaf JSON 或 HEV 私有目录。最终 namespace 保持干净。
+- 因此 Linux 重复普通生命周期与资源回基线已达到首版证据要求；仍需单独保留长期网络切换/高并发 UDP soak，不应把本 10 轮短循环扩大解释为长期负载证明。
