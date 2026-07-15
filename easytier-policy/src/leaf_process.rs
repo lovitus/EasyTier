@@ -244,17 +244,38 @@ fn configure_parent_death(_parent_pid: libc::pid_t) -> std::io::Result<()> {
 }
 
 pub fn system_dns_servers() -> Result<Vec<std::net::IpAddr>, String> {
-    const CANDIDATES: &[&str] = &[
-        "/etc/resolv.conf",
+    const PRIMARY: &str = "/etc/resolv.conf";
+    const MANAGED_CANDIDATES: &[&str] = &[
         "/run/systemd/resolve/resolv.conf",
         "/run/NetworkManager/no-stub-resolv.conf",
     ];
     let mut failures = Vec::new();
-    for path in CANDIDATES {
+
+    match std::fs::read_to_string(PRIMARY) {
+        Ok(contents) => match classify_system_dns_servers(&contents) {
+            SystemDnsSource::Servers(servers) => return Ok(servers),
+            SystemDnsSource::ManagedResolverStub => {
+                failures.push(format!("{PRIMARY}: contains only loopback resolver stubs"))
+            }
+            SystemDnsSource::Unavailable => {
+                return Err(format!(
+                    "no directly usable system DNS server found ({PRIMARY}: contains no usable nameserver; refusing managed resolver fallback without an explicit loopback stub)"
+                ));
+            }
+        },
+        Err(error) => failures.push(format!("{PRIMARY}: {error}")),
+    }
+
+    for path in MANAGED_CANDIDATES {
         match std::fs::read_to_string(path) {
-            Ok(contents) => match parse_system_dns_servers(&contents) {
-                Ok(servers) => return Ok(servers),
-                Err(error) => failures.push(format!("{path}: {error}")),
+            Ok(contents) => match classify_system_dns_servers(&contents) {
+                SystemDnsSource::Servers(servers) => return Ok(servers),
+                SystemDnsSource::ManagedResolverStub => {
+                    failures.push(format!("{path}: contains only loopback resolver stubs"));
+                }
+                SystemDnsSource::Unavailable => {
+                    failures.push(format!("{path}: contains no usable nameserver"));
+                }
             },
             Err(error) => failures.push(format!("{path}: {error}")),
         }
@@ -265,8 +286,16 @@ pub fn system_dns_servers() -> Result<Vec<std::net::IpAddr>, String> {
     ))
 }
 
-fn parse_system_dns_servers(contents: &str) -> Result<Vec<std::net::IpAddr>, String> {
+#[derive(Debug, PartialEq, Eq)]
+enum SystemDnsSource {
+    Servers(Vec<std::net::IpAddr>),
+    ManagedResolverStub,
+    Unavailable,
+}
+
+fn classify_system_dns_servers(contents: &str) -> SystemDnsSource {
     let mut servers = Vec::new();
+    let mut has_loopback_stub = false;
     for line in contents.lines() {
         let line = line.split('#').next().unwrap_or_default().trim();
         let mut fields = line.split_whitespace();
@@ -281,15 +310,32 @@ fn parse_system_dns_servers(contents: &str) -> Result<Vec<std::net::IpAddr>, Str
         };
         if usable_dns_server(address) && !servers.contains(&address) {
             servers.push(address);
+        } else if address.is_loopback() {
+            has_loopback_stub = true;
         }
         if servers.len() == 4 {
             break;
         }
     }
-    if servers.is_empty() {
-        return Err("contains no non-loopback IP nameserver usable by Leaf".to_owned());
+    if !servers.is_empty() {
+        SystemDnsSource::Servers(servers)
+    } else if has_loopback_stub {
+        SystemDnsSource::ManagedResolverStub
+    } else {
+        SystemDnsSource::Unavailable
     }
-    Ok(servers)
+}
+
+fn parse_system_dns_servers(contents: &str) -> Result<Vec<std::net::IpAddr>, String> {
+    match classify_system_dns_servers(contents) {
+        SystemDnsSource::Servers(servers) => Ok(servers),
+        SystemDnsSource::ManagedResolverStub => {
+            Err("contains only loopback resolver stubs unusable by Leaf".to_owned())
+        }
+        SystemDnsSource::Unavailable => {
+            Err("contains no non-loopback IP nameserver usable by Leaf".to_owned())
+        }
+    }
 }
 
 fn usable_dns_server(address: std::net::IpAddr) -> bool {
@@ -485,5 +531,25 @@ mod tests {
         assert!(parse_system_dns_servers("nameserver 127.0.0.53\nnameserver ::1\n").is_err());
         assert!(parse_system_dns_servers("nameserver fe80::1\n").is_err());
         assert!(parse_system_dns_servers("search example.test\n").is_err());
+    }
+
+    #[test]
+    fn only_explicit_loopback_stub_allows_managed_resolver_fallback() {
+        assert_eq!(
+            classify_system_dns_servers("nameserver 127.0.0.53\nnameserver ::1\n"),
+            SystemDnsSource::ManagedResolverStub
+        );
+        assert_eq!(
+            classify_system_dns_servers(""),
+            SystemDnsSource::Unavailable
+        );
+        assert_eq!(
+            classify_system_dns_servers("search example.test\n"),
+            SystemDnsSource::Unavailable
+        );
+        assert_eq!(
+            classify_system_dns_servers("nameserver 0.0.0.0\nnameserver fe80::1\n"),
+            SystemDnsSource::Unavailable
+        );
     }
 }

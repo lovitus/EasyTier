@@ -223,6 +223,10 @@ policy:
     dns_isolation_help: DNS 与应用流量使用相同的有序域名规则选择解析器集合。某一集合失败时直接失败，不会跨集合查询；EasyTier Magic DNS 始终留在 Mesh 路径。
     rule_sets: Geo 规则数据
     advanced_yaml: 高级 YAML
+    advanced_features: 实验性高级能力
+    advanced_features_help: 显式解锁 split DNS、native 或 UDP 代理节点、chain/fallback 分组和自定义在线规则数据；这些能力的首版验证矩阵更窄。
+    advanced_existing_help: 当前文档已使用实验性字段；界面会继续显示并完整保留，保存前请确认其首版限制。
+    advanced_features_required: 解锁实验性高级能力后才能配置自定义在线数据源。
     name: 名称
     path: 路径
     server: 服务器

@@ -101,14 +101,21 @@ describe('PolicyEditor', () => {
     expect(model.policy_config_inline).toContain('MATCH,DIRECT')
     expect(wrapper.find('[data-header="policy.editor.nodes"]').exists()).toBe(true)
     expect(wrapper.find('[data-header="policy.editor.rules"]').exists()).toBe(true)
-    expect(wrapper.find('[data-header="policy.editor.dns"]').exists()).toBe(true)
+    expect(wrapper.find('[data-header="policy.editor.dns"]').exists()).toBe(false)
+    expect(wrapper.find('[data-header="policy.editor.groups"]').exists()).toBe(false)
+    expect(wrapper.find('#policy_advanced_features').exists()).toBe(true)
     expect(model.policy_config_inline).toContain('doh:cloudflare-dns.com@1.1.1.1')
   })
 
   it('edits direct and proxy DNS sets without losing ordered policy rules', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
-    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
+    config.policy_config_inline = `version: 1
+dns:
+  direct: [223.5.5.5]
+  proxy: ["doh:cloudflare-dns.com@1.1.1.1"]
+rules: ["MATCH,DIRECT"]
+`
     const { model, wrapper } = mountEditor(config)
 
     await wrapper.find<HTMLTextAreaElement>('#policy_dns_direct').setValue('223.5.5.5\ndoh:dns.alidns.com@223.5.5.5')
@@ -120,6 +127,64 @@ describe('PolicyEditor', () => {
     expect(model.policy_config_inline).toContain('doh:dns.alidns.com@223.5.5.5')
     expect(model.policy_config_inline).toContain('doh:dns.google@8.8.8.8')
     expect(model.policy_config_inline).toContain('MATCH,DIRECT')
+  })
+
+  it('reveals experimental creation controls only after an explicit unlock', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
+    const { model, wrapper } = mountEditor(config)
+    const original = model.policy_config_inline
+
+    expect(wrapper.find('[data-header="policy.editor.dns"]').exists()).toBe(false)
+    expect(wrapper.find('[data-header="policy.editor.groups"]').exists()).toBe(false)
+
+    await wrapper.find<HTMLInputElement>('#policy_advanced_features').setValue(true)
+    await nextTick()
+
+    expect(wrapper.find('[data-header="policy.editor.dns"]').exists()).toBe(true)
+    expect(wrapper.find('[data-header="policy.editor.groups"]').exists()).toBe(true)
+
+    await wrapper.find<HTMLInputElement>('#policy_advanced_features').setValue(false)
+    await nextTick()
+
+    expect(wrapper.find('[data-header="policy.editor.dns"]').exists()).toBe(false)
+    expect(wrapper.find('[data-header="policy.editor.groups"]').exists()).toBe(false)
+    expect(model.policy_config_inline).toBe(original)
+  })
+
+  it('keeps existing advanced documents visible and byte-stable without unlocking', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = `version: 1
+proxies:
+  exit:
+    type: socks5
+    server: 192.0.2.10
+    port: 1080
+    via: native
+    udp: true
+groups:
+  preferred:
+    type: fallback
+    members: [exit, DIRECT]
+rules: ["MATCH,preferred"]
+`
+    const { model, wrapper } = mountEditor(config)
+    const serialized = model.policy_config_inline
+
+    expect(wrapper.find<HTMLInputElement>('#policy_advanced_features').element.checked).toBe(false)
+    expect(wrapper.find('[data-header="policy.editor.groups"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('policy.editor.advanced_existing_help')
+
+    await wrapper.find<HTMLInputElement>('#policy_advanced_features').setValue(true)
+    await wrapper.find<HTMLInputElement>('#policy_advanced_features').setValue(false)
+    await nextTick()
+
+    expect(model.policy_config_inline).toBe(serialized)
+    expect(model.policy_config_inline).toContain('type: fallback')
+    expect(model.policy_config_inline).toContain('via: native')
+    expect(model.policy_config_inline).toContain('udp: true')
   })
 
   it('does not overwrite invalid advanced YAML with the last visual document', async () => {

@@ -48,13 +48,36 @@ const updatingRuleData = ref<PolicyRuleSetKind | ''>('')
 const outboundInfo = ref<Api.ListPolicyOutboundInterfacesResponse>()
 const outboundLoading = ref(false)
 const outboundError = ref('')
+const advancedPolicyFeatures = ref(false)
 let lastSerialized = ''
+
+const DEFAULT_PROXY_DNS = 'doh:cloudflare-dns.com@1.1.1.1'
+const hasExistingAdvancedPolicyFeatures = computed(() => {
+  const customDns = document.value.dns.direct.length > 0
+    || document.value.dns.proxy.length !== 1
+    || document.value.dns.proxy[0] !== DEFAULT_PROXY_DNS
+  const advancedProxy = document.value.proxies.some(proxy => proxy.via === 'native' || proxy.udp)
+  const advancedRule = document.value.rules.some(rule =>
+    rule.type.toUpperCase() === 'NETWORK' && rule.operand.toLowerCase() === 'udp',
+  )
+  const onlineRuleData = document.value.ruleSets.some(row =>
+    row.sourceUrl.trim() !== '' || row.update !== 'manual',
+  )
+  return customDns
+    || advancedProxy
+    || document.value.groups.length > 0
+    || advancedRule
+    || onlineRuleData
+})
+const showAdvancedPolicyFeatures = computed(() =>
+  advancedPolicyFeatures.value || hasExistingAdvancedPolicyFeatures.value,
+)
 
 const sourceOptions = computed(() => [
   { label: t('policy.editor.inline'), value: 'inline' },
   { label: t('policy.editor.file'), value: 'file' },
 ])
-const proxyViaOptions = ['mesh', 'native']
+const proxyViaOptions = computed(() => showAdvancedPolicyFeatures.value ? ['mesh', 'native'] : ['mesh'])
 const groupTypeOptions = ['fallback', 'chain']
 const outboundOptions = computed(() => (outboundInfo.value?.interfaces ?? []).map(item => ({
   label: item.addresses.length
@@ -168,7 +191,7 @@ function addProxy() {
     instanceId: '',
     virtualIp: '',
     port: 1080,
-    udp: true,
+    udp: false,
     username: '',
     password: '',
   }
@@ -355,7 +378,20 @@ onMounted(() => {
         </Message>
 
         <template v-if="!parseError">
-          <Panel :header="t('policy.editor.dns')" toggleable collapsed>
+          <div class="flex flex-col gap-2 rounded-lg border border-surface-200 p-3 dark:border-surface-700">
+            <div class="flex items-center gap-2">
+              <Checkbox input-id="policy_advanced_features" v-model="advancedPolicyFeatures" binary />
+              <label for="policy_advanced_features" class="font-semibold">
+                {{ t('policy.editor.advanced_features') }}
+              </label>
+            </div>
+            <small class="text-surface-500">{{ t('policy.editor.advanced_features_help') }}</small>
+            <Message v-if="hasExistingAdvancedPolicyFeatures" severity="warn" :closable="false">
+              {{ t('policy.editor.advanced_existing_help') }}
+            </Message>
+          </div>
+
+          <Panel v-if="showAdvancedPolicyFeatures" :header="t('policy.editor.dns')" toggleable collapsed>
             <div class="grid gap-4 md:grid-cols-2">
               <div class="flex flex-col gap-2">
                 <label for="policy_dns_direct" class="font-semibold">{{ t('policy.editor.dns_direct') }}</label>
@@ -400,7 +436,7 @@ onMounted(() => {
                     <InputNumber v-model="data.port" :min="1" :max="65535" :use-grouping="false" class="w-28" />
                   </template>
                 </Column>
-                <Column field="udp" header="UDP">
+                <Column v-if="showAdvancedPolicyFeatures" field="udp" header="UDP">
                   <template #body="{ data }"><Checkbox v-model="data.udp" binary /></template>
                 </Column>
                 <Column :header="t('policy.editor.credentials')">
@@ -422,7 +458,7 @@ onMounted(() => {
             </div>
           </Panel>
 
-          <Panel :header="t('policy.editor.groups')" toggleable collapsed>
+          <Panel v-if="showAdvancedPolicyFeatures" :header="t('policy.editor.groups')" toggleable collapsed>
             <div class="flex flex-col gap-3">
               <DataTable :value="document.groups" data-key="name" responsive-layout="scroll">
                 <Column field="name" :header="t('policy.editor.name')">
@@ -514,12 +550,13 @@ onMounted(() => {
                       <div class="font-mono text-xs break-all min-w-72">{{ managedRuleDataSource(data.type) }}</div>
                       <small class="text-surface-500">{{ t('policy.editor.builtin_help') }}</small>
                     </template>
-                    <template v-else>
+                    <template v-else-if="showAdvancedPolicyFeatures">
                       <InputText :model-value="ruleDataSource(data)" class="w-full min-w-96"
                         :aria-label="t('policy.editor.rule_data_source')"
                         @update:model-value="setRuleDataSource(data, String($event))" />
                       <small class="text-surface-500">{{ t('policy.editor.rule_data_source_help') }}</small>
                     </template>
+                    <small v-else class="text-surface-500">{{ t('policy.editor.advanced_features_required') }}</small>
                   </template>
                 </Column>
                 <Column :header="t('policy.editor.status')">
@@ -528,7 +565,7 @@ onMounted(() => {
                       <span :class="isManagedRuleDataInstalled(data) || usesBundledRuleData(data) ? 'text-green-600' : 'text-surface-500'">
                         {{ managedRuleDataStatus(data) }}
                       </span>
-                      <Button v-if="!usesBundledRuleData(data)" icon="pi pi-refresh"
+                      <Button v-if="showAdvancedPolicyFeatures && !usesBundledRuleData(data)" icon="pi pi-refresh"
                         :label="t('policy.editor.update_rule_data')" size="small"
                         :loading="updatingRuleData === data.type"
                         :disabled="!props.api?.update_policy_rule_data || !config.instance_id || Boolean(updatingRuleData)"
@@ -538,7 +575,7 @@ onMounted(() => {
                 </Column>
                 <Column header-style="width: 4rem">
                   <template #body="{ data }">
-                    <Button v-if="isManagedRuleDataInstalled(data) && !usesBundledRuleData(data)"
+                    <Button v-if="showAdvancedPolicyFeatures && isManagedRuleDataInstalled(data) && !usesBundledRuleData(data)"
                       icon="pi pi-trash" severity="danger" text
                       @click="removeRuleData(data)" />
                   </template>

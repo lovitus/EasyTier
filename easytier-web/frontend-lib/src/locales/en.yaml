@@ -222,6 +222,10 @@ policy:
     dns_isolation_help: Resolver sets are selected by the same ordered domain rules as application traffic. A failed set fails closed; it is never replaced by the other set. EasyTier Magic DNS remains on the mesh path.
     rule_sets: Geo rule data
     advanced_yaml: Advanced YAML
+    advanced_features: Experimental advanced features
+    advanced_features_help: Explicitly unlock split DNS, native or UDP proxy nodes, chain/fallback groups, and custom online rule data. These capabilities have a narrower first-release validation matrix.
+    advanced_existing_help: This document already uses experimental fields. They remain visible and are preserved; review their release limitations before saving.
+    advanced_features_required: Unlock experimental advanced features to configure custom online data sources.
     name: Name
     path: Path
     server: Server
