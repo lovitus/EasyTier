@@ -575,6 +575,34 @@ pub struct PolicyProxyConfig {
 impl PolicyProxyConfig {
     const MAX_INLINE_BYTES: usize = 4 * 1024 * 1024;
 
+    pub const fn runtime_supported() -> bool {
+        cfg!(any(
+            all(feature = "leaf-policy-proxy", target_os = "linux"),
+            all(
+                feature = "leaf-policy-proxy",
+                target_os = "macos",
+                not(feature = "macos-ne")
+            ),
+            all(feature = "leaf-policy-mobile", target_os = "android")
+        ))
+    }
+
+    pub fn validate_runtime_support(&self) -> anyhow::Result<()> {
+        if !self.enabled || Self::runtime_supported() {
+            return Ok(());
+        }
+
+        // Mihomo listener/inbound/tun.go::Tun.Listen propagates sing_tun.New
+        // failures, while listener/sing_tun/server.go::New closes partial state
+        // before returning the error. Reject even earlier because silently
+        // starting an ordinary EasyTier instance would violate the same
+        // externally observable fail-closed behavior.
+        anyhow::bail!(
+            "policy_proxy enabled=true is unsupported on {} by this build; the policy runtime is unavailable",
+            std::env::consts::OS
+        );
+    }
+
     pub fn validate_envelope(&self) -> anyhow::Result<()> {
         if self.config_file.is_some() && self.config_inline.is_some() {
             anyhow::bail!("policy_proxy config_file and config_inline are mutually exclusive");
@@ -862,6 +890,9 @@ impl TomlConfigLoader {
             policy_proxy
                 .validate_envelope()
                 .context("failed to parse policy_proxy")?;
+            policy_proxy
+                .validate_runtime_support()
+                .context("failed to activate policy_proxy")?;
         }
         let mut flags = Self::gen_flags(config.flags.clone().unwrap_or_default())
             .context("failed to parse flags")?;
@@ -2942,13 +2973,35 @@ config_inline = "version: 1\nrules: [FINAL,DIRECT]"
         assert!(missing.to_string().contains("requires exactly one"));
     }
 
+    #[cfg(not(any(
+        all(feature = "leaf-policy-proxy", target_os = "linux"),
+        all(
+            feature = "leaf-policy-proxy",
+            target_os = "macos",
+            not(feature = "macos-ne")
+        ),
+        all(feature = "leaf-policy-mobile", target_os = "android")
+    )))]
+    #[test]
+    fn policy_proxy_enabled_rejects_build_without_runtime() {
+        let error = TomlConfigLoader::new_from_str(
+            "[policy_proxy]\nenabled = true\nconfig_file = \"policy.yaml\"\n",
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("the policy runtime is unavailable"),
+            "unexpected error: {error:#}"
+        );
+    }
+
     #[test]
     fn policy_proxy_file_is_resolved_relative_to_network_config() {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("network.toml");
         std::fs::write(
             &config_path,
-            "[policy_proxy]\nenabled = true\nconfig_file = \"policy/default.yaml\"\n",
+            "[policy_proxy]\nenabled = false\nconfig_file = \"policy/default.yaml\"\n",
         )
         .unwrap();
 

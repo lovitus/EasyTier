@@ -938,6 +938,7 @@ impl NetworkConfig {
                 source_dir: None,
             };
             policy.validate_envelope()?;
+            policy.validate_runtime_support()?;
             cfg.set_policy_proxy_config(Some(policy));
         }
 
@@ -1402,12 +1403,13 @@ mod tests {
 
     #[test]
     fn network_config_roundtrips_policy_proxy_envelope() -> Result<(), anyhow::Error> {
+        let policy_enabled = crate::common::config::PolicyProxyConfig::runtime_supported();
         let network_config = super::NetworkConfig {
             instance_id: Some(uuid::Uuid::new_v4().to_string()),
             network_name: Some("policy-demo".to_string()),
             network_secret: Some("secret".to_string()),
             networking_method: Some(crate::proto::api::manage::NetworkingMethod::Standalone as i32),
-            enable_policy_proxy: Some(true),
+            enable_policy_proxy: Some(policy_enabled),
             policy_config_inline: Some("version: 1\nrules: [\"FINAL,DIRECT\"]\n".to_string()),
             policy_outbound_interface: Some("eth0".to_string()),
             policy_leaf_executable: Some("easytier-leaf-worker".to_string()),
@@ -1416,7 +1418,7 @@ mod tests {
 
         let config = network_config.gen_config()?;
         let roundtrip = super::NetworkConfig::new_from_config(&config)?;
-        assert_eq!(roundtrip.enable_policy_proxy, Some(true));
+        assert_eq!(roundtrip.enable_policy_proxy, Some(policy_enabled));
         assert_eq!(
             roundtrip.policy_config_inline,
             network_config.policy_config_inline
@@ -1427,6 +1429,34 @@ mod tests {
             Some("easytier-leaf-worker")
         );
         Ok(())
+    }
+
+    #[cfg(not(any(
+        all(feature = "leaf-policy-proxy", target_os = "linux"),
+        all(
+            feature = "leaf-policy-proxy",
+            target_os = "macos",
+            not(feature = "macos-ne")
+        ),
+        all(feature = "leaf-policy-mobile", target_os = "android")
+    )))]
+    #[test]
+    fn network_config_rejects_enabled_policy_proxy_without_runtime() {
+        let network_config = super::NetworkConfig {
+            instance_id: Some(uuid::Uuid::new_v4().to_string()),
+            network_name: Some("unsupported-policy-demo".to_string()),
+            network_secret: Some("secret".to_string()),
+            networking_method: Some(crate::proto::api::manage::NetworkingMethod::Standalone as i32),
+            enable_policy_proxy: Some(true),
+            policy_config_inline: Some("version: 1\nrules: [\"FINAL,DIRECT\"]\n".to_string()),
+            ..Default::default()
+        };
+
+        let error = network_config.gen_config().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("the policy runtime is unavailable"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]

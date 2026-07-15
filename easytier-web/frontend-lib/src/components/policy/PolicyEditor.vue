@@ -17,6 +17,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type * as Api from '../../modules/api'
 import type { NetworkConfig } from '../../types/network'
+import { canEnablePolicyProxy } from './policyRuntimeSupport'
 import {
   DEFAULT_POLICY_TEMPLATE,
   emptyPolicyDocument,
@@ -117,6 +118,7 @@ function ensureInlineDocument() {
 }
 
 function setEnabled(enabled: boolean) {
+  if (enabled && !canEnablePolicyProxy(outboundInfo.value)) return
   config.value.enable_policy_proxy = enabled
   if (enabled && sourceMode.value === 'inline') ensureInlineDocument()
 }
@@ -313,14 +315,15 @@ watch(() => config.value.enable_policy_proxy, enabled => {
 })
 
 onMounted(() => {
-  if (config.value.enable_policy_proxy) void loadOutboundInterfaces()
+  void loadOutboundInterfaces()
 })
 </script>
 
 <template>
   <div class="flex flex-col gap-4">
     <div class="flex items-center gap-3">
-      <Checkbox input-id="enable_policy_proxy" :model-value="config.enable_policy_proxy" binary
+      <Checkbox input-id="enable_policy_proxy" :model-value="config.enable_policy_proxy"
+        :disabled="!config.enable_policy_proxy && outboundInfo?.supported === false" binary
         @update:model-value="setEnabled(Boolean($event))" />
       <label for="enable_policy_proxy" class="font-semibold">{{ t('enable_policy_proxy') }}</label>
       <span class="pi pi-question-circle" v-tooltip="t('enable_policy_proxy_help')" />

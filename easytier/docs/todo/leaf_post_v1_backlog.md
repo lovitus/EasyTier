@@ -37,3 +37,8 @@ These items must not silently expand the Leaf v1 release boundary. Promote an it
 - Cross-platform CPU, latency, throughput, wakeup, allocation, RSS, FD, thread, and battery baselines against EasyTier 2.9.10.
 - Profile-guided work only after exact-candidate correctness and lifecycle gates pass.
 - Zero-copy or direct virtual-interface exit designs only if measurements show the temporary SOCKS boundary is materially limiting.
+
+## Measured HEV worker policy (2026-07-16)
+
+- Keep the v1 default at one HEV worker. Exact-candidate testing reached approximately `117 MB/s` for both one stream and eight concurrent streams with workers 1, 2, or 4; extra workers did not improve throughput.
+- Worker growth increased idle ownership from `12 FDs / 2 threads` to `24 FDs / 5 threads`. A future target-specific override requires CPU saturation, latency, battery, or higher-concurrency evidence on that target rather than a CPU-count heuristic.

@@ -11,6 +11,7 @@ Append evidence by exact commit SHA. This file is an audit trail, not the curren
 | `afceaab282b92c61c8c8b1e216358fe810d82395` | Workflow cancelled | Workflow cancelled | Source snapshot, not a candidate |
 | `949d29e2a5f13c421c40e7e15c72da4497877e84` | Passed workflow and exact artifact checks | Passed workflow, signature, native lifecycle, captured-UID policy TLS, local HEV, and mesh ICMP | Validated baseline; built-in HEV mesh ingress not yet included |
 | `00b62e65b9b52bdd2546c0d436e8ffc8acea6d2c` | Passed workflow and exact artifact checks | Passed workflow, signature, built-in HEV in both directions, policy TLS, and lifecycle | Validated baseline; blocked by HEV TCP performance and three-peer route recovery |
+| `e1a54d87e08eda80f3d081f10b9a9546cbb268d5` | Run `29440664216` in progress | Run `29440667649` in progress | Exact policy-only KCP and OSPF generation-repair candidate |
 
 ## `61c6f313559cedce3453970e2729c6eb7035e48a`
 
@@ -170,7 +171,7 @@ Required validation after implementation:
 
 ## 2026-07-16 - Batched successor: policy-only KCP and OSPF generation repair
 
-Status: local implementation and mandatory `.160` preflight complete; workflow and exact-artifact validation pending.
+Status: exact candidate `e1a54d87e08eda80f3d081f10b9a9546cbb268d5`; mandatory `.160` preflight complete; Linux run `29440664216` and Android run `29440667649` in progress; exact-artifact validation pending.
 
 Performance diagnosis on exact candidate `00b62e65b9b52bdd2546c0d436e8ffc8acea6d2c`:
 
@@ -198,3 +199,57 @@ Combined next-candidate evidence matrix:
 - Linux exact artifact: DIRECT throughput guard, built-in HEV TCP throughput, explicit user SOCKS behavior with KCP disabled, KCP-input-disabled fallback, three-peer route loss/recovery, worker/HEV crash, stop/start, and FD/thread/RSS cleanup.
 - Android exact artifact: captured-UID DIRECT/REJECT/mesh semantics, built-in HEV TCP/UDP, pre-scheduled Wi-Fi disable/enable recovery, reverse third-peer route recovery, semantic stop/start, and FD/thread/TUN/listener cleanup.
 - Workflow policy: one frozen code/document snapshot and one automatic Linux/Android workflow pair only.
+
+Build-wait preparation for exact candidate `e1a54d87e08eda80f3d081f10b9a9546cbb268d5`:
+
+- `.37` and `.38` old `00b62e65` validation processes required exact-PID `SIGKILL` after the hosts' `killall` did not remove them. Independent follow-up checks showed no `easytier-core`, `tun0`, or `tun1` residue before the new artifact.
+- Fresh `.160` fixtures listen on TCP/UDP `25453` and iperf TCP `25454`. Direct `.38 -> .160` TCP and UDP echo passed; a two-second DIRECT iperf measured `948/941 Mbps` sender/receiver with zero retransmits. Unrelated existing iperf port `28090` was not touched.
+- Android pre-upgrade state: package PID `13404`, RSS `203088 KiB`, `250` FDs, `62` threads/tasks, first-install time `2026-07-14 15:25:47`, and `shared_prefs` archive SHA-256 `4bf154e3e19a2b55fcb9c5a87bbc16370df880cf181b9b6fdc1454b677b842d8`.
+- Semantic CDP plus direct Tauri `get_config` confirmed peer `tcp://192.168.1.37:25301`, listeners `25340-25344`, virtual IP `10.246.0.2`, `enable_kcp_proxy=false`, `disable_kcp_input=false`, and policy enabled. The exact-artifact run will change only the validation ports through backend config commands; it must preserve the user's explicit KCP setting.
+- Device-side `/data/local/tmp/easytier-wifi-cycle-e1a54d87.sh` is installed but not started. It performs the complete delayed disable/wait/enable cycle and records both command return codes so wireless ADB is not responsible for restoring Wi-Fi.
+
+## 2026-07-16 - `e1a54d87e08eda80f3d081f10b9a9546cbb268d5` exact candidate closure
+
+- Candidate discipline: one code snapshot, one Linux workflow (`29440664216`), and one Android workflow (`29440667649`). Both workflows succeeded. The downloaded assets were fetched from byte zero through the configured proxy; ZIP/tar integrity, `SHA256SUMS.txt`, `BUILD_INFO.txt`, exact commit SHA, targets, Android v2 signatures/certificates, Linux static PIE/debug symbols, and Linux Build ID `f1c2a28c3a810b58042c652096aa2b8792b59e3e` were checked before deployment.
+- `.160` pre-push diagnostics used the full candidate snapshot with `--locked --no-run` and exact binaries/tests. KCP endpoint isolation passed `1/1`, OSPF generation/cache invalidation passed `1/1`, and `policy_proxy::mesh_udp_relay::tests` passed `8/8`. No GitHub workflow was used as routine compiler feedback.
+- All Linux and Android runtime nodes intentionally omitted `--enable-kcp-proxy`. Policy-only KCP still selected `transport_type: Kcp`. Linux HEV TCP throughput was about `478 Mbps` receiver versus a direct baseline near `941 Mbps`; after restoring the normal destination capability later in the run it measured `452 Mbps` receiver.
+- Destination capability/fallback: `.37` was restarted with `--disable-kcp-input true`, advertised `kcp_input=false`, and `.38`/Android continued to advertise `true`. `.38` through Linux HEV passed TCP and UDP echo to `.160:25453`; iperf used source `10.246.0.3` and measured `53.5 Mbps` receiver, matching the bounded smoltcp fallback rather than KCP or direct/kernel escape. Restoring `.37` without the flag restored `452 Mbps` receiver on the same path.
+- Linux lifecycle/resource evidence: normal SIGTERM of PID `13071` removed core, Leaf, HEV, TUNs, and PID-scoped temporary files. The no-KCP-input cycle used about `20548 KiB`, `47` FDs, and `9` threads and again cleaned to zero. A third standard cycle and the `.38` SOCKS cycle also exited normally with zero candidate processes and no TUN. Cleanup logged four idempotent policy-route deletion `ESRCH` warnings even though resources were absent; treat this as a low-priority observability issue, not a leak.
+- Android upgrade preserved first-install time, preferences, instance identity, explicit `enable_kcp_proxy=false`, VPN ownership/ranges, and native version `2.6.10-e1a54d87~`. A captured untrusted-app UID probe completed TCP plus TLS/SNI to `github.com:443` through the configured policy (`probe_valid=true`, `390 ms`).
+- Formal Android Wi-Fi lifecycle: `.38` observer PID `18790` was verified with successful samples before the outage. Device-side script PID `18983` was verified before its 30-second delay with `scheduled=1784143102`, `outage=70`, candidate PID `17596`, and connected Wi-Fi. Disable started at `1784143132` and enable at `1784143202`; both commands returned `rc=0`.
+- Formal route transition: `.38` first failed at `1784143133` and first recovered at `1784143205`, three seconds after Wi-Fi enable. `.37` removed the stale Android peer, removed cached peer info at `03:20:01`, and rotated the `.37` -> `.38` OSPF session from `2648166354101310701` to `10685380957993188232`. `.38` observed the hub session mismatch at `03:20:01`; its direct Android session did not mismatch/recreate until `03:20:16`. Route recovery therefore preceded direct reconnection by about 11 seconds and used the generation-repair propagation path.
+- Post-outage Android data plane: after atomically selecting Android virtual IP `10.246.0.2` as `.38`'s HEV server, both TCP and UDP echo passed. The config was atomically restored to Linux HEV `10.246.0.1`. Android PID remained `17596`; final post-cleanup resources were `194856 KiB`, `253` FDs, and `64` threads, close to the earlier `203088 KiB`, `249` FDs, and `61` threads. `tun0` and the VPN UID ranges remained present.
+- Ordinary user SOCKS isolation: `.38` ran `--socks5 25580` without `--enable-kcp-proxy` while policy HEV remained enabled. SOCKS5 greeting, CONNECT to `10.246.0.1:25553`, TCP echo, and simultaneous policy HEV traffic all passed. `.37` had 456 KCP stream records but zero destination-port `25553` matches, proving that policy-only KCP did not silently enable or hijack the ordinary user SOCKS endpoint.
+- Final cleanup: `.37/.38` exact-candidate processes, Leaf children, TUNs, observer, and echo fixture were removed; `.160` fixture PIDs for ports `25453/25454` were stopped without touching unrelated services. Probe packages and ADB forwarding were removed. Android exact candidate was deliberately left running with Wi-Fi enabled.
+- Release interpretation: no new Linux/Android v1 blocker was found inside the frozen basic Leaf/mesh coexistence boundary. Split DNS, advanced chain/fallback, and high-throughput UDP remain explicit scope/validation decisions and must not be silently advertised as completed.
+
+## 2026-07-16 - HEV worker-count candidate benchmark
+
+- Purpose: decide whether the cross-platform HEV wrapper should raise its default from one worker. This was measured before changing code so a larger idle footprint would not be justified by assumption.
+- Artifact: the exact static HEV sidecar shipped with candidate `e1a54d87e08eda80f3d081f10b9a9546cbb268d5` was run on `192.168.1.37`. A bounded HTTP stream fixture ran on `192.168.2.160:25653`; `192.168.1.38` was the direct/SOCKS client. HEV candidates used explicit ports `25680`, `25681`, and `25683` for `workers=1`, `2`, and `4`.
+- Single 512 MiB stream: direct `117.04 MB/s`; HEV workers 1 `117.44 MB/s`, workers 2 `117.51 MB/s`, workers 4 `116.57 MB/s`. All paths saturated the same approximately 1 Gbit/s link and the differences were noise.
+- Eight concurrent streams with the same aggregate 512 MiB: direct `116.97 MB/s`; HEV workers 1/2/4 each approximately `116.71 MB/s`. Additional workers provided no measured concurrency throughput benefit.
+- Idle footprint after traffic: workers 1 used `268 KiB`, `12` FDs, `2` threads; workers 2 used `296 KiB`, `16` FDs, `3` threads; workers 4 used `308 KiB`, `24` FDs, `5` threads.
+- Decision: retain `workers=1`. It reaches line rate for both single-stream and eight-stream traffic while minimizing FDs, threads, wakeups, and mobile idle cost. Revisit only with target-specific CPU saturation or materially higher-concurrency evidence; do not auto-scale by CPU count without measurements.
+- Cleanup: all three exact HEV PIDs and the `.160` fixture exited; ports `25653/25680/25681/25683` were released. No EasyTier build or workflow was triggered.
+
+## 2026-07-16: unsupported-platform fail-closed preflight and productive-wait batch
+
+- Mihomo reference: `/Users/fanli/Documents/mihomo-rev/listener/inbound/tun.go::Tun.Listen` propagates `sing_tun.New` startup errors; `/Users/fanli/Documents/mihomo-rev/listener/sing_tun/server.go::New` closes partial listener state before returning an initialization error. Observable parity used here: an unavailable policy runtime must fail startup/config generation rather than silently continue as an ordinary mesh instance.
+- Intentional EasyTier boundary: enabled policy proxy is accepted only on builds whose cfg/feature combination has a policy runtime. Disabled policy configuration remains portable and preserved. This rejects earlier than Mihomo because EasyTier already knows the build capability during configuration loading/generation.
+- `.160` no-feature `cargo test --locked --no-run --package easytier --lib`: passed; both unsupported-runtime exact tests passed.
+- `.160` `--features leaf-policy-proxy` no-run: passed; existing config path, disabled-preference, and launcher round-trip exact tests passed.
+- Native Windows MSVC no-feature no-run: passed after installing the previously missing host prerequisites LLVM/libclang and Protobuf/protoc. Exact tests `common::config::tests::policy_proxy_enabled_rejects_build_without_runtime` and `launcher::tests::network_config_rejects_enabled_policy_proxy_without_runtime` each passed 1/1.
+- GUI policy editor now fetches runtime capability while disabled, blocks only a new enable action when the backend reports `supported=false`, and continues to allow disabling/preserving an already loaded configuration. A pure capability guard test covers unknown, supported, and unsupported responses.
+- Validation efficiency used: one `.160` Rust preflight, one retained Windows incremental target directory, no GitHub compiler-debug pushes, and UI/config review plus documentation performed while Windows compiled.
+
+### Candidate manifest: unsupported-runtime fail-closed batch
+
+- Base: `e1a54d87e08eda80f3d081f10b9a9546cbb268d5`; intended candidate SHA is assigned only after this exact snapshot is committed.
+- Included functions: `PolicyProxyConfig::runtime_supported`, `PolicyProxyConfig::validate_runtime_support`, TOML load enforcement, `NetworkConfig::gen_config` enforcement, unsupported-build parity tests, policy-editor capability guard/preload, HEV worker-count benchmark evidence, and release-gate/journal updates.
+- `.160` gate: no-feature and `leaf-policy-proxy` `--locked --no-run` passed; two unsupported-build and three supported-build exact tests passed.
+- Additional platform gate: native Windows MSVC no-feature no-run and both unsupported-build exact tests passed.
+- Required workflow set: one push to `codex/profiling-beta`, allowing its automatic Linux profiling-beta and Android candidate workflows exactly once; no manual duplicate dispatch.
+- Workflow evidence: exact head SHA, successful frontend/native compilation as applicable, artifact SHA256/build metadata/signing, and no concurrency-cancelled duplicate.
+- Exact-artifact validation: Linux confirms enabled policy remains accepted and basic mesh/policy coexistence; Android confirms retained enabled policy starts and a captured-UID policy probe succeeds. Existing full lifecycle evidence remains applicable because this batch does not alter the supported-platform data plane or HEV lifecycle.
+- Productive wait: inspect workflow metadata, prepare checksum/artifact commands, and preflight Linux/Android hosts without mutating the committed snapshot.

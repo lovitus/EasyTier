@@ -6,7 +6,7 @@
 ## Candidate state
 
 - Exact validated artifact baseline: `00b62e65b9b52bdd2546c0d436e8ffc8acea6d2c`; unique Linux/Android workflows, hashes/signature, built-in HEV TCP/UDP in both directions, captured-UID policy TLS semantics, and semantic Android stop/start passed. It is not releasable because HEV TCP throughput remained about 5-6% of DIRECT and a three-peer Wi-Fi outage exposed stale OSPF peer-info recovery.
-- Local batched successor: policy-only reuse of the existing KCP endpoint without enabling user SOCKS/KCP behavior, bounded smoltcp fallback, and OSPF session-generation restart after peer-info removal. The mandatory `.160` gate passed; no candidate SHA or artifact claim exists until this snapshot is frozen.
+- Exact pending candidate: `e1a54d87e08eda80f3d081f10b9a9546cbb268d5`; policy-only reuse of the existing KCP endpoint without enabling user SOCKS/KCP behavior, bounded smoltcp fallback, and OSPF session-generation restart after peer-info removal. Mandatory `.160` preflight passed; Linux run `29440664216` and Android run `29440667649` are the unique automatic workflow pair.
 - Historical `afceaab282b92c61c8c8b1e216358fe810d82395` workflows were intentionally cancelled to stop excessive candidate pushes and provide no artifact evidence.
 - `61c6f313` passed Linux lifecycle and Android HEV traffic validation, but Android cycle 10 exposed a WebView-owned VPN-stop race that left the TUN alive.
 - `e8f7e74549f83791ed43a6f692ff7a034bab070d` proved the direct native stop path was reached, but used the wrong native plugin command name and is rejected.
@@ -30,9 +30,9 @@
 - [x] Run remote minimal `cargo test --locked --no-run` for the complete KCP/policy/OSPF batch after confirming no cargo/rustc process is active.
 - [x] Run KCP endpoint isolation 1/1, OSPF generation/cache invalidation 1/1, and mesh relay 8/8 directly from the built test binary.
 - [x] Inspect `Cargo.lock`, platform `cfg` boundaries, workflow pins, generated bindings, and the complete candidate diff; no sensitive/generated file changed and `git diff --check` passed.
-- [ ] Record the new exact candidate SHA in the local journal immediately after the single commit.
-- [ ] Commit and push one complete candidate snapshot to `codex/profiling-beta`.
-- [ ] Run one Linux and one Android workflow pair for that exact snapshot.
+- [x] Record exact candidate `e1a54d87e08eda80f3d081f10b9a9546cbb268d5` in the local journal after the single commit.
+- [x] Commit and push one complete candidate snapshot to `codex/profiling-beta`.
+- [x] Start only the automatic Linux run `29440664216` and Android run `29440667649` for that exact snapshot.
 
 ## Exact-candidate acceptance
 
@@ -45,3 +45,16 @@
 ## Workflow rule
 
 The rolling beta validates a complete candidate; it is not the compiler feedback loop. Do not push again for a single mechanical fix. Accumulate related fixes, run the remote minimal preflight and exact tests, inspect the full diff, then create one candidate.
+
+## Exact candidate result: `e1a54d87e08eda80f3d081f10b9a9546cbb268d5` (2026-07-16)
+
+- Linux workflow `29440664216`: passed; exact musl artifact metadata, checksums, static PIE/debug symbols, and Build ID verified.
+- Android workflow `29440667649`: passed; exact APK metadata, checksums, v2 signatures, candidate certificate, and probe certificate verified.
+- Mandatory `.160` locked preflight and exact tests: passed (`1 + 1 + 8` focused tests).
+- Policy-only KCP with user KCP disabled: passed on Linux and Android. Linux HEV improved from the earlier ~`50 Mbps` path to ~`478 Mbps`; direct baseline was ~`941 Mbps`.
+- Destination `disable_kcp_input`: passed. TCP/UDP remained fail-closed through smoltcp at ~`53.5 Mbps`, with no direct/kernel escape; restoring capability restored ~`452 Mbps` KCP throughput.
+- Android formal 70-second Wi-Fi outage: passed. The device-side disable/enable script was verified before outage, PID/VPN ownership survived, route recovered three seconds after Wi-Fi enable, and OSPF generation repair propagated before direct Android reconnection.
+- Android post-outage HEV TCP/UDP and captured-UID TLS: passed.
+- Linux repeated SIGTERM/resource cleanup and ordinary `--socks5` isolation: passed. Policy-only KCP did not enable KCP for the user SOCKS endpoint.
+- Current v1 status: no implementation or architecture blocker remains for the frozen Linux/Android basic Leaf boundary. Advanced split DNS, chain/fallback, and high-throughput UDP remain explicit release-scope decisions, not implied support.
+- Non-blocking follow-up: suppress or downgrade idempotent policy-route cleanup `ESRCH` warnings after successful cleanup; continue longer soak/resource sampling after v1 without reopening the architecture.
