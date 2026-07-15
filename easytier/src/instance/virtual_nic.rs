@@ -100,6 +100,11 @@ struct PolicyActiveRuntime {
     runtime: Arc<dyn PolicyRuntime>,
     bridge: Arc<LeafPacketBridge>,
     mesh_bridges: Arc<crate::policy_proxy::MeshProxyBridgeSet>,
+    #[cfg(any(
+        target_os = "linux",
+        all(target_os = "macos", not(feature = "macos-ne"))
+    ))]
+    dns_servers: Arc<[IpAddr]>,
 }
 
 #[cfg(all(feature = "leaf-policy-proxy", unix))]
@@ -119,6 +124,78 @@ fn schedule_policy_runtime_restart(
             false
         }
         RuntimeRestartDecision::Dormant => true,
+    }
+}
+
+#[cfg(all(
+    feature = "leaf-policy-proxy",
+    any(
+        target_os = "linux",
+        all(target_os = "macos", not(feature = "macos-ne"))
+    )
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolicyDnsTransition {
+    Unchanged,
+    Pending,
+    Changed,
+    Lost,
+    Recovered,
+}
+
+#[cfg(all(
+    feature = "leaf-policy-proxy",
+    any(
+        target_os = "linux",
+        all(target_os = "macos", not(feature = "macos-ne"))
+    )
+))]
+struct PolicyDnsMonitor {
+    current: Option<Arc<[IpAddr]>>,
+    candidate: Option<Option<Arc<[IpAddr]>>>,
+}
+
+#[cfg(all(
+    feature = "leaf-policy-proxy",
+    any(
+        target_os = "linux",
+        all(target_os = "macos", not(feature = "macos-ne"))
+    )
+))]
+impl PolicyDnsMonitor {
+    fn new(current: Option<Arc<[IpAddr]>>) -> Self {
+        Self {
+            current,
+            candidate: None,
+        }
+    }
+
+    fn observe(&mut self, observed: Option<Vec<IpAddr>>) -> PolicyDnsTransition {
+        let observed = observed.map(Arc::<[IpAddr]>::from);
+        if observed == self.current {
+            self.candidate = None;
+            return PolicyDnsTransition::Unchanged;
+        }
+        if self.candidate.as_ref() != Some(&observed) {
+            self.candidate = Some(observed);
+            return PolicyDnsTransition::Pending;
+        }
+        let previous_available = self.current.is_some();
+        self.current = self.candidate.take().expect("stable DNS candidate exists");
+        match (previous_available, self.current.is_some()) {
+            (true, true) => PolicyDnsTransition::Changed,
+            (true, false) => PolicyDnsTransition::Lost,
+            (false, true) => PolicyDnsTransition::Recovered,
+            (false, false) => PolicyDnsTransition::Unchanged,
+        }
+    }
+
+    fn is_available(&self) -> bool {
+        self.current.is_some()
+    }
+
+    fn current_arc(&self) -> Option<Arc<[IpAddr]>> {
+        self.current.clone()
     }
 }
 
@@ -2046,6 +2123,7 @@ impl NicCtx {
             peer_mgr.clone(),
             peer_mgr.my_peer_id(),
             &routes,
+            None,
         )
         .await
         {
@@ -2093,6 +2171,7 @@ impl NicCtx {
         peer_mgr: Arc<PeerManager>,
         self_peer_id: u32,
         routes: &[crate::proto::api::instance::Route],
+        dns_servers: Option<Arc<[IpAddr]>>,
     ) -> anyhow::Result<PolicyActiveRuntime> {
         let mesh_endpoints = Self::resolve_policy_mesh_endpoints(&revision, self_peer_id, routes)?;
         let mesh_bridges = Arc::new(
@@ -2104,11 +2183,18 @@ impl NicCtx {
             )
             .await?,
         );
-        let runtime = LeafProcessRuntime::start(
+        let dns_servers = match dns_servers {
+            Some(servers) => servers,
+            None => Arc::<[IpAddr]>::from(
+                easytier_policy::system_dns_servers().map_err(anyhow::Error::msg)?,
+            ),
+        };
+        let runtime = LeafProcessRuntime::start_with_dns_servers(
             &config.leaf_executable,
             &config.base_dir,
             Some(&config.outbound_interface),
             mesh_bridges.as_ref(),
+            dns_servers.as_ref(),
             revision,
         )
         .await
@@ -2118,6 +2204,7 @@ impl NicCtx {
             runtime: runtime as Arc<dyn PolicyRuntime>,
             bridge,
             mesh_bridges,
+            dns_servers,
         })
     }
 
@@ -2151,6 +2238,11 @@ impl NicCtx {
         let data_plane = policy_data_plane
             .upgrade()
             .ok_or_else(|| "policy data plane is not available".to_owned())?;
+        let dns_servers = active
+            .lock()
+            .await
+            .as_ref()
+            .map(|runtime| runtime.dns_servers.clone());
         let candidate = Self::build_policy_runtime(
             config,
             candidate_revision.clone(),
@@ -2158,6 +2250,7 @@ impl NicCtx {
             peer_mgr.clone(),
             peer_mgr.my_peer_id(),
             route_table,
+            dns_servers,
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -2196,7 +2289,16 @@ impl NicCtx {
         self.tasks.spawn(async move {
             let mut monitor = tokio::time::interval(Duration::from_secs(1));
             monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let initial_active = active.lock().await.is_some();
+            let (initial_active, initial_dns_servers) = {
+                let active = active.lock().await;
+                (
+                    active.is_some(),
+                    active
+                        .as_ref()
+                        .map(|runtime| runtime.dns_servers.clone()),
+                )
+            };
+            let mut dns_monitor = PolicyDnsMonitor::new(initial_dns_servers);
             let mut restart_budget = RuntimeRestartBudget::default();
             let mut next_restart = tokio::time::Instant::now();
             let mut underlay_available = if let Some(routing) = routing.upgrade() {
@@ -2207,6 +2309,8 @@ impl NicCtx {
             let mut dormant = !initial_active
                 && schedule_policy_runtime_restart(&mut restart_budget, &mut next_restart);
             let mut last_route_refresh = tokio::time::Instant::now();
+            #[cfg(target_os = "linux")]
+            let mut last_dns_refresh = tokio::time::Instant::now();
             let mut last_mesh_endpoints: Option<
                 BTreeMap<String, crate::policy_proxy::MeshProxyTarget>,
             > = None;
@@ -2257,31 +2361,43 @@ impl NicCtx {
                         (result, routing.has_usable_underlay())
                     };
                     match refresh_result {
-                        Ok(true) => {
-                            let was_underlay_available = underlay_available;
+                        Ok(crate::policy_proxy::PolicyUnderlayTransition::Unchanged) => {}
+                        Ok(crate::policy_proxy::PolicyUnderlayTransition::RoutesChanged) => {
                             underlay_available = refreshed_underlay_available;
-                            if was_underlay_available && underlay_available {
-                                tracing::info!(
-                                    "refreshed policy underlay routes after network change"
-                                );
-                            } else if was_underlay_available {
-                                stop_policy_active_runtime(&active, &bridge, &bridge_updates).await;
-                                active_since = None;
-                                restart_budget.reset();
-                                dormant = true;
-                                tracing::info!(
-                                    "policy underlay default route is unavailable; policy traffic is fail-closed without consuming restart budget"
-                                );
-                            } else if underlay_available {
-                                restart_budget.reset();
-                                dormant = false;
-                                next_restart = tokio::time::Instant::now();
-                                tracing::info!(
-                                    "policy underlay default route recovered; rebuilding the policy runtime once"
-                                );
-                            }
+                            tracing::info!(
+                                "refreshed policy underlay routes without replacing the Leaf runtime"
+                            );
                         }
-                        Ok(false) => {}
+                        Ok(crate::policy_proxy::PolicyUnderlayTransition::IdentityChanged) => {
+                            underlay_available = refreshed_underlay_available;
+                            stop_policy_active_runtime(&active, &bridge, &bridge_updates).await;
+                            active_since = None;
+                            restart_budget.reset();
+                            dormant = false;
+                            next_restart = tokio::time::Instant::now();
+                            tracing::info!(
+                                "policy underlay identity changed; rebuilding the Leaf runtime once"
+                            );
+                        }
+                        Ok(crate::policy_proxy::PolicyUnderlayTransition::Lost) => {
+                            underlay_available = false;
+                            stop_policy_active_runtime(&active, &bridge, &bridge_updates).await;
+                            active_since = None;
+                            restart_budget.reset();
+                            dormant = true;
+                            tracing::info!(
+                                "policy underlay default route is unavailable; policy traffic is fail-closed without consuming restart budget"
+                            );
+                        }
+                        Ok(crate::policy_proxy::PolicyUnderlayTransition::Recovered) => {
+                            underlay_available = true;
+                            restart_budget.reset();
+                            dormant = false;
+                            next_restart = tokio::time::Instant::now();
+                            tracing::info!(
+                                "policy underlay default route recovered; rebuilding the policy runtime once"
+                            );
+                        }
                         Err(error) => {
                             if underlay_available && !refreshed_underlay_available {
                                 underlay_available = false;
@@ -2320,6 +2436,44 @@ impl NicCtx {
                     }
                 }
 
+                #[cfg(target_os = "linux")]
+                if meaningful_event || last_dns_refresh.elapsed() >= Duration::from_secs(2) {
+                    last_dns_refresh = tokio::time::Instant::now();
+                    let dns_result = easytier_policy::system_dns_servers();
+                    let dns_error = dns_result.as_ref().err().cloned();
+                    match dns_monitor.observe(dns_result.ok()) {
+                        PolicyDnsTransition::Unchanged | PolicyDnsTransition::Pending => {}
+                        PolicyDnsTransition::Changed => {
+                            stop_policy_active_runtime(&active, &bridge, &bridge_updates).await;
+                            active_since = None;
+                            restart_budget.reset();
+                            dormant = false;
+                            next_restart = tokio::time::Instant::now();
+                            tracing::info!(
+                                "stable system DNS change detected; rebuilding the Leaf runtime once"
+                            );
+                        }
+                        PolicyDnsTransition::Lost => {
+                            stop_policy_active_runtime(&active, &bridge, &bridge_updates).await;
+                            active_since = None;
+                            restart_budget.reset();
+                            dormant = true;
+                            tracing::warn!(
+                                error = dns_error.as_deref().unwrap_or("no usable resolver"),
+                                "system DNS is stably unavailable; policy traffic is fail-closed without consuming restart budget"
+                            );
+                        }
+                        PolicyDnsTransition::Recovered => {
+                            restart_budget.reset();
+                            dormant = false;
+                            next_restart = tokio::time::Instant::now();
+                            tracing::info!(
+                                "system DNS recovered; rebuilding the Leaf runtime once"
+                            );
+                        }
+                    }
+                }
+
                 let stopped = {
                     let guard = active.lock().await;
                     guard
@@ -2337,6 +2491,10 @@ impl NicCtx {
                 }
 
                 if !underlay_available {
+                    continue;
+                }
+                #[cfg(target_os = "linux")]
+                if !dns_monitor.is_available() {
                     continue;
                 }
 
@@ -2467,6 +2625,7 @@ impl NicCtx {
                     peer_mgr.clone(),
                     peer_mgr.my_peer_id(),
                     &route_table,
+                    dns_monitor.current_arc(),
                 )
                 .await
                 {
@@ -3198,6 +3357,22 @@ mod tests {
     use super::VirtualNic;
     #[cfg(all(feature = "leaf-policy-proxy", unix))]
     use super::{NicCtx, ensure_policy_mesh_credentials_confidential};
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ))]
+    use super::{PolicyDnsMonitor, PolicyDnsTransition};
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ))]
+    use std::{net::IpAddr, sync::Arc};
 
     async fn run_test_helper() -> Result<VirtualNic, Error> {
         let mut dev = VirtualNic::new(get_mock_global_ctx());
@@ -3299,5 +3474,49 @@ rules: ["FINAL,exit"]
             "network-secret".to_owned(),
         )));
         assert!(ensure_policy_mesh_credentials_confidential(&encrypted, &revision).is_ok());
+    }
+
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ))]
+    #[test]
+    fn policy_dns_monitor_requires_two_matching_observations() {
+        let first = "192.0.2.53".parse::<IpAddr>().unwrap();
+        let second = "198.51.100.53".parse::<IpAddr>().unwrap();
+        let mut monitor = PolicyDnsMonitor::new(Some(Arc::<[IpAddr]>::from([first])));
+
+        assert_eq!(
+            monitor.observe(Some(vec![second])),
+            PolicyDnsTransition::Pending
+        );
+        assert_eq!(
+            monitor.observe(Some(vec![first])),
+            PolicyDnsTransition::Unchanged
+        );
+        assert_eq!(
+            monitor.observe(Some(vec![second])),
+            PolicyDnsTransition::Pending
+        );
+        assert_eq!(
+            monitor.observe(Some(vec![second])),
+            PolicyDnsTransition::Changed
+        );
+        assert_eq!(monitor.current_arc().as_deref(), Some(&[second][..]));
+        assert_eq!(monitor.observe(None), PolicyDnsTransition::Pending);
+        assert_eq!(monitor.observe(None), PolicyDnsTransition::Lost);
+        assert!(!monitor.is_available());
+        assert_eq!(
+            monitor.observe(Some(vec![first])),
+            PolicyDnsTransition::Pending
+        );
+        assert_eq!(
+            monitor.observe(Some(vec![first])),
+            PolicyDnsTransition::Recovered
+        );
+        assert!(monitor.is_available());
     }
 }

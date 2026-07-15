@@ -5,6 +5,8 @@ use std::{
 
 use nix::libc;
 
+use super::PolicyUnderlayTransition;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RouteSpec {
     family: RouteFamily,
@@ -52,10 +54,10 @@ impl PolicyRoutingGuard {
         Ok(guard)
     }
 
-    pub(crate) fn refresh(&mut self) -> anyhow::Result<bool> {
+    pub(crate) fn refresh(&mut self) -> anyhow::Result<PolicyUnderlayTransition> {
         validate_interface(&self.outbound_interface)?;
         validate_interface(&self.tun_interface)?;
-        Ok(false)
+        Ok(PolicyUnderlayTransition::Unchanged)
     }
 
     pub(crate) fn has_usable_underlay(&self) -> bool {

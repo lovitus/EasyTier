@@ -2258,3 +2258,68 @@ Validation snapshot: `cf405e8041dd58044dcdab96905ab283f57c3e97` on `codex/profil
 - Intentional Mihomo difference: Mihomo accepts the general Go HTTP client's schemes and ten-request redirect chain. EasyTier retains its pre-existing HTTPS-only source contract and five-redirect ceiling because these files control policy behavior. Failure on an unsafe hop, excessive redirects, timeout, non-success status, declared or streamed size over 256 MiB, empty body, format validation, or digest/storage operations leaves the installed rule data untouched.
 - Tests: `custom_sources_are_https_urls_without_credentials_or_fragments`, `redirect_targets_preserve_url_safety_and_five_hop_limit`, and `bounded_writer_rejects_oversized_input_without_partial_write` cover the local contract. The resolved-relative-URL, shared-timeout, cross-host header stripping, and redirect engine itself remain delegated to locked reqwest behavior rather than copied into EasyTier.
 - Validation status: implementation and formatting pending; remote/GitHub compilation, unit tests, artifact integrity, Linux deployment, and Android regression evidence have not yet been collected. Do not treat this working note as validation evidence.
+# d875d5cf exact-candidate qualification and next underlay batch
+
+## Exact artifact evidence
+
+- Commit `d875d5cf164419990205624e7ada95d794828943` was built by Linux profiling run `29377915892` and Android policy-candidate run `29377915883`; both jobs completed successfully against that full SHA.
+- The Linux Actions artifact and rolling `profiling-beta` release archive were byte-identical. Their outer SHA-256 was `7bd060c9ee76cc48c1e4cd3b214fc9ac119f45d5b8273694056635d4678f03eb`; outer and inner manifests passed. `BUILD_INFO.txt` recorded run 129, `x86_64-unknown-linux-musl`, Rust 1.95.0 and the exact commit. Core build ID was `c8a264afe9fb74e053b958f1790cb026abd72530`; core, CLI and Leaf worker retained debug info and symbol tables. CentOS 7 `file` described static PIE as a shared object, but `ldd` authoritatively reported `statically linked`.
+- All three Android artifact hashes passed their manifest. APK Signature Scheme v2 verification passed with one signer each; the candidate certificate and the shared probe/runner certificate matched `BUILD_INFO.txt` exactly. The build recorded the exact commit, run `29377915883`, `aarch64-linux-android`, and debug profile.
+
+## Android real-device evidence
+
+- Device `192.168.234.227:5555` was online as `arm64-v8a`. Before upgrade, VPN preferences and WebView Local Storage/IndexedDB were archived with `run-as`. `adb install -r` preserved the original `firstInstallTime`; the persisted WebView archive remained byte-identical before the first post-upgrade start. No uninstall, clear-data, screenshot, or coordinate click was used.
+- A cold start completed in 760 ms. CDP read the unchanged saved instance ID, explicit listener ports, peer, virtual address, and inline policy. Tauri native invokes used that backend-owned config; VPN permission remained granted and no replacement config was constructed.
+- The captured-UID probe ran as a distinct untrusted-app UID. Mesh TCP to the peer succeeded in 20-24 ms. A CN TLS endpoint matched `GEOIP,CN,DIRECT,no-resolve` and completed certificate validation in 121-190 ms. A certificate-valid non-CN domain succeeded without VPN in 1.1 seconds, then failed its TLS handshake with the policy enabled, proving terminal `MATCH,REJECT` rather than target unreachability.
+- Two API-driven stop/start cycles removed and restored the TUN without losing the saved config. Mesh ping remained healthy after restart.
+- A real Wi-Fi outage was performed only after scheduling autonomous Wi-Fi recovery. Native events emitted `outage!1` with no DNS, then a recovered Wi-Fi network key carrying epoch 1 and the restored DNS list. The application PID remained unchanged, TUN routing returned, mesh ping passed 5/5, and mesh TCP, CN DIRECT TLS, and terminal REJECT behavior all passed again.
+
+## Linux 3.10 namespace evidence
+
+- The exact archive was copied to `192.168.2.160`, re-hashed, extracted, and checked against its inner manifest before use. Two fresh namespaces on `10.250.129.0/24` used listener bases 25300 and 25310; no existing `.1.37` or `.1.38` validation process was replaced.
+- The source started the exact external Leaf worker with `MATCH,DIRECT`, explicit `eth0`, and the exact artifact path. Initial resources were approximately 16.6 MiB RSS / 9 threads for core and 5.4 MiB / 6 threads for Leaf. Rules 10899/10900, table 52000, terminal unreachable, connected route, and main-table split defaults were present.
+- Ordinary lookup for `203.0.113.10` selected policy TUN while the policy mark selected table 52000 through the physical gateway. A TCP SSH banner traversed Leaf DIRECT. Mesh ping to the destination delivered 5/5 at sub-millisecond RTT.
+- Killing only the exact worker PID left mesh ping at 3/3. A new generation worker appeared during the second one-second poll and policy DIRECT immediately recovered.
+- Removing the physical default route stopped the worker, left only connected plus terminal-unreachable policy routes, preserved mesh ping 3/3, and failed policy traffic closed. Restoring the route created generation 3, restored table 52000, DIRECT, and mesh traffic.
+- Replacing one usable gateway with another usable gateway refreshed table 52000 while retaining the same worker PID; a new policy DIRECT connection still succeeded. This is evidence against restarting Leaf for every route-set change.
+- SIGTERM of the source removed core, worker, custom rules, all table-52000 routes, split defaults, TUN, and every generation temp config. The destination and both namespaces were then stopped and deleted; no EasyTier process or test namespace remained.
+- `--check-config` returned status 1 with no diagnostic for both policy and non-policy pure-CLI configurations, while both real starts succeeded. This mode is not used as qualification evidence and is a separate low-priority CLI diagnostic issue.
+
+## Reference semantics established before the next behavior edit
+
+- Mihomo network update reference: `/Users/fanli/Documents/mihomo-rev/listener/sing_tun/server.go` default-interface callback flushes `component/iface/iface.go::FlushCache` and calls `component/resolver/resolver.go::ResetConnection`; it preserves the policy runtime while invalidating interface and DNS transport state.
+- sing-box network update reference: `/Users/fanli/Documents/singbox-withfallback/route/network.go::NetworkManager.ResetNetwork` closes tracked connections and notifies interface listeners; `/Users/fanli/Documents/singbox-withfallback/route/router.go::Router.ResetNetwork` then resets DNS. It is intentionally stronger than Mihomo.
+- Pinned Leaf `b1e33b50e37ea3b396e3cee2a1d60bb0c599655c` exposes only runtime reload and shutdown in `leaf/src/lib.rs::RuntimeManager::reload/shutdown`. Reload rebuilds router, DNS configuration/cache, and outbounds, but does not provide a network-change or close-all API. It must not be presented as equivalent to Mihomo or sing-box network reset.
+- Mihomo reject reference: `/Users/fanli/Documents/mihomo-rev/adapter/outbound/reject.go::Reject.DialContext` distinguishes immediate `REJECT` (`nopConn`) from delayed `REJECT-DROP` (`dropConn`). Pinned Leaf `leaf/src/config/conf/config.rs` maps `reject` to `drop`; `leaf/src/proxy/drop/stream.rs::Handler::handle` returns an immediate error, but the Android TUN path currently exposes that as a TCP handshake followed by read timeout. This remains safe fail-closed but is not Mihomo-compatible fast rejection.
+
+## Next-batch candidates
+
+1. **Preferred: rich underlay transition classification.** Extend the Linux policy routing snapshot to distinguish `Unchanged`, `RoutesChanged`, `IdentityChanged`, `Lost`, and `Recovered`. Continue in-place route reconciliation for route-only gateway/metric changes, as validated above. Restart only the Leaf runtime for stable interface identity or DNS-upstream changes, preserving EasyTier, TUN ownership, mesh traffic, and policy routing. Add pure transition tests plus an integration test proving route-only refresh keeps the generation while identity/DNS changes advance it once.
+2. **Rejected candidate: restart on every successful route refresh.** It is simple but the usable-gateway validation proves unnecessary downtime and connection churn with no functional benefit.
+3. **Rejected candidate: call pinned Leaf reload as network reset.** It does not close tracked connections and therefore cannot establish the Mihomo/sing-box externally observable semantics.
+4. **Deferred candidate: add a close-all/reset-network API to the Leaf fork.** This could preserve the runtime more precisely than restart, but it couples EasyTier to new Leaf internals and needs Leaf-side connection ownership tests. Revisit after the initial release only if restart downtime is measurable.
+5. **Deferred compatibility fix: fast `REJECT`.** Fixing the Android timeout requires a Leaf/netstack boundary change and parity tests, not an EasyTier-side duplicate rule engine. Current behavior is safe and bounded but less responsive, so record it for the next version rather than expanding the initial patch surface.
+
+The preferred initial-release boundary is therefore: retain the proven outage/recovery restart, preserve route-only refresh in place, and add a narrow identity/DNS-triggered runtime restart only after its state model and tests are isolated from Leaf internals.
+## Underlay transition implementation batch
+
+- Implemented the preferred transition model as `PolicyUnderlayTransition`: route-only changes keep the current Leaf generation, removal of a previously usable address or replacement of the interface index is an identity change, and route availability has explicit lost/recovered states.
+- A failed Linux interface/index/address/route snapshot now first reconciles to a fail-closed boundary before returning the diagnostic. Enabled IPv4/IPv6 families retain split capture, a marked lookup rule, and a terminal unreachable route even while their physical default is absent.
+- External Leaf startup now accepts the exact system DNS snapshot used to compile its config, and the active runtime retains that snapshot. Linux requires two matching resolver observations before applying changed/lost/recovered state, preventing one transient resolver-file rewrite from causing a restart.
+- Route-only gateway replacement remains in-place by design. Stable DNS change, DNS loss/recovery, interface replacement, and removal of a previously usable source address rebuild only Leaf while EasyTier, TUN ownership, mesh classification, and policy routing remain decoupled.
+- Added pure tests for route/identity/availability classification, dual-stack fail-closed boundaries, and two-observation DNS stability. The batch still requires remote Rust compilation and exact Linux namespace validation before acceptance.
+
+## 2026-07-15 DNS and underlay transition preflight
+
+- Implemented the next safety batch as local, decoupled policy-supervisor behavior:
+  - Leaf startup can receive an explicit system-DNS snapshot without changing the existing generic process API.
+  - DNS replacement, loss, and recovery require two matching observations before changing runtime state.
+  - Linux underlay refresh distinguishes route-only changes from interface identity loss, address removal, loss, and recovery.
+  - Route-only gateway/metric changes keep the Leaf worker alive; identity changes restart only the policy worker.
+  - Missing route/address discovery reconciles the policy table to terminal fail-closed routes and keeps mark rules installed.
+- Reference semantics remain the previously recorded Mihomo `listener/sing_tun/server.go`, `component/iface/iface.go::FlushCache`, and `component/resolver/resolver.go::ResetConnection`; sing-box `route/network.go::NetworkManager.ResetNetwork` and `route/router.go::Router.ResetNetwork` remain the secondary lifecycle reference. EasyTier intentionally restarts only its decoupled Leaf worker when the pinned Leaf API cannot reset DNS connections in place.
+- Remote diagnostic preflight used `root@192.168.2.160` in `easytier-debug-builder`, with all CPU cores, incremental unoptimized tests, explicit timeout, separate log retrieval, and the SSH reverse proxy on remote port `7890`.
+- `cargo test --no-run --package easytier --lib --features leaf-policy-proxy` succeeded in 4m34s and produced `target/debug/deps/easytier-6677514306ccf978`.
+- Direct execution of `instance::virtual_nic::tests::policy_dns_monitor_requires_two_matching_observations` passed `1/1`.
+- Direct execution of `policy_proxy::policy_routing::tests::` with `--test-threads 1` passed `7/7`, including the new transition classifier and per-family terminal-boundary assertions.
+- This proves compilation and pure transition invariants only. Linux namespace lifecycle behavior, exact GitHub artifact identity, and Android real-device recovery remain unverified for this new snapshot and must not be claimed until the next profiling-beta build is deployed.

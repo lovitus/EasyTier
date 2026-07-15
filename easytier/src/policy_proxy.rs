@@ -22,6 +22,15 @@ mod mesh_udp_relay;
 #[cfg(target_os = "linux")]
 mod policy_routing;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PolicyUnderlayTransition {
+    Unchanged,
+    RoutesChanged,
+    IdentityChanged,
+    Lost,
+    Recovered,
+}
+
 #[cfg(all(target_os = "macos", not(feature = "macos-ne")))]
 pub(crate) use macos_routing::PolicyRoutingGuard;
 pub(crate) use mesh_socks_bridge::{MeshProxyBridgeSet, MeshProxyTarget};

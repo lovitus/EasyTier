@@ -16,6 +16,8 @@ use crate::common::ifcfg::netlink::{
     NetlinkIfConfiger, replace_netlink_route, send_netlink_req_and_wait_one_resp,
 };
 
+use super::PolicyUnderlayTransition;
+
 const POLICY_TABLE: u32 = 52_000;
 // Stay ahead of the kernel main/default rules while avoiding the common low
 // priorities used by administrators for hand-written policy routing.
@@ -106,28 +108,68 @@ impl PolicyRoutingGuard {
         Ok(guard)
     }
 
-    pub(crate) fn refresh(&mut self) -> anyhow::Result<bool> {
-        self.outbound_index = NetlinkIfConfiger::get_interface_index(&self.outbound_interface)?;
-        let addresses = NetlinkIfConfiger::list_addresses(&self.outbound_interface)?
-            .into_iter()
-            .map(|address| address.address())
-            .filter(|address| usable_source(*address))
-            .filter(|address| self.enable_ipv6 || address.is_ipv4())
-            .collect::<Vec<_>>();
-        if !addresses.iter().any(IpAddr::is_ipv4) {
-            self.has_v4_bypass = false;
-            anyhow::bail!(
-                "policy outbound interface {} has no usable IPv4 address",
-                self.outbound_interface
-            );
+    pub(crate) fn refresh(&mut self) -> anyhow::Result<PolicyUnderlayTransition> {
+        let was_available = self.has_v4_bypass;
+        let previous_index = self.outbound_index;
+        let previous_addresses = self.outbound_addresses.clone();
+        let outbound_index = match NetlinkIfConfiger::get_interface_index(&self.outbound_interface)
+        {
+            Ok(index) => index,
+            Err(error) => return self.fail_closed_refresh(error.into()),
+        };
+        let addresses = match NetlinkIfConfiger::list_addresses(&self.outbound_interface) {
+            Ok(addresses) => addresses,
+            Err(error) => return self.fail_closed_refresh(error.into()),
         }
-        let v4_routes = NetlinkIfConfiger::list_route_messages(AddressFamily::Inet)?;
-        let v6_routes = NetlinkIfConfiger::list_route_messages(AddressFamily::Inet6)?;
-        self.refresh_with(v4_routes, v6_routes, addresses)
+        .into_iter()
+        .map(|address| address.address())
+        .filter(|address| usable_source(*address))
+        .filter(|address| self.enable_ipv6 || address.is_ipv4())
+        .collect::<Vec<_>>();
+        let v4_routes = match NetlinkIfConfiger::list_route_messages(AddressFamily::Inet) {
+            Ok(routes) => routes,
+            Err(error) => return self.fail_closed_refresh(error.into()),
+        };
+        let v6_routes = match NetlinkIfConfiger::list_route_messages(AddressFamily::Inet6) {
+            Ok(routes) => routes,
+            Err(error) => return self.fail_closed_refresh(error.into()),
+        };
+        self.outbound_index = outbound_index;
+        let routes_changed = self.refresh_with(v4_routes, v6_routes, addresses)?;
+        Ok(classify_underlay_transition(
+            was_available,
+            self.has_v4_bypass,
+            previous_index,
+            self.outbound_index,
+            &previous_addresses,
+            &self.outbound_addresses,
+            routes_changed,
+        ))
     }
 
     pub(crate) fn has_usable_underlay(&self) -> bool {
         self.has_v4_bypass
+    }
+
+    fn fail_closed_refresh<T>(&mut self, error: anyhow::Error) -> anyhow::Result<T> {
+        self.reconcile_unavailable()?;
+        Err(error)
+    }
+
+    fn reconcile_unavailable(&mut self) -> anyhow::Result<bool> {
+        let desired_routes = policy_boundary_routes(self.tun_index, self.enable_ipv6);
+        let desired_rules = policy_mark_rules(self.socket_mark, self.enable_ipv6);
+        let changed = !same_members(&desired_routes, &self.routes)
+            || !same_members(&desired_rules, &self.rules)
+            || !self.outbound_addresses.is_empty()
+            || self.has_v4_bypass
+            || self.has_v6_bypass;
+        reconcile_routes(&mut self.routes, desired_routes)?;
+        reconcile_rules(&mut self.rules, desired_rules)?;
+        self.outbound_addresses.clear();
+        self.has_v4_bypass = false;
+        self.has_v6_bypass = false;
+        Ok(changed)
     }
 
     fn refresh_with(
@@ -136,10 +178,16 @@ impl PolicyRoutingGuard {
         v6_routes: Vec<RouteMessage>,
         addresses: Vec<IpAddr>,
     ) -> anyhow::Result<bool> {
-        let v4_physical = physical_routes(&v4_routes, self.outbound_index);
-        let has_v4_bypass = v4_physical
-            .iter()
-            .any(|route| route.header.destination_prefix_length == 0);
+        let has_v4_address = addresses.iter().any(IpAddr::is_ipv4);
+        let v4_physical = if has_v4_address {
+            physical_routes(&v4_routes, self.outbound_index)
+        } else {
+            Vec::new()
+        };
+        let has_v4_bypass = has_v4_address
+            && v4_physical
+                .iter()
+                .any(|route| route.header.destination_prefix_length == 0);
         if !has_v4_bypass && (self.routes.is_empty() || self.has_v4_bypass) {
             tracing::warn!(
                 interface = self.outbound_interface,
@@ -150,12 +198,14 @@ impl PolicyRoutingGuard {
             .into_iter()
             .map(|route| bypass_route(route, self.outbound_index))
             .collect::<Vec<_>>();
-        // A terminal route prevents marked underlay sockets from falling
-        // through to the main table's TUN capture when the physical route
-        // disappears during a network transition.
-        desired_routes.push(fail_closed_route(AddressFamily::Inet));
-        let v6_physical = physical_routes(&v6_routes, self.outbound_index);
+        let has_v6_address = addresses.iter().any(IpAddr::is_ipv6);
+        let v6_physical = if self.enable_ipv6 && has_v6_address {
+            physical_routes(&v6_routes, self.outbound_index)
+        } else {
+            Vec::new()
+        };
         let has_v6_bypass = self.enable_ipv6
+            && has_v6_address
             && v6_physical
                 .iter()
                 .any(|route| route.header.destination_prefix_length == 0);
@@ -171,24 +221,11 @@ impl PolicyRoutingGuard {
                 "policy outbound interface has no IPv6 default route; IPv6 policy traffic remains unavailable"
             );
         }
-        desired_routes.push(capture_route(
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            self.tun_index,
-        ));
-        desired_routes.push(capture_route(
-            IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)),
-            self.tun_index,
-        ));
-        if has_v6_bypass {
-            desired_routes.push(capture_route(
-                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-                self.tun_index,
-            ));
-            desired_routes.push(capture_route(
-                IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)),
-                self.tun_index,
-            ));
-        }
+        // Keep capture and a terminal private-table route installed for every
+        // enabled family. If the physical default disappears, marked Leaf and
+        // EasyTier sockets must fail closed instead of falling through to the
+        // main table or bypassing policy during the transition.
+        desired_routes.extend(policy_boundary_routes(self.tun_index, self.enable_ipv6));
 
         let mut desired_rules = addresses
             .iter()
@@ -196,10 +233,7 @@ impl PolicyRoutingGuard {
             .filter(|address| address.is_ipv4() || has_v6_bypass)
             .map(source_rule)
             .collect::<Vec<_>>();
-        desired_rules.push(mark_rule(self.socket_mark, AddressFamily::Inet));
-        if has_v6_bypass {
-            desired_rules.push(mark_rule(self.socket_mark, AddressFamily::Inet6));
-        }
+        desired_rules.extend(policy_mark_rules(self.socket_mark, self.enable_ipv6));
         if same_members(&desired_routes, &self.routes)
             && same_members(&desired_rules, &self.rules)
             && same_members(&addresses, &self.outbound_addresses)
@@ -230,6 +264,36 @@ impl PolicyRoutingGuard {
                 tracing::warn!(?error, "failed to remove policy rule");
             }
         }
+    }
+}
+
+fn classify_underlay_transition(
+    was_available: bool,
+    is_available: bool,
+    previous_index: u32,
+    current_index: u32,
+    previous_addresses: &[IpAddr],
+    current_addresses: &[IpAddr],
+    routes_changed: bool,
+) -> PolicyUnderlayTransition {
+    if was_available && !is_available {
+        return PolicyUnderlayTransition::Lost;
+    }
+    if !was_available && is_available {
+        return PolicyUnderlayTransition::Recovered;
+    }
+    if is_available
+        && (previous_index != current_index
+            || previous_addresses
+                .iter()
+                .any(|address| !current_addresses.contains(address)))
+    {
+        return PolicyUnderlayTransition::IdentityChanged;
+    }
+    if routes_changed {
+        PolicyUnderlayTransition::RoutesChanged
+    } else {
+        PolicyUnderlayTransition::Unchanged
     }
 }
 
@@ -430,6 +494,33 @@ fn fail_closed_route(family: AddressFamily) -> RouteMessage {
     route
 }
 
+fn policy_boundary_routes(tun_index: u32, enable_ipv6: bool) -> Vec<RouteMessage> {
+    let mut routes = vec![
+        fail_closed_route(AddressFamily::Inet),
+        capture_route(IpAddr::V4(Ipv4Addr::UNSPECIFIED), tun_index),
+        capture_route(IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), tun_index),
+    ];
+    if enable_ipv6 {
+        routes.extend([
+            fail_closed_route(AddressFamily::Inet6),
+            capture_route(IpAddr::V6(Ipv6Addr::UNSPECIFIED), tun_index),
+            capture_route(
+                IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)),
+                tun_index,
+            ),
+        ]);
+    }
+    routes
+}
+
+fn policy_mark_rules(mark: u32, enable_ipv6: bool) -> Vec<RuleMessage> {
+    let mut rules = vec![mark_rule(mark, AddressFamily::Inet)];
+    if enable_ipv6 {
+        rules.push(mark_rule(mark, AddressFamily::Inet6));
+    }
+    rules
+}
+
 fn base_route(family: AddressFamily, prefix: u8, table: u32) -> RouteMessage {
     let mut route = RouteMessage::default();
     route.header.address_family = family;
@@ -576,5 +667,63 @@ mod tests {
     fn member_comparison_ignores_netlink_dump_order() {
         assert!(same_members(&[1, 2, 3], &[3, 1, 2]));
         assert!(!same_members(&[1, 2], &[1, 3]));
+    }
+
+    #[test]
+    fn underlay_transition_separates_routes_identity_and_availability() {
+        let first = [IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))];
+        let second = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11));
+        assert_eq!(
+            classify_underlay_transition(true, true, 3, 3, &first, &first, false),
+            PolicyUnderlayTransition::Unchanged
+        );
+        assert_eq!(
+            classify_underlay_transition(true, true, 3, 3, &first, &first, true),
+            PolicyUnderlayTransition::RoutesChanged
+        );
+        let added = [first[0], second];
+        assert_eq!(
+            classify_underlay_transition(true, true, 3, 3, &first, &added, true),
+            PolicyUnderlayTransition::RoutesChanged
+        );
+        assert_eq!(
+            classify_underlay_transition(true, true, 3, 3, &added, &first, true),
+            PolicyUnderlayTransition::IdentityChanged
+        );
+        assert_eq!(
+            classify_underlay_transition(true, true, 3, 4, &first, &first, true),
+            PolicyUnderlayTransition::IdentityChanged
+        );
+        assert_eq!(
+            classify_underlay_transition(true, false, 3, 3, &first, &[], true),
+            PolicyUnderlayTransition::Lost
+        );
+        assert_eq!(
+            classify_underlay_transition(false, true, 3, 3, &[], &first, true),
+            PolicyUnderlayTransition::Recovered
+        );
+    }
+
+    #[test]
+    fn policy_boundary_remains_terminal_for_every_enabled_family() {
+        let ipv4 = policy_boundary_routes(7, false);
+        assert_eq!(ipv4.len(), 3);
+        assert_eq!(
+            ipv4.iter()
+                .filter(|route| route.header.kind == RouteType::Unreachable)
+                .count(),
+            1
+        );
+        let dual_stack = policy_boundary_routes(7, true);
+        assert_eq!(dual_stack.len(), 6);
+        assert_eq!(
+            dual_stack
+                .iter()
+                .filter(|route| route.header.kind == RouteType::Unreachable)
+                .count(),
+            2
+        );
+        assert_eq!(policy_mark_rules(9, false).len(), 1);
+        assert_eq!(policy_mark_rules(9, true).len(), 2);
     }
 }

@@ -28,7 +28,7 @@ pub use leaf_config::{
     LeafConfigError, MeshServerResolver, ResolvedMeshServer, compile_leaf_config,
 };
 #[cfg(unix)]
-pub use leaf_process::{LeafProcessFactory, LeafProcessRuntime};
+pub use leaf_process::{LeafProcessFactory, LeafProcessRuntime, system_dns_servers};
 #[cfg(unix)]
 pub use packet::{LeafPacketBridge, LeafPacketEndpoint};
 pub use packet::{MeshRouteSnapshot, PacketClass, PacketClassifier, PacketError};
