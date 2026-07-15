@@ -3443,7 +3443,10 @@ rules: ["FINAL,exit"]
         );
         let resolved = NicCtx::resolve_policy_mesh_endpoints(&revision, 8, &[route]).unwrap();
         assert_eq!(resolved["exit"].peer_id, 7);
-        assert_eq!(resolved["exit"].endpoint, "10.44.0.7:1080".parse().unwrap());
+        assert_eq!(
+            resolved["exit"].endpoints(),
+            &["10.44.0.7:1080".parse().unwrap()]
+        );
     }
 
     #[cfg(all(feature = "leaf-policy-proxy", unix))]

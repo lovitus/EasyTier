@@ -89,7 +89,7 @@ impl MeshProxyTarget {
         }
     }
 
-    fn endpoints(&self) -> &[SocketAddr] {
+    pub(crate) fn endpoints(&self) -> &[SocketAddr] {
         &self.endpoints[..usize::from(self.endpoint_count)]
     }
 }

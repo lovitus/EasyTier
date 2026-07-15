@@ -1637,3 +1637,16 @@ policy schema 兼容变更：
   - 默认模板的内置 mesh示例不再填写 1080；用户自建 native SOCKS示例仍保留 7890。
   - 新增缺省 mesh port与显式旧 port同时往返的 codec测试。
 - 该前端修改同时包含此前已完成但未提交的 GeoX默认组、规则、chain/fallback注释模板，现与免端口 HEV语义一并进入验证快照。
+
+## 38. 第二轮 Linux 编译传播修复
+
+- 精确候选 4d467a12，Linux run 29413455082：
+  - HEV musl sidecar再次成功。
+  - easytier-policy通过上一轮失败点。
+  - EasyTier主 crate test no-run发现两处旧类型测试调用：
+    1. policy_proxy.rs 的 resolver closure仍声明 port: u16。
+    2. virtual_nic.rs 的显式端口测试仍读取已替换的 MeshProxyTarget.endpoint字段。
+- 修复：
+  - closure改为 Option<u16>。
+  - MeshProxyTarget只读暴露 endpoints()，显式旧配置测试断言候选切片只有 10.44.0.7:1080。
+- 这些都是 schema传播的测试断点，不改变运行时连接或回退语义。

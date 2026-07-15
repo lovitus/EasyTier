@@ -528,7 +528,7 @@ mod tests {
         let resolver = |_name: &str,
                         _instance_id: Option<uuid::Uuid>,
                         _virtual_ip: Option<std::net::IpAddr>,
-                        _port: u16| { None };
+                        _port: Option<u16>| { None };
 
         let compiled = easytier_policy::compile_leaf_config(
             &revision,
