@@ -415,7 +415,7 @@ mod tests {
         _proxy_name: &str,
         _instance_id: Option<uuid::Uuid>,
         _virtual_ip: Option<std::net::IpAddr>,
-        _port: u16,
+        _port: Option<u16>,
     ) -> Option<crate::ResolvedMeshServer> {
         None
     }

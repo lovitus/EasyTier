@@ -1,0 +1,17 @@
+[package]
+name = "easytier-socks-egress"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[features]
+default = []
+hev-inprocess = []
+
+[dependencies]
+anyhow = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "net", "process", "rt", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"

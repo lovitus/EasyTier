@@ -67,7 +67,31 @@ pub(crate) struct MeshProxyBridgeSet {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct MeshProxyTarget {
     pub(crate) peer_id: u32,
-    pub(crate) endpoint: SocketAddr,
+    endpoints: [SocketAddr; 3],
+    endpoint_count: u8,
+}
+
+impl MeshProxyTarget {
+    pub(crate) fn explicit(peer_id: u32, endpoint: SocketAddr) -> Self {
+        Self {
+            peer_id,
+            endpoints: [endpoint; 3],
+            endpoint_count: 1,
+        }
+    }
+
+    pub(crate) fn built_in(peer_id: u32, address: IpAddr) -> Self {
+        let ports = easytier_socks_egress::DEFAULT_PORT_CANDIDATES;
+        Self {
+            peer_id,
+            endpoints: ports.map(|port| SocketAddr::new(address, port)),
+            endpoint_count: ports.len() as u8,
+        }
+    }
+
+    fn endpoints(&self) -> &[SocketAddr] {
+        &self.endpoints[..usize::from(self.endpoint_count)]
+    }
 }
 
 struct RemoteState {
@@ -225,7 +249,7 @@ impl easytier_policy::MeshServerResolver for MeshProxyBridgeSet {
         proxy_name: &str,
         _instance_id: Option<uuid::Uuid>,
         _virtual_ip: Option<IpAddr>,
-        _port: u16,
+        _port: Option<u16>,
     ) -> Option<ResolvedMeshServer> {
         self.resolve(proxy_name)
     }
@@ -318,7 +342,7 @@ async fn run_listener(
                     )
                     .await;
                     if let Err(error) = result {
-                        tracing::debug!(proxy = %session_name, peer_id = remote.peer_id, endpoint = %remote.endpoint, ?error, "mesh proxy session ended");
+                        tracing::debug!(proxy = %session_name, peer_id = remote.peer_id, endpoints = ?remote.endpoints(), ?error, "mesh proxy session ended");
                     }
                 });
             }
@@ -330,12 +354,22 @@ async fn run_listener(
 
 async fn connect_remote(
     data_plane: &Socks5Server,
-    remote: SocketAddr,
+    remote: MeshProxyTarget,
 ) -> anyhow::Result<DataPlaneTcpStream> {
-    data_plane
-        .data_plane_tcp_connect_mesh_only(remote, CONNECT_TIMEOUT)
-        .await
-        .map_err(anyhow::Error::from)
+    let mut failures = Vec::new();
+    for endpoint in remote.endpoints() {
+        match data_plane
+            .data_plane_tcp_connect_mesh_only(*endpoint, CONNECT_TIMEOUT)
+            .await
+        {
+            Ok(stream) => return Ok(stream),
+            Err(error) => failures.push(format!("{endpoint}: {error}")),
+        }
+    }
+    anyhow::bail!(
+        "mesh SOCKS endpoint candidates failed: {}",
+        failures.join("; ")
+    )
 }
 
 async fn relay_socks5(
@@ -363,7 +397,7 @@ async fn relay_socks5(
 
     match command {
         1 => {
-            let mut upstream = connect_remote(&data_plane, remote.endpoint).await?;
+            let mut upstream = connect_remote(&data_plane, remote).await?;
             negotiate_policy_proxy_auth(&mut upstream, credentials.as_ref()).await?;
             relay_socks_connect_command(&mut client, &mut upstream, request).await?;
             tokio::select! {
@@ -374,14 +408,31 @@ async fn relay_socks5(
             }
         }
         3 => {
-            let association = RemoteUdpAssociation::open(
-                &peer_mgr,
-                &data_plane,
-                remote.peer_id,
-                remote.endpoint,
-                credentials.as_ref(),
-            )
-            .await?;
+            let mut association = None;
+            let mut failures = Vec::new();
+            for endpoint in remote.endpoints() {
+                match RemoteUdpAssociation::open(
+                    &peer_mgr,
+                    &data_plane,
+                    remote.peer_id,
+                    *endpoint,
+                    credentials.as_ref(),
+                )
+                .await
+                {
+                    Ok(opened) => {
+                        association = Some(opened);
+                        break;
+                    }
+                    Err(error) => failures.push(format!("{endpoint}: {error:#}")),
+                }
+            }
+            let association = association.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "mesh SOCKS UDP endpoint candidates failed: {}",
+                    failures.join("; ")
+                )
+            })?;
             relay_socks_udp(client, client_addr.ip(), association, generation).await?;
         }
         _ => unreachable!("SOCKS command was validated before dispatch"),
@@ -757,19 +808,13 @@ mod tests {
 
     #[tokio::test]
     async fn route_identity_change_cancels_only_the_old_generation() {
-        let first = MeshProxyTarget {
-            peer_id: 7,
-            endpoint: "10.44.0.7:1080".parse().unwrap(),
-        };
+        let first = MeshProxyTarget::explicit(7, "10.44.0.7:1080".parse().unwrap());
         let slot = RemoteSlot::new(first);
         let (_, old_generation) = slot.snapshot().unwrap();
         slot.replace(Some(first));
         assert!(!old_generation.is_cancelled());
 
-        let second = MeshProxyTarget {
-            peer_id: 8,
-            endpoint: first.endpoint,
-        };
+        let second = MeshProxyTarget::explicit(8, first.endpoints()[0]);
         slot.replace(Some(second));
         assert!(old_generation.is_cancelled());
         let (current, new_generation) = slot.snapshot().unwrap();

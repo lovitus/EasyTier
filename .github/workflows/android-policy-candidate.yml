@@ -51,6 +51,32 @@ jobs:
           cache-targets: true
           cache-on-failure: true
 
+      - name: Build pinned HEV static libraries
+        env:
+          HEV_SERVER_COMMIT: 97e74f1
+        run: |
+          set -euo pipefail
+          hev_src="$RUNNER_TEMP/hev-socks5-server"
+          hev_lib="$RUNNER_TEMP/hev-libs/aarch64-linux-android"
+          toolchain="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cc="$toolchain/aarch64-linux-android24-clang"
+          git init "$hev_src"
+          git -C "$hev_src" remote add origin https://github.com/lovitus/hev-socks5-server.git
+          git -C "$hev_src" fetch --depth=1 origin "$HEV_SERVER_COMMIT"
+          git -C "$hev_src" checkout --detach FETCH_HEAD
+          git -C "$hev_src" submodule update --init --recursive --depth=1
+          make -C "$hev_src" -j"$(nproc)" static \
+            CC="$cc" \
+            PP="$cc -E" \
+            AR="$toolchain/llvm-ar" \
+            STRIP="$toolchain/llvm-strip"
+          mkdir -p "$hev_lib"
+          cp "$hev_src/bin/libhev-socks5-server.a" "$hev_lib/"
+          cp "$hev_src/third-part/yaml/bin/libyaml.a" "$hev_lib/"
+          cp "$hev_src/third-part/hev-task-system/bin/libhev-task-system.a" "$hev_lib/"
+          echo "HEV_SOCKS5_LIB_DIR=$hev_lib" >> "$GITHUB_ENV"
+          echo "HEV_SERVER_COMMIT=$HEV_SERVER_COMMIT" >> "$GITHUB_ENV"
+
       - name: Restore stable candidate signing key
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_POLICY_CANDIDATE_KEYSTORE_B64 }}
@@ -172,6 +198,7 @@ jobs:
           workflow_run_attempt=$GITHUB_RUN_ATTEMPT
           target=aarch64-linux-android
           profile=debug
+          hev_server_commit=$HEV_SERVER_COMMIT
           application_id=com.kkrainbow.easytier.policycandidate
           signing_cert_sha256=14d2d885ce1bc361923a493210865f86390ffcd32eb2b555042bbd1a8b6c38e0
           probe_application_id=com.kkrainbow.easytier.policyprobe

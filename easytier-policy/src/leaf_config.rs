@@ -29,13 +29,13 @@ pub trait MeshServerResolver: Send + Sync {
         proxy_name: &str,
         instance_id: Option<Uuid>,
         virtual_ip: Option<std::net::IpAddr>,
-        port: u16,
+        port: Option<u16>,
     ) -> Option<ResolvedMeshServer>;
 }
 
 impl<F> MeshServerResolver for F
 where
-    F: Fn(&str, Option<Uuid>, Option<std::net::IpAddr>, u16) -> Option<ResolvedMeshServer>
+    F: Fn(&str, Option<Uuid>, Option<std::net::IpAddr>, Option<u16>) -> Option<ResolvedMeshServer>
         + Send
         + Sync,
 {
@@ -44,7 +44,7 @@ where
         proxy_name: &str,
         instance_id: Option<Uuid>,
         virtual_ip: Option<std::net::IpAddr>,
-        port: u16,
+        port: Option<u16>,
     ) -> Option<ResolvedMeshServer> {
         self(proxy_name, instance_id, virtual_ip, port)
     }
@@ -93,7 +93,9 @@ pub fn compile_leaf_config(
         let (address, port, credentials) = match &proxy.server {
             ProxyServer::Address(address) => (
                 address.clone(),
-                proxy.port,
+                proxy
+                    .port
+                    .expect("validated native proxy has an explicit port"),
                 proxy
                     .credentials()
                     .map(|(username, password)| (username.to_owned(), password.to_owned())),
@@ -614,7 +616,7 @@ mod tests {
             _proxy_name: &str,
             _instance_id: Option<Uuid>,
             _virtual_ip: Option<IpAddr>,
-            _port: u16,
+            _port: Option<u16>,
         ) -> Option<ResolvedMeshServer> {
             None
         }
@@ -628,7 +630,7 @@ mod tests {
             proxy_name: &str,
             _instance_id: Option<Uuid>,
             _virtual_ip: Option<IpAddr>,
-            port: u16,
+            port: Option<u16>,
         ) -> Option<ResolvedMeshServer> {
             assert_eq!(proxy_name, "mesh");
             assert_eq!(port, 1080);

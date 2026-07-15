@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "easytier",
     "easytier-policy",
+    "easytier-socks-egress",
     "third_party/kcp-sys",
     "third_party/netstack-smoltcp",
     "easytier-gui/src-tauri",

@@ -3075,13 +3075,15 @@ impl NicCtx {
                 )
                 .into());
             }
-            endpoints.insert(
-                name.clone(),
-                crate::policy_proxy::MeshProxyTarget {
-                    peer_id: route.expect("route was checked above").peer_id,
-                    endpoint: SocketAddr::new(address, proxy.port),
-                },
-            );
+            let peer_id = route.expect("route was checked above").peer_id;
+            let target = match proxy.port {
+                Some(port) => crate::policy_proxy::MeshProxyTarget::explicit(
+                    peer_id,
+                    SocketAddr::new(address, port),
+                ),
+                None => crate::policy_proxy::MeshProxyTarget::built_in(peer_id, address),
+            };
+            endpoints.insert(name.clone(), target);
         }
         Ok(endpoints)
     }

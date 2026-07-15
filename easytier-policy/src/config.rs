@@ -135,7 +135,8 @@ pub struct Proxy {
     #[serde(rename = "type")]
     pub kind: ProxyKind,
     pub server: ProxyServer,
-    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     #[serde(default)]
     pub via: ProxyVia,
     #[serde(default)]
@@ -559,7 +560,7 @@ impl PolicyDocument {
 
     fn validate_proxies(&self) -> Result<(), PolicyError> {
         for (name, proxy) in &self.proxies {
-            if proxy.port == 0 {
+            if proxy.port == Some(0) {
                 return Err(PolicyError::InvalidServer {
                     name: name.clone(),
                     reason: "port 0 is not allowed".to_owned(),
@@ -588,6 +589,12 @@ impl PolicyDocument {
                     return Err(PolicyError::InvalidServer {
                         name: name.clone(),
                         reason: "structured mesh selector requires via: mesh".to_owned(),
+                    });
+                }
+                (ProxyVia::Native, ProxyServer::Address(_)) if proxy.port.is_none() => {
+                    return Err(PolicyError::InvalidServer {
+                        name: name.clone(),
+                        reason: "native proxy requires an explicit port".to_owned(),
                     });
                 }
                 (_, ProxyServer::Address(address))
@@ -1038,6 +1045,35 @@ rules:
   - NETWORK,udp,final-udp
   - MATCH,final-tcp
 "#;
+
+    #[test]
+    fn permits_implicit_port_only_for_mesh_egress() {
+        let mesh = r#"
+version: 1
+proxies:
+  exit:
+    type: socks5
+    server: { virtual-ip: 10.44.0.8 }
+    via: mesh
+    udp: true
+rules: ["FINAL,exit"]
+"#;
+        let revision = PolicyRevision::parse(mesh, Path::new(".")).unwrap();
+        assert_eq!(revision.document.proxies["exit"].port, None);
+
+        let native = r#"
+version: 1
+proxies:
+  exit:
+    type: socks5
+    server: 127.0.0.1
+rules: ["FINAL,exit"]
+"#;
+        assert!(matches!(
+            PolicyRevision::parse(native, Path::new(".")),
+            Err(PolicyError::InvalidServer { name, .. }) if name == "exit"
+        ));
+    }
 
     #[test]
     fn validates_document_and_stable_digest() {
