@@ -193,6 +193,14 @@ impl ProcessRuntime {
     }
 }
 
+impl Drop for ProcessRuntime {
+    fn drop(&mut self) {
+        // The owning instance normally awaits run_until_cancel. This is the
+        // last-resort path for runtime abort/panic and must never detach HEV.
+        let _ = self.child.start_kill();
+    }
+}
+
 async fn start_candidate(
     executable: &Path,
     config_path: &Path,

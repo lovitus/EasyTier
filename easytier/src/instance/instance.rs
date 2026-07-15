@@ -622,13 +622,37 @@ impl InstanceConfigPatcher {
 #[cfg(feature = "leaf-policy-proxy")]
 struct SocksEgressGuard {
     cancel: CancellationToken,
-    _task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[cfg(feature = "leaf-policy-proxy")]
+impl SocksEgressGuard {
+    async fn shutdown(mut self) {
+        self.cancel.cancel();
+        let Some(mut task) = self.task.take() else {
+            return;
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(?error, "HEV SOCKS egress task stopped during shutdown");
+            }
+            Err(_) => {
+                tracing::warn!("timed out waiting for HEV SOCKS egress shutdown");
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
 }
 
 #[cfg(feature = "leaf-policy-proxy")]
 impl Drop for SocksEgressGuard {
     fn drop(&mut self) {
         self.cancel.cancel();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -1245,7 +1269,7 @@ impl Instance {
                 });
                 self.socks_egress = Some(SocksEgressGuard {
                     cancel,
-                    _task: task,
+                    task: Some(task),
                 });
             }
             Err(error) => {
@@ -1278,7 +1302,7 @@ impl Instance {
                 });
                 self.socks_egress = Some(SocksEgressGuard {
                     cancel,
-                    _task: task,
+                    task: Some(task),
                 });
             }
             Err(error) => {
@@ -1792,6 +1816,14 @@ impl Instance {
     }
 
     pub async fn clear_resources(&mut self) {
+        // Mihomo runtime/listener Close waits for owned workers and sockets to
+        // stop. Do the same before this instance runtime calls
+        // shutdown_background(); cancellation from Drop alone can be left
+        // unpolled and would orphan the external HEV process.
+        #[cfg(feature = "leaf-policy-proxy")]
+        if let Some(socks_egress) = self.socks_egress.take() {
+            socks_egress.shutdown().await;
+        }
         self.peer_manager.clear_resources().await;
         #[cfg(feature = "tun")]
         let _ = self.nic_ctx.lock().await.take();
@@ -1839,6 +1871,26 @@ mod tests {
         instance::instance::{InstanceConfigPatcher, InstanceRpcServerHook},
         proto::{api::config::InstanceConfigPatch, rpc_impl::standalone::RpcServerHook},
     };
+
+    #[cfg(feature = "leaf-policy-proxy")]
+    #[tokio::test]
+    async fn socks_egress_guard_shutdown_waits_for_owned_task() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let (finished, finished_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            task_cancel.cancelled().await;
+            let _ = finished.send(());
+        });
+        let guard = super::SocksEgressGuard {
+            cancel,
+            task: Some(task),
+        };
+
+        guard.shutdown().await;
+
+        assert!(finished_rx.await.is_ok());
+    }
 
     #[tokio::test]
     async fn test_rpc_portal_whitelist() {

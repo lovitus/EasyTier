@@ -1692,3 +1692,27 @@ policy schema 兼容变更：
 - HEV 的 `FWD UDP` 是其私有 UDP-over-TCP 扩展，不等同于 SagerNet UoT；Leaf 标准 SOCKS outbound 不会自动协商该扩展。
 - EasyTier `enable_kcp_proxy` 是 underlay/代理能力，不等于 Leaf-to-HEV 的 UDP 自动 KCP，当前验证配置也未启用。
 - 首版维持 native UDP：DNS 可独立使用 DoH/DoT/TCP；QUIC、语音和游戏避免 UoT 队头阻塞或叠加 KCP 重传。后续若用户决定实现，应在 egress 抽象下增加显式 `native`/`tcp`（或兼容 UoT）模式，不做无法可靠判定失败的静默逐包切换。
+
+## 40. 2026-07-15 Linux namespace lifecycle failure and ownership fix
+
+### 40.1 Mihomo lifecycle reference
+
+- `/Users/fanli/Documents/mihomo-rev/listener/inbound/socks.go::Socks.Close` synchronously closes every owned TCP and UDP listener and aggregates close errors；`listener/socks/tcp.go::Listener.Close` 与 `listener/socks/udp.go::UDPListener.Close` 直接关闭底层 listener/packet connection，使 accept/packet worker 可观察到关闭。
+- `/Users/fanli/Documents/mihomo-rev/component/tsnet/tsnet.go::runtime.Close` 先发布 cancel，再等待 `<-r.runDone`，随后关闭 gateway sessions、TCP listeners、UDP conns 和 server；`TestGatewayTCPListenRetryStopsOnClose`、`TestStartupWatchdogCancelOnClose` 明确要求 Close 返回前重试 worker/watchdog 已退出。
+- EasyTier 采用同一外部语义：实例正常清理返回前，其拥有的 HEV runtime 必须已经停止、监听必须释放、私有配置目录必须删除。不能只发送 cancellation 后依赖 runtime 最终 Drop。
+
+### 40.2 精确失败证据（候选 `0aa7c3db`）
+
+- 在 `192.168.1.37` 的独立 network namespace `et-hev` 中运行完整 Linux policy TUN、Leaf worker 和 HEV sidecar；显式 listeners 为 25030-25034，policy outbound interface 为 namespace veth `ethev-ns`。
+- 启动成功：core PID 23033、Leaf PID 23044、HEV PID 23052；`tun0=10.247.37.1/24`，HEV `[::]:11080`。
+- 运行资源：core RSS 13,840 KiB / 9 threads / 36 FD；Leaf RSS 5,576 KiB / 4 threads / 11 FD；HEV RSS 272 KiB / 2 threads / 12 FD。
+- 受控数据面：TCP SOCKS CONNECT 到 host OpenSSH 成功并读取 `SSH-2.0-OpenSSH_7.4`；UDP `ASSOCIATE 0.0.0.0:0` 返回 relay `0.0.0.0:56118`，到 host UDP echo 往返成功。证明 HEV socket mark 正确绕过本机 policy TUN。
+- 对 core 发送正常 `SIGTERM` 后，core、Leaf、TUN、策略 rules/table 52000 和 Leaf 临时 JSON 均清理；但 HEV PID 23052、`11080` 和 `/tmp/easytier-hev-pOxqtk` 残留。
+
+### 40.3 根因、修复与失败边界
+
+- 根因：`Instance::clear_resources()` 没有处理 `socks_egress`；`SocksEgressGuard::Drop` 只 cancel task。launcher 紧接着执行 `rt.shutdown_background()`，不等待 detached task 再次被 poll，导致外部 HEV child 脱离实例所有权。
+- 修复：`SocksEgressGuard` 保存可取出的 JoinHandle；`shutdown()` cancel 后最多等待 5 秒，超时则 abort 并 await；`Instance::clear_resources()` 在清理 peer/TUN 前显式 await 该 shutdown。
+- Drop 兜底：guard Drop cancel 并 abort task；desktop `ProcessRuntime::Drop` 直接 `start_kill()`，覆盖 panic、task abort 和非正常清理。
+- 兼容测试：`instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task` 证明 shutdown 返回前 owned task 已观察 cancellation 并结束。
+- 待最终候选验证：正常 SIGTERM 后 HEV PID/11080/private dir 回收；11080 冲突回退到 11081 后也必须只清理 11081；重复 stop/start 不出现 FD、线程和子进程单调增长。
