@@ -68,10 +68,18 @@ pub struct RuntimeRestartBudget {
 
 impl RuntimeRestartBudget {
     pub fn record_failure(&mut self) -> RuntimeRestartDecision {
-        let Some(delay) = RUNTIME_RESTART_BACKOFF.get(self.failures).copied() else {
-            return RuntimeRestartDecision::Dormant;
-        };
-        self.failures += 1;
+        // Mihomo's component/slowdown/slowdown.go::{Do,Wait} and
+        // component/slowdown/backoff.go::Backoff::{Duration,Reset} keep retrying at a
+        // bounded maximum delay and reset after success; they do not permanently
+        // exhaust a retry budget. EasyTier uses longer 1s/2s/5s stages because this
+        // restarts an external Leaf process, then holds at 5s until the runtime has
+        // remained healthy long enough for the caller to reset this state.
+        let last_stage = RUNTIME_RESTART_BACKOFF.len() - 1;
+        let delay = RUNTIME_RESTART_BACKOFF[self.failures.min(last_stage)];
+        self.failures = self
+            .failures
+            .saturating_add(1)
+            .min(RUNTIME_RESTART_BACKOFF.len());
         RuntimeRestartDecision::RetryAfter(delay)
     }
 
@@ -276,7 +284,7 @@ mod tests {
     const POLICY: &str = "version: 1\nrules: [\"MATCH,DIRECT\"]\n";
 
     #[test]
-    fn runtime_restart_budget_uses_every_delay_then_becomes_dormant() {
+    fn runtime_restart_backoff_caps_until_stable_reset() {
         let mut budget = RuntimeRestartBudget::default();
         assert_eq!(
             budget.record_failure(),
@@ -290,7 +298,12 @@ mod tests {
             budget.record_failure(),
             RuntimeRestartDecision::RetryAfter(Duration::from_secs(5))
         );
-        assert_eq!(budget.record_failure(), RuntimeRestartDecision::Dormant);
+        for _ in 0..32 {
+            assert_eq!(
+                budget.record_failure(),
+                RuntimeRestartDecision::RetryAfter(Duration::from_secs(5))
+            );
+        }
         assert_eq!(budget.failures(), 3);
         budget.reset();
         assert_eq!(budget.failures(), 0);
