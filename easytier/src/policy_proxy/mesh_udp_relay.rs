@@ -1248,8 +1248,24 @@ mod tests {
 
         let data_plane_a = Socks5Server::new(peer_a.get_global_ctx(), peer_a.clone(), None);
         let data_plane_b = Socks5Server::new(peer_b.get_global_ctx(), peer_b.clone(), None);
-        data_plane_a.run(None).await.unwrap();
-        data_plane_b.run(None).await.unwrap();
+        data_plane_a
+            .run(
+                #[cfg(feature = "kcp")]
+                None,
+                #[cfg(feature = "kcp")]
+                None,
+            )
+            .await
+            .unwrap();
+        data_plane_b
+            .run(
+                #[cfg(feature = "kcp")]
+                None,
+                #[cfg(feature = "kcp")]
+                None,
+            )
+            .await
+            .unwrap();
 
         let kernel_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
         let stream_port = kernel_listener.local_addr().unwrap().port();
@@ -1361,8 +1377,24 @@ mod tests {
 
         let data_plane_a = Socks5Server::new(peer_a.get_global_ctx(), peer_a.clone(), None);
         let data_plane_b = Socks5Server::new(peer_b.get_global_ctx(), peer_b.clone(), None);
-        data_plane_a.run(None).await.unwrap();
-        data_plane_b.run(None).await.unwrap();
+        data_plane_a
+            .run(
+                #[cfg(feature = "kcp")]
+                None,
+                #[cfg(feature = "kcp")]
+                None,
+            )
+            .await
+            .unwrap();
+        data_plane_b
+            .run(
+                #[cfg(feature = "kcp")]
+                None,
+                #[cfg(feature = "kcp")]
+                None,
+            )
+            .await
+            .unwrap();
         let relay_service = MeshSocksRelayService::new(&peer_b, data_plane_b, None);
         relay_service.register();
         let mut peer_reservations = Vec::with_capacity(ASSOCIATION_LIMIT_PER_PEER);
@@ -1528,8 +1560,24 @@ mod tests {
 
         let data_plane_a = Socks5Server::new(peer_a.get_global_ctx(), peer_a.clone(), None);
         let data_plane_b = Socks5Server::new(peer_b.get_global_ctx(), peer_b.clone(), None);
-        data_plane_a.run(None).await.unwrap();
-        data_plane_b.run(None).await.unwrap();
+        data_plane_a
+            .run(
+                #[cfg(feature = "kcp")]
+                None,
+                #[cfg(feature = "kcp")]
+                None,
+            )
+            .await
+            .unwrap();
+        data_plane_b
+            .run(
+                #[cfg(feature = "kcp")]
+                None,
+                #[cfg(feature = "kcp")]
+                None,
+            )
+            .await
+            .unwrap();
 
         let local_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let local_endpoint = local_listener.local_addr().unwrap();

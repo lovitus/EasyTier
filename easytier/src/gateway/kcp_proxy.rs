@@ -351,13 +351,21 @@ impl KcpProxySrc {
         self.peer_manager
             .add_packet_process_pipeline(Box::new(self.tcp_proxy.0.clone()))
             .await;
+        self.start_endpoint_only().await;
+        self.tcp_proxy.0.start(false).await.unwrap();
+    }
+
+    /// Starts only the KCP packet endpoint used by an explicit caller.
+    ///
+    /// Policy HEV uses this narrow mode so its mesh data plane can reuse KCP
+    /// without enabling the user-facing KCP TCP proxy or failover selector.
+    pub async fn start_endpoint_only(&self) {
         self.peer_manager
             .add_packet_process_pipeline(Box::new(KcpEndpointFilter {
                 kcp_endpoint: self.kcp_endpoint.clone(),
                 is_src: true,
             }))
             .await;
-        self.tcp_proxy.0.start(false).await.unwrap();
     }
 
     pub fn get_tcp_proxy(&self) -> Arc<TcpProxy<NatDstKcpConnector>> {

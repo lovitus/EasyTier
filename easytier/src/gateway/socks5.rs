@@ -373,7 +373,7 @@ struct Socks5AutoConnector {
     fallback_to_smoltcp_on_kcp_failure: bool,
 }
 
-const POLICY_UOT_KCP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+const POLICY_KCP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Socks5AutoConnector {
     fn smoltcp_connector(&self) -> Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send> {
@@ -489,7 +489,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
 
         let mut ret = if selected_kcp && self.fallback_to_smoltcp_on_kcp_failure {
             match timeout(
-                POLICY_UOT_KCP_ATTEMPT_TIMEOUT,
+                POLICY_KCP_ATTEMPT_TIMEOUT,
                 connector.tcp_connect(addr, timeout_s),
             )
             .await
@@ -666,6 +666,8 @@ pub struct Socks5Server {
 
     #[cfg(feature = "kcp")]
     kcp_endpoint: Mutex<Option<Weak<KcpEndpoint>>>,
+    #[cfg(feature = "kcp")]
+    policy_kcp_endpoint: Mutex<Option<Weak<KcpEndpoint>>>,
 
     socks5_enabled: Arc<AtomicBool>,
     #[cfg(feature = "ffi-dataplane")]
@@ -906,6 +908,8 @@ impl Socks5Server {
 
             #[cfg(feature = "kcp")]
             kcp_endpoint: Mutex::new(None),
+            #[cfg(feature = "kcp")]
+            policy_kcp_endpoint: Mutex::new(None),
 
             socks5_enabled: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "ffi-dataplane")]
@@ -1041,10 +1045,12 @@ impl Socks5Server {
     pub async fn run(
         self: &Arc<Self>,
         #[cfg(feature = "kcp")] kcp_endpoint: Option<Weak<KcpEndpoint>>,
+        #[cfg(feature = "kcp")] policy_kcp_endpoint: Option<Weak<KcpEndpoint>>,
     ) -> Result<(), Error> {
         #[cfg(feature = "kcp")]
         {
             *self.kcp_endpoint.lock().await = kcp_endpoint.clone();
+            *self.policy_kcp_endpoint.lock().await = policy_kcp_endpoint;
         }
         if let Some(proxy_url) = self.global_ctx.config.get_socks5_portal() {
             #[cfg(feature = "kcp")]

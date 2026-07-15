@@ -1136,10 +1136,22 @@ impl Instance {
         let proxy_prepared_store = Arc::new(PreparedProxyStore::default());
 
         #[cfg(feature = "kcp")]
-        if self.global_ctx.get_flags().enable_kcp_proxy {
+        #[cfg(feature = "leaf-policy-proxy")]
+        let policy_kcp_enabled =
+            crate::policy_proxy::is_configured_for(self.global_ctx.config.as_ref());
+        #[cfg(feature = "kcp")]
+        #[cfg(not(feature = "leaf-policy-proxy"))]
+        let policy_kcp_enabled = false;
+
+        #[cfg(feature = "kcp")]
+        if self.global_ctx.get_flags().enable_kcp_proxy || policy_kcp_enabled {
             let src_proxy =
                 KcpProxySrc::new(self.get_peer_manager(), Some(proxy_prepared_store.clone())).await;
-            src_proxy.start().await;
+            if self.global_ctx.get_flags().enable_kcp_proxy {
+                src_proxy.start().await;
+            } else {
+                src_proxy.start_endpoint_only().await;
+            }
             self.kcp_proxy_src = Some(src_proxy);
         }
 
@@ -1175,8 +1187,10 @@ impl Instance {
                 transports.push(Arc::new(connector));
             }
             #[cfg(feature = "kcp")]
-            if let Some(src) = self.kcp_proxy_src.as_ref() {
-                transports.push(Arc::new(src.get_connector()));
+            if self.global_ctx.get_flags().enable_kcp_proxy {
+                if let Some(src) = self.kcp_proxy_src.as_ref() {
+                    transports.push(Arc::new(src.get_connector()));
+                }
             }
             if !transports.is_empty() {
                 let selector = DeferredProxySelector::new(
@@ -1230,6 +1244,12 @@ impl Instance {
                 #[cfg(feature = "kcp")]
                 self.kcp_proxy_src
                     .as_ref()
+                    .filter(|_| self.global_ctx.get_flags().enable_kcp_proxy)
+                    .map(|x| Arc::downgrade(&x.get_kcp_endpoint())),
+                #[cfg(feature = "kcp")]
+                self.kcp_proxy_src
+                    .as_ref()
+                    .filter(|_| policy_kcp_enabled)
                     .map(|x| Arc::downgrade(&x.get_kcp_endpoint())),
             )
             .await?;

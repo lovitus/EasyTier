@@ -2114,6 +2114,28 @@ impl SyncRouteSession {
         }
     }
 
+    /// Changes the generation advertised to the remote peer so the remote
+    /// session discards its stale belief about what it has already sent us.
+    /// This uses the existing session-id compatibility mechanism and does not
+    /// require a protocol extension.
+    fn restart_local_generation(&self) {
+        let _session_lock = self.lock.lock();
+        let old_session_id = self.my_session_id.load(Ordering::Relaxed);
+        let mut new_session_id = rand::random();
+        while new_session_id == old_session_id {
+            new_session_id = rand::random();
+        }
+        self.my_session_id.store(new_session_id, Ordering::Relaxed);
+        self.need_sync_initiator_info.store(true, Ordering::Release);
+        tracing::info!(
+            my_peer_id = self.my_peer_id,
+            dst_peer_id = self.dst_peer_id,
+            old_session_id,
+            new_session_id,
+            "restart OSPF sync generation after local peer-info removal"
+        );
+    }
+
     fn clean_dst_saved_map(&self) {
         self.dst_saved_peer_info_versions
             .retain(|_, v| !v.is_expired());
@@ -2330,6 +2352,17 @@ impl PeerRouteServiceImpl {
     fn remove_session(&self, dst_peer_id: PeerId) {
         self.sessions.remove(&dst_peer_id);
         shrink_dashmap(&self.sessions, None);
+    }
+
+    fn restart_remaining_sync_generations_after_peer_removal(&self, removed_peer_ids: &[PeerId]) {
+        if removed_peer_ids.is_empty() {
+            return;
+        }
+        for session in self.sessions.iter() {
+            if !removed_peer_ids.contains(session.key()) {
+                session.value().restart_local_generation();
+            }
+        }
     }
 
     fn list_session_peers(&self) -> Vec<PeerId> {
@@ -2973,24 +3006,25 @@ impl PeerRouteServiceImpl {
         }
     }
 
-    async fn clear_expired_peer(&self) {
+    async fn clear_expired_peer(&self) -> bool {
         let now = SystemTime::now();
-        let mut to_remove = Vec::new();
+        let mut expired_peer_ids = Vec::new();
         for (peer_id, peer_info) in self.synced_route_info.peer_infos.read().iter() {
             if let Ok(d) = now.duration_since(peer_info.last_update.unwrap().try_into().unwrap())
                 && (d > REMOVE_DEAD_PEER_INFO_AFTER
                     || (d > REMOVE_UNREACHABLE_PEER_INFO_AFTER
                         && !self.route_table.topology_peer_reachable(*peer_id)))
             {
-                to_remove.push(*peer_id);
+                expired_peer_ids.push(*peer_id);
             }
         }
 
         self.synced_route_info
-            .remove_peers(to_remove.iter().copied());
+            .remove_peers(expired_peer_ids.iter().copied());
+        self.restart_remaining_sync_generations_after_peer_removal(&expired_peer_ids);
 
         // clear expired foreign network info
-        let mut to_remove = Vec::new();
+        let mut expired_foreign_network_keys = Vec::new();
         for item in self.synced_route_info.foreign_network.iter() {
             let Some(since_last_update) = item
                 .value()
@@ -2998,22 +3032,23 @@ impl PeerRouteServiceImpl {
                 .and_then(|x| SystemTime::try_from(x).ok())
                 .and_then(|x| now.duration_since(x).ok())
             else {
-                to_remove.push(item.key().clone());
+                expired_foreign_network_keys.push(item.key().clone());
                 continue;
             };
 
             if since_last_update > REMOVE_DEAD_PEER_INFO_AFTER {
-                to_remove.push(item.key().clone());
+                expired_foreign_network_keys.push(item.key().clone());
             }
         }
 
-        for p in to_remove.iter() {
+        for p in expired_foreign_network_keys.iter() {
             self.synced_route_info.foreign_network.remove(p);
         }
 
         self.refresh_credential_trusts_and_disconnect().await;
         self.route_table.clean_expired_route_info();
         self.route_table_with_cost.clean_expired_route_info();
+        !expired_peer_ids.is_empty()
     }
 
     fn build_sync_route_raw_req(
@@ -3876,10 +3911,15 @@ impl PeerRoute {
         })
     }
 
-    async fn clear_expired_peer(service_impl: Arc<PeerRouteServiceImpl>) {
+    async fn clear_expired_peer(
+        service_impl: Arc<PeerRouteServiceImpl>,
+        session_mgr: RouteSessionManager,
+    ) {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
-            service_impl.clear_expired_peer().await;
+            if service_impl.clear_expired_peer().await {
+                session_mgr.sync_now("expired_peer_generation_restart");
+            }
             // TODO: use debug log level for this.
             tracing::debug!(?service_impl, "clear_expired_peer");
         }
@@ -3961,10 +4001,10 @@ impl PeerRoute {
                 self.service_impl.clone(),
             ));
 
-        self.tasks
-            .lock()
-            .unwrap()
-            .spawn(Self::clear_expired_peer(self.service_impl.clone()));
+        self.tasks.lock().unwrap().spawn(Self::clear_expired_peer(
+            self.service_impl.clone(),
+            self.session_mgr.clone(),
+        ));
 
         self.tasks
             .lock()
@@ -4354,6 +4394,51 @@ mod tests {
         assert!(session.need_sync_initiator_info.load(Ordering::Acquire));
         assert!(session.has_initiator_responsibility());
         assert_eq!(session.initiator_sync_in_flight.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn peer_removal_restarts_remaining_generation_and_invalidates_remote_cache() {
+        let service_impl = PeerRouteServiceImpl::new(1, get_mock_global_ctx());
+        let removed_peer_id = 2;
+        let hub_peer_id = 3;
+        let removed_session = service_impl.get_or_create_session(removed_peer_id);
+        let remaining_session = service_impl.get_or_create_session(hub_peer_id);
+        let removed_generation = removed_session.my_session_id.load(Ordering::Relaxed);
+        let old_generation = remaining_session.my_session_id.load(Ordering::Relaxed);
+
+        let remote_session = SyncRouteSession::new(hub_peer_id, service_impl.my_peer_id);
+        {
+            let _lock = remote_session.lock.lock();
+            remote_session.update_dst_session_id(old_generation);
+        }
+        let mut stale_info = RoutePeerInfo::new();
+        stale_info.peer_id = removed_peer_id;
+        stale_info.version = 6;
+        remote_session.update_dst_saved_peer_info_version(&[stale_info], service_impl.my_peer_id);
+        remote_session
+            .last_sync_succ_timestamp
+            .store(Some(SystemTime::now()));
+
+        service_impl.restart_remaining_sync_generations_after_peer_removal(&[removed_peer_id]);
+
+        let new_generation = remaining_session.my_session_id.load(Ordering::Relaxed);
+        assert_ne!(new_generation, old_generation);
+        assert_eq!(
+            removed_session.my_session_id.load(Ordering::Relaxed),
+            removed_generation
+        );
+        assert!(
+            remaining_session
+                .need_sync_initiator_info
+                .load(Ordering::Acquire)
+        );
+
+        {
+            let _lock = remote_session.lock.lock();
+            remote_session.update_dst_session_id(new_generation);
+        }
+        assert!(remote_session.dst_saved_peer_info_versions.is_empty());
+        assert_eq!(remote_session.last_sync_succ_timestamp.load(), None);
     }
 
     struct AuthOnlyInterface {

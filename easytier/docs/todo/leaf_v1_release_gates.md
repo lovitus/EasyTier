@@ -5,8 +5,8 @@
 
 ## Candidate state
 
-- Exact validated artifact baseline: `949d29e2a5f13c421c40e7e15c72da4497877e84`; Linux and Android workflows, hashes/signature, native Android lifecycle, captured-UID policy TLS semantics, and local HEV startup passed.
-- Pending working snapshot: built-in HEV userspace mesh TCP ingress, explicit UDP built-in endpoint remapping, unified relay lifecycle ownership, focused parity tests, and the corrected validation/process record. Assign and record its exact SHA locally after the single candidate commit; do not create a second documentation-only workflow commit.
+- Exact validated artifact baseline: `00b62e65b9b52bdd2546c0d436e8ffc8acea6d2c`; unique Linux/Android workflows, hashes/signature, built-in HEV TCP/UDP in both directions, captured-UID policy TLS semantics, and semantic Android stop/start passed. It is not releasable because HEV TCP throughput remained about 5-6% of DIRECT and a three-peer Wi-Fi outage exposed stale OSPF peer-info recovery.
+- Local batched successor: policy-only reuse of the existing KCP endpoint without enabling user SOCKS/KCP behavior, bounded smoltcp fallback, and OSPF session-generation restart after peer-info removal. The mandatory `.160` gate passed; no candidate SHA or artifact claim exists until this snapshot is frozen.
 - Historical `afceaab282b92c61c8c8b1e216358fe810d82395` workflows were intentionally cancelled to stop excessive candidate pushes and provide no artifact evidence.
 - `61c6f313` passed Linux lifecycle and Android HEV traffic validation, but Android cycle 10 exposed a WebView-owned VPN-stop race that left the TUN alive.
 - `e8f7e74549f83791ed43a6f692ff7a034bab070d` proved the direct native stop path was reached, but used the wrong native plugin command name and is rejected.
@@ -18,6 +18,8 @@
 - [ ] Native success does not schedule a redundant second stop through the frontend.
 - [ ] Native failure preserves the existing frontend fallback and reports the native failure.
 - [ ] Stop/start, process death, Wi-Fi loss/recovery, and repeated cycles return TUN, HEV, Leaf, FD, thread, and task ownership to baseline.
+- [ ] Built-in HEV TCP approaches the proven existing KCP path without changing explicit user SOCKS/KCP configuration, and KCP-disabled destinations fail over to mesh smoltcp without kernel/direct escape.
+- [ ] A third peer relearns an Android peer through the hub after Wi-Fi loss/recovery without waiting for a new direct peer connection.
 - [x] HEV hosting and shutdown boundaries are audited for Windows, macOS, Linux, Android, iOS, and constrained targets; v1 claims only evidence actually obtained.
 - [ ] The v1 capability boundary is frozen: unsupported advanced transports or rule/DNS fields are rejected, hidden, or explicitly experimental.
 - [ ] Default configuration remains simple: DIRECT and mesh work without HEV-specific tuning; optional chain/fallback examples do not silently imply UoT or KCP.
@@ -25,9 +27,9 @@
 ## One-push preflight
 
 - [x] Format changed Rust files locally with Rust 1.95 and edition 2024.
-- [x] Run remote minimal `cargo test --no-run` or `cargo check` for the smallest affected target after confirming no cargo/rustc process is active.
-- [x] Run the exact focused test binary separately.
-- [x] Inspect `Cargo.lock`, platform `cfg` boundaries, workflow commit pins, generated bindings, and the complete candidate diff.
+- [x] Run remote minimal `cargo test --locked --no-run` for the complete KCP/policy/OSPF batch after confirming no cargo/rustc process is active.
+- [x] Run KCP endpoint isolation 1/1, OSPF generation/cache invalidation 1/1, and mesh relay 8/8 directly from the built test binary.
+- [x] Inspect `Cargo.lock`, platform `cfg` boundaries, workflow pins, generated bindings, and the complete candidate diff; no sensitive/generated file changed and `git diff --check` passed.
 - [ ] Record the new exact candidate SHA in the local journal immediately after the single commit.
 - [ ] Commit and push one complete candidate snapshot to `codex/profiling-beta`.
 - [ ] Run one Linux and one Android workflow pair for that exact snapshot.

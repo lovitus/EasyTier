@@ -299,6 +299,19 @@ pub fn configured_for(config: &dyn ConfigLoader) -> anyhow::Result<Option<Policy
     resolve_instance_config(config).map(Some)
 }
 
+/// Returns whether this instance requested policy mode without resolving
+/// platform-specific worker paths or loading the policy document.
+///
+/// Runtime components that only need to reserve a shared capability (such as
+/// the policy-only KCP endpoint) use this check; full validation remains owned
+/// by `configured_for` at policy startup.
+pub fn is_configured_for(config: &dyn ConfigLoader) -> bool {
+    POLICY_CONFIG.get().is_some()
+        || config
+            .get_policy_proxy_config()
+            .is_some_and(|policy| policy.enabled)
+}
+
 fn resolve_instance_config(config: PolicyProxyConfig) -> anyhow::Result<PolicyProcessConfig> {
     config.validate_envelope()?;
     let source_file = config.resolved_config_file();
