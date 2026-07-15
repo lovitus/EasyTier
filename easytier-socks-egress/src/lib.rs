@@ -109,6 +109,12 @@ impl ProcessRuntime {
         let mut failures = Vec::new();
 
         for port in &config.server.port_candidates {
+            if let Err(error) =
+                ensure_candidate_listener_available(config.server.listen_address, *port)
+            {
+                failures.push(format!("{port}: {error:#}"));
+                continue;
+            }
             let config_path = private_dir.path().join(format!("hev-{port}.yml"));
             write_private_file(
                 &config_path,
@@ -211,7 +217,8 @@ async fn start_candidate(
     listen_address: IpAddr,
     port: u16,
 ) -> anyhow::Result<(Child, SocketAddr)> {
-    let parent_pid = unsafe { libc::getpid() };
+    #[cfg(target_os = "linux")]
+    let parent_pid = unsafe { linux_getpid() };
     let mut command = tokio::process::Command::new(executable);
     command
         .arg(config_path)
@@ -257,16 +264,61 @@ async fn start_candidate(
     }
 }
 
+fn ensure_candidate_listener_available(listen_address: IpAddr, port: u16) -> anyhow::Result<()> {
+    let primary = SocketAddr::new(listen_address, port);
+    let listener = std::net::TcpListener::bind(primary)
+        .with_context(|| format!("HEV listener candidate {primary} is unavailable"))?;
+    drop(listener);
+
+    // HEV maps an unspecified IPv4 configuration to a dual-stack listener on
+    // platforms that support it. Probe the IPv6 wildcard separately, after
+    // dropping our IPv4 reservation, so a v6-only owner is also respected.
+    if listen_address == IpAddr::V4(Ipv4Addr::UNSPECIFIED) {
+        let secondary = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
+        match std::net::TcpListener::bind(secondary) {
+            Ok(listener) => drop(listener),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
+                ) => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("HEV listener candidate {secondary} is unavailable"));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
-fn configure_parent_death(parent_pid: libc::pid_t) -> std::io::Result<()> {
+unsafe extern "C" {
+    #[link_name = "getpid"]
+    fn linux_getpid() -> std::ffi::c_int;
+    #[link_name = "getppid"]
+    fn linux_getppid() -> std::ffi::c_int;
+    #[link_name = "prctl"]
+    fn linux_prctl(
+        option: std::ffi::c_int,
+        arg2: std::ffi::c_ulong,
+        arg3: std::ffi::c_ulong,
+        arg4: std::ffi::c_ulong,
+        arg5: std::ffi::c_ulong,
+    ) -> std::ffi::c_int;
+}
+
+#[cfg(target_os = "linux")]
+fn configure_parent_death(parent_pid: std::ffi::c_int) -> std::io::Result<()> {
     // sing-box cmd/sing-box/cmd_run_userns_linux.go::runInUserNamespaceIfNeeded
     // (b789a2e6) uses Pdeathsig=SIGKILL for the same externally owned child
     // invariant. HEV has no state that must outlive EasyTier, so guarantee that a
     // killed parent cannot leave a listener behind.
-    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
+    const PR_SET_PDEATHSIG: std::ffi::c_int = 1;
+    const SIGKILL: std::ffi::c_ulong = 9;
+    if unsafe { linux_prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    if unsafe { libc::getppid() } != parent_pid {
+    if unsafe { linux_getppid() } != parent_pid {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "EasyTier parent exited while starting HEV",
@@ -329,6 +381,22 @@ mod tests {
         assert!(rendered.contains("bind-interface: 'eth0'"));
         assert!(rendered.contains("mark: 9011"));
     }
+
+    #[test]
+    fn occupied_candidate_is_rejected_without_connecting_to_owner() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let error =
+            ensure_candidate_listener_available(IpAddr::V4(Ipv4Addr::LOCALHOST), port).unwrap_err();
+
+        assert!(error.to_string().contains("unavailable"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }
 
 #[cfg(all(target_os = "android", feature = "hev-inprocess"))]
@@ -341,7 +409,10 @@ mod android {
     use anyhow::{Context as _, bail};
     use tokio_util::sync::CancellationToken;
 
-    use super::{READY_INTERVAL, START_TIMEOUT, SocksEgressConfig, render_hev_config};
+    use super::{
+        READY_INTERVAL, START_TIMEOUT, SocksEgressConfig, ensure_candidate_listener_available,
+        render_hev_config,
+    };
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -360,6 +431,12 @@ mod android {
             config.validate()?;
             let mut failures = Vec::new();
             for port in &config.port_candidates {
+                if let Err(error) =
+                    ensure_candidate_listener_available(config.listen_address, *port)
+                {
+                    failures.push(format!("{port}: {error:#}"));
+                    continue;
+                }
                 match start_candidate(&config, *port).await {
                     Ok(runtime) => return Ok(runtime),
                     Err(error) => failures.push(format!("{port}: {error:#}")),
