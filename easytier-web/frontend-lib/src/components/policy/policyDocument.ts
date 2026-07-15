@@ -6,6 +6,105 @@ export type PolicyProxyVia = 'mesh' | 'native'
 export type PolicyGroupKind = 'chain' | 'fallback'
 export const DEFAULT_POLICY_PROXY_DNS = 'doh:cloudflare-dns.com@1.1.1.1'
 
+// Reference semantics:
+// - Mihomo rules/parser.go::ParseRule, rules/common/geosite.go::GEOSITE.Match,
+//   and rules/common/geoip.go::GEOIP.Match keep ordered, first-match GeoX rules.
+// - Mihomo adapter/outboundgroup/parser.go::ParseProxyGroup and
+//   adapter/outboundgroup/fallback.go::NewFallback define ordered fallback groups;
+//   current Mihomo explicitly rejects the removed relay group.
+// EasyTier intentionally exposes only its validated v1 actors here. Its `chain` is
+// Leaf's sequential actor chain, not Mihomo's removed relay group, and provider,
+// select, and url-test fields remain unsupported rather than looking effective.
+export const DEFAULT_POLICY_TEMPLATE = `# EasyTier Leaf policy v1
+# Every preset group contains only DIRECT, so this file works before any node is configured.
+# Add a proxy name before DIRECT in a fallback group to prefer it. Remove DIRECT when
+# proxy failure must be fail-closed instead of falling back to the native connection.
+version: 1
+dns:
+  proxy:
+    - doh:cloudflare-dns.com@1.1.1.1
+
+# Mesh SOCKS example: select an EasyTier peer by virtual IP or instance ID.
+# proxies:
+#   mesh-exit:
+#     type: socks5
+#     server:
+#       virtual-ip: 10.144.144.2
+#       # instance-id: 00000000-0000-0000-0000-000000000000
+#     via: mesh
+#     udp: true
+#
+#   native-socks:
+#     type: socks5
+#     server: 127.0.0.1
+#     port: 7890
+#     via: native
+#     udp: true
+#     # username: user
+#     # password: password
+
+groups:
+  default-exit:
+    type: fallback
+    members: [DIRECT]
+  google-exit:
+    type: fallback
+    members: [DIRECT]
+  social-exit:
+    type: fallback
+    members: [DIRECT]
+  telegram-exit:
+    type: fallback
+    members: [DIRECT]
+  media-exit:
+    type: fallback
+    members: [DIRECT]
+  github-exit:
+    type: fallback
+    members: [DIRECT]
+  domestic-exit:
+    type: fallback
+    members: [DIRECT]
+  other-exit:
+    type: fallback
+    members: [DIRECT]
+
+  # Chain sends traffic through every member in order. Uncomment only after both
+  # proxy actors above exist, then use chained-exit as a rule target.
+  # chained-exit:
+  #   type: chain
+  #   members: [mesh-exit, native-socks]
+
+  # Fallback prefers the first working member. This example keeps DIRECT as the
+  # final bypass; remove it when a failed proxy must block traffic.
+  # preferred-exit:
+  #   type: fallback
+  #   members: [mesh-exit, native-socks, DIRECT]
+
+# Bundled GeoSite and GeoIP snapshots are selected automatically; no local paths
+# are required. Rules are first-match. The preset groups currently resolve to
+# DIRECT, so choosing an exit only requires editing the corresponding members.
+rules:
+  - GEOIP,LAN,DIRECT,no-resolve
+  - GEOSITE,github,github-exit
+  - GEOSITE,twitter,social-exit
+  - GEOSITE,youtube,google-exit
+  - GEOSITE,google,google-exit
+  - GEOSITE,telegram,telegram-exit
+  - GEOSITE,netflix,media-exit
+  - GEOSITE,bilibili,media-exit
+  - GEOSITE,bahamut,media-exit
+  - GEOSITE,spotify,media-exit
+  - GEOSITE,CN,domestic-exit
+  - GEOSITE,geolocation-!cn,other-exit
+  - GEOIP,google,google-exit
+  - GEOIP,netflix,media-exit
+  - GEOIP,telegram,telegram-exit
+  - GEOIP,twitter,social-exit
+  - GEOIP,CN,domestic-exit
+  - MATCH,default-exit
+`
+
 export interface PolicyDnsSettings {
   direct: string[]
   proxy: string[]
@@ -27,7 +126,7 @@ export interface PolicyProxyRow {
   address: string
   instanceId: string
   virtualIp: string
-  port: number
+  port: number | null
   udp: boolean
   username: string
   password: string
@@ -130,8 +229,36 @@ export function emptyPolicyDocument(): PolicyEditorDocument {
     dns: { direct: [], proxy: [DEFAULT_POLICY_PROXY_DNS] },
     ruleSets: [],
     proxies: [],
-    groups: [],
-    rules: [{ type: 'MATCH', operand: '', target: 'DIRECT', noResolve: false }],
+    groups: [
+      { name: 'default-exit', type: 'fallback', members: ['DIRECT'] },
+      { name: 'google-exit', type: 'fallback', members: ['DIRECT'] },
+      { name: 'social-exit', type: 'fallback', members: ['DIRECT'] },
+      { name: 'telegram-exit', type: 'fallback', members: ['DIRECT'] },
+      { name: 'media-exit', type: 'fallback', members: ['DIRECT'] },
+      { name: 'github-exit', type: 'fallback', members: ['DIRECT'] },
+      { name: 'domestic-exit', type: 'fallback', members: ['DIRECT'] },
+      { name: 'other-exit', type: 'fallback', members: ['DIRECT'] },
+    ],
+    rules: [
+      { type: 'GEOIP', operand: 'LAN', target: 'DIRECT', noResolve: true },
+      { type: 'GEOSITE', operand: 'github', target: 'github-exit', noResolve: false },
+      { type: 'GEOSITE', operand: 'twitter', target: 'social-exit', noResolve: false },
+      { type: 'GEOSITE', operand: 'youtube', target: 'google-exit', noResolve: false },
+      { type: 'GEOSITE', operand: 'google', target: 'google-exit', noResolve: false },
+      { type: 'GEOSITE', operand: 'telegram', target: 'telegram-exit', noResolve: false },
+      { type: 'GEOSITE', operand: 'netflix', target: 'media-exit', noResolve: false },
+      { type: 'GEOSITE', operand: 'bilibili', target: 'media-exit', noResolve: false },
+      { type: 'GEOSITE', operand: 'bahamut', target: 'media-exit', noResolve: false },
+      { type: 'GEOSITE', operand: 'spotify', target: 'media-exit', noResolve: false },
+      { type: 'GEOSITE', operand: 'CN', target: 'domestic-exit', noResolve: false },
+      { type: 'GEOSITE', operand: 'geolocation-!cn', target: 'other-exit', noResolve: false },
+      { type: 'GEOIP', operand: 'google', target: 'google-exit', noResolve: false },
+      { type: 'GEOIP', operand: 'netflix', target: 'media-exit', noResolve: false },
+      { type: 'GEOIP', operand: 'telegram', target: 'telegram-exit', noResolve: false },
+      { type: 'GEOIP', operand: 'twitter', target: 'social-exit', noResolve: false },
+      { type: 'GEOIP', operand: 'CN', target: 'domestic-exit', noResolve: false },
+      { type: 'MATCH', operand: '', target: 'default-exit', noResolve: false },
+    ],
   }
 }
 
@@ -180,7 +307,9 @@ export function parsePolicyDocument(source: string): PolicyEditorDocument {
       address: typeof server === 'string' ? server : '',
       instanceId: optionalString(selector['instance-id'], `proxies.${name}.server.instance-id`),
       virtualIp: optionalString(selector['virtual-ip'], `proxies.${name}.server.virtual-ip`),
-      port: requiredPort(value.port, `proxies.${name}.port`),
+      port: via === 'mesh' && value.port == null
+        ? null
+        : requiredPort(value.port, `proxies.${name}.port`),
       udp: optionalBoolean(value.udp, `proxies.${name}.udp`),
       username: optionalString(value.username, `proxies.${name}.username`),
       password: optionalString(value.password, `proxies.${name}.password`),
@@ -253,7 +382,7 @@ export function serializePolicyDocument(document: PolicyEditorDocument): string 
     proxies[name] = compact({
       type: row.type,
       server,
-      port: row.port,
+      port: row.port ?? undefined,
       via: row.via,
       udp: row.udp || undefined,
       username: row.username,

@@ -1614,3 +1614,26 @@ policy schema 兼容变更：
 - 尚未更新 Cargo.lock、编译或运行测试。
 - 下一步应先在远程 builder 做最小 GNU debug no-run，集中修复机械编译错误；随后再推 profiling beta，避免用一次完整 workflow发现普通类型错误。
 - Android NDK Makefile能否在 clang/API 24下无补丁生成三个静态库仍属待证据项；失败时优先修复独立构建包装，不修改 HEV 协议状态机。
+
+## 37. 首轮构建证据与机械修复
+
+### 37.1 run 证据
+
+- 旧短 SHA run：
+  - Linux 29412925636 仅因 git fetch 无法解析短 commit 97e74f1 失败。
+  - Android 29412925632 在新 push 后按 concurrency 规则取消。
+- 完整 SHA快照 6852763e：
+  - Linux 29413035603：HEV x86_64-musl sidecar构建成功，并通过 statically linked 检查；随后 easytier-policy test no-run 在 leaf_config.rs 的测试断言发现 Option<u16> 机械类型错误。
+  - Android 29413035683：HEV server、yaml、hev-task-system 使用 NDK aarch64 API 24 clang 的三个静态库全部构建成功；既有前端 persisted-selection 测试通过，随后进入 debug APK Rust构建。
+- 上述证据证明桌面 sidecar 与 Android静态库两种构建包装均可行；尚未证明最终 Rust链接和运行时行为。
+
+### 37.2 修复
+
+- 将 resolver 测试断言从 port == 1080 改为 port == Some(1080)，与新 trait签名一致。
+- 前端 PolicyProxyRow.port 改为 number | null：
+  - via: mesh 缺省 port解析为 null，序列化时省略。
+  - native仍走 requiredPort，继续要求显式非零端口。
+  - 新增 mesh actor默认 port为空，UI显示 auto占位。
+  - 默认模板的内置 mesh示例不再填写 1080；用户自建 native SOCKS示例仍保留 7890。
+  - 新增缺省 mesh port与显式旧 port同时往返的 codec测试。
+- 该前端修改同时包含此前已完成但未提交的 GeoX默认组、规则、chain/fallback注释模板，现与免端口 HEV语义一并进入验证快照。

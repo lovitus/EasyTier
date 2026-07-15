@@ -1,11 +1,43 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DEFAULT_POLICY_TEMPLATE,
   emptyPolicyDocument,
   parsePolicyDocument,
   serializePolicyDocument,
 } from '../src/components/policy/policyDocument'
 
 describe('policy visual document codec', () => {
+  it('provides Mihomo-informed GeoX presets with safe DIRECT-only groups and actor examples', () => {
+    const document = emptyPolicyDocument()
+    const template = parsePolicyDocument(DEFAULT_POLICY_TEMPLATE)
+
+    expect(template).toEqual(document)
+    expect(document.groups.map(group => group.name)).toEqual([
+      'default-exit',
+      'google-exit',
+      'social-exit',
+      'telegram-exit',
+      'media-exit',
+      'github-exit',
+      'domestic-exit',
+      'other-exit',
+    ])
+    expect(document.groups.every(group =>
+      group.type === 'fallback' && group.members.join(',') === 'DIRECT')).toBe(true)
+    expect(document.rules.map(rule => `${rule.type},${rule.operand},${rule.target}`)).toEqual(expect.arrayContaining([
+      'GEOSITE,github,github-exit',
+      'GEOSITE,geolocation-!cn,other-exit',
+      'GEOIP,google,google-exit',
+      'GEOIP,CN,domestic-exit',
+      'MATCH,,default-exit',
+    ]))
+    expect(DEFAULT_POLICY_TEMPLATE).toContain('virtual-ip: 10.144.144.2')
+    expect(DEFAULT_POLICY_TEMPLATE).toContain('server: 127.0.0.1')
+    expect(DEFAULT_POLICY_TEMPLATE).toContain('port: 7890')
+    expect(DEFAULT_POLICY_TEMPLATE).toContain('type: chain')
+    expect(DEFAULT_POLICY_TEMPLATE).toContain('members: [mesh-exit, native-socks, DIRECT]')
+  })
+
   it('round-trips mesh/native nodes, ordered groups, geo data and ordered rules', () => {
     const source = `
 version: 1
@@ -121,6 +153,30 @@ rules: ["MATCH,DIRECT"]
     expect(serialized).not.toContain('username:')
     expect(serialized).not.toContain('password:')
     expect(serialized).not.toContain('udp:')
+  })
+
+  it('omits the built-in mesh egress port while preserving explicit ports', () => {
+    const document = parsePolicyDocument(`
+version: 1
+proxies:
+  automatic:
+    type: socks5
+    server: { virtual-ip: 10.44.0.8 }
+    via: mesh
+    udp: true
+  explicit:
+    type: socks5
+    server: { virtual-ip: 10.44.0.9 }
+    port: 1080
+    via: mesh
+rules: ["MATCH,automatic"]
+`)
+
+    expect(document.proxies[0].port).toBeNull()
+    expect(document.proxies[1].port).toBe(1080)
+    const serialized = serializePolicyDocument(document)
+    expect(serialized.match(/^    port:/gm)).toHaveLength(1)
+    expect(serialized).toContain('port: 1080')
   })
 
   it('preserves advanced root fields instead of silently discarding them', () => {

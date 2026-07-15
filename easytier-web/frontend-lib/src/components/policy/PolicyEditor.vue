@@ -18,6 +18,7 @@ import { useI18n } from 'vue-i18n'
 import type * as Api from '../../modules/api'
 import type { NetworkConfig } from '../../types/network'
 import {
+  DEFAULT_POLICY_TEMPLATE,
   emptyPolicyDocument,
   parsePolicyDocument,
   serializePolicyDocument,
@@ -111,7 +112,7 @@ const sourceMode = computed({
 
 function ensureInlineDocument() {
   if (!config.value.policy_config_inline?.trim()) {
-    config.value.policy_config_inline = serializePolicyDocument(emptyPolicyDocument())
+    config.value.policy_config_inline = DEFAULT_POLICY_TEMPLATE
   }
 }
 
@@ -190,7 +191,7 @@ function addProxy() {
     address: '',
     instanceId: '',
     virtualIp: '',
-    port: 1080,
+    port: null,
     udp: false,
     username: '',
     password: '',
@@ -433,7 +434,14 @@ onMounted(() => {
                 </Column>
                 <Column field="port" :header="t('policy.editor.port')">
                   <template #body="{ data }">
-                    <InputNumber v-model="data.port" :min="1" :max="65535" :use-grouping="false" class="w-28" />
+                    <InputNumber
+                      v-model="data.port"
+                      :min="1"
+                      :max="65535"
+                      :use-grouping="false"
+                      :placeholder="data.via === 'mesh' ? 'auto' : undefined"
+                      class="w-28"
+                    />
                   </template>
                 </Column>
                 <Column v-if="showAdvancedPolicyFeatures" field="udp" header="UDP">

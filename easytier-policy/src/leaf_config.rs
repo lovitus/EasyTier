@@ -633,7 +633,7 @@ mod tests {
             port: Option<u16>,
         ) -> Option<ResolvedMeshServer> {
             assert_eq!(proxy_name, "mesh");
-            assert_eq!(port, 1080);
+            assert_eq!(port, Some(1080));
             Some(ResolvedMeshServer {
                 endpoint: "127.0.0.1:32100".parse().unwrap(),
                 username: "easytier".to_owned(),
