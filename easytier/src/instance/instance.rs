@@ -621,6 +621,7 @@ impl InstanceConfigPatcher {
 
 #[cfg(feature = "leaf-policy-proxy")]
 struct SocksEgressGuard {
+    endpoint: std::net::SocketAddr,
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -692,8 +693,8 @@ pub struct Instance {
     #[cfg(feature = "socks5")]
     socks5_server: Arc<Socks5Server>,
 
-    #[cfg(all(feature = "leaf-policy-proxy", unix))]
-    policy_udp_relay: Option<Arc<crate::policy_proxy::MeshUdpRelayService>>,
+    #[cfg(feature = "leaf-policy-proxy")]
+    policy_socks_relay: Option<Arc<crate::policy_proxy::MeshSocksRelayService>>,
 
     #[cfg(feature = "leaf-policy-proxy")]
     socks_egress: Option<SocksEgressGuard>,
@@ -787,8 +788,8 @@ impl Instance {
             #[cfg(feature = "socks5")]
             socks5_server,
 
-            #[cfg(all(feature = "leaf-policy-proxy", unix))]
-            policy_udp_relay: None,
+            #[cfg(feature = "leaf-policy-proxy")]
+            policy_socks_relay: None,
 
             #[cfg(feature = "leaf-policy-proxy")]
             socks_egress: None,
@@ -1239,14 +1240,21 @@ impl Instance {
         #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
         self.start_android_socks_egress().await;
 
-        #[cfg(all(feature = "leaf-policy-proxy", unix))]
+        #[cfg(feature = "leaf-policy-proxy")]
         {
-            let relay = crate::policy_proxy::MeshUdpRelayService::new(
+            let local_endpoint = self.socks_egress.as_ref().map(|guard| guard.endpoint);
+            let relay = crate::policy_proxy::MeshSocksRelayService::new(
                 &self.peer_manager,
                 self.socks5_server.clone(),
+                local_endpoint,
             );
             relay.register();
-            self.policy_udp_relay = Some(relay);
+            if local_endpoint.is_some()
+                && let Err(error) = relay.start_local_tcp_ingress().await
+            {
+                tracing::warn!(?error, "built-in HEV mesh TCP ingress is unavailable");
+            }
+            self.policy_socks_relay = Some(relay);
         }
 
         Ok(())
@@ -1279,6 +1287,7 @@ impl Instance {
                     }
                 });
                 self.socks_egress = Some(SocksEgressGuard {
+                    endpoint,
                     cancel,
                     task: Some(task),
                 });
@@ -1312,6 +1321,7 @@ impl Instance {
                     }
                 });
                 self.socks_egress = Some(SocksEgressGuard {
+                    endpoint,
                     cancel,
                     task: Some(task),
                 });
@@ -1839,6 +1849,10 @@ impl Instance {
             }
         }
         #[cfg(feature = "leaf-policy-proxy")]
+        if let Some(relay) = self.policy_socks_relay.take() {
+            relay.shutdown().await;
+        }
+        #[cfg(feature = "leaf-policy-proxy")]
         if let Some(socks_egress) = self.socks_egress.take() {
             socks_egress.shutdown().await;
         }
@@ -1899,6 +1913,7 @@ mod tests {
             let _ = finished.send(());
         });
         let guard = super::SocksEgressGuard {
+            endpoint: "127.0.0.1:11080".parse().unwrap(),
             cancel,
             task: Some(task),
         };

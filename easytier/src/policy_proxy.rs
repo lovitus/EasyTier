@@ -34,11 +34,12 @@ pub(crate) enum PolicyUnderlayTransition {
 #[cfg(all(target_os = "macos", not(feature = "macos-ne")))]
 pub(crate) use macos_routing::PolicyRoutingGuard;
 pub(crate) use mesh_socks_bridge::{MeshProxyBridgeSet, MeshProxyTarget};
-pub(crate) use mesh_udp_relay::{MeshUdpRelayService, RemoteUdpAssociation};
+pub(crate) use mesh_udp_relay::{MeshSocksRelayService, RemoteUdpAssociation};
 #[cfg(target_os = "linux")]
 pub(crate) use policy_routing::PolicyRoutingGuard;
 
 pub(crate) const POLICY_SOCKET_MARK: u32 = 0x4554_5001;
+pub(crate) const BUILT_IN_MESH_SOCKS_PORT: u16 = easytier_socks_egress::DEFAULT_PORT_CANDIDATES[0];
 const POLICY_UDP_SOCKET_BUFFER_SIZE: usize = 4 * 1_024 * 1_024;
 
 #[derive(Clone, PartialEq, Eq)]

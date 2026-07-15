@@ -1,7 +1,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
-        Arc, Weak,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -12,6 +12,8 @@ use dashmap::DashMap;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader, ReadHalf, WriteHalf},
     net::{TcpListener, TcpSocket, TcpStream, UdpSocket},
+    sync::Semaphore,
+    task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -19,7 +21,10 @@ use crate::{
     common::PeerId,
     gateway::socks5::{DataPlaneTcpListener, DataPlaneTcpStream, DataPlaneUdpSocket, Socks5Server},
     peers::peer_manager::PeerManager,
-    policy_proxy::{PolicyProxyCredentials, negotiate_policy_proxy_auth, tune_policy_udp_socket},
+    policy_proxy::{
+        BUILT_IN_MESH_SOCKS_PORT, PolicyProxyCredentials, negotiate_policy_proxy_auth,
+        tune_policy_udp_socket,
+    },
     proto::{
         peer_rpc::{
             ClosePolicyUdpRelayRequest, ClosePolicyUdpRelayResponse, OpenPolicyUdpRelayRequest,
@@ -48,6 +53,7 @@ const UOT_CONNECT: u8 = 1;
 const UOT_IPV4: u8 = 1;
 const UOT_IPV6: u8 = 4;
 const UOT_STREAM_BUFFER_SIZE: usize = 16 * 1_024;
+const TCP_RELAY_LIMIT: usize = 1_024;
 
 pub(crate) type AssociationToken = [u8; TOKEN_LEN];
 
@@ -86,20 +92,30 @@ impl Drop for AssociationReservation {
     }
 }
 
-pub(crate) struct MeshUdpRelayService {
+pub(crate) struct MeshSocksRelayService {
     peer_mgr: Weak<PeerManager>,
     data_plane: Arc<Socks5Server>,
+    local_socks_endpoint: Option<SocketAddr>,
     associations: Arc<DashMap<AssociationToken, AssociationOwner>>,
     capacity_lock: tokio::sync::Mutex<()>,
+    cancel: CancellationToken,
+    tcp_ingress_task: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl MeshUdpRelayService {
-    pub(crate) fn new(peer_mgr: &Arc<PeerManager>, data_plane: Arc<Socks5Server>) -> Arc<Self> {
+impl MeshSocksRelayService {
+    pub(crate) fn new(
+        peer_mgr: &Arc<PeerManager>,
+        data_plane: Arc<Socks5Server>,
+        local_socks_endpoint: Option<SocketAddr>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             peer_mgr: Arc::downgrade(peer_mgr),
             data_plane,
+            local_socks_endpoint,
             associations: Arc::new(DashMap::new()),
             capacity_lock: tokio::sync::Mutex::new(()),
+            cancel: CancellationToken::new(),
+            tcp_ingress_task: Mutex::new(None),
         })
     }
 
@@ -115,6 +131,91 @@ impl MeshUdpRelayService {
                 PolicyUdpRelayRpcServer::new_arc(self.clone()),
                 &peer_mgr.get_global_ctx().get_network_name(),
             );
+    }
+
+    /// Mihomo's embedded Tailscale runtime exposes its mesh SOCKS listener on
+    /// the userspace tailnet (`runtime.retryStartSocks5TCP` in
+    /// component/tsnet/tsnet.go), rather than relying on a host kernel listener
+    /// bound to the virtual address. Do the same here: smoltcp owns the mesh
+    /// endpoint and this narrow relay owns only the hop to the independent HEV
+    /// runtime. This is required on Android VpnService, whose virtual address is
+    /// not a normal kernel-local listener address.
+    pub(crate) async fn start_local_tcp_ingress(&self) -> anyhow::Result<()> {
+        let local_endpoint = self
+            .local_socks_endpoint
+            .context("built-in HEV has no registered local endpoint")?;
+        let mut listener = self
+            .data_plane
+            .data_plane_tcp_bind(BUILT_IN_MESH_SOCKS_PORT, SETUP_TIMEOUT)
+            .await
+            .context("failed to bind built-in HEV mesh TCP ingress")?;
+        let mut task_slot = self.tcp_ingress_task.lock().unwrap();
+        if task_slot.is_some() {
+            bail!("built-in HEV mesh TCP ingress is already running");
+        }
+        let cancel = self.cancel.child_token();
+        *task_slot = Some(tokio::spawn(async move {
+            let permits = Arc::new(Semaphore::new(TCP_RELAY_LIMIT));
+            let mut sessions = JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    accepted = listener.accept() => {
+                        let Ok((mut mesh_stream, source)) = accepted else {
+                            break;
+                        };
+                        let Ok(permit) = permits.clone().try_acquire_owned() else {
+                            tracing::warn!(%source, "built-in HEV mesh TCP relay is at capacity");
+                            continue;
+                        };
+                        let session_cancel = cancel.child_token();
+                        sessions.spawn(async move {
+                            let _permit = permit;
+                            let mut local = tokio::time::timeout(
+                                SETUP_TIMEOUT,
+                                TcpStream::connect(local_endpoint),
+                            )
+                            .await
+                            .context("local HEV TCP connect timed out")??;
+                            local.set_nodelay(true)?;
+                            tokio::select! {
+                                _ = session_cancel.cancelled() => Ok::<(), anyhow::Error>(()),
+                                result = tokio::io::copy_bidirectional(&mut mesh_stream, &mut local) => {
+                                    result?;
+                                    Ok(())
+                                }
+                            }
+                        });
+                    }
+                    Some(result) = sessions.join_next(), if !sessions.is_empty() => {
+                        match result {
+                            Ok(Err(error)) => tracing::debug!(?error, "built-in HEV mesh TCP relay session ended"),
+                            Err(error) => tracing::debug!(?error, "built-in HEV mesh TCP relay task failed"),
+                            Ok(Ok(())) => {}
+                        }
+                    }
+                }
+            }
+            sessions.abort_all();
+            while sessions.join_next().await.is_some() {}
+        }));
+        Ok(())
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.cancel.cancel();
+        for association in self.associations.iter() {
+            association.value().cancel.cancel();
+        }
+        let task = self.tcp_ingress_task.lock().unwrap().take();
+        if let Some(mut task) = task
+            && tokio::time::timeout(Duration::from_secs(5), &mut task)
+                .await
+                .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
     }
 
     async fn open_association(
@@ -152,8 +253,13 @@ impl MeshUdpRelayService {
         let cancel = CancellationToken::new();
         let mut reservation = self.reserve_token(source_peer_id, &cancel).await?;
         let token = reservation.token;
+        let local_proxy_addr = select_local_proxy_addr(
+            proxy_addr,
+            request.built_in_proxy,
+            self.local_socks_endpoint,
+        )?;
         let (control, native_udp, upstream_relay) =
-            open_local_socks_udp(proxy_addr, credentials.as_ref()).await?;
+            open_local_socks_udp(local_proxy_addr, credentials.as_ref()).await?;
         if request.stream_version >= UOT_VERSION {
             let kernel_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
                 .await
@@ -285,8 +391,12 @@ impl MeshUdpRelayService {
     }
 }
 
-impl Drop for MeshUdpRelayService {
+impl Drop for MeshSocksRelayService {
     fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(task) = self.tcp_ingress_task.lock().unwrap().take() {
+            task.abort();
+        }
         for association in self.associations.iter() {
             association.value().cancel.cancel();
         }
@@ -294,7 +404,7 @@ impl Drop for MeshUdpRelayService {
 }
 
 #[async_trait::async_trait]
-impl PolicyUdpRelayRpc for MeshUdpRelayService {
+impl PolicyUdpRelayRpc for MeshSocksRelayService {
     type Controller = BaseController;
 
     async fn open_policy_udp_relay(
@@ -363,6 +473,7 @@ impl RemoteUdpAssociation {
         data_plane: &Socks5Server,
         dst_peer_id: PeerId,
         proxy_addr: SocketAddr,
+        built_in_proxy: bool,
         credentials: Option<&PolicyProxyCredentials>,
     ) -> anyhow::Result<Self> {
         let stream_attempt = async {
@@ -372,6 +483,7 @@ impl RemoteUdpAssociation {
                 proxy_addr,
                 None,
                 UOT_VERSION,
+                built_in_proxy,
                 credentials,
             )
             .await?;
@@ -433,6 +545,7 @@ impl RemoteUdpAssociation {
                     data_plane,
                     dst_peer_id,
                     proxy_addr,
+                    built_in_proxy,
                     credentials,
                 )
                 .await?
@@ -534,6 +647,7 @@ async fn request_remote_association(
     proxy_addr: SocketAddr,
     origin_addr: Option<SocketAddr>,
     stream_version: u32,
+    built_in_proxy: bool,
     credentials: Option<&PolicyProxyCredentials>,
 ) -> anyhow::Result<OpenPolicyUdpRelayResponse> {
     let (proxy_username, proxy_password) = credentials
@@ -558,6 +672,7 @@ async fn request_remote_association(
                 stream_version,
                 proxy_username,
                 proxy_password,
+                built_in_proxy,
             },
         ),
     )
@@ -571,6 +686,7 @@ async fn open_legacy_remote_association(
     data_plane: &Socks5Server,
     dst_peer_id: PeerId,
     proxy_addr: SocketAddr,
+    built_in_proxy: bool,
     credentials: Option<&PolicyProxyCredentials>,
 ) -> anyhow::Result<(AssociationToken, RemoteUdpTransport)> {
     let mesh_udp = data_plane
@@ -583,6 +699,7 @@ async fn open_legacy_remote_association(
         proxy_addr,
         Some(mesh_udp.local_addr()),
         0,
+        built_in_proxy,
         credentials,
     )
     .await?;
@@ -692,6 +809,24 @@ async fn open_local_socks_udp(
     let relay_addr = SocketAddr::new(proxy_addr.ip(), relay_port);
     native_udp.connect(relay_addr).await?;
     Ok((control, native_udp, relay_addr))
+}
+
+fn select_local_proxy_addr(
+    requested: SocketAddr,
+    built_in_proxy: bool,
+    local_socks_endpoint: Option<SocketAddr>,
+) -> anyhow::Result<SocketAddr> {
+    if !built_in_proxy {
+        return Ok(requested);
+    }
+    let local = local_socks_endpoint.context("built-in HEV is unavailable on destination peer")?;
+    if requested.port() != BUILT_IN_MESH_SOCKS_PORT {
+        bail!(
+            "built-in HEV mesh service does not use requested port {}",
+            requested.port()
+        );
+    }
+    Ok(local)
 }
 
 fn encode_uot_connect_request(destination: SocketAddr) -> Vec<u8> {
@@ -1228,7 +1363,7 @@ mod tests {
         let data_plane_b = Socks5Server::new(peer_b.get_global_ctx(), peer_b.clone(), None);
         data_plane_a.run(None).await.unwrap();
         data_plane_b.run(None).await.unwrap();
-        let relay_service = MeshUdpRelayService::new(&peer_b, data_plane_b);
+        let relay_service = MeshSocksRelayService::new(&peer_b, data_plane_b, None);
         relay_service.register();
         let mut peer_reservations = Vec::with_capacity(ASSOCIATION_LIMIT_PER_PEER);
         for _ in 0..ASSOCIATION_LIMIT_PER_PEER {
@@ -1335,6 +1470,7 @@ mod tests {
             &data_plane_a,
             peer_b.my_peer_id(),
             SocketAddr::new(IpAddr::V4(ip_b.address()), proxy_port),
+            false,
             None,
         )
         .await
@@ -1354,6 +1490,79 @@ mod tests {
         )
         .await;
         fake_server.await.unwrap();
+    }
+
+    #[test]
+    fn maps_only_explicitly_marked_active_built_in_proxy_to_local_endpoint() {
+        let requested: SocketAddr = "10.45.0.2:11080".parse().unwrap();
+        let local: SocketAddr = "127.0.0.1:11081".parse().unwrap();
+        assert_eq!(
+            select_local_proxy_addr(requested, true, Some(local)).unwrap(),
+            local
+        );
+        assert_eq!(
+            select_local_proxy_addr(requested, false, Some(local)).unwrap(),
+            requested
+        );
+        assert!(
+            select_local_proxy_addr("10.45.0.2:11081".parse().unwrap(), true, Some(local))
+                .unwrap_err()
+                .to_string()
+                .contains("does not use")
+        );
+        assert!(select_local_proxy_addr(requested, true, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn relays_built_in_tcp_from_mesh_data_plane_to_local_endpoint() {
+        let peer_a = create_mock_peer_manager().await;
+        let peer_b = create_mock_peer_manager().await;
+        connect_peer_manager(peer_a.clone(), peer_b.clone()).await;
+        let ip_a: cidr::Ipv4Inet = "10.179.0.1/24".parse().unwrap();
+        let ip_b: cidr::Ipv4Inet = "10.179.0.2/24".parse().unwrap();
+        peer_a.get_global_ctx().set_ipv4(Some(ip_a));
+        peer_b.get_global_ctx().set_ipv4(Some(ip_b));
+        wait_route_appear(peer_a.clone(), peer_b.clone())
+            .await
+            .unwrap();
+
+        let data_plane_a = Socks5Server::new(peer_a.get_global_ctx(), peer_a.clone(), None);
+        let data_plane_b = Socks5Server::new(peer_b.get_global_ctx(), peer_b.clone(), None);
+        data_plane_a.run(None).await.unwrap();
+        data_plane_b.run(None).await.unwrap();
+
+        let local_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let local_endpoint = local_listener.local_addr().unwrap();
+        let relay = MeshSocksRelayService::new(&peer_b, data_plane_b.clone(), Some(local_endpoint));
+        relay.start_local_tcp_ingress().await.unwrap();
+        let local_server = tokio::spawn(async move {
+            let (mut stream, _) = local_listener.accept().await.unwrap();
+            let mut request = [0u8; 4];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"ping");
+            stream.write_all(b"pong").await.unwrap();
+        });
+
+        let mesh_endpoint = SocketAddr::new(IpAddr::V4(ip_b.address()), BUILT_IN_MESH_SOCKS_PORT);
+        let mut stream = data_plane_a
+            .data_plane_tcp_connect_mesh_only(mesh_endpoint, SETUP_TIMEOUT)
+            .await
+            .unwrap();
+        stream.write_all(b"ping").await.unwrap();
+        stream.flush().await.unwrap();
+        let mut reply = [0u8; 4];
+        stream.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"pong");
+        local_server.await.unwrap();
+        drop(stream);
+
+        relay.shutdown().await;
+        assert!(
+            data_plane_a
+                .data_plane_tcp_connect_mesh_only(mesh_endpoint, Duration::from_secs(1))
+                .await
+                .is_err()
+        );
     }
 
     fn socks_reply_for_test(address: SocketAddr) -> Vec<u8> {

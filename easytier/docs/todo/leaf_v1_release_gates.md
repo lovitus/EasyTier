@@ -5,10 +5,9 @@
 
 ## Candidate state
 
-- Candidate base: `afceaab282b92c61c8c8b1e216358fe810d82395`.
-- `afceaab2` is **not** a validated release candidate: its Linux and Android workflows were intentionally cancelled to stop excessive candidate pushes.
-- Pending candidate batch: Android native command mapping, authoritative native VPN shutdown with failure-only WebView fallback, dependency-free lifecycle/command contracts, HEV platform-host audit, and release-document split. Record the exact commit SHA locally immediately after the single candidate commit; do not create a second documentation-only workflow commit.
-- Last exact Linux/Android build baseline: `61c6f313559cedce3453970e2729c6eb7035e48a`.
+- Exact validated artifact baseline: `949d29e2a5f13c421c40e7e15c72da4497877e84`; Linux and Android workflows, hashes/signature, native Android lifecycle, captured-UID policy TLS semantics, and local HEV startup passed.
+- Pending working snapshot: built-in HEV userspace mesh TCP ingress, explicit UDP built-in endpoint remapping, unified relay lifecycle ownership, focused parity tests, and the corrected validation/process record. Assign and record its exact SHA locally after the single candidate commit; do not create a second documentation-only workflow commit.
+- Historical `afceaab282b92c61c8c8b1e216358fe810d82395` workflows were intentionally cancelled to stop excessive candidate pushes and provide no artifact evidence.
 - `61c6f313` passed Linux lifecycle and Android HEV traffic validation, but Android cycle 10 exposed a WebView-owned VPN-stop race that left the TUN alive.
 - `e8f7e74549f83791ed43a6f692ff7a034bab070d` proved the direct native stop path was reached, but used the wrong native plugin command name and is rejected.
 - Local branch, working tree base, and `origin/codex/profiling-beta` were aligned to `afceaab2` before continuing. The remaining tracked local modification to `AGENTS.md` is maintainer-owned and outside the candidate.
@@ -29,7 +28,7 @@
 - [x] Run remote minimal `cargo test --no-run` or `cargo check` for the smallest affected target after confirming no cargo/rustc process is active.
 - [x] Run the exact focused test binary separately.
 - [x] Inspect `Cargo.lock`, platform `cfg` boundaries, workflow commit pins, generated bindings, and the complete candidate diff.
-- [ ] Confirm documentation evidence names the exact candidate SHA.
+- [ ] Record the new exact candidate SHA in the local journal immediately after the single commit.
 - [ ] Commit and push one complete candidate snapshot to `codex/profiling-beta`.
 - [ ] Run one Linux and one Android workflow pair for that exact snapshot.
 

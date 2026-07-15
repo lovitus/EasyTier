@@ -69,6 +69,7 @@ pub(crate) struct MeshProxyTarget {
     pub(crate) peer_id: u32,
     endpoints: [SocketAddr; 3],
     endpoint_count: u8,
+    built_in: bool,
 }
 
 impl MeshProxyTarget {
@@ -77,20 +78,26 @@ impl MeshProxyTarget {
             peer_id,
             endpoints: [endpoint; 3],
             endpoint_count: 1,
+            built_in: false,
         }
     }
 
     pub(crate) fn built_in(peer_id: u32, address: IpAddr) -> Self {
-        let ports = easytier_socks_egress::DEFAULT_PORT_CANDIDATES;
+        let endpoint = SocketAddr::new(address, crate::policy_proxy::BUILT_IN_MESH_SOCKS_PORT);
         Self {
             peer_id,
-            endpoints: ports.map(|port| SocketAddr::new(address, port)),
-            endpoint_count: ports.len() as u8,
+            endpoints: [endpoint; 3],
+            endpoint_count: 1,
+            built_in: true,
         }
     }
 
     pub(crate) fn endpoints(&self) -> &[SocketAddr] {
         &self.endpoints[..usize::from(self.endpoint_count)]
+    }
+
+    pub(crate) fn is_built_in(&self) -> bool {
+        self.built_in
     }
 }
 
@@ -416,6 +423,7 @@ async fn relay_socks5(
                     &data_plane,
                     remote.peer_id,
                     *endpoint,
+                    remote.is_built_in(),
                     credentials.as_ref(),
                 )
                 .await

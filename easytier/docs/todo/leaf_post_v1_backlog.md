@@ -5,6 +5,7 @@ These items must not silently expand the Leaf v1 release boundary. Promote an it
 ## Transports and proxy composition
 
 - Optional UoT with explicit capability negotiation and a compatible remote endpoint.
+- HEV's proprietary `FWD UDP` request uses SOCKS command `0x05` and HEV-specific UDP-in-TCP framing. Mihomo/sing UoT instead uses magic destinations and a different request/frame protocol; they are not configuration-compatible. Reusing HEV `FWD UDP` would require an explicit Leaf/EasyTier client adapter plus interoperability and fallback tests, not a hidden `uot: true` switch.
 - Optional KCP-based actors where their reliability/latency tradeoffs are justified; never present KCP as a cure for blocked UDP.
 - Full UDP loss, reordering, rebinding, idle-timeout, and association-resource soak matrices.
 - High-throughput UDP optimization and performance comparison against native mesh forwarding.

@@ -356,6 +356,9 @@ message OpenPolicyUdpRelayRequest {
   // Both fields are empty for the existing no-authentication behavior.
   string proxy_username = 5;
   string proxy_password = 6;
+  // The destination maps this exact candidate to its registered local
+  // built-in HEV endpoint. Explicit user SOCKS servers leave this false.
+  bool built_in_proxy = 7;
 }
 
 message OpenPolicyUdpRelayResponse {
