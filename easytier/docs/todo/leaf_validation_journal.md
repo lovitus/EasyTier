@@ -564,3 +564,110 @@ Tooling discovery: in zsh, assigning loop variable `path` overwrites the special
 
 - Maintainer authorization is standing rather than per-push: after a batched candidate is frozen and the `.160` preflight passes, the agent may commit and push it to `codex/profiling-beta` autonomously.
 - The efficiency constraint remains strict: GitHub Actions must not be used for one-line compiler feedback. Related implementation, tests, platform fixes, artifact intake, and validation scenarios are accumulated, checked together on `.160`, and submitted as one exact candidate SHA.
+
+## 2026-07-16 - Android FD evidence correction after candidate push
+
+- A read-only pre-install snapshot on the Android 8 validation device showed that shell can read process status but cannot enumerate the candidate application's `/proc/<pid>/fd`; the first script version therefore printed a misleading zero FD count.
+- Confirmed that the debug candidate's `run-as` identity can enumerate the same PID: 231 FDs and 58 tasks at the observed pre-install baseline, while `/proc/<pid>/status` reported 182476 KiB VmRSS and 58 threads.
+- Updated the local validation script to use `run-as` only for FD/task enumeration. This post-push tooling correction is intentionally not being pushed as a second Workflow candidate; it will accumulate with the next code batch unless the current candidate itself fails and requires a replacement.
+
+- The first captured-UID matrix run executed only its first row because `adb` inherited the TSV loop's stdin and consumed the remaining rows. The local validation script now redirects instrumentation stdin from `/dev/null`; this is validation-tool-only and remains accumulated for the next code batch.
+
+## 2026-07-16 - exact candidate `824ac5a1d47d568113a7e2190d57fecf049dd47b`
+
+Candidate and artifact binding:
+
+- Branch: `codex/profiling-beta`; commit: `824ac5a1d47d568113a7e2190d57fecf049dd47b`.
+- Linux profiling-beta run `29461390271` succeeded. Android policy candidate run `29461390297` succeeded.
+- Downloaded Linux release and Android workflow artifacts were bound to the full commit SHA. `SHA256SUMS.txt`, `BUILD_INFO.txt`, run ID, target, build ID, symbols, four Linux binaries, APK, probe, and runner hashes all matched.
+- A local `shasum` invocation initially failed because Perl could not load the host `C.UTF-8` locale. Re-running artifact verification with `LC_ALL=C LANG=C` passed; this was a local verification environment issue, not an artifact mismatch.
+
+Linux exact-artifact validation:
+
+- Hosts: `192.168.1.37` hub plus isolated namespace source, destination `192.168.1.38`; virtual addresses `10.247.0.1/10.247.0.2`; explicit listener ranges `25400..25404` and `25410..25414`.
+- Managed and DIRECT configurations passed target-side `--check-config`. Mesh ICMP passed, FakeDNS returned `198.18.0.1`, and TLS/HTTP to `example.com` passed through policy routing.
+- GitHub access timed out from both validation hosts without EasyTier, so it was classified as validation-host underlay reachability rather than a candidate regression.
+- Managed HEV TCP reached 313 Mbit/s receiver with zero retransmissions.
+- UDP/UoT at 10 Mbit/s delivered `4641/4641` datagrams with zero loss. At 20 Mbit/s for 20 seconds it lost `119/37692` datagrams (`0.32%`). Trace logging showed `dst_allow_kcp: true` and `socks5 auto connector selected kcp` for the managed endpoint and private UoT stream; an empty `easytier-cli proxy` view is not accepted as transport proof.
+- Killing the Leaf worker changed PID `30481 -> 31509`; mesh and policy traffic recovered. After recovery: core about 19 MiB, 31 FD, 9 threads; HEV 252 KiB, 12 FD, 2 threads; worker 6308 KiB, 12 FD, 4 threads.
+- Removing the DIRECT default route kept mesh ICMP working and made DIRECT policy DNS fail closed. Restoring the route restored policy traffic. Resource counts returned to the same range.
+- Startup with the managed endpoint temporarily absent produced an expected initial policy failure. The peer route arrived about one second later, system DNS recovered, and the Leaf worker recovered about 4.3 seconds after the initial error without restarting the core.
+- Normal stop removed namespace processes, TUN, policy rules `10899/10900`, and table `52000`. Final host and namespace cleanup found no EasyTier core, Leaf worker, HEV process, `tun0`, or `tun1`.
+
+Android exact-artifact validation:
+
+- Device: `192.168.234.227:5555`; package `com.kkrainbow.easytier.policycandidate`; installed with `install -r -t` while preserving the saved configuration.
+- Configuration was updated through WebView DevTools DOM events rather than screenshots or coordinate clicks: network `leaf-hev-824ac5a1`, virtual IP `10.247.0.3`, managed mesh endpoint `10.247.0.1`, `via: mesh`, `udp: true`, and no user-specified managed SOCKS port.
+- The peer view contained the exact candidate on local `10.247.0.3`, hub `10.247.0.1`, and source `10.247.0.2`. `TauriVpnService` owned the VPN and `tun0` held `10.247.0.3/24`.
+- Captured-UID probes passed for mesh owner TCP (`10.247.0.1:25401`), policy-domain TLS (`example.com:443` with SNI), and managed HEV TCP (`192.168.1.38:24500`). The validation script must redirect each `adb shell` invocation from `/dev/null`; otherwise ADB consumes the matrix loop's stdin and only the first row executes.
+- Before a Wi-Fi outage all three probes passed. Wi-Fi re-enable was scheduled before disabling Wi-Fi so wireless ADB could recover. After reconnection the same process, `TauriVpnService`, and `tun0` were present, `vpn_network_changed` reported the new Wi-Fi generation and DNS servers, and all three probes passed again.
+- Resource snapshots around Wi-Fi recovery were 220076 KiB/369 FD/68 threads before and 222932 KiB/359 FD/69 threads after. The first immediate snapshot missed the process transiently and was not accepted until VPN ownership and a later resource snapshot were confirmed.
+- A normal stop removed the VPN service and `tun0` while retaining the app configuration. Restart restored all three peers and all three probes. Stop/start resource snapshots were 224128 KiB/366 FD/69 threads before and 222572 KiB/371 FD/69 threads after.
+- Device `/system/bin/iperf3` supplied direct UDP evidence. At 10 Mbit/s for 5 seconds the local source was VPN address `10.247.0.3` and receiver loss was `0/4960`. At 20 Mbit/s for 10 seconds the source remained `10.247.0.3` and receiver loss was `0/19840`. This excludes physical-Wi-Fi bypass and validates Android HEV/Leaf UDP forwarding for this candidate. The final UDP snapshot was 237732 KiB RSS, 356 FD, 69 threads.
+- Final normal stop removed `TauriVpnService` and `tun0`. The temporary Linux hub also stopped cleanly with no remaining core, worker, HEV, `tun0`, or `tun1`.
+
+Assessment boundary:
+
+- This closes the current exact candidate's first-pass Linux and Android artifact, ownership, TCP, UDP/UoT, network-change recovery, worker recovery, fail-closed, configuration retention, and cleanup matrix.
+- It does not replace longer repeated lifecycle/resource soak testing, and it does not promote unvalidated split-DNS, chain/fallback generation changes, high-loss UDP behavior, multi-instance, netns, HTTP actor, or non-Linux/Android targets into the v1 compatibility claim.
+- Post-push script corrections (`run-as` FD counting and `adb shell </dev/null`) and this journal entry remain local until the next code-bearing candidate or an explicit documentation push; they must not trigger a workflow by themselves.
+
+## 2026-07-16: `824ac5a1` overseas chain/fallback validation
+
+Candidate and deployment:
+
+- Exact candidate: `824ac5a1d47d568113a7e2190d57fecf049dd47b` (`2.6.10-824ac5a1`).
+- The verified x86_64-musl four-binary bundle was deployed to `lv1g2` and `lv1g3`; hashes and embedded version matched the profiling-beta artifact.
+- Public overseas host names and addresses are intentionally omitted. Validation used the locally configured aliases only.
+- Policy client: `192.168.1.37`, virtual IP `10.249.0.1`.
+- `lv1g2`: virtual IP `10.249.0.2`, managed HEV plus a loopback native SOCKS service.
+- `lv1g3`: virtual IP `10.249.0.3`, managed HEV plus controlled TCP/UDP targets.
+- Every EasyTier listener used an explicit isolated port in the `25500..25524` range. Test SOCKS and target services used separate explicit ports.
+
+Validated policy topology:
+
+- `mesh-hop`: portless `via: mesh` hop to `lv1g2`.
+- `peer-local-socks`: native SOCKS at loopback on `lv1g2`.
+- `peer-chain`: ordered chain `[mesh-hop, peer-local-socks]`.
+- `mesh-direct`: portless `via: mesh` hop to `lv1g3`.
+- `overseas-fallback`: `[peer-chain, mesh-direct]`.
+- Domestic and default groups remained DIRECT.
+- Explicit UDP rules selected `mesh-direct`; GeoSite, GeoIP, custom domain and custom IP rules selected the overseas fallback.
+
+Results:
+
+- Bundled rule resources loaded: GeoIP CN `112008`, GeoSite GitHub `63`, GeoSite `geolocation-!cn` `26948` entries.
+- `GEOSITE,github`: HTTPS returned 200 and the `lv1g2` SOCKS log recorded `github.com:443`.
+- Custom domain `example.com`: HTTPS returned 200 and the `lv1g2` SOCKS log recorded the destination.
+- `GEOIP,google`: TCP to `8.8.8.8:443` passed through the primary chain and appeared in the `lv1g2` SOCKS log.
+- Custom IP TCP throughput reached approximately 20 Mbps; the controlled target observed `lv1g2` as the source.
+- Explicit UDP via `mesh-direct`: 2321/2321 datagrams, zero loss, approximately 4.9 Mbps; the controlled target observed `lv1g3` as the source.
+- After stopping the `lv1g2` SOCKS service, a new single-connection HTTP request returned 200 through `lv1g3`, proving fallback.
+- After restoring the SOCKS service, four consecutive requests appeared in its log, proving failback to the first member.
+
+Failure boundary established by validation:
+
+- Fallback is connection-scoped. It does not migrate established connections.
+- During the first transition, a multi-connection protocol can establish its control connection through one member and its data connection after the fallback state changes. The initial `iperf3` transaction demonstrated this boundary and required a whole-transaction retry.
+- This is not documented as seamless in-flight failover. Single-connection HTTP fallback and subsequent failback are the v1 guarantee.
+
+Resource snapshot before cleanup on the policy client:
+
+- EasyTier core: 20872 KiB RSS, 10 threads, 32 file descriptors.
+- Leaf worker: 17196 KiB RSS, 4 threads, 25 file descriptors.
+- HEV: 256 KiB RSS, 2 threads, 12 file descriptors.
+
+Validation tooling note:
+
+- The macOS resolver initially returned a FakeIP for an overseas alias. Using that address as a controlled target caused the first `iperf3` attempt to hang. The target address was replaced with the address reported by the overseas host itself and the policy was hot-reloaded. This was an orchestration error, not a product failure.
+
+Cleanup evidence:
+
+- All exact EasyTier, Leaf/HEV, test SOCKS, HTTP and `iperf3` processes were stopped.
+- Test TUN devices, policy rules/tables, explicit listeners and temporary firewall rules were absent after cleanup.
+- The hosts' pre-existing production SOCKS service was not modified.
+- Exact candidate binaries were retained on the overseas nodes for later validation reuse.
+
+Documentation test preflight note:
+
+- The first remote execution of `documented_leaf_policy_v1_example_parses_and_compiles` reached production validation and rejected the test-only bridge password `documented-test-secret` because bridge credentials are alphanumeric. The fixture was corrected to `documentedtestsecret`; the exact remote test then passed (`1 passed`, 1508 filtered out). Production behavior was not changed.

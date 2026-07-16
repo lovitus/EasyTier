@@ -71,7 +71,7 @@ capture_snapshot() {
     echo '===== vpn ====='
     adb_device shell dumpsys vpn
     echo '===== process ====='
-    adb_device shell "pid=\$(pidof $candidate_package); echo pid=\$pid; if [ -n \"\$pid\" ]; then cat /proc/\$pid/status; echo -n fd_count=; ls /proc/\$pid/fd 2>/dev/null | wc -l; echo -n thread_count=; ls /proc/\$pid/task 2>/dev/null | wc -l; fi"
+    adb_device shell "pid=\$(pidof $candidate_package); echo pid=\$pid; if [ -n \"\$pid\" ]; then cat /proc/\$pid/status; run-as $candidate_package sh -c \"echo -n fd_count=; ls /proc/\$pid/fd 2>/dev/null | wc -l; echo -n thread_count=; ls /proc/\$pid/task 2>/dev/null | wc -l\"; fi"
     echo '===== memory ====='
     adb_device shell dumpsys meminfo "$candidate_package"
     echo '===== recent EasyTier/VPN logs ====='
@@ -121,7 +121,7 @@ run_probe_matrix() {
     args+=("$probe_instrumentation")
 
     set +e
-    adb_device "${args[@]}" >"$output_file" 2>&1
+    adb_device "${args[@]}" </dev/null >"$output_file" 2>&1
     local status=$?
     set -e
     if [[ $status -ne 0 \

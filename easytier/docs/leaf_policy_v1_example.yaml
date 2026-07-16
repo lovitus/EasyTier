@@ -1,0 +1,97 @@
+# EasyTier Leaf policy v1: one peer-local TCP chain plus one managed mesh exit.
+# Replace the virtual IPs and the peer-local SOCKS port before deployment.
+version: 1
+
+dns:
+  proxy:
+    - doh:cloudflare-dns.com@1.1.1.1
+
+proxies:
+  mesh-hop:
+    type: socks5
+    server:
+      virtual-ip: 10.144.144.2
+    via: mesh
+    udp: true
+
+  # Used only after mesh-hop in peer-chain. Here 127.0.0.1 means the loopback
+  # address visible from the peer reached through mesh-hop.
+  peer-local-socks:
+    type: socks5
+    server: 127.0.0.1
+    port: 7890
+    via: native
+
+  mesh-direct:
+    type: socks5
+    server:
+      virtual-ip: 10.144.144.3
+    via: mesh
+    udp: true
+
+groups:
+  # TCP only for the v1 support claim. Leaf SOCKS UDP does not reuse chain transport.
+  peer-chain:
+    type: chain
+    members: [mesh-hop, peer-local-socks]
+
+  # No DIRECT member: selected overseas traffic fails closed when both paths fail.
+  overseas-fallback:
+    type: fallback
+    members: [peer-chain, mesh-direct]
+
+  default-exit:
+    type: fallback
+    members: [DIRECT]
+  google-exit:
+    type: fallback
+    members: [overseas-fallback]
+  social-exit:
+    type: fallback
+    members: [overseas-fallback]
+  telegram-exit:
+    type: fallback
+    members: [overseas-fallback]
+  media-exit:
+    type: fallback
+    members: [overseas-fallback]
+  github-exit:
+    type: fallback
+    members: [overseas-fallback]
+  domestic-exit:
+    type: fallback
+    members: [DIRECT]
+  other-exit:
+    type: fallback
+    members: [overseas-fallback]
+
+rules:
+  - GEOIP,LAN,DIRECT,no-resolve
+
+  # Custom rules are first-match. Replace these documentation-only examples.
+  - DOMAIN,direct.example.invalid,DIRECT
+  - DOMAIN-SUFFIX,proxy.example.invalid,other-exit
+  - IP-CIDR,203.0.113.0/24,DIRECT,no-resolve
+
+  - GEOSITE,CN,domestic-exit
+  - GEOIP,CN,domestic-exit,no-resolve
+
+  # Keep UDP off the TCP chain/fallback path. Put required DIRECT exceptions above it.
+  - NETWORK,udp,mesh-direct
+
+  - GEOSITE,github,github-exit
+  - GEOSITE,twitter,social-exit
+  - GEOSITE,youtube,google-exit
+  - GEOSITE,google,google-exit
+  - GEOSITE,telegram,telegram-exit
+  - GEOSITE,netflix,media-exit
+  - GEOSITE,bilibili,media-exit
+  - GEOSITE,bahamut,media-exit
+  - GEOSITE,spotify,media-exit
+  - GEOSITE,geolocation-!cn,other-exit
+
+  - GEOIP,google,google-exit
+  - GEOIP,netflix,media-exit
+  - GEOIP,telegram,telegram-exit
+  - GEOIP,twitter,social-exit
+  - MATCH,default-exit

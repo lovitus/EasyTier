@@ -585,4 +585,69 @@ mod tests {
                 .is_some_and(|cidrs| !cidrs.is_empty())
         );
     }
+
+    #[test]
+    fn documented_leaf_policy_v1_example_parses_and_compiles() {
+        // Compatibility references:
+        // - Mihomo rules/parser.go::ParseRule keeps ordered rule shapes.
+        // - Mihomo adapter/outboundgroup/fallback.go::{findAliveProxy,DialContext,
+        //   ListenPacketContext,SupportUDP} defines ordered fallback behavior.
+        // - Pinned Leaf proxy/chain/outbound/{stream,datagram}.rs and
+        //   proxy/socks/outbound/datagram.rs::Handler::handle show why v1 sends UDP
+        //   to a dedicated mesh actor instead of claiming SOCKS-over-SOCKS UDP chain.
+        let directory = tempfile::tempdir().unwrap();
+        let revision = parse_policy_source(
+            include_str!("../docs/leaf_policy_v1_example.yaml"),
+            directory.path(),
+        )
+        .unwrap();
+        let resolver = |_name: &str,
+                        _instance_id: Option<uuid::Uuid>,
+                        virtual_ip: Option<std::net::IpAddr>,
+                        port: Option<u16>| {
+            Some(easytier_policy::ResolvedMeshServer {
+                endpoint: std::net::SocketAddr::new(
+                    virtual_ip.expect("documented mesh actor has a virtual IP"),
+                    port.unwrap_or(BUILT_IN_MESH_SOCKS_PORT),
+                ),
+                username: "easytier".to_owned(),
+                password: "documentedtestsecret".to_owned(),
+            })
+        };
+
+        let compiled = easytier_policy::compile_leaf_config(
+            &revision,
+            7,
+            directory.path(),
+            &resolver,
+            &["192.0.2.53".parse().unwrap()],
+        )
+        .unwrap();
+        let compiled: serde_json::Value = serde_json::from_str(&compiled).unwrap();
+        let outbounds = compiled["outbounds"].as_array().unwrap();
+        let rules = compiled["router"]["rules"].as_array().unwrap();
+
+        assert!(outbounds.iter().any(|outbound| {
+            outbound["tag"] == "peer-chain" && outbound["protocol"] == "chain"
+        }));
+        assert!(outbounds.iter().any(|outbound| {
+            outbound["tag"] == "overseas-fallback" && outbound["protocol"] == "failover"
+        }));
+        assert!(rules.iter().any(|rule| {
+            rule["target"] == "mesh-direct"
+                && rule["network"]
+                    .as_array()
+                    .is_some_and(|networks| networks == &[serde_json::json!("udp")])
+        }));
+        assert!(rules.iter().any(|rule| {
+            rule["target"] == "other-exit"
+                && rule["external"].as_array().is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry
+                            .as_str()
+                            .is_some_and(|entry| entry.contains("geosite.dat:geolocation-!cn"))
+                    })
+                })
+        }));
+    }
 }

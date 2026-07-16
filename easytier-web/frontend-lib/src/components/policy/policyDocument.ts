@@ -69,14 +69,18 @@ groups:
     type: fallback
     members: [DIRECT]
 
-  # Chain sends traffic through every member in order. Uncomment only after both
-  # proxy actors above exist, then use chained-exit as a rule target.
+  # Chain sends TCP through every member in order. Pinned Leaf SOCKS UDP does not
+  # reuse chain transport, so route UDP explicitly to a proven mesh actor instead.
+  # Uncomment only after both proxy actors above exist.
   # chained-exit:
   #   type: chain
   #   members: [mesh-exit, native-socks]
 
-  # Fallback prefers the first working member. This example keeps DIRECT as the
-  # final bypass; remove it when a failed proxy must block traffic.
+  # Fallback prefers the first actor that can be established. It does not rescue
+  # UDP after an association succeeds but payload is lost. This example keeps
+  # DIRECT as the final bypass; remove it when a failed proxy must block traffic.
+  # Multi-connection protocols may need a whole-transaction retry during the
+  # first transition.
   # preferred-exit:
   #   type: fallback
   #   members: [mesh-exit, native-socks, DIRECT]

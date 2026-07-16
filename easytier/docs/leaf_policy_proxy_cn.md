@@ -1,0 +1,372 @@
+# EasyTier Leaf 策略路由部署与配置指南
+
+本文面向 EasyTier Leaf 策略路由 v1。当前正式验证范围是 Linux 和 Android，配置格式为 EasyTier 自己的严格子集，不是 Mihomo、Leaf 或 sing-box 完整配置兼容层。
+
+当前精确候选为 `824ac5a1d47d568113a7e2190d57fecf049dd47b`。Linux 与 Android 已验证 mesh 共存、DIRECT/REJECT、GeoSite/GeoIP、内置 HEV、TCP、UDP/UoT、Wi-Fi/路由恢复、worker 崩溃恢复、配置保留和正常清理。chain/fallback 的已验证安全边界是：TCP 可以使用 chain/fallback；UDP 使用显式 `NETWORK,udp` 规则指向已验证的 mesh actor，不依赖 SOCKS 多跳或 payload 超时后的自动回退。
+
+## 1. 组件与流量关系
+
+Linux 发布包中的四个文件应放在同一目录：
+
+| 文件 | 用途 |
+| --- | --- |
+| `easytier-core` | mesh、TUN、策略路由和生命周期所有者 |
+| `easytier-cli` | EasyTier 状态与诊断 |
+| `easytier-leaf-worker` | Linux 上的 Leaf 策略 worker |
+| `easytier-hev-socks-egress` | 内置 TCP/UDP SOCKS5 出口，由 EasyTier 管理 |
+
+Android APK 内嵌 Leaf 和 HEV，不需要用户启动 sidecar。
+
+`via: mesh` 不会把 Leaf 直接绑定到远端公开 SOCKS 端口。EasyTier 在本机创建私有 loopback bridge，经 mesh 数据面连接目标 peer 的 SOCKS 服务，并为 bridge 使用临时凭据。mesh 路由失效时该 actor fail-closed，不会逃逸到系统直连。
+
+Magic DNS 始终由 EasyTier mesh 处理；其他 DNS 和应用流量才进入 Leaf 策略路径。
+
+## 2. 最小启用方式
+
+### 2.1 Linux
+
+继续使用现有 EasyTier 网络配置，只追加：
+
+```toml
+[policy_proxy]
+enabled = true
+config_file = "leaf-policy.yaml"
+outbound_interface = "eth0"
+# 四个二进制同目录时通常无需填写：
+# leaf_executable = "easytier-leaf-worker"
+```
+
+`config_file` 相对路径以 EasyTier 网络 TOML 所在目录为基准。`outbound_interface` 必须是实际 underlay 出口，例如 `eth0`、`ens3` 或 `wlan0`，不能填策略 TUN。
+
+启动前检查：
+
+```bash
+./easytier-core --check-config --config-file ./network.toml
+```
+
+启动：
+
+```bash
+sudo ./easytier-core --config-file ./network.toml
+```
+
+也可以不修改 TOML，使用进程级参数：
+
+```bash
+sudo ./easytier-core \
+  --config-file ./network.toml \
+  --policy-config ./leaf-policy.yaml \
+  --policy-outbound-interface eth0 \
+  --policy-leaf-executable ./easytier-leaf-worker
+```
+
+不要手工启动 `easytier-hev-socks-egress`。EasyTier 负责候选端口选择、进程父子关系、重启和清理。
+
+### 2.2 Android
+
+1. 安装带 policy runtime 的 Android 包。
+2. 为网络配置固定虚拟 IPv4；v1 不使用 DHCP 作为策略 TUN 启动依据。
+3. 在策略编辑器启用策略路由，保留默认模板或粘贴本文示例。
+4. 保存并启动网络，首次启动授予 Android VPN 权限。
+
+Android 由 `TauriVpnService` 持有系统 TUN；Leaf 和 HEV 在应用内运行。停止网络应同时移除 VPN service 和 `tun0`。
+
+### 2.3 最小 policy 文件
+
+只要求 mesh 正常、国内直连、其余流量从一个 peer 出口时：
+
+```yaml
+version: 1
+dns:
+  proxy:
+    - doh:cloudflare-dns.com@1.1.1.1
+
+proxies:
+  mesh-exit:
+    type: socks5
+    server:
+      virtual-ip: 10.144.144.2
+    via: mesh
+    udp: true
+
+rules:
+  - GEOIP,LAN,DIRECT,no-resolve
+  - GEOSITE,CN,DIRECT
+  - GEOIP,CN,DIRECT,no-resolve
+  - NETWORK,udp,mesh-exit
+  - MATCH,mesh-exit
+```
+
+把 `10.144.144.2` 改成实际 EasyTier peer 虚拟 IP。省略 `port` 表示使用目标 peer 的 EasyTier 托管 HEV；用户不需要在 peer 上另外启动 SOCKS。
+
+## 3. actor 的三种用法
+
+### 3.1 托管 HEV：端口省略的 `via: mesh`
+
+```yaml
+proxies:
+  mesh-direct:
+    type: socks5
+    server:
+      virtual-ip: 10.144.144.3
+      # 也可以改用稳定 instance UUID：
+      # instance-id: 00000000-0000-0000-0000-000000000000
+    via: mesh
+    udp: true
+```
+
+这是最省事的 mesh 出口。目标 peer 使用 EasyTier 托管 HEV，支持 TCP 与 UDP。`udp: true` 是 actor 能力声明，不会让一个实际不支持 UDP 的第三方 SOCKS 自动获得 UDP 能力。
+
+### 3.2 peer 上用户自建 SOCKS：显式 mesh 端口
+
+```yaml
+proxies:
+  peer-gost:
+    type: socks5
+    server:
+      virtual-ip: 10.144.144.2
+    port: 1080
+    via: mesh
+    udp: true
+```
+
+此时 EasyTier 通过 mesh 访问 `10.144.144.2:1080`，端口由用户进程提供。用户负责认证、UDP 开关、超时和服务生命周期。如果服务只支持 TCP，应删除 `udp: true` 或改为 `udp: false`。
+
+### 3.3 native SOCKS
+
+```yaml
+proxies:
+  local-socks:
+    type: socks5
+    server: 127.0.0.1
+    port: 7890
+    via: native
+    # 只有确认服务端 UDP ASSOCIATE 可用时才打开：
+    # udp: true
+    # username: user
+    # password: password
+```
+
+native SOCKS 地址由运行 Leaf 的主机直接访问，必须显式指定端口。它可以是 gost、Mihomo、sing-box 或其他标准 SOCKS5 服务。
+
+现有 EasyTier `--socks5` portal 与托管 HEV 不是同一个功能。不要因为配置了 EasyTier TCP SOCKS portal 就假定它支持本策略路径要求的 UDP。
+
+## 4. chain 与 fallback
+
+### 4.1 mesh peer 后接 peer 本地 SOCKS
+
+```yaml
+proxies:
+  mesh-hop:
+    type: socks5
+    server:
+      virtual-ip: 10.144.144.2
+    via: mesh
+    udp: true
+
+  peer-local-socks:
+    type: socks5
+    server: 127.0.0.1
+    port: 7890
+    via: native
+
+groups:
+  peer-chain:
+    type: chain
+    members: [mesh-hop, peer-local-socks]
+```
+
+chain 按 `members` 声明顺序建立 TCP hop。上例先进入 `mesh-hop`，然后由该 hop 连接它所看到的 `127.0.0.1:7890`，最后访问目标。`peer-local-socks` 不应被规则单独选择，否则 `127.0.0.1` 指的是 Leaf 所在本机。
+
+v1 不承诺 SOCKS-over-SOCKS UDP chain。固定的 Leaf SOCKS datagram 实现不会复用 chain transport，因此多跳 UDP 即使每个 actor 都写了 `udp: true` 也可能超时。
+
+### 4.2 一个 chain 加一个 mesh direct 组成 fallback
+
+```yaml
+groups:
+  overseas-fallback:
+    type: fallback
+    members: [peer-chain, mesh-direct]
+```
+
+fallback 按顺序偏好成员，并在 actor 建立失败时做有界、稳定的被动切换。EasyTier v1 没有复刻 Mihomo 的 URL 主动健康检查。
+
+fallback 是连接级选择，不会迁移已经建立的连接。多连接协议在第一次故障切换窗口中，控制连接和随后建立的数据连接可能落在不同的 fallback 状态，因此应重试整个事务。境外实机验证中，单连接 HTTP 在主出口停止后可直接回退并返回 200；`iperf3` 的控制连接和数据连接跨越切换窗口时需要整次重试，不能把它描述为进行中多连接会话的无缝迁移。
+
+以下情况不会可靠触发下一个成员：SOCKS UDP ASSOCIATE 已成功，但随后 payload 被服务端或中间网络丢弃。此时 fallback 看不到 actor 建立错误。因此 UDP 不应依赖这个 group 自动救援。
+
+如需失败后允许本机直连，可显式加入 `DIRECT`：
+
+```yaml
+groups:
+  overseas-fallback:
+    type: fallback
+    members: [peer-chain, mesh-direct, DIRECT]
+```
+
+加入 `DIRECT` 意味着代理不可用时可能绕过代理。要求 fail-closed 时不要加入。
+
+### 4.3 推荐的 TCP/UDP 分离规则
+
+```yaml
+rules:
+  - GEOIP,LAN,DIRECT,no-resolve
+  - GEOSITE,CN,DIRECT
+  - GEOIP,CN,DIRECT,no-resolve
+  - NETWORK,udp,mesh-direct
+  - GEOSITE,geolocation-!cn,overseas-fallback
+  - MATCH,DIRECT
+```
+
+规则是 first-match。国内规则放在 `NETWORK,udp` 前面，国内 UDP 仍为 DIRECT；剩余 UDP 固定走 `mesh-direct`；境外 TCP 才进入 chain/fallback。
+
+## 5. 默认出口组
+
+GUI 默认生成以下组，初始成员都只有 `DIRECT`，所以没有节点时配置仍可运行：
+
+| 组 | 默认匹配 |
+| --- | --- |
+| `default-exit` | 最终 `MATCH` |
+| `google-exit` | Google、YouTube 及 Google GeoIP |
+| `social-exit` | Twitter 及 Twitter GeoIP |
+| `telegram-exit` | Telegram 及 Telegram GeoIP |
+| `media-exit` | Netflix、Bilibili、Bahamut、Spotify |
+| `github-exit` | GitHub |
+| `domestic-exit` | `GEOSITE,CN` 与 `GEOIP,CN` |
+| `other-exit` | `GEOSITE,geolocation-!cn` |
+
+如果只测试一个 chain 和一个 mesh direct，可以把二者组成 `overseas-fallback`，再把 `google-exit`、`social-exit`、`telegram-exit`、`media-exit`、`github-exit`、`other-exit` 的成员改成 `[overseas-fallback]`。保持 `domestic-exit` 和 `default-exit` 为 `[DIRECT]` 没有结构问题。
+
+完整可执行示例见 [`leaf_policy_v1_example.yaml`](leaf_policy_v1_example.yaml)。该文件会由核心 Rust 测试实际解析并编译为 Leaf 配置，避免文档字段漂移。
+
+## 6. 自定义域名和 IP 规则
+
+```yaml
+rules:
+  - DOMAIN,api.example.com,overseas-fallback
+  - DOMAIN-SUFFIX,example.com,overseas-fallback
+  - DOMAIN-KEYWORD,video,media-exit
+  - IP-CIDR,203.0.113.0/24,DIRECT,no-resolve
+  - PORT-RANGE,443,overseas-fallback
+  - NETWORK,udp,mesh-direct
+  - MATCH,default-exit
+```
+
+支持的 v1 规则：
+
+| 类型 | operand | 说明 |
+| --- | --- | --- |
+| `DOMAIN` | 完整域名 | 精确匹配 |
+| `DOMAIN-SUFFIX` | 域名后缀 | 子域与根域匹配 |
+| `DOMAIN-KEYWORD` | 字符串 | 域名关键字匹配 |
+| `IP-CIDR` | IPv4/IPv6 CIDR | IP 规则，可加 `no-resolve` |
+| `GEOIP` | GeoX 分类 | `LAN` 内置；其他分类从内置或显式 GeoIP DAT 加载 |
+| `GEOSITE` | GeoX 分类 | 默认自动使用内置 GeoSite 快照 |
+| `COUNTRY` | MMDB 国家代码 | 需要显式 `mmdb` rule-set |
+| `EXTERNAL` | `site:CODE`、`geoip:CODE` 或 `mmdb:CODE` | 显式外部数据源 |
+| `PORT-RANGE` | 端口或范围 | 目标端口匹配 |
+| `NETWORK` | `tcp` 或 `udp` | 传输类型匹配 |
+| `INBOUND-TAG` | tag | Leaf inbound tag |
+| `MATCH` / `FINAL` | 无 | 最终匹配 TCP 与 UDP |
+
+规则顺序不会自动重排。未知规则、未知字段、未知 actor、循环 group、空 group 和不支持 UDP 的明确规则目标都会在启动前失败，而不是静默忽略。
+
+## 7. GeoSite、GeoIP 与自定义 rule-set
+
+只写 `GEOSITE` 或非 `LAN` 的 `GEOIP` 时，EasyTier 自动释放并校验随程序打包的 GeoX 快照，不要求用户配置路径。
+
+需要固定自有数据时：
+
+```yaml
+rule-sets:
+  my-site:
+    type: geosite
+    path: ./rules/geosite.dat
+    update: manual
+    sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    source-url: https://example.invalid/geosite.dat
+```
+
+v1 只允许 `update: manual`。`source-url` 是来源元数据，不会在启动时下载。相对路径以 policy 文件目录为基准；配置了 `sha256` 时内容不匹配会 fail-closed。
+
+## 8. DNS 行为
+
+```yaml
+dns:
+  # 空或省略：使用 EasyTier 从平台获得的安全 underlay DNS。
+  direct: []
+  # 默认是 bootstrap-pinned DoH，TCP-only actor 也能解析。
+  proxy:
+    - doh:cloudflare-dns.com@1.1.1.1
+```
+
+域名规则不会先被全局解析成 IP。字面 `DIRECT` 规则走 direct lookup；SOCKS actor 接收原始域名并由实际代理路径处理。fallback/chain 是外层 group，不应被描述成拥有固定 DNS 出口；尤其 fallback 最终选择 `DIRECT` 时，固定 Leaf 版本的 resolver 选择边界与字面 `DIRECT` 不完全相同。需要严格 direct DNS 的域名应写在 group 规则之前并直接指向 `DIRECT`。
+
+不要用全局放行 53 端口绕开策略 DNS，这会破坏 FakeDNS。v1 不承诺 Mihomo/sing-box 完整的 `nameserver-policy` 或 split-DNS。
+
+## 9. 字段说明
+
+### 9.1 EasyTier `[policy_proxy]`
+
+| 字段 | 必需 | 说明 |
+| --- | --- | --- |
+| `enabled` | 是 | `false` 时不创建 Leaf、策略 TUN 或策略任务 |
+| `config_file` | 二选一 | policy YAML 路径 |
+| `config_inline` | 二选一 | 内联 policy YAML，最多 4 MiB |
+| `outbound_interface` | 启用时是 | underlay 物理出口接口 |
+| `leaf_executable` | Linux 可省略 | 默认查找同目录或 `PATH` 中的 `easytier-leaf-worker` |
+
+`config_file` 与 `config_inline` 互斥。当前每个进程只允许一个 policy-enabled 实例。
+
+### 9.2 policy 根字段
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `version` | integer | v1 必须为 `1` |
+| `dns` | mapping | direct/proxy resolver 集合 |
+| `rule-sets` | mapping | 可选手工 GeoX/MMDB 文件 |
+| `proxies` | mapping | SOCKS5 actor |
+| `groups` | mapping | chain/fallback group |
+| `rules` | sequence | 有序 first-match 规则，不能为空 |
+
+### 9.3 proxy 字段
+
+| 字段 | 说明 |
+| --- | --- |
+| `type` | v1 仅支持 `socks5`；HTTP 会被拒绝 |
+| `server` | native 使用地址字符串；mesh 使用 `virtual-ip`/`instance-id` mapping |
+| `port` | native 必需；mesh 省略为托管 HEV，填写则为显式 peer SOCKS 端口 |
+| `via` | `native` 或 `mesh` |
+| `udp` | actor UDP 能力声明，默认 `false` |
+| `username` / `password` | 必须同时出现，1..128 个安全 ASCII 字符 |
+
+### 9.4 group 字段
+
+| 字段 | 说明 |
+| --- | --- |
+| `type` | `chain` 或 `fallback` |
+| `members` | 有序 actor/group 名称；允许 `DIRECT`、`REJECT`；不能为空 |
+
+actor 与 group 名只能使用 ASCII 字母、数字、`_`、`-`、`.`，最长 64 字符；不能使用保留名 `DIRECT` 或 `REJECT`。展开后的 chain 最多 32 个 actor，group 引用总数最多 64。
+
+## 10. v1 兼容与限制
+
+- 不配置 `[policy_proxy]` 或设置 `enabled=false` 时，不创建新运行时，普通 EasyTier mesh 行为保持原路径。
+- policy-enabled 配置需要带相应 feature 和 sidecar 的新构建，不能把该 YAML 当作 EasyTier 2.9.10 原生字段使用。
+- 当前发布声明仅覆盖 Linux 与 Android；macOS/Windows 等目标保留架构兼容设计，但尚不能引用 Linux/Android 结果代替实机验证。
+- 单进程单 policy-enabled 实例；不承诺 netns、多实例、HTTP actor、在线 Geo 更新和完整 split-DNS。
+- native SOCKS 的 UDP 完整性由用户服务负责；`udp: true` 不是探测结果。
+- chain/fallback 首版主要用于 TCP。UDP 使用显式、已验证的 mesh actor。
+
+## 11. 验证清单
+
+部署后至少验证：
+
+1. `--check-config` 成功，未知字段能明确失败。
+2. mesh 虚拟 IP 的 ICMP/TCP 在策略开启和 Leaf worker 重启期间保持可用。
+3. 国内域名/IP 从 DIRECT 出口出现，境外域名从选定 mesh/chain/fallback 出口出现。
+4. UDP 测试源地址是策略 TUN 虚拟 IP，而不是物理网卡地址。
+5. 停止网络后 Leaf、HEV、策略 TUN、规则和临时配置全部清理。
+6. Android 断 Wi-Fi 前先安排设备侧自动重开 Wi-Fi，再继续 wireless ADB；截图只用于最终视觉确认。
+
+实现语义参考：Mihomo `rules/parser.go::ParseRule` 的 first-match 规则形状、`adapter/outboundgroup/{parser.go::ParseProxyGroup,fallback.go::{findAliveProxy,DialContext,ListenPacketContext,SupportUDP}}` 的有序组边界；固定 Leaf `proxy/chain/outbound/{stream,datagram}.rs`、`proxy/failover/{stream,datagram}.rs` 和 `proxy/socks/outbound/datagram.rs::Handler::handle`。EasyTier 的有意差异是严格 v1 schema、无主动公共 URL 健康检查、托管 mesh bridge，以及明确不宣称 SOCKS UDP 多跳。

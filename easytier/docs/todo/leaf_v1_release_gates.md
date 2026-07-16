@@ -5,10 +5,10 @@
 
 ## Candidate state
 
-- Exact current candidate: `318497c4fd8450a8fee237ef5826841c60517b0c`. Linux run `29447382393` and Android run `29447382391` are the unique automatic workflow pair; both succeeded and exact artifacts, hashes, signer, symbols, build ID, upgrade retention, Linux mesh/policy coexistence, Android VPN ownership, and captured-UID mesh-HEV egress were verified.
+- Exact validated runtime baseline: `824ac5a1d47d568113a7e2190d57fecf049dd47b`. Linux run `29461390271` and Android run `29461390297` are the unique automatic workflow pair; both succeeded. Exact artifacts, hashes, signer, symbols, build ID, Linux mesh/policy coexistence, Android VPN ownership, TCP, UDP/UoT, Wi-Fi/route recovery, worker recovery, configuration retention, and cleanup were verified.
 - Data-plane baseline: `e1a54d87e08eda80f3d081f10b9a9546cbb268d5`. It closed policy-only KCP performance, bounded smoltcp fallback, OSPF generation recovery, Android native stop, Wi-Fi recovery, and repeated Linux/Android lifecycle/resource cleanup.
 - `318497c4` adds build-capability fail-closed enforcement: enabled policy is rejected on builds without a runtime while disabled configuration remains portable and preserved. Native Windows MSVC no-run and exact unsupported-runtime tests passed; supported Linux/Android behavior remained valid.
-- Current release work is capability-boundary closure, not core architecture repair: validate or explicitly defer the exposed chain/fallback and UDP combinations, then freeze the documented v1 subset.
+- Current release work is user-facing capability closure, not core architecture repair: the safe chain/fallback and explicit UDP boundary is frozen in documentation and a compiled example, and overseas GeoSite/custom-rule egress evidence is complete.
 
 ## P0 gates
 
@@ -19,8 +19,8 @@
 - [x] Built-in HEV TCP approaches the proven existing KCP path without changing explicit user SOCKS/KCP configuration, and KCP-disabled destinations fail over to mesh smoltcp without kernel/direct escape.
 - [x] A third peer relearns an Android peer through the hub after Wi-Fi loss/recovery without waiting for a new direct peer connection.
 - [x] HEV hosting and shutdown boundaries are audited for Windows, macOS, Linux, Android, iOS, and constrained targets; v1 claims only evidence actually obtained.
-- [ ] The v1 capability boundary is frozen: unsupported advanced transports or rule/DNS fields are rejected, hidden, or explicitly experimental.
-- [ ] Default configuration remains simple: DIRECT and mesh work without HEV-specific tuning; optional chain/fallback examples do not silently imply UoT or KCP. DIRECT and portless `via: mesh` are proven; chain/fallback combinations remain to be closed below.
+- [x] The v1 capability boundary is frozen: unsupported advanced transports or rule/DNS fields are rejected, hidden, or explicitly experimental.
+- [x] Default configuration remains simple: DIRECT and portless `via: mesh` need no HEV-specific tuning; chain/fallback documentation explicitly separates TCP from UDP and does not imply UoT or KCP.
 
 ## One-push preflight
 
@@ -37,7 +37,8 @@
 - [x] Verify workflow commit SHA, `BUILD_INFO.txt`, build ID, symbols, target, signer, and `SHA256SUMS.txt`.
 - [x] Linux: normal stop, SIGTERM, Leaf/HEV crash, route/network replacement, fail-closed, repeated lifecycle, and resource baseline.
 - [x] Android: cold start, stop/start, Leaf/HEV failure, Wi-Fi loss with Wi-Fi restored before wireless ADB continuation, network recovery, repeated lifecycle, and resource baseline.
-- [ ] Linux and Android: real TCP and UDP through DIRECT, mesh, chain, and fallback configurations within the frozen v1 boundary.
+- [x] Linux and Android: real TCP and UDP through DIRECT and mesh within the frozen v1 boundary; Linux additionally validated TCP chain/fallback and explicit UDP-to-mesh separation. Android does not claim SOCKS chain UDP.
+- [x] Linux policy client with `lv1g2` and `lv1g3`: exact `824ac5a1` artifacts passed GeoSite, GeoIP, custom domain/IP, native SOCKS chain, mesh UDP, single-connection fallback and failback. The first failure transition remains connection-scoped: multi-connection transactions may require a whole-transaction retry. Android already passed the same policy engine's captured-UID GeoSite/GeoIP and mesh UDP paths; this overseas topology did not add a second redundant Android run.
 - [x] No screenshots or simulated taps are used for Android control; screenshots are reserved for final visual evidence.
 
 ## Exact candidate result: `318497c4fd8450a8fee237ef5826841c60517b0c` (2026-07-16)
@@ -51,6 +52,14 @@
 ## Workflow rule
 
 The rolling beta validates a complete candidate; it is not the compiler feedback loop. Do not push again for a single mechanical fix. Accumulate related fixes, run the remote minimal preflight and exact tests, inspect the full diff, then create one candidate.
+
+## Exact candidate result: `824ac5a1d47d568113a7e2190d57fecf049dd47b` (2026-07-16)
+
+- Linux workflow `29461390271` and Android workflow `29461390297` passed from one batched push; all artifact metadata and hashes match the exact SHA.
+- Linux managed HEV TCP reached 313 Mbit/s. UDP/UoT delivered `4641/4641` at 10 Mbit/s and lost `0.32%` at 20 Mbit/s for 20 seconds; trace proved KCP selection. Worker kill, DIRECT route loss/recovery, startup route delay, fail-closed, mesh continuity, resources, and cleanup passed.
+- Android captured-UID mesh owner TCP, policy TLS, and HEV TCP passed before and after Wi-Fi recovery and normal stop/start. Device `iperf3` used policy TUN source `10.247.0.3`; receiver loss was `0/4960` at 10 Mbit/s and `0/19840` at 20 Mbit/s.
+- Final stop removed Android `TauriVpnService`/`tun0` and all Linux core, Leaf worker, HEV, TUN, policy rules, table state, and generated private configuration.
+- Overseas GeoSite/custom-rule selection is now closed. A longer soak remains optional follow-up evidence, not an unclosed Linux/Android architecture defect or a Leaf v1 release blocker.
 
 ## Exact candidate result: `e1a54d87e08eda80f3d081f10b9a9546cbb268d5` (2026-07-16)
 
