@@ -194,7 +194,10 @@ function addProxy() {
     instanceId: '',
     virtualIp: '',
     port: null,
-    udp: false,
+    // A new row is the managed built-in HEV mesh endpoint, whose UDP support is
+    // known and validated. Native SOCKS users can explicitly clear this visible
+    // capability flag when their independently managed server is TCP-only.
+    udp: true,
     username: '',
     password: '',
   }
@@ -447,7 +450,7 @@ onMounted(() => {
                     />
                   </template>
                 </Column>
-                <Column v-if="showAdvancedPolicyFeatures" field="udp" header="UDP">
+                <Column field="udp" header="UDP">
                   <template #body="{ data }"><Checkbox v-model="data.udp" binary /></template>
                 </Column>
                 <Column :header="t('policy.editor.credentials')">

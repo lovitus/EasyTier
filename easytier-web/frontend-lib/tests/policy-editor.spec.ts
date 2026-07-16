@@ -110,6 +110,24 @@ describe('PolicyEditor', () => {
     expect(model.policy_config_inline).toContain('doh:cloudflare-dns.com@1.1.1.1')
   })
 
+  it('adds the managed mesh HEV actor with automatic port and UDP enabled', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
+    const { model, wrapper } = mountEditor(config)
+    const addNode = wrapper.findAllComponents({ name: 'Button' })
+      .find(button => button.props('label') === 'policy.editor.add_node')
+
+    expect(addNode).toBeDefined()
+    await addNode?.trigger('click')
+    await nextTick()
+
+    expect(model.policy_config_inline).toContain('proxy1:')
+    expect(model.policy_config_inline).toContain('via: mesh')
+    expect(model.policy_config_inline).toContain('udp: true')
+    expect(model.policy_config_inline).not.toContain('port:')
+  })
+
   it('edits direct and proxy DNS sets without losing ordered policy rules', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true

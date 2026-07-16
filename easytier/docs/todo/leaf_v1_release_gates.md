@@ -5,24 +5,22 @@
 
 ## Candidate state
 
-- Exact validated artifact baseline: `00b62e65b9b52bdd2546c0d436e8ffc8acea6d2c`; unique Linux/Android workflows, hashes/signature, built-in HEV TCP/UDP in both directions, captured-UID policy TLS semantics, and semantic Android stop/start passed. It is not releasable because HEV TCP throughput remained about 5-6% of DIRECT and a three-peer Wi-Fi outage exposed stale OSPF peer-info recovery.
-- Exact pending candidate: `e1a54d87e08eda80f3d081f10b9a9546cbb268d5`; policy-only reuse of the existing KCP endpoint without enabling user SOCKS/KCP behavior, bounded smoltcp fallback, and OSPF session-generation restart after peer-info removal. Mandatory `.160` preflight passed; Linux run `29440664216` and Android run `29440667649` are the unique automatic workflow pair.
-- Historical `afceaab282b92c61c8c8b1e216358fe810d82395` workflows were intentionally cancelled to stop excessive candidate pushes and provide no artifact evidence.
-- `61c6f313` passed Linux lifecycle and Android HEV traffic validation, but Android cycle 10 exposed a WebView-owned VPN-stop race that left the TUN alive.
-- `e8f7e74549f83791ed43a6f692ff7a034bab070d` proved the direct native stop path was reached, but used the wrong native plugin command name and is rejected.
-- Local branch, working tree base, and `origin/codex/profiling-beta` were aligned to `afceaab2` before continuing. The remaining tracked local modification to `AGENTS.md` is maintainer-owned and outside the candidate.
+- Exact current candidate: `318497c4fd8450a8fee237ef5826841c60517b0c`. Linux run `29447382393` and Android run `29447382391` are the unique automatic workflow pair; both succeeded and exact artifacts, hashes, signer, symbols, build ID, upgrade retention, Linux mesh/policy coexistence, Android VPN ownership, and captured-UID mesh-HEV egress were verified.
+- Data-plane baseline: `e1a54d87e08eda80f3d081f10b9a9546cbb268d5`. It closed policy-only KCP performance, bounded smoltcp fallback, OSPF generation recovery, Android native stop, Wi-Fi recovery, and repeated Linux/Android lifecycle/resource cleanup.
+- `318497c4` adds build-capability fail-closed enforcement: enabled policy is rejected on builds without a runtime while disabled configuration remains portable and preserved. Native Windows MSVC no-run and exact unsupported-runtime tests passed; supported Linux/Android behavior remained valid.
+- Current release work is capability-boundary closure, not core architecture repair: validate or explicitly defer the exposed chain/fallback and UDP combinations, then freeze the documented v1 subset.
 
 ## P0 gates
 
-- [ ] Android native VPN stop is independent of WebView readiness and JavaScript queue progress.
-- [ ] Native success does not schedule a redundant second stop through the frontend.
-- [ ] Native failure preserves the existing frontend fallback and reports the native failure.
-- [ ] Stop/start, process death, Wi-Fi loss/recovery, and repeated cycles return TUN, HEV, Leaf, FD, thread, and task ownership to baseline.
-- [ ] Built-in HEV TCP approaches the proven existing KCP path without changing explicit user SOCKS/KCP configuration, and KCP-disabled destinations fail over to mesh smoltcp without kernel/direct escape.
-- [ ] A third peer relearns an Android peer through the hub after Wi-Fi loss/recovery without waiting for a new direct peer connection.
+- [x] Android native VPN stop is independent of WebView readiness and JavaScript queue progress.
+- [x] Native success does not schedule a redundant second stop through the frontend.
+- [x] Native failure preserves the existing frontend fallback and reports the native failure.
+- [x] Stop/start, process death, Wi-Fi loss/recovery, and repeated cycles return TUN, HEV, Leaf, FD, thread, and task ownership to baseline.
+- [x] Built-in HEV TCP approaches the proven existing KCP path without changing explicit user SOCKS/KCP configuration, and KCP-disabled destinations fail over to mesh smoltcp without kernel/direct escape.
+- [x] A third peer relearns an Android peer through the hub after Wi-Fi loss/recovery without waiting for a new direct peer connection.
 - [x] HEV hosting and shutdown boundaries are audited for Windows, macOS, Linux, Android, iOS, and constrained targets; v1 claims only evidence actually obtained.
 - [ ] The v1 capability boundary is frozen: unsupported advanced transports or rule/DNS fields are rejected, hidden, or explicitly experimental.
-- [ ] Default configuration remains simple: DIRECT and mesh work without HEV-specific tuning; optional chain/fallback examples do not silently imply UoT or KCP.
+- [ ] Default configuration remains simple: DIRECT and mesh work without HEV-specific tuning; optional chain/fallback examples do not silently imply UoT or KCP. DIRECT and portless `via: mesh` are proven; chain/fallback combinations remain to be closed below.
 
 ## One-push preflight
 
@@ -36,11 +34,19 @@
 
 ## Exact-candidate acceptance
 
-- [ ] Verify workflow commit SHA, `BUILD_INFO.txt`, build ID, symbols, target, signer, and `SHA256SUMS.txt`.
-- [ ] Linux: normal stop, SIGTERM, Leaf/HEV crash, route/network replacement, fail-closed, repeated lifecycle, and resource baseline.
-- [ ] Android: cold start, stop/start, Leaf/HEV failure, Wi-Fi loss with Wi-Fi restored before wireless ADB continuation, network recovery, repeated lifecycle, and resource baseline.
+- [x] Verify workflow commit SHA, `BUILD_INFO.txt`, build ID, symbols, target, signer, and `SHA256SUMS.txt`.
+- [x] Linux: normal stop, SIGTERM, Leaf/HEV crash, route/network replacement, fail-closed, repeated lifecycle, and resource baseline.
+- [x] Android: cold start, stop/start, Leaf/HEV failure, Wi-Fi loss with Wi-Fi restored before wireless ADB continuation, network recovery, repeated lifecycle, and resource baseline.
 - [ ] Linux and Android: real TCP and UDP through DIRECT, mesh, chain, and fallback configurations within the frozen v1 boundary.
-- [ ] No screenshots or simulated taps are used for Android control; screenshots are reserved for final visual evidence.
+- [x] No screenshots or simulated taps are used for Android control; screenshots are reserved for final visual evidence.
+
+## Exact candidate result: `318497c4fd8450a8fee237ef5826841c60517b0c` (2026-07-16)
+
+- Linux workflow `29447382393` and Android workflow `29447382391` passed from one push; artifact and platform metadata match the exact candidate.
+- `.160` no-feature and `leaf-policy-proxy` locked no-run builds passed with all focused supported/unsupported tests. Native Windows MSVC no-feature no-run and both fail-closed tests passed.
+- Android `install -r` preserved the complete selected data archive byte-for-byte and retained the enabled policy document. VPN ownership, runtime-UID exclusion, semantic start/stop, and Wi-Fi state were verified without screenshots.
+- Linux policy + ordinary mesh namespaces passed 3/3 ICMP. Android `MATCH,linux-hev` reached a controlled `.160` fixture with source `192.168.1.37`; the VPN-down baseline reached it from `192.168.6.36`, proving the mesh egress change.
+- All validation processes, TUNs, listeners, probe packages, forwards, sensitive temporary configuration, and remote fixture state were cleaned.
 
 ## Workflow rule
 

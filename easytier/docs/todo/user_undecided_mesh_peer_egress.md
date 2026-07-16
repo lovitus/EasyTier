@@ -1716,3 +1716,105 @@ policy schema 兼容变更：
 - Drop 兜底：guard Drop cancel 并 abort task；desktop `ProcessRuntime::Drop` 直接 `start_kill()`，覆盖 panic、task abort 和非正常清理。
 - 兼容测试：`instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task` 证明 shutdown 返回前 owned task 已观察 cancellation 并结束。
 - 待最终候选验证：正常 SIGTERM 后 HEV PID/11080/private dir 回收；11080 冲突回退到 11081 后也必须只清理 11081；重复 stop/start 不出现 FD、线程和子进程单调增长。
+
+
+## 41. 2026-07-16 当前实现收敛与全平台后续边界
+
+> 状态：HEV 作为首版内置 SOCKS egress 已由第 34 节明确采用并完成 Linux/Android 主路径集成；“以后是否替换为无 SOCKS 的原生 MeshEgressDialer”仍由用户决定。本节记录当前事实和跨平台演进边界，不授权实现未决定的 v2 数据面。
+
+### 41.1 当前解耦结果
+
+当前实现已经形成三层独立所有权：
+
+1. `easytier-socks-egress` 只拥有 HEV 配置、端口候选、process/in-process runtime、启动/停止和直接出口 socket 参数，不依赖 Leaf 规则、EasyTier peer 路由或 GUI。
+2. EasyTier Instance 只拥有一个 `SocksEgressGuard`、mesh endpoint 发布与生命周期；HEV 退出会降级内置 egress，不停止 mesh。
+3. Leaf 只接收解析后的标准 SOCKS endpoint；显式用户 SOCKS、内置 HEV mesh actor、chain 和 fallback 使用同一 outbound schema，Leaf 不知道 endpoint 的宿主类型。
+
+首版用户配置因此保持简单：
+
+- `via: mesh` 的内置 actor 不要求填写端口。
+- 显式用户 SOCKS 继续填写端口，旧配置语义不变。
+- 不要求开启传统 `enable_exit_node`。
+- 新建 managed mesh actor 默认声明 `udp: true`；用户自建 native SOCKS 的 UDP 能力仍由用户配置。
+- 内部 listener 默认按 `11080`、`11081`、`11082` 顺序真实 bind，不能覆盖用户的 `7890`，也不使用 probe/release。
+
+### 41.2 已验证的数据面和性能结论
+
+精确候选 `318497c4fd8450a8fee237ef5826841c60517b0c` 的 Linux/Android 权威制品已经覆盖：
+
+- HEV TCP CONNECT、标准 UDP ASSOCIATE、零端口客户端请求、端口冲突回退、正常停止清理。
+- Android in-process ownership、VPN package 自排除、冷启动、真实应用 UID policy 流量和 Wi-Fi 中断恢复。
+- Linux Leaf worker crash、路由丢失/恢复、网关替换、fail-closed、mesh 不受影响和 SIGTERM 后 TUN/route/temp/HEV 清理。
+- 内置 mesh TCP/UDP、DIRECT、fallback primary failure/recovery，以及 chain 的已知 UDP 限制。
+
+性能证据：
+
+- HEV worker 1 与 worker 4 的同条件 TCP throughput 约为 908.4 与 912.8 Mbit/s，差异约 0.5%；首版保持单 worker，避免无收益地增加线程。
+- 普通内置 HEV mesh TCP 受现有 policy/mesh transport 路径影响约为 50 Mbit/s；启用 policy-only KCP endpoint 后约为 478 Mbit/s，直接路径约为 941 Mbit/s。
+- KCP 是明确配置的 policy-only TCP transport优化，不是 HEV 或 Leaf 自动协商。
+- Mesh UDP 首选 EasyTier UoT v2 framing，并保留认证的旧 datagram fallback；原生用户 SOCKS UDP 仍按 SOCKS server 的真实能力工作，不做无法可靠判定的静默逐包回退。
+- pinned Leaf 的原生 SOCKS chain datagram 仍有 `TODO support chaining`；首版安全配置应将 UDP 明确指向 managed mesh actor，而不是声称任意 SOCKS chain 支持 UDP。
+
+### 41.3 Route-aware DNS 的精确语义
+
+EasyTier lockfile固定 Leaf `b1e33b50e37ea3b396e3cee2a1d60bb0c599655c`。该精确 revision 已实现：
+
+- `direct_lookup` 强制 `DnsQueryRoute::direct()`，选择 `direct:` resolver 子集并使用独立 cache scope。
+- 普通应用 DNS lookup 先按 first-match policy 选择 outbound tag；DIRECT 使用 direct resolver，代理 DNS 请求携带选中 tag dispatch。
+- SOCKS/managed mesh 数据连接保留目标域名，由选中 SOCKS/HEV peer 在出口解析；本机只 bootstrap 解析代理 endpoint。
+- fallback 真正执行 DIRECT 成员时会进入该成员的 `direct_lookup`；不会因外层 group tag 不是 direct 而使用错误 resolver。
+- Android underlay/DNS generation 变化通过 EasyTier restart/recreate Leaf runtime 清除旧 resolver/socket generation，当前不向 HEV 注入第二套 DNS 或 VPN 生命周期。
+
+以后审计 Leaf 行为必须以 `Cargo.lock` SHA 对齐工作树；旧 Cargo cache checkout 或默认分支不能作为当前产品语义证据。
+
+### 41.4 macOS v2 边界
+
+macOS 已有 policy route/TUN 和外部 Leaf worker 宿主基础；HEV process runtime 的协议与生命周期不需要另一套实现。尚缺：
+
+- 在 macOS workflow 用固定 HEV fork构建并签名/打包 `easytier-hev-socks-egress`。
+- 验证 app bundle 相邻 executable 查找、quarantine/codesign、utun bypass/interface binding 和停止清理。
+- 用精确 workflow 制品覆盖 TCP/UDP、端口冲突、sleep/wake、Wi-Fi切换和资源回基线。
+
+这属于 v2 平台交付工作，不应混入 Linux/Android v1 候选，也不得在维护者低性能 Mac 上构建 EasyTier。
+
+### 41.5 Windows v2 边界
+
+HEV fork 的 Windows sidecar TCP/UDP 和零端口 association 已完成独立验证；协议服务器本身不是阻塞。EasyTier policy runtime 当前的主要缺口是：
+
+- policy proxy/packet bridge 仍以 Unix packet FD/UnixDatagram 模型接 Leaf TUN，Windows 没有等价 handoff。
+- 需要在不改变 Leaf/HEV/mesh schema 的前提下实现 Windows packet/TUN transport adapter，例如窄的 framed local transport 或 Windows-native handle backend。
+- 完成后仍复用同一个 `SocksEgressRuntime` process contract 和 HEV sidecar，不重写 Windows SOCKS server。
+- 必须验证 Wintun route ownership、DNS generation、service/session shutdown、child process cleanup 和 loop prevention。
+
+因此 Windows 的下一问题是 policy packet handoff，不是 HEV UDP 协议或端口机制。收益较大但实现面高于 v1，明确留到 v2。
+
+### 41.6 iOS、OHOS、FreeBSD 与特殊目标
+
+长期公共接口保持宿主无关：
+
+- 桌面/server 可使用 process runtime。
+- 不适合外部 executable 的 iOS/OHOS 使用同一 HEV C API 的 in-process host，并复用 Android 已实现的 global runtime ownership、quit/join 和 generation contract。
+- FreeBSD/macOS/Linux 可共享 process backend，平台只注入 bind/interface/mark 能力。
+- 32-bit、MIPS/MIPSel、RISC-V、LoongArch 等目标依赖 HEV 上游已有广泛 C 构建基础，但必须由 EasyTier正式 target workflow逐个证明，不能从 README 外推。
+- 所有平台只允许薄的 packaging/socket adapter；不得出现第二套 SOCKS handshake、UDP association 或规则语义。
+
+### 41.7 v1 与 v2 决策线
+
+Linux/Android v1 继续冻结为：
+
+- 单 policy-enabled 实例和单 HEV runtime。
+- DIRECT、REJECT、基础 domain/GeoSite/GeoIP、managed mesh SOCKS actor。
+- 标准 chain/fallback TCP；UDP 显式指向支持的 managed mesh actor。
+- Magic DNS 保持归 mesh。
+- 不承诺 split-DNS、在线 Geo 更新、HTTP actor、netns、多实例或任意 native SOCKS UDP 可用性。
+
+v2 才处理：
+
+- Windows packet/TUN handoff。
+- macOS正式构建/签名/实机矩阵。
+- iOS/OHOS in-process packaging。
+- HEV 多 runtime handle 或进程隔离多实例。
+- 是否实现无 SOCKS 的原生 `MeshEgressDialer`。
+- 高吞吐 UDP、任意 chain datagram和更高级 DNS policy。
+
+该边界避免为首版推倒已经验证的 HEV/Leaf/mesh 解耦结构，同时保留所有平台迁移到同一公共配置和生命周期契约的路径。

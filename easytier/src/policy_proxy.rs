@@ -239,12 +239,8 @@ pub fn configure(
     leaf_executable: PathBuf,
     outbound_interface: String,
 ) -> anyhow::Result<()> {
-    if outbound_interface.trim().is_empty() {
-        anyhow::bail!("policy mode requires a non-empty outbound interface");
-    }
-    let leaf_executable = resolve_executable(&leaf_executable)?;
-    let revision = validate_policy_file(&policy_file)
-        .with_context(|| format!("invalid policy config {}", policy_file.display()))?;
+    let (revision, leaf_executable) =
+        resolve_process_inputs(&policy_file, &leaf_executable, outbound_interface.as_str())?;
     let source_label = policy_file.display().to_string();
     let base_dir = policy_file
         .parent()
@@ -260,6 +256,28 @@ pub fn configure(
             source_file: Some(policy_file),
         })
         .map_err(|_| anyhow::anyhow!("policy process config was initialized more than once"))
+}
+
+pub(crate) fn validate_process_config(
+    policy_file: &Path,
+    leaf_executable: &Path,
+    outbound_interface: &str,
+) -> anyhow::Result<()> {
+    resolve_process_inputs(policy_file, leaf_executable, outbound_interface).map(|_| ())
+}
+
+fn resolve_process_inputs(
+    policy_file: &Path,
+    leaf_executable: &Path,
+    outbound_interface: &str,
+) -> anyhow::Result<(PolicyRevision, PathBuf)> {
+    if outbound_interface.trim().is_empty() {
+        anyhow::bail!("policy mode requires a non-empty outbound interface");
+    }
+    let leaf_executable = resolve_executable(leaf_executable)?;
+    let revision = validate_policy_file(policy_file)
+        .with_context(|| format!("invalid policy config {}", policy_file.display()))?;
+    Ok((revision, leaf_executable))
 }
 
 fn resolve_executable(executable: &Path) -> anyhow::Result<PathBuf> {

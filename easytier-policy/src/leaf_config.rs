@@ -783,6 +783,79 @@ rules: ["MATCH,DIRECT"]
     }
 
     #[test]
+    fn preserves_unresolved_domain_contract_for_direct_socks_and_fallback() {
+        // Reference semantics:
+        // - Mihomo adapter/outbound/direct.go::Direct::{DialContext,ResolveUDP} resolves a
+        //   DIRECT destination with resolver::DirectHostResolver.
+        // - Leaf b1e33b50 proxy/mod.rs::{connect_stream_outbound,connect_datagram_outbound}
+        //   resolves DIRECT locally, while SOCKS receives the original destination domain;
+        //   failover/{stream,datagram}.rs invokes the selected actor's connection path.
+        // - At that exact pin, app/dns/client.rs::_lookup_inner forces DnsQueryRoute::direct
+        //   for direct_lookup, so a DIRECT member inside a non-direct group still selects the
+        //   direct-marked DNS subset and its resolver-scoped cache.
+        // EasyTier therefore must not pre-resolve every domain before Leaf chooses an actor.
+        let source = r#"
+version: 1
+dns:
+  direct: [223.5.5.5]
+  proxy: ["doh:cloudflare-dns.com@1.1.1.1"]
+proxies:
+  native:
+    type: socks5
+    server: proxy.example
+    port: 1080
+    udp: true
+groups:
+  route:
+    type: fallback
+    members: [native, DIRECT]
+rules:
+  - DOMAIN-SUFFIX,direct.example,DIRECT
+  - DOMAIN-SUFFIX,proxy.example,route
+  - MATCH,route
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        let config = compile_leaf_config(
+            &revision,
+            7,
+            Path::new("."),
+            &Unresolved,
+            &["9.9.9.9".parse().unwrap()],
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+
+        assert_eq!(config["router"]["domainResolve"], false);
+        assert_eq!(
+            config["dns"]["servers"],
+            serde_json::json!(["direct:223.5.5.5", "doh:cloudflare-dns.com@1.1.1.1"])
+        );
+
+        let outbounds = config["outbounds"].as_array().unwrap();
+        let native = outbounds
+            .iter()
+            .find(|outbound| outbound["tag"] == "native")
+            .unwrap();
+        assert_eq!(native["protocol"], "socks");
+        assert_eq!(native["settings"]["address"], "proxy.example");
+        let route = outbounds
+            .iter()
+            .find(|outbound| outbound["tag"] == "route")
+            .unwrap();
+        assert_eq!(route["protocol"], "failover");
+        assert_eq!(
+            route["settings"]["actors"],
+            serde_json::json!(["native", "DIRECT"])
+        );
+
+        let rules = config["router"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["target"], "DIRECT");
+        assert_eq!(rules[1]["target"], "route");
+        assert!(rules[0].get("resolveDomain").is_none());
+        assert!(rules[1].get("resolveDomain").is_none());
+    }
+
+    #[test]
     fn compiles_geoip_dat_categories_without_dns_or_mmdb() {
         let dir = tempfile::tempdir().unwrap();
         crate::geodata::write_test_geoip(

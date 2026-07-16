@@ -253,3 +253,314 @@ Build-wait preparation for exact candidate `e1a54d87e08eda80f3d081f10b9a9546cbb2
 - Workflow evidence: exact head SHA, successful frontend/native compilation as applicable, artifact SHA256/build metadata/signing, and no concurrency-cancelled duplicate.
 - Exact-artifact validation: Linux confirms enabled policy remains accepted and basic mesh/policy coexistence; Android confirms retained enabled policy starts and a captured-UID policy probe succeeds. Existing full lifecycle evidence remains applicable because this batch does not alter the supported-platform data plane or HEV lifecycle.
 - Productive wait: inspect workflow metadata, prepare checksum/artifact commands, and preflight Linux/Android hosts without mutating the committed snapshot.
+
+## 2026-07-16: exact candidate `318497c4` artifact and device closure
+
+- Candidate: `318497c4fd8450a8fee237ef5826841c60517b0c` (`fix(policy): reject unsupported runtime activation`). One push to `codex/profiling-beta` triggered exactly one automatic workflow pair; no manual duplicate dispatch.
+- Linux workflow `29447382393` succeeded in 18m24s. Artifact `8356470329` was exactly `119224308` bytes; outer ZIP integrity, outer tar SHA256, inner `easytier-core`, `easytier-cli`, `easytier-leaf-worker`, and `easytier-hev-socks-egress` SHA256 all passed. BUILD_INFO records the exact candidate, run, x86_64-musl target, Rust 1.95.0, and pinned HEV `97e74f1068bd924e740032382cdc94ca83741ae6`. Core is static PIE, unstripped, with `.debug_info`, `.debug_line`, `.symtab`, and build ID `3e38600a137bdf1ee3166ce799890ae6bd9f0e6f`.
+- Android workflow `29447382391` succeeded in 18m45s. Artifact `8356481302` was exactly `32218009` bytes. The first concurrent download stopped at `8978432` bytes and failed ZIP central-directory validation; it was rejected and a fresh byte-zero retry passed ZIP integrity. APK/probe/runner/BUILD_INFO SHA256 all passed. Candidate certificate SHA256 is `14d2d885ce1bc361923a493210865f86390ffcd32eb2b555042bbd1a8b6c38e0`; both probe packages use `05242c2efd4415f80d7b4bf8837d667f115fcbd97420652cf5a957fd55095ada`.
+- Linux exact-artifact isolation: `.37` ran a policy-enabled node (`10.250.77.1`) and ordinary node (`10.250.77.2`) in point-to-point network namespaces. The policy node had core + Leaf + HEV, `transparent policy proxy is ready`, and TUN `et318p`. The ordinary node connected over TCP and established a QUIC direct tunnel. Mesh ICMP to the policy node passed 3/3 (0.518 ms average). Normal exit removed both cores, TUNs, sidecars, listeners, namespaces, and temporary files.
+- The first bridge namespace topology was rejected before product startup because host bridge forwarding blocked namespace-to-namespace ICMP. The first policy startup without a namespace default route correctly failed closed with `policy outbound interface eth0 has no IPv4 default route` and cleaned its partial TUN. Neither result was counted as a candidate failure.
+- Android upgrade retention: before `adb install -r`, the candidate data tar SHA256 was `d4170e818e1243477218b1aa6ec47f39c07e404a11141ca5ed509762bfdbaeb2`; the post-install, pre-start archive was byte-identical. `firstInstallTime` remained `2026-07-14 15:25:47`; only `lastUpdateTime` changed. CDP confirmed `enable_policy_proxy=true` and a retained 145-byte v1 rule document without printing secrets.
+- Android startup used semantic CDP/Tauri invocation, not screenshots or coordinate clicks. `TauriVpnService` owned connected VPN network 268, TUN `10.246.0.2/24`, OwnerUid/AdminUid `10254`, underlying Wi-Fi network 267, and captured UID ranges `{0-10253, 10255-20253, 20255-99999}`. Excluding runtime UID `10254` preserves HEV loop prevention; `revoked_by_system=false`.
+- Captured-UID probe: exact probe UID `10280`, SELinux `u:r:untrusted_app:s0:c24,c257,c512,c768`, rule first-match `MATCH,linux-hev`. With VPN active, TCP probe to controlled `.160:25450` completed in 9 ms and `.160` observed source `192.168.1.37:41780`, proving traversal through the mesh HEV peer rather than a local TUN handshake. After `update_network_config_state(disabled=true)` and explicit VPN-down confirmation, the identical probe completed in 17 ms but `.160` observed direct/NAT source `192.168.6.36:42356`. The source change is the controlled baseline.
+- The first Android probe attempts to `1.1.1.1:443` were rejected as policy-success evidence. Before `.37:25401` was restored, Tauri network events showed repeated `ConnectionRefused` and the probe timed out before TCP. After peer restoration, TCP connected but TLS read timed out; `.37` direct HTTPS also timed out, proving that host has no usable public 443 egress. The final controlled intranet remote-observation fixture avoids this infrastructure dependency.
+- Final cleanup: Android VPN stopped, probe packages uninstalled, CDP forward removed, Wi-Fi remained enabled and connected; `.37` core/TUN/HEV/Leaf/listeners/temp files removed; `.160` listener and log removed.
+
+## 2026-07-16 `318497c4` chain/fallback capability audit and exact-artifact matrix (in progress)
+
+Reference semantics inspected before changing any policy behavior:
+
+- Mihomo `/Users/fanli/Documents/mihomo-rev/adapter/outboundgroup/parser.go::ParseProxyGroup` and `adapter/outboundgroup/fallback.go::{findAliveProxy,DialContext,ListenPacketContext,SupportUDP}`: Mihomo fallback selects from actively health-checked proxies, uses the first alive proxy in configured order, and feeds stream first-write failure back to health state. EasyTier intentionally does not claim this active-probe semantic.
+- Pinned Leaf `lovitus/leaf@b1e33b50e37ea3b396e3cee2a1d60bb0c599655c`, `leaf/src/proxy/failover/stable.rs::{StableFailover,RequestDecision}` plus `failover/{stream,datagram}.rs`: EasyTier emits `healthCheck=false`, `failover=true`, `stableFailover=true`; TCP and UDP keep separate preference-first passive state, compare actors after actor/association establishment failure, require differential observations across 15-second windows before switching, and use bounded outage backoff/recovery probes.
+- Pinned Leaf `leaf/src/proxy/chain/outbound/{stream,datagram}.rs`: TCP applies actors in declaration order. UDP chooses unreliable datagram composition only when all remaining actors report unreliable support.
+- Pinned Leaf `leaf/src/proxy/socks/outbound/datagram.rs::Handler::handle`: the implementation explicitly says `TODO support chaining`, ignores the supplied chain transport, and opens a new direct TCP/UDP association. The ten upstream `test_out_chain_1` through `test_out_chain_10` cases cover TCP-oriented WS/Trojan/Shadowsocks combinations and contain no SOCKS5 UDP multi-hop case.
+
+Exact artifact and isolated topology:
+
+- Candidate: `318497c4fd8450a8fee237ef5826841c60517b0c`, previously verified profiling-beta Linux artifact from run `29447382393`.
+- `.37` policy client runs in network namespace `leaf318`; `.38` is ordinary mesh peer plus HEV; `.160` is controlled TCP/UDP echo plus second HEV. No new build or workflow was started.
+- Controlled target source-address evidence: DIRECT TCP/UDP reached `.160` from `192.168.1.37`; `via: mesh` TCP/UDP reached it from `192.168.1.38`; two-native-SOCKS chain TCP reached it from `192.168.2.160`.
+- Two-native-SOCKS chain UDP timed out after both HEV servers accepted associations. This is the pinned Leaf SOCKS UDP chaining limitation above, not evidence that HEV lacks UDP.
+- Passive fallback `[unavailable native, mesh, DIRECT]` succeeded for TCP and UDP on the first request and across three 16-second observations; every controlled target request came from `192.168.1.38`.
+- User-shape fallback `[two-hop chain, mesh, DIRECT]` kept TCP on the chain and reached the target from `192.168.2.160`, but UDP timed out and did not fall through. The chain returns a successfully created datagram before payload loss, so failover has no actor-establishment error to observe. Do not document or test this as automatic UDP rescue.
+- Safe v1 configuration boundary already exists: `NETWORK,udp,<mesh actor/group>` is accepted with strict `tcp|udp` validation and has parser coverage. Put DIRECT/domestic first-match rules before it when those UDP flows must remain direct; route remaining UDP explicitly to mesh instead of relying on chain fallback.
+- Tooling gap discovered: `easytier-core::validate_config` requires `--config-file` and only runs `TomlConfigLoader`; it does not parse `--policy-config`. The initial policy-only invocation did not record its exit status and is not evidence of successful policy validation. Normal startup correctly failed closed on the invalid top-level mesh `virtual-ip`. Batch policy parsing into `--check-config` with the next build-affecting candidate rather than triggering a workflow for this diagnostic-only fix.
+- Normal phase restart removed the Leaf worker, policy TUN, policy routes, generated `/tmp/easytier-leaf-*` JSON, and left only the namespace underlay route. The fallback recovery and explicit `NETWORK,udp` data-plane checks remain in progress; do not mark this matrix complete yet.
+
+### `318497c4` exact-artifact matrix completion and next candidate manifest
+
+Additional exact-artifact evidence:
+
+- With a recovered native HEV primary, passive fallback TCP moved from mesh source `192.168.1.38` back to primary source `192.168.1.37` across the observation windows. Native SOCKS UDP remained invalid in the policy TUN path even though a standalone RFC1928 probe through the same HEV server succeeded.
+- HEV debug showed native UDP ASSOCIATE completing and the UDP splicer starting, followed by immediate session destruction in the policy path. Leaf `async-socks5 0.6.0::SocksDatagram` itself retains the control stream, so the remaining fault is in Leaf TUN/native-datagram session ownership rather than HEV UDP support. This is a separate post-v1 investigation unless native SOCKS UDP becomes a release promise.
+- Final safe v1 rules put the controlled DIRECT rule first and then `NETWORK,udp,mesh38`. Ten TCP/UDP probes all passed. Server-observed TCP sources remained DIRECT `.37`, mesh `.38`, two-hop chain `.160`, recovered native fallback `.37`, and chain fallback `.160`; all non-DIRECT UDP sources were mesh `.38`, while DIRECT UDP remained `.37`.
+- This proves the supported transition configuration: use chain/fallback for TCP and a first-match `NETWORK,udp,<mesh actor/group>` after required DIRECT/domestic exceptions. Do not claim native SOCKS UDP, SOCKS-over-SOCKS UDP chain, or automatic payload-timeout fallback.
+
+Next build-affecting candidate manifest (local snapshot, SHA assigned only after `.160` passes):
+
+- Implementation files: `easytier/src/policy_proxy.rs`, `easytier/src/core.rs`.
+- Reference: Mihomo `/Users/fanli/Documents/mihomo-rev/main.go` test mode calls `executor.Parse`/`ParseWithBytes`; `/Users/fanli/Documents/mihomo-rev/hub/executor/executor.go::{ParseWithPath,ParseWithBytes}` routes the selected source through full `config.Parse` without starting runtime services.
+- Intended semantics: EasyTier `--check-config` validates every supplied TOML and its enabled inline/file policy, or validates CLI `--policy-config` without requiring an unrelated TOML. It reuses the same worker path, outbound-interface, strict policy parser, and built-in rule-set resolution as startup, but does not initialize global policy state or start networking.
+- Parity test: `check_config_fully_parses_policy_only_input_like_mihomo_test_mode` accepts a valid policy-only invocation and rejects an unknown policy field.
+- Mandatory `.160` lane: preflight Cargo/rustc process check; sync full snapshot; `cargo test --locked --no-run --package easytier --bin easytier-core --features leaf-policy-proxy`; run only `check_config_fully_parses_policy_only_input_like_mihomo_test_mode`.
+- Pre-push review: Cargo.lock unchanged; Linux/macOS policy cfg remains aligned with existing CLI fields; no workflow pin/generated output change; documentation remains local until this code candidate is ready.
+- Authoritative workflow after `.160`: one push to `codex/profiling-beta`, automatically starting the Linux and Android candidate workflows once. While they build, prepare policy-only valid/invalid CLI checks and retain the already-running exact-artifact matrix as the data-plane baseline.
+
+## 2026-07-16 - Local batch candidate preflight and validation cleanup
+
+- Candidate implementation scope remained batched: policy-only `--check-config` now performs the same full policy parse used by startup, rather than validating only the outer CLI/TOML shape. The implementation reuses `policy_proxy::resolve_process_inputs`/`validate_process_config`; startup remains the only path that installs global policy state.
+- Reference boundary: Mihomo `main.go` test mode calls `executor.Parse`/`ParseWithBytes`, and `hub/executor/executor.go::{ParseWithPath,ParseWithBytes}` routes through the full `config.Parse` path without starting the runtime. EasyTier intentionally follows that externally observable parse-before-runtime behavior.
+- Local formatting used `rustup run 1.95 rustfmt --edition 2024` only. No EasyTier compilation was performed on the maintainer Mac.
+- Remote builder `root@192.168.2.160`, container `easytier-debug-builder`, exact synchronized local snapshot: `cargo test --locked --no-run --package easytier --lib --features leaf-policy-proxy` completed successfully in 46.24 seconds with all available CPU cores and debug/incremental settings. The only diagnostic was the pre-existing `parse_system_dns_servers` dead-code warning.
+- Exact test binary `/workspace/target/debug/deps/easytier-68b83d7d96a53024` executed `core::tests::check_config_fully_parses_policy_only_input_like_mihomo_test_mode`: 1 passed, 0 failed, 1507 filtered out, 0.02 seconds. The test proves a valid policy-only `NETWORK,udp` configuration succeeds and an unknown policy field fails during check mode.
+- An earlier `--bin easytier-core` no-run was the wrong target for this test and produced a harness with zero tests. It is not acceptance evidence. Future candidate manifests must name the library test target before starting the build so one incremental compile and one direct test-binary run are sufficient.
+- Efficiency rule applied: `.160` supplied cheap compiler/test feedback for the whole pending Rust batch; GitHub workflow was not triggered for this local candidate or documentation. A workflow should be started once, only after the batch is intentionally committed as the authoritative candidate requiring artifacts/device validation.
+- Waiting-time work completed against the already-built exact `318497c4fd8450a8fee237ef5826841c60517b0c` artifact: DIRECT, mesh, two-hop native SOCKS chain, native fallback, chain fallback, TCP/UDP rule separation, cleanup, and pinned-Leaf boundary analysis were combined into one Linux topology rather than separate builds.
+- Cleanup completed on `192.168.1.37`, `192.168.1.38`, and `192.168.2.160`: test PID-file processes stopped, `leaf318` netns/veth removed, dedicated forwarding/NAT rules removed, temporary aliases `192.168.2.161/.162/.163/.165/.166` removed, and test files removed. Builder Cargo artifacts were intentionally retained for incremental reuse.
+
+## 2026-07-16 - HEV worker candidate and cross-platform host boundary
+
+### Existing transport semantics confirmed
+
+- The current built-in mesh path already prefers policy UoT v2 for UDP and uses a separately registered policy-only KCP endpoint for TCP. HEV remains the terminal SOCKS5 server and native destination socket owner; it does not absorb EasyTier mesh, Leaf DNS/rules, KCP, or UoT state.
+- `RemoteUdpAssociation::open` requests UoT v2 first and closes the reserved association before bounded fallback to the legacy authenticated mesh datagram relay. This is an EasyTier peer capability negotiation, not an unsupported attempt to make ordinary third-party SOCKS servers speak UoT.
+- Policy-only KCP starts only the endpoint filter and does not enable the user-facing KCP proxy selector. Existing exact-artifact evidence remains approximately 478 Mbps for the complete Linux built-in HEV TCP path, versus approximately 50 Mbps through the smoltcp fallback and approximately 941 Mbps DIRECT.
+
+### HEV worker-count candidate rejected after no-build comparison
+
+- Reference: pinned HEV `README.md` demonstrates `main.workers: 4`; `src/hev-socks5-proxy.c::{hev_socks5_proxy_init,hev_socks5_proxy_task_entry,hev_socks5_proxy_run}` creates one task-system worker thread per configured worker. `src/hev-config.c::hev_config_init` forces Windows/MSYS back to one worker.
+- The exact `318497c4fd8450a8fee237ef5826841c60517b0c` HEV sidecar was run unchanged on `192.168.2.160`. A fixed 64 MiB HTTP object on `192.168.1.37` was fetched through SOCKS from `192.168.1.38` using eight simultaneous connections. No EasyTier build or host-network modification was required.
+- `workers: 1`: 512 MiB total in 4.727860800 seconds, 908.438 Mbps aggregate, zero failed transfers.
+- `workers: 4`: 512 MiB total in 4.705139323 seconds, 912.825 Mbps aggregate, zero failed transfers.
+- The approximately 0.5% difference is below a useful operational gain and both results are already at the controlled network ceiling. Keep the v1 default at one worker to avoid three additional resident threads on Android and low-end peers. Do not add CPU-count auto-tuning without a workload that proves a material gain.
+- Dedicated benchmark PIDs, ports `27680/27690`, files, and the copied exact sidecar were removed after the comparison.
+
+### Cross-platform host boundary
+
+- The `easytier-socks-egress::ProcessRuntime` supervisor is structurally usable by macOS and Windows: platform-neutral Tokio child ownership is the primary mechanism and Linux alone adds `PR_SET_PDEATHSIG`. The HEV fork documents Unix, Apple, Android, and MSYS2 build paths.
+- macOS is the next lowest-risk platform batch. EasyTier already has `policy_proxy::macos_routing`, builds the Leaf worker, and declares it as a Tauri external binary. The missing work is a pinned HEV executable build, target-suffixed Tauri external-binary packaging, exact macOS lifecycle/TCP/UDP evidence, and route/DNS recovery validation. Do not mix this packaging-only work into the Linux/Android v1 release candidate.
+- Windows is not equivalent to macOS. Although the HEV sidecar and its repaired UDP path can run, EasyTier currently gates `policy_proxy` on `unix`, and `easytier-policy::packet` uses Unix datagram FD transport. Windows therefore needs a native packet/TUN handoff plus route/DNS ownership design before HEV packaging is meaningful. Do not claim Windows Leaf support from the standalone HEV result.
+- iOS, OHOS, FreeBSD, MIPS, and other special targets remain design targets. Reuse the same narrow HEV lifecycle/config contract where their host model permits it, but track each packet transport and package independently rather than adding platform conditionals to HEV's SOCKS state machine.
+
+## 2026-07-16 - Reusable `.160` Leaf/HEV preflight entry point
+
+- Added `scripts/leaf-remote-preflight.sh` so the mandatory builder sequence is executable policy rather than a manually reconstructed set of SSH commands.
+- The script synchronizes one complete snapshot, rejects concurrent Cargo/rustc work, carries the required reverse `7890` tunnel on the Cargo invocation, performs one `--locked` `easytier --lib --features leaf-policy-proxy` no-run build, resolves the emitted `src/lib.rs` test binary, and runs the focused tests directly with one test thread.
+- Default focused coverage is policy-only full-config check mode, policy-KCP/user-SOCKS isolation, OSPF route-generation cache invalidation, the complete mesh UDP/UoT relay module, and awaited HEV guard shutdown. Additional batch-specific filters can be appended without starting another Cargo build.
+- The tool does not create optimized artifacts, trigger GitHub, commit, push, or deploy. GitHub remains the sole source of authoritative release/profile artifacts after this diagnostic gate passes.
+
+## 2026-07-16 - Managed mesh actor UDP default and visible capability
+
+- Mihomo reference: `/Users/fanli/Documents/mihomo-rev/adapter/parser.go::ParseProxy` decodes `Socks5Option`; `/Users/fanli/Documents/mihomo-rev/adapter/outbound/socks5.go::{Socks5Option,NewSocks5}` copies the explicit `udp` field into `BaseOption`; `/Users/fanli/Documents/mihomo-rev/adapter/outbound/base.go::SupportUDP` returns that declared capability. A generic omitted SOCKS5 `udp` field therefore remains false because Mihomo cannot know the server's behavior.
+- EasyTier intentionally differs only for a newly created `via: mesh` row. That row selects the managed built-in HEV endpoint, not an arbitrary SOCKS server; exact Linux and Android artifacts have already validated UDP ASSOCIATE plus policy UoT/mesh fallback. The editor now defaults that known actor to `udp: true` while retaining the serialized capability field.
+- The UDP checkbox is now visible in the normal node table instead of being hidden behind the advanced-feature unlock. If the user switches the row to an independently managed native SOCKS server, they can explicitly clear the capability rather than unknowingly inheriting an invisible value.
+- Added a frontend regression contract: adding a node in ordinary policy mode serializes `via: mesh`, omits `port`, and emits `udp: true`. This closes the previous mismatch where the documented mesh example supported UDP but the normal Add Node action silently created a TCP-only actor.
+
+## 2026-07-16: Route-aware DNS semantics audit (current working candidate)
+
+Status: compiler contract test added locally; no runtime implementation change and no workflow dispatch.
+
+Reference behavior inspected before editing:
+
+- Mihomo `/Users/fanli/Documents/mihomo-rev/adapter/outbound/direct.go::Direct::DialContext` appends `dialer.WithResolver(resolver.DirectHostResolver)`; `Direct::ResolveUDP` also resolves the destination host with `DirectHostResolver`.
+- Mihomo `/Users/fanli/Documents/mihomo-rev/adapter/outbound/base.go::Base::ResolveUDP` uses `resolver.DefaultResolver` for actors that require local UDP resolution. Proxy server host bootstrap is separately wired through `ProxyServerHostResolver` in `hub/executor/executor.go::updateDNS`.
+- Pinned Leaf `leaf/src/proxy/mod.rs::{connect_stream_outbound,connect_datagram_outbound,new_tcp_stream}` and `leaf/src/common/resolver.rs::Resolver::new` show that a DIRECT destination is locally resolved through `DnsClient::direct_lookup`. A SOCKS actor locally resolves only its server address, then receives the original destination domain in its session.
+- Pinned Leaf `leaf/src/proxy/failover/{stream,datagram}.rs` calls `connect_*_outbound` for the actual candidate actor, so a fallback containing SOCKS and DIRECT preserves each member's own DNS behavior. `leaf/src/proxy/chain/outbound/stream.rs::{next_connect_addr,next_session,handle}` resolves/connects the first hop and passes the final destination domain through the chain.
+- Android Mihomo `/Users/fanli/Documents/clashmeta-android-rev/core/src/foss/golang/clash/dns/resolver.go::{Resolvers::ClearCache,Resolvers::ResetConnection}` treats network-change recovery as a resolver lifecycle issue across default, proxy, and direct resolvers. EasyTier's Android Leaf restart on underlay/DNS generation change is the current v1 equivalent; cache/transport mutation inside pinned Leaf remains intentionally avoided.
+
+Externally observable EasyTier contract:
+
+- Domain rules are first-match evaluated without global pre-resolution because generated Leaf JSON keeps `router.domainResolve=false`.
+- A DIRECT rule uses the generated `direct:` resolver set and exits on the local underlay.
+- A SOCKS/managed-mesh rule leaves the destination as a domain; the selected SOCKS server/mesh peer resolves it at that exit. Only the proxy server's own hostname is bootstrap-resolved locally.
+- A fallback or chain does not have one fixed DNS exit of its own; resolution follows the actual member/hop behavior. This is required for a fallback such as `[native-chain, mesh, DIRECT]`.
+- Explicit `dns.proxy` remains available for Leaf rule-resolution and DNS-service paths; it does not replace SOCKS remote destination resolution.
+
+Added regression: `easytier-policy::leaf_config::tests::preserves_route_aware_dns_contract_for_direct_socks_and_fallback` locks the EasyTier-generated half of this contract: separate direct/proxy DNS entries, disabled global domain resolution, preserved SOCKS server domain, fallback actor order, and no implicit `resolveDomain` on domain rules.
+
+Validation plan: include this test in the next batched `scripts/leaf-remote-preflight.sh` run on `192.168.2.160`; do not start a separate build or GitHub workflow for this one test.
+EOF\n
+## 2026-07-16: Next batched candidate manifest before .160 preflight
+
+Snapshot identity: current complete local working snapshot based on validated candidate `318497c4fd8450a8fee237ef5826841c60517b0c`; no candidate commit/SHA assigned yet.
+
+Included implementation and regression scope:
+
+- `easytier/src/policy_proxy.rs`: side-effect-free full process-policy validation shared by startup and `--check-config`.
+- `easytier/src/core.rs`: policy-only and embedded/file `--check-config` fully parse the policy document instead of validating only outer CLI syntax.
+- `easytier-policy/src/leaf_config.rs`: route-aware DNS compiler contract for DIRECT, SOCKS, fallback, and chain semantics; no new DNS runtime.
+- `easytier-web/frontend-lib/src/components/policy/PolicyEditor.vue` and its component test: newly added managed mesh actor defaults to known-supported UDP while native SOCKS remains user-controlled.
+- `scripts/leaf-remote-preflight.sh` and `AGENTS.md`: one complete snapshot sync, one locked no-run Cargo invocation, exact EasyTier and policy test binaries, and the full focused Leaf/HEV suite.
+
+Mandatory `192.168.2.160` evidence:
+
+- Run `scripts/leaf-remote-preflight.sh` after Rust 1.95/edition-2024 formatting.
+- Required focused filters: full policy-only check-config; route-aware DNS compiler contract; policy-only KCP endpoint isolation; peer-generation invalidation/restart; mesh UoT relay suite; owned HEV task shutdown.
+- One Cargo build invocation only. Both package test binaries are resolved from that build log; a package-mismatched filter that runs zero tests is not evidence.
+
+Authoritative workflow plan after the complete candidate is intentionally committed:
+
+- One push to `codex/profiling-beta`; rely on its automatic Linux and Android workflow pair and do not manually duplicate dispatch.
+- Linux artifact evidence: policy-only check-config failure/success boundary, DIRECT/SOCKS/fallback DNS egress observation, existing HEV TCP/UDP and cleanup smoke.
+- Android artifact evidence: policy document retention, managed mesh UDP default, underlay/DNS generation restart, Wi-Fi detached disable/enable recovery, exact application-UID policy probe, resource return after stop/start.
+- No macOS/Windows workflow in v1 routine scope.
+
+Productive wait work:
+
+- During `.160`: finish source-level DNS/group audit and prepare bounded Linux DNS fixtures without mutating the synchronized snapshot.
+- During GitHub: pre-clean Linux hosts, verify wireless ADB and detached Wi-Fi recovery script, prepare artifact checksum/build-info verification, and stage Linux/Android probes.
+- Run independent Linux and Android sessions concurrently from the exact workflow artifacts.
+
+Dispatch lock: do not push or start workflows unless this complete snapshot passes the `.160` locked no-run and all focused filters. Documentation remains local until it accompanies that code candidate.
+EOF\n
+### Correction: fallback-to-DIRECT DNS server selection boundary
+
+The preceding route-aware DNS entry overstated one pinned Leaf case. The connection target behavior is correct: SOCKS receives the domain and DIRECT calls `direct_lookup`. However, `leaf/src/app/dns/client.rs::query_record_type` currently selects the DNS server subset solely from `is_direct_outbound(host)`, which asks the router for the outer rule target. `leaf/src/app/outbound/manager.rs` marks only the literal direct handler as `is_direct=true`; failover/chain handlers remain false.
+
+Consequence: a literal `...,DIRECT` rule selects `direct:` DNS as intended, and a SOCKS member still resolves the target remotely. But if a rule targets a fallback group and that group actually reaches its DIRECT member, `direct_lookup(host)` can select the normal/proxy DNS subset because the outer group tag is not direct. The actual network exit remains DIRECT; the DNS server choice is wrong for the requested contract.
+
+Preferred minimal Leaf fix: in both `DnsClient::query_record_type` and `DnsClient::query_ech_record_type`, select direct-marked servers when the explicit lookup call is direct OR the router classifies the host as direct: `collect_servers(is_direct || is_direct_outbound)`. Add pinned Leaf unit coverage for (1) explicit direct lookup under a non-direct group route, (2) normal lookup under literal DIRECT, and (3) normal proxy lookup. This keeps EasyTier decoupled from Leaf group internals.
+
+The EasyTier regression was renamed to `preserves_unresolved_domain_contract_for_direct_socks_and_fallback`; it locks only the compiler-owned half and explicitly records that the pinned Leaf fix is still required. The first `.160` batch attempt also correctly rejected the anonymous test resolver because its closure was not higher-ranked over `&str`; it now reuses the existing `Unresolved` trait implementation. No GitHub workflow was started.
+EOF\n
+### Second correction: exact pinned Leaf already fixes group-to-DIRECT DNS selection
+
+The immediately preceding correction is invalid because it was derived from the stale Cargo checkout worktree `.../leaf-6ac41ef5369474b3/2f99d4f`, not the revision in EasyTier's lockfile. `Cargo.lock` authoritatively pins `lovitus/leaf@b1e33b50e37ea3b396e3cee2a1d60bb0c599655c`. A dedicated worktree at that exact SHA shows eight commits beyond the repository's current `master`.
+
+At `b1e33b50`:
+
+- `leaf/src/app/dns/client.rs::_lookup_inner` maps every explicit `direct_lookup` to `DnsQueryRoute::direct()` before cache lookup or query construction.
+- `query_record_type` selects servers with `collect_servers(route.direct)`; `resolve_with_server` also uses the same route to force the physical direct socket.
+- Direct and policy DNS caches are keyed in separate resolver scopes.
+- Normal application lookup still uses `query_route_for_host`, preserving first-match rule selection and an explicit proxy outbound tag for dispatched DNS.
+- Consequently, when failover reaches its DIRECT member, that member's `direct_lookup` does use the `direct:` server subset even though the outer group handler is not marked direct. The proposed two-line Leaf patch is unnecessary and must not be applied.
+
+The correct v1 conclusion is restored: literal DIRECT and fallback-to-DIRECT resolve with the direct set; SOCKS/managed mesh keeps the target domain for the selected node; normal Leaf DNS-service/rule lookups follow their selected outbound route. EasyTier only needs the compiler-owned regression `preserves_unresolved_domain_contract_for_direct_socks_and_fallback`.
+
+Process fix added to `AGENTS.md`: every Cargo git dependency audit must start from the exact `Cargo.lock` URL/SHA and an explicitly aligned worktree. Cache directory names and stale checkout contents are not evidence.
+EOF\n
+## 2026-07-16: Batched .160 preflight and focused frontend evidence
+
+Remote builder: `root@192.168.2.160`, container `easytier-debug-builder`. No GitHub workflow or optimized artifact build was started.
+
+First preflight attempt:
+
+- Complete snapshot sync and busy-process check succeeded (`CLEAR`).
+- The single multi-package no-run correctly failed in `easytier-policy/src/leaf_config.rs`: the anonymous resolver closure was not higher-ranked over every `&str` lifetime.
+- This was routine compiler feedback caught on `.160`, not sent to GitHub. The test now reuses the existing concrete `Unresolved: MeshServerResolver`.
+
+Final preflight:
+
+- Command owner: `scripts/leaf-remote-preflight.sh`.
+- One Cargo invocation: locked, debug/no-run, all CPU cores, packages `easytier` and `easytier-policy`, feature `easytier/leaf-policy-proxy`.
+- Build result: success in 31.11 seconds.
+- Exact EasyTier test binary: `/workspace/target/debug/deps/easytier-68b83d7d96a53024`.
+- Exact policy test binary: `/workspace/target/debug/deps/easytier_policy-9738e97381dbc100`.
+- EasyTier focused results: policy-only full check-config 1/1; KCP endpoint isolation 1/1; peer-generation invalidation/restart 1/1; mesh UDP/UoT suite 8/8; owned HEV task shutdown 1/1.
+- Policy focused result: unresolved-domain DIRECT/SOCKS/fallback compiler contract 1/1.
+- Aggregate focused result: 13 passed, 0 failed. Network-sensitive filters ran serially.
+- The only build warning was the pre-existing test-only helper `parse_system_dns_servers` reported as dead code in the non-test library phase.
+
+Independent local small test, not a package/build:
+
+- `pnpm --dir easytier-web/frontend-lib exec vitest run tests/policy-editor.spec.ts`.
+- Result: one test file passed, 9/9 tests, 43 ms test time, 1.62 s total.
+- This covers the managed mesh actor default `udp: true`, omitted mesh port, and existing policy editor behavior.
+- The first command typo used an extra `easytier/` path and exited before Vitest started; it is not counted as evidence.
+
+Current dispatch status:
+
+- Mandatory `.160` pre-push gate is satisfied for the complete build-affecting snapshot.
+- Local formatting and focused frontend evidence are complete.
+- No candidate commit/SHA exists yet, so authoritative Linux/Android workflows and exact-artifact real-device validation remain pending.
+EOF\n
+
+## 2026-07-16: Candidate freeze boundary after preflight
+
+Repository alignment:
+
+- Local branch: `codex/profiling-beta`.
+- Local HEAD: `318497c4fd8450a8fee237ef5826841c60517b0c`.
+- `origin/codex/profiling-beta`: the same exact SHA.
+- No ahead/behind delta and no staged files. This removes the prior branch-pointer/worktree ambiguity.
+
+Explicit next-candidate scope:
+
+- `AGENTS.md`
+- `easytier-policy/src/leaf_config.rs`
+- `easytier-web/frontend-lib/src/components/policy/PolicyEditor.vue`
+- `easytier-web/frontend-lib/tests/policy-editor.spec.ts`
+- `easytier/docs/todo/leaf_v1_release_gates.md`
+- `easytier/docs/todo/leaf_validation_journal.md`
+- `easytier/src/core.rs`
+- `easytier/src/policy_proxy.rs`
+- `scripts/leaf-remote-preflight.sh` (executable)
+
+The tracked diff is 452 insertions and 42 deletions before this journal entry; `git diff --check` reported no whitespace errors. The only file under untracked `scripts/` is the intended preflight script.
+
+Must remain unstaged and uncommitted:
+
+- `.artifacts/`
+- `.claude/`
+- `tauri-plugin-vpnservice/android/.gradle/`
+
+These paths are currently untracked and not ignored, so the candidate must use an explicit file list and must never use `git add .`.
+
+Pinned Leaf investigation workspace:
+
+- `/Volumes/micron512g/code/leaf` is a clean dedicated clone on local branch `codex/direct-dns-group`, checked out at exact EasyTier lock revision `b1e33b50e37ea3b396e3cee2a1d60bb0c599655c`.
+- No Leaf source modification is required or present. The exact pin already implements `DnsQueryRoute::direct`, route-scoped DNS dispatch, and direct/policy cache separation.
+- This workspace is reference evidence only and is not part of the EasyTier candidate.
+
+No commit, push, workflow dispatch, or artifact build was performed during this freeze step.
+
+
+### Candidate scope docs-only addition after preflight
+
+After the successful `.160` gate, `easytier/docs/todo/user_undecided_mesh_peer_egress.md` received section 41 only. It reconciles the adopted HEV v1 implementation with the still-undecided native MeshEgressDialer and records macOS, Windows, iOS/OHOS, FreeBSD, special-target, DNS, UoT/KCP, and v1/v2 boundaries. This is documentation-only, does not alter the synchronized build-affecting snapshot, and therefore does not justify another Cargo build or workflow dispatch. Add this exact file to the explicit candidate stage list.
+
+
+### Preflight log cleanup and local staging guard
+
+Post-preflight, `scripts/leaf-remote-preflight.sh` changed only its remote test-header construction so logs render a real newline instead of `=== TEST ... ===n`. `bash -n` and the script's `--help` path both pass. No Cargo command or workflow was repeated because this does not affect source compilation, test selection, or execution.
+
+Local-only `.git/info/exclude` now contains:
+
+- `.artifacts/`
+- `.claude/`
+- `tauri-plugin-vpnservice/android/.gradle/`
+
+The three unrelated generated/local trees no longer appear in `git status`; they remain untracked and are not part of repository commits. Candidate status now consists only of the nine intended tracked files plus `scripts/leaf-remote-preflight.sh`.
+
+Tooling discovery: in zsh, assigning loop variable `path` overwrites the special `path` array and therefore `PATH`; this caused three non-fatal `rg: command not found` messages during the initial exclude loop. Shell builtins still appended the entries, and a separate status check confirmed the intended result. The rule is now recorded in `AGENTS.md`; future commands use `candidate_path` or `file_path`.
+
+## 2026-07-16 - Exact candidate artifact intake prepared
+
+- Inspected the current Linux profiling and Android policy-candidate workflows once. A single push to `codex/profiling-beta` triggers both; no duplicate manual dispatch is needed.
+- Added `scripts/leaf-candidate-artifacts.sh` to bind artifact intake to one 40-character commit SHA. It requires exactly one successful run per workflow, verifies the rolling Linux tag before and after download, checks outer and inner Linux hashes, checks Android hashes, validates both `BUILD_INFO.txt` files, and rejects mismatched HEV pins.
+- The script deliberately performs no build, deployment, ADB action, route change, or service start. Its output is an immutable per-SHA directory under `.artifacts/leaf-candidates/`, preventing evidence from two candidates from being mixed.
+- This automation has not contacted GitHub yet because the frozen candidate has not been authorized for commit/push. After authorization, the two workflows should run once; artifact verification and Linux/Android deployment preparation can proceed in parallel while real-device gates remain tied to the same SHA.
+
+## 2026-07-16 - Android non-visual candidate validation prepared
+
+- Inspected `PolicyProbeInstrumentation`, `VpnServicePlugin`, and `TauriVpnService`. The existing probe executes bounded TCP/TLS connections from a separate captured UID and reports connection, TLS, elapsed-time, UID, SELinux context, and error evidence through instrumentation output.
+- The production Android start/stop API is intentionally available through the Tauri plugin, not an exported test service. Directly starting `TauriVpnService` with ADB would bypass the real ownership, callback, revocation, and configuration-generation path, so validation automation must not use that shortcut.
+- Added `scripts/leaf-android-validate.sh` with four explicit phases: exact artifact installation, text-only state/resource snapshots, matrix-driven captured-UID probes, and Wi-Fi outage/recovery probes.
+- The outage command schedules a detached on-device `svc wifi enable` before executing `svc wifi disable`. This preserves the wireless ADB recovery path instead of disconnecting the device indefinitely.
+- The script uses ADB/instrumentation and dumpsys/logcat evidence; it does not use screenshots or simulated taps. Initial VPN authorization and start still use the real application path. A final screenshot remains optional presentation evidence, not functional evidence.
+- No device command has been run in this preparation step. Runtime evidence remains pending the exact pushed candidate artifact.
+
+## 2026-07-16 - Linux isolated fault execution prepared
+
+- Reviewed the existing Linux policy validation report. The accepted evidence already covers routing ownership, fail-closed underlay loss, worker supervision, UoT/KCP behavior, mixed-version fallback, cleanup, and resource return, but the fault commands and measurements were not yet exposed as a reusable execution surface.
+- Added `scripts/leaf-linux-validate.sh`. It refuses to operate without root and an existing named network namespace, so it cannot delete or replace the host default route.
+- The script captures addresses, rules, main/table-52000 routes, sockets, per-process RSS, FD counts, and thread counts. It supports supervised Leaf-worker kill/restart and exact default-route removal/restoration with an EXIT/INT/TERM restoration trap.
+- Data-plane checks are executable hooks rather than embedded topology assumptions: mesh continuity, normal policy success, and outage fail-closed probes remain independently replaceable and can reuse the current curl/iperf tooling.
+- Combined with the Android instrumentation runner and exact artifact intake, the post-workflow path is now parallel: verify one SHA, deploy Linux and Android independently, run text-based fault/resource matrices, then collect only final presentation screenshots if desired.
+- No namespace, route, process, device, builder, or GitHub command was executed while preparing this script. Runtime qualification still requires the exact pushed candidate.
+
+## 2026-07-16 - Workflow authorization clarified
+
+- Maintainer authorization is standing rather than per-push: after a batched candidate is frozen and the `.160` preflight passes, the agent may commit and push it to `codex/profiling-beta` autonomously.
+- The efficiency constraint remains strict: GitHub Actions must not be used for one-line compiler feedback. Related implementation, tests, platform fixes, artifact intake, and validation scenarios are accumulated, checked together on `.160`, and submitted as one exact candidate SHA.

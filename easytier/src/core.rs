@@ -1836,31 +1836,99 @@ pub async fn main() -> ExitCode {
 }
 
 async fn validate_config(cli: &Cli) -> anyhow::Result<()> {
-    // Check if a config file is provided
-    let config_files = cli
-        .config_file
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("--config-file is required when using --check-config"))?;
+    // Mihomo main.go test mode passes the selected source through
+    // executor.Parse/ParseWithBytes -> config.Parse without starting runtime
+    // services. Keep the same externally observable boundary for both the
+    // EasyTier TOML envelope and its referenced or inline policy document.
+    let mut has_config = false;
+    if let Some(config_files) = cli.config_file.as_ref() {
+        has_config = true;
+        for config_file in config_files {
+            let config = if config_file == &PathBuf::from("-") {
+                let mut stdin = String::new();
+                _ = tokio::io::stdin()
+                    .read_to_string(&mut stdin)
+                    .await
+                    .context("failed to read config from stdin")?;
+                TomlConfigLoader::new_from_str_with_source("stdin", stdin.as_str())?
+            } else {
+                TomlConfigLoader::new(config_file)?
+            };
 
-    for config_file in config_files {
-        if config_file == &PathBuf::from("-") {
-            let mut stdin = String::new();
-            _ = tokio::io::stdin()
-                .read_to_string(&mut stdin)
-                .await
-                .context("failed to read config from stdin")?;
-            TomlConfigLoader::new_from_str_with_source("stdin", stdin.as_str())?;
-        } else {
-            TomlConfigLoader::new(config_file)?;
-        };
+            #[cfg(all(
+                feature = "leaf-policy-proxy",
+                any(
+                    target_os = "linux",
+                    all(target_os = "macos", not(feature = "macos-ne"))
+                )
+            ))]
+            crate::policy_proxy::configured_for(&config)?;
+        }
     }
 
+    #[cfg(all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ))]
+    if let Some(policy_file) = cli.policy_config.as_deref() {
+        has_config = true;
+        let outbound_interface = cli.policy_outbound_interface.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("--policy-config requires --policy-outbound-interface")
+        })?;
+        crate::policy_proxy::validate_process_config(
+            policy_file,
+            cli.policy_leaf_executable.as_path(),
+            outbound_interface,
+        )?;
+    }
+
+    if !has_config {
+        anyhow::bail!("--config-file or --policy-config is required when using --check-config");
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
+    #[tokio::test]
+    async fn check_config_fully_parses_policy_only_input_like_mihomo_test_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let policy = directory.path().join("policy.yaml");
+        let worker = directory.path().join("easytier-leaf-worker");
+        std::fs::write(&worker, b"worker").unwrap();
+        std::fs::write(
+            &policy,
+            "version: 1\nrules: [\"NETWORK,udp,DIRECT\", \"MATCH,DIRECT\"]\n",
+        )
+        .unwrap();
+
+        let cli = Cli::try_parse_from([
+            "easytier-core",
+            "--check-config",
+            "--policy-config",
+            policy.to_str().unwrap(),
+            "--policy-leaf-executable",
+            worker.to_str().unwrap(),
+            "--policy-outbound-interface",
+            "eth0",
+        ])
+        .unwrap();
+        validate_config(&cli).await.unwrap();
+
+        std::fs::write(
+            &policy,
+            "version: 1\nunknown-field: true\nrules: [\"MATCH,DIRECT\"]\n",
+        )
+        .unwrap();
+        let error = validate_config(&cli).await.unwrap_err();
+        assert!(error.to_string().contains("invalid policy config"));
+    }
 
     #[test]
     fn test_parse_listeners() {

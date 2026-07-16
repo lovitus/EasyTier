@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly BUILDER_HOST="${BUILDER_HOST:-root@192.168.2.160}"
+readonly BUILDER_CONTAINER="${BUILDER_CONTAINER:-easytier-debug-builder}"
+readonly REMOTE_HOST_WORKSPACE="${REMOTE_HOST_WORKSPACE:-/data/easytier-builder/workspace}"
+readonly REMOTE_WORKSPACE="${REMOTE_WORKSPACE:-/workspace}"
+readonly BUILD_TIMEOUT="${BUILD_TIMEOUT:-1800}"
+readonly TEST_TIMEOUT="${TEST_TIMEOUT:-300}"
+readonly BUILD_LOG="/tmp/easytier_leaf_preflight_build.log"
+readonly TEST_LOG="/tmp/easytier_leaf_preflight_test.log"
+
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+readonly -a SSH_OPTIONS=(
+  -o ServerAliveInterval=30
+  -o ServerAliveCountMax=3
+  -o ConnectTimeout=10
+)
+readonly -a BUILD_SSH_OPTIONS=(
+  "${SSH_OPTIONS[@]}"
+  -o ExitOnForwardFailure=yes
+  -R 7890:127.0.0.1:7890
+)
+
+readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
+  core::tests::check_config_fully_parses_policy_only_input_like_mihomo_test_mode
+  gateway::socks5::dataplane::tests::policy_kcp_endpoint_is_isolated_from_user_socks_endpoint
+  peers::peer_ospf_route::tests::peer_removal_restarts_remaining_generation_and_invalidates_remote_cache
+  policy_proxy::mesh_udp_relay::tests
+  instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
+)
+readonly -a DEFAULT_POLICY_TEST_FILTERS=(
+  leaf_config::tests::preserves_unresolved_domain_contract_for_direct_socks_and_fallback
+)
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/leaf-remote-preflight.sh [ADDITIONAL_TEST_FILTER ...]
+
+Synchronizes the complete local snapshot to the dedicated builder, performs one
+locked debug no-run build for the EasyTier Leaf/HEV library target, and executes
+the focused tests directly from that exact test binary. Additional filters are
+appended to the default candidate suite.
+
+Environment overrides:
+  BUILDER_HOST, BUILDER_CONTAINER, REMOTE_HOST_WORKSPACE, REMOTE_WORKSPACE
+  BUILD_TIMEOUT, TEST_TIMEOUT
+EOF
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+sync_snapshot() {
+  printf 'Syncing complete candidate snapshot to %s:%s\n' \
+    "$BUILDER_HOST" "$REMOTE_HOST_WORKSPACE"
+  rsync -a --delete \
+    --exclude '/.git/' \
+    --exclude '/target/' \
+    --exclude '/.artifacts/' \
+    --exclude '/.claude/' \
+    --exclude '/.envrc.local' \
+    --exclude '/easytier-gui/src-tauri/gen/' \
+    --exclude '/easytier-gui/src-tauri/.gradle/' \
+    -e "ssh ${SSH_OPTIONS[*]}" \
+    "$REPOSITORY_ROOT/" "$BUILDER_HOST:$REMOTE_HOST_WORKSPACE/"
+}
+
+check_builder_idle() {
+  local status
+  status="$({
+    ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+      "docker exec $BUILDER_CONTAINER bash -c 'if pgrep -x cargo >/dev/null || pgrep -x rustc >/dev/null; then pgrep -a -x cargo; pgrep -a -x rustc; echo BLOCKED; else echo CLEAR; fi'"
+  } 2>&1)"
+  printf '%s\n' "$status"
+  if [[ "$status" != *CLEAR* || "$status" == *BLOCKED* ]]; then
+    printf 'Remote builder is busy; inspect the reported process before retrying.\n' >&2
+    exit 2
+  fi
+}
+
+run_no_run_build() {
+  local exit_code=0
+  ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --lib --features easytier/leaf-policy-proxy > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
+    || exit_code=$?
+
+  ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER tail -50 $BUILD_LOG"
+  if ((exit_code != 0)); then
+    printf 'Remote no-run build failed with exit code %d.\n' "$exit_code" >&2
+    exit "$exit_code"
+  fi
+}
+
+resolve_test_binary() {
+  local binary_prefix="$1"
+  ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER bash -c \"awk '/Executable unittests src\\/lib.rs/ && /\\/deps\\/$binary_prefix-/ { line=\\\$0 } END { if (line == \\\"\\\") exit 1; sub(/^.*\\\\(/, \\\"\\\", line); sub(/\\\\).*$/, \\\"\\\", line); print \\\"$REMOTE_WORKSPACE/\\\" line }' $BUILD_LOG\""
+}
+
+run_focused_tests() {
+  local test_binary="$1"
+  local log_mode="$2"
+  shift 2
+  local -a filters=("$@")
+  local remote_script
+
+  if [[ "$log_mode" == "reset" ]]; then
+    printf -v remote_script 'set -euo pipefail; : > %q;' "$TEST_LOG"
+  else
+    printf -v remote_script 'set -euo pipefail; : >> %q;' "$TEST_LOG"
+  fi
+  local filter
+  for filter in "${filters[@]}"; do
+    printf -v remote_script '%s printf %q %q >> %q; timeout %q %q %q --nocapture --test-threads 1 >> %q 2>&1;' \
+      "$remote_script" '%s\n' "=== TEST $filter ===" "$TEST_LOG" \
+      "$TEST_TIMEOUT" "$test_binary" "$filter" "$TEST_LOG"
+  done
+
+  local exit_code=0
+  ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER bash -c $(printf '%q' "$remote_script")" \
+    || exit_code=$?
+  ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER tail -100 $TEST_LOG"
+  if ((exit_code != 0)); then
+    printf 'Focused test suite failed with exit code %d.\n' "$exit_code" >&2
+    exit "$exit_code"
+  fi
+}
+
+sync_snapshot
+check_builder_idle
+run_no_run_build
+readonly EASYTIER_TEST_BINARY="$(resolve_test_binary easytier)"
+readonly POLICY_TEST_BINARY="$(resolve_test_binary easytier_policy)"
+printf 'Using exact EasyTier library test binary: %s\n' "$EASYTIER_TEST_BINARY"
+printf 'Using exact policy library test binary: %s\n' "$POLICY_TEST_BINARY"
+run_focused_tests "$EASYTIER_TEST_BINARY" reset "${DEFAULT_EASYTIER_TEST_FILTERS[@]}" "$@"
+run_focused_tests "$POLICY_TEST_BINARY" append "${DEFAULT_POLICY_TEST_FILTERS[@]}"
+printf 'Leaf/HEV remote preflight passed. GitHub release artifacts were not built.\n'
