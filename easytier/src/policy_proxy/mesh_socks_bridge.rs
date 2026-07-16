@@ -365,27 +365,10 @@ async fn connect_remote(
 ) -> anyhow::Result<DataPlaneTcpStream> {
     let mut failures = Vec::new();
     for endpoint in remote.endpoints() {
-        // Reference semantics:
-        // - Mihomo adapter/outbound/socks5.go::{dialSocksServer,StreamConnContext}
-        //   carries a user SOCKS stream over its configured dialer without silently
-        //   substituting a second transport solely because the server supports it.
-        // - Clash Meta Android service/TunService.kt::startTun adds the virtual DNS
-        //   endpoint to VpnService and leaves outbound transport ownership to core.
-        // EasyTier intentionally keeps policy KCP for its versioned, portless managed
-        // HEV actor. An explicit user SOCKS port may belong to an older EasyTier peer;
-        // kcp_input only proves generic KCP availability, not policy-bridge payload
-        // interoperability. Use the ordinary mesh/smoltcp path for that compatibility
-        // boundary instead of accepting a control handshake and black-holing payload.
-        let result = if remote.is_built_in() {
-            data_plane
-                .data_plane_tcp_connect_mesh_only(*endpoint, CONNECT_TIMEOUT)
-                .await
-        } else {
-            data_plane
-                .data_plane_tcp_connect_mesh_without_kcp(*endpoint, CONNECT_TIMEOUT)
-                .await
-        };
-        match result {
+        match data_plane
+            .data_plane_tcp_connect_mesh_only(*endpoint, CONNECT_TIMEOUT)
+            .await
+        {
             Ok(stream) => return Ok(stream),
             Err(error) => failures.push(format!("{endpoint}: {error}")),
         }

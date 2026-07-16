@@ -308,7 +308,7 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<DataPlaneTcpStream, Error> {
-        self.data_plane_tcp_connect_inner(dst_addr, timeout, true, false, false, true)
+        self.data_plane_tcp_connect_inner(dst_addr, timeout, true, false, false)
             .await
     }
 
@@ -317,16 +317,7 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<DataPlaneTcpStream, Error> {
-        self.data_plane_tcp_connect_inner(dst_addr, timeout, false, true, true, true)
-            .await
-    }
-
-    pub(crate) async fn data_plane_tcp_connect_mesh_without_kcp(
-        &self,
-        dst_addr: SocketAddr,
-        timeout: Duration,
-    ) -> Result<DataPlaneTcpStream, Error> {
-        self.data_plane_tcp_connect_inner(dst_addr, timeout, false, false, true, false)
+        self.data_plane_tcp_connect_inner(dst_addr, timeout, false, true, true)
             .await
     }
 
@@ -335,7 +326,7 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<DataPlaneTcpStream, Error> {
-        self.data_plane_tcp_connect_inner(dst_addr, timeout, false, true, true, true)
+        self.data_plane_tcp_connect_inner(dst_addr, timeout, false, true, true)
             .await
     }
 
@@ -343,11 +334,7 @@ impl Socks5Server {
     async fn data_plane_kcp_endpoint(
         &self,
         use_policy_kcp_endpoint: bool,
-        allow_kcp: bool,
     ) -> Option<std::sync::Weak<kcp_sys::endpoint::KcpEndpoint>> {
-        if !allow_kcp {
-            return None;
-        }
         if use_policy_kcp_endpoint {
             self.policy_kcp_endpoint.lock().await.clone()
         } else {
@@ -362,7 +349,6 @@ impl Socks5Server {
         allow_kernel_fallback: bool,
         fallback_to_smoltcp_on_kcp_failure: bool,
         _use_policy_kcp_endpoint: bool,
-        _allow_kcp: bool,
     ) -> Result<DataPlaneTcpStream, Error> {
         let data_plane_ref = self.acquire_data_plane_ref();
         let deadline = Instant::now() + timeout;
@@ -374,9 +360,7 @@ impl Socks5Server {
         let local_port = smoltcp_net.get_port();
         let local_addr = SocketAddr::new(IpAddr::V4(ipv4_addr.address()), local_port);
         #[cfg(feature = "kcp")]
-        let kcp_endpoint = self
-            .data_plane_kcp_endpoint(_use_policy_kcp_endpoint, _allow_kcp)
-            .await;
+        let kcp_endpoint = self.data_plane_kcp_endpoint(_use_policy_kcp_endpoint).await;
         let connector = Socks5AutoConnector {
             #[cfg(feature = "kcp")]
             kcp_endpoint,
@@ -677,7 +661,7 @@ mod tests {
 
     #[cfg(feature = "kcp")]
     #[tokio::test]
-    async fn policy_kcp_endpoint_is_isolated_and_can_be_disabled_for_compatibility() {
+    async fn policy_kcp_endpoint_is_isolated_from_user_socks_endpoint() {
         let peer = create_mock_peer_manager().await;
         let server = Socks5Server::new(peer.get_global_ctx(), peer, None);
         let user_endpoint = std::sync::Arc::new(kcp_sys::endpoint::KcpEndpoint::new());
@@ -688,12 +672,12 @@ mod tests {
             Some(std::sync::Arc::downgrade(&policy_endpoint));
 
         let selected_user = server
-            .data_plane_kcp_endpoint(false, true)
+            .data_plane_kcp_endpoint(false)
             .await
             .and_then(|endpoint| endpoint.upgrade())
             .unwrap();
         let selected_policy = server
-            .data_plane_kcp_endpoint(true, true)
+            .data_plane_kcp_endpoint(true)
             .await
             .and_then(|endpoint| endpoint.upgrade())
             .unwrap();
@@ -701,6 +685,5 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&selected_user, &user_endpoint));
         assert!(std::sync::Arc::ptr_eq(&selected_policy, &policy_endpoint));
         assert!(!std::sync::Arc::ptr_eq(&selected_user, &selected_policy));
-        assert!(server.data_plane_kcp_endpoint(true, false).await.is_none());
     }
 }
