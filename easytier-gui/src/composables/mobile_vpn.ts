@@ -3,7 +3,7 @@ import { addPluginListener } from '@tauri-apps/api/core'
 import { Utils } from 'easytier-frontend-lib'
 import { get_vpn_status, prepare_vpn, start_vpn, stop_vpn } from 'tauri-plugin-vpnservice-api'
 import { setTunFd, updateMobileNetwork } from './backend'
-import { getRoutesForVpn, getStaticVpnBootstrap } from './vpn_routes'
+import { getDnsForVpn, getRoutesForVpn, getStaticVpnBootstrap } from './vpn_routes'
 
 interface vpnStatus {
   running: boolean
@@ -340,7 +340,7 @@ async function applyNetworkInstanceChange(instanceId: string, epoch: number, for
 
   const routes = staticBootstrap?.routes ?? getRoutesForVpn(curNetworkInfo?.routes, config)
 
-  const dns = config.enable_magic_dns ? '100.100.100.101' : undefined
+  const dns = getDnsForVpn(config)
 
   const ipChanged = virtual_ip !== curVpnStatus.ipv4Addr
   const cidrChanged = network_length !== curVpnStatus.ipv4Cidr

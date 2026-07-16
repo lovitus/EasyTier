@@ -11,10 +11,33 @@ interface VpnRouteConfig {
   network_length?: number
 }
 
+const MAGIC_DNS_SERVER = '100.100.100.101'
+const POLICY_FAKE_DNS_SERVER = '198.19.0.1'
+
 export interface StaticVpnBootstrap {
   ipv4Addr: string
   networkLength: number
   routes: string[]
+}
+
+/**
+ * Selects the DNS address published by Android VpnService.
+ *
+ * The pinned Leaf TUN inbound intercepts UDP/53 before dispatch and restores
+ * domains through FakeDNS. 198.19.0.1 is inside the reserved 198.18.0.0/15
+ * benchmark range but outside Leaf's 198.18.0.0/16 allocation pool, so it is
+ * only a stable packet destination and can never alias an allocated FakeIP.
+ * Magic DNS keeps priority because its exact address remains mesh-owned; using
+ * both mechanisms requires the separately tracked split-DNS adapter.
+ */
+export function getDnsForVpn(config: VpnRouteConfig): string | undefined {
+  if (config.enable_magic_dns) {
+    return MAGIC_DNS_SERVER
+  }
+  if (config.enable_policy_proxy) {
+    return POLICY_FAKE_DNS_SERVER
+  }
+  return undefined
 }
 
 export function getRoutesForVpn(
@@ -34,7 +57,7 @@ export function getRoutesForVpn(
   ret.push(...(config.routes ?? []))
 
   if (config.enable_magic_dns) {
-    ret.push('100.100.100.101/32')
+    ret.push(`${MAGIC_DNS_SERVER}/32`)
   }
 
   if (config.enable_policy_proxy) {

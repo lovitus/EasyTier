@@ -671,3 +671,23 @@ Cleanup evidence:
 Documentation test preflight note:
 
 - The first remote execution of `documented_leaf_policy_v1_example_parses_and_compiles` reached production validation and rejected the test-only bridge password `documented-test-secret` because bridge credentials are alphanumeric. The fixture was corrected to `documentedtestsecret`; the exact remote test then passed (`1 passed`, 1508 filtered out). Production behavior was not changed.
+
+## 2026-07-16: Android browser domain-loss diagnosis and host fix
+
+Observed failure and isolation:
+
+- The saved Android policy selected the explicit mesh SOCKS actor for foreign GeoSite/domain rules. Mesh ICMP, TCP port `24443`, and the SOCKS greeting were healthy. A SOCKS request carrying the destination as a domain returned HTTP 200, while the same request carrying the locally resolved Google IP timed out after the SOCKS server accepted the TLS ClientHello.
+- Android reported `DnsAddresses: []`, and `TauriVpnService` logged `dns:null`. The browser therefore resolved domains before packets entered Leaf. Leaf received only the real destination IP and could not reconstruct the domain for GeoSite matching or a SOCKS `ATYP=DOMAIN` request.
+- The reverted mesh-transport experiment changed the explicit actor leg from KCP-backed transport to ordinary mesh TCP but produced the same failure. Mesh encapsulation and overlay selection are therefore outside this fix and must remain unchanged.
+
+Reference behavior followed before editing:
+
+- Mihomo `/Users/fanli/Documents/mihomo-rev/adapter/outbound/socks5.go`: `StreamConnContext` and `DialContext` pass the original metadata destination to `dialSocksServer`, so a preserved domain is encoded as a SOCKS domain rather than prematurely resolved to an IP.
+- ClashMeta Android `/Users/fanli/Documents/clashmeta-android-rev/service/src/main/java/com/github/kr328/clash/service/TunService.kt`: `startTun` publishes the TUN DNS address with `VpnService.Builder.addDnsServer`. `TunModule.attach` passes the TUN FD and virtual DNS parameters to the proxy core.
+- Pinned Leaf `2f62208187f7980d066e479bd70bb55613c066d2`: `proxy/tun/inbound.rs::handle_inbound_datagram_{lwip,smoltcp}` intercepts UDP destination port 53, `app/fake_dns.rs::generate_fake_response` allocates a FakeIP, and `handle_inbound_stream_{lwip,smoltcp}` restores the paired domain before dispatch.
+
+Implementation and compatibility boundary:
+
+- Android policy-only mode now publishes `198.19.0.1` as a virtual DNS sink. Policy mode already installs IPv4/IPv6 default VPN routes, so DNS packets reach the existing Leaf TUN inbound. The address is inside reserved `198.18.0.0/15` but outside Leaf's `198.18.0.0/16` allocation pool, avoiding an alias with generated FakeIPs.
+- Magic DNS still takes priority at `100.100.100.101` and remains mesh-owned. This fix intentionally does not pretend to implement split DNS when Magic DNS and policy routing are enabled together; that documented compatibility boundary remains unchanged.
+- `getDnsForVpn` unit coverage pins disabled, policy-only, Magic-DNS-only, and combined-feature selection. Real Android evidence still required: VPN DNS ownership, browser GeoSite/domain routing, DIRECT domestic browsing, explicit mesh SOCKS domain form, Magic DNS non-regression, Wi-Fi recovery, and normal stop/start cleanup.

@@ -1,8 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import {
+  getDnsForVpn,
   getRoutesForVpn,
   getStaticVpnBootstrap,
 } from '../../../easytier-gui/src/composables/vpn_routes'
+
+describe('getDnsForVpn', () => {
+  it('publishes the Leaf FakeDNS sink only for policy mode', () => {
+    expect(getDnsForVpn({})).toBeUndefined()
+    expect(getDnsForVpn({ enable_policy_proxy: true })).toBe('198.19.0.1')
+  })
+
+  it('keeps Magic DNS mesh-owned when both features are enabled', () => {
+    expect(getDnsForVpn({ enable_magic_dns: true })).toBe('100.100.100.101')
+    expect(getDnsForVpn({
+      enable_magic_dns: true,
+      enable_policy_proxy: true,
+    })).toBe('100.100.100.101')
+  })
+})
 
 describe('getRoutesForVpn', () => {
   it('keeps policy capture routes when runtime peer routes are absent', () => {
