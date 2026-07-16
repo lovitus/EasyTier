@@ -657,6 +657,102 @@ impl Drop for SocksEgressGuard {
     }
 }
 
+#[cfg(feature = "leaf-policy-proxy")]
+struct SocksEgressManager {
+    guard: tokio::sync::Mutex<Option<SocksEgressGuard>>,
+}
+
+#[cfg(feature = "leaf-policy-proxy")]
+impl SocksEgressManager {
+    fn new() -> Self {
+        Self {
+            guard: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    #[cfg(not(mobile))]
+    async fn start_guard() -> anyhow::Result<SocksEgressGuard> {
+        let executable_name = format!("easytier-hev-socks-egress{}", std::env::consts::EXE_SUFFIX);
+        let executable = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.join(&executable_name)))
+            .filter(|path| path.is_file())
+            .unwrap_or_else(|| executable_name.into());
+        let mut config = easytier_socks_egress::ProcessConfig::new(executable);
+        #[cfg(target_os = "linux")]
+        {
+            config.server.socket_mark = Some(crate::policy_proxy::POLICY_SOCKET_MARK);
+        }
+        let runtime = easytier_socks_egress::ProcessRuntime::start(config).await?;
+        let endpoint = runtime.endpoint();
+        let cancel = CancellationToken::new();
+        let runtime_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            if let Err(error) = runtime.run_until_cancel(runtime_cancel).await {
+                tracing::warn!(%endpoint, ?error, "HEV SOCKS egress stopped unexpectedly");
+            }
+        });
+        Ok(SocksEgressGuard {
+            endpoint,
+            cancel,
+            task: Some(task),
+        })
+    }
+
+    #[cfg(all(mobile, target_os = "android"))]
+    async fn start_guard() -> anyhow::Result<SocksEgressGuard> {
+        let runtime = easytier_socks_egress::InProcessRuntime::start(
+            easytier_socks_egress::SocksEgressConfig::default(),
+        )
+        .await?;
+        let endpoint = runtime.endpoint();
+        let cancel = CancellationToken::new();
+        let runtime_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            if let Err(error) = runtime.run_until_cancel(runtime_cancel).await {
+                tracing::warn!(%endpoint, ?error, "Android HEV SOCKS egress stopped unexpectedly");
+            }
+        });
+        Ok(SocksEgressGuard {
+            endpoint,
+            cancel,
+            task: Some(task),
+        })
+    }
+
+    #[cfg(all(mobile, not(target_os = "android")))]
+    async fn start_guard() -> anyhow::Result<SocksEgressGuard> {
+        anyhow::bail!("built-in HEV is unavailable on this platform host")
+    }
+
+    async fn endpoint(&self) -> anyhow::Result<std::net::SocketAddr> {
+        let mut guard = self.guard.lock().await;
+        if let Some(guard) = guard.as_ref() {
+            return Ok(guard.endpoint);
+        }
+        let started = Self::start_guard().await?;
+        let endpoint = started.endpoint;
+        tracing::info!(%endpoint, "started built-in HEV on first mesh actor request");
+        *guard = Some(started);
+        Ok(endpoint)
+    }
+
+    async fn shutdown(&self) {
+        let guard = self.guard.lock().await.take();
+        if let Some(guard) = guard {
+            guard.shutdown().await;
+        }
+    }
+}
+
+#[cfg(feature = "leaf-policy-proxy")]
+#[async_trait::async_trait]
+impl crate::policy_proxy::LocalSocksEndpointProvider for SocksEgressManager {
+    async fn endpoint(&self) -> anyhow::Result<std::net::SocketAddr> {
+        self.endpoint().await
+    }
+}
+
 pub struct Instance {
     inst_name: String,
 
@@ -697,7 +793,7 @@ pub struct Instance {
     policy_socks_relay: Option<Arc<crate::policy_proxy::MeshSocksRelayService>>,
 
     #[cfg(feature = "leaf-policy-proxy")]
-    socks_egress: Option<SocksEgressGuard>,
+    socks_egress: Option<Arc<SocksEgressManager>>,
 
     proxy_cidrs_monitor: Option<AbortOnDropHandle<()>>,
 
@@ -1254,105 +1350,25 @@ impl Instance {
             )
             .await?;
 
-        #[cfg(all(feature = "leaf-policy-proxy", not(mobile)))]
-        self.start_socks_egress().await;
-
-        #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
-        self.start_android_socks_egress().await;
-
         #[cfg(feature = "leaf-policy-proxy")]
         {
-            let local_endpoint = self.socks_egress.as_ref().map(|guard| guard.endpoint);
+            let socks_egress = Arc::new(SocksEgressManager::new());
+            let endpoint_provider: Arc<dyn crate::policy_proxy::LocalSocksEndpointProvider> =
+                socks_egress.clone();
             let relay = crate::policy_proxy::MeshSocksRelayService::new(
                 &self.peer_manager,
                 self.socks5_server.clone(),
-                local_endpoint,
+                Some(endpoint_provider),
             );
             relay.register();
-            if local_endpoint.is_some()
-                && let Err(error) = relay.start_local_tcp_ingress().await
-            {
+            if let Err(error) = relay.start_local_tcp_ingress().await {
                 tracing::warn!(?error, "built-in HEV mesh TCP ingress is unavailable");
             }
             self.policy_socks_relay = Some(relay);
+            self.socks_egress = Some(socks_egress);
         }
 
         Ok(())
-    }
-
-    #[cfg(all(feature = "leaf-policy-proxy", not(mobile)))]
-    async fn start_socks_egress(&mut self) {
-        if self.socks_egress.is_some() {
-            return;
-        }
-        let executable_name = format!("easytier-hev-socks-egress{}", std::env::consts::EXE_SUFFIX);
-        let executable = std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(|parent| parent.join(&executable_name)))
-            .filter(|path| path.is_file())
-            .unwrap_or_else(|| executable_name.into());
-        let mut config = easytier_socks_egress::ProcessConfig::new(executable);
-        #[cfg(target_os = "linux")]
-        {
-            config.server.socket_mark = Some(crate::policy_proxy::POLICY_SOCKET_MARK);
-        }
-        match easytier_socks_egress::ProcessRuntime::start(config).await {
-            Ok(runtime) => {
-                let endpoint = runtime.endpoint();
-                let cancel = CancellationToken::new();
-                let runtime_cancel = cancel.clone();
-                let task = tokio::spawn(async move {
-                    if let Err(error) = runtime.run_until_cancel(runtime_cancel).await {
-                        tracing::warn!(%endpoint, ?error, "HEV SOCKS egress stopped unexpectedly");
-                    }
-                });
-                self.socks_egress = Some(SocksEgressGuard {
-                    endpoint,
-                    cancel,
-                    task: Some(task),
-                });
-            }
-            Err(error) => {
-                tracing::warn!(
-                    ?error,
-                    "HEV SOCKS egress is unavailable; mesh remains active"
-                );
-            }
-        }
-    }
-
-    #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
-    async fn start_android_socks_egress(&mut self) {
-        if self.socks_egress.is_some() {
-            return;
-        }
-        match easytier_socks_egress::InProcessRuntime::start(
-            easytier_socks_egress::SocksEgressConfig::default(),
-        )
-        .await
-        {
-            Ok(runtime) => {
-                let endpoint = runtime.endpoint();
-                let cancel = CancellationToken::new();
-                let runtime_cancel = cancel.clone();
-                let task = tokio::spawn(async move {
-                    if let Err(error) = runtime.run_until_cancel(runtime_cancel).await {
-                        tracing::warn!(%endpoint, ?error, "Android HEV SOCKS egress stopped unexpectedly");
-                    }
-                });
-                self.socks_egress = Some(SocksEgressGuard {
-                    endpoint,
-                    cancel,
-                    task: Some(task),
-                });
-            }
-            Err(error) => {
-                tracing::warn!(
-                    ?error,
-                    "Android HEV SOCKS egress is unavailable; mesh remains active"
-                );
-            }
-        }
     }
 
     pub async fn run_ip_proxy(&mut self) -> Result<(), Error> {

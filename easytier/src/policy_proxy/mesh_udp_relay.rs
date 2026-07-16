@@ -92,10 +92,15 @@ impl Drop for AssociationReservation {
     }
 }
 
+#[async_trait::async_trait]
+pub(crate) trait LocalSocksEndpointProvider: Send + Sync {
+    async fn endpoint(&self) -> anyhow::Result<SocketAddr>;
+}
+
 pub(crate) struct MeshSocksRelayService {
     peer_mgr: Weak<PeerManager>,
     data_plane: Arc<Socks5Server>,
-    local_socks_endpoint: Option<SocketAddr>,
+    local_socks_endpoint_provider: Option<Arc<dyn LocalSocksEndpointProvider>>,
     associations: Arc<DashMap<AssociationToken, AssociationOwner>>,
     capacity_lock: tokio::sync::Mutex<()>,
     cancel: CancellationToken,
@@ -106,12 +111,12 @@ impl MeshSocksRelayService {
     pub(crate) fn new(
         peer_mgr: &Arc<PeerManager>,
         data_plane: Arc<Socks5Server>,
-        local_socks_endpoint: Option<SocketAddr>,
+        local_socks_endpoint_provider: Option<Arc<dyn LocalSocksEndpointProvider>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             peer_mgr: Arc::downgrade(peer_mgr),
             data_plane,
-            local_socks_endpoint,
+            local_socks_endpoint_provider,
             associations: Arc::new(DashMap::new()),
             capacity_lock: tokio::sync::Mutex::new(()),
             cancel: CancellationToken::new(),
@@ -141,9 +146,10 @@ impl MeshSocksRelayService {
     /// runtime. This is required on Android VpnService, whose virtual address is
     /// not a normal kernel-local listener address.
     pub(crate) async fn start_local_tcp_ingress(&self) -> anyhow::Result<()> {
-        let local_endpoint = self
-            .local_socks_endpoint
-            .context("built-in HEV has no registered local endpoint")?;
+        let endpoint_provider = self
+            .local_socks_endpoint_provider
+            .clone()
+            .context("built-in HEV has no endpoint provider")?;
         let mut listener = self
             .data_plane
             .data_plane_tcp_bind(BUILT_IN_MESH_SOCKS_PORT, SETUP_TIMEOUT)
@@ -169,8 +175,15 @@ impl MeshSocksRelayService {
                             continue;
                         };
                         let session_cancel = cancel.child_token();
+                        let endpoint_provider = endpoint_provider.clone();
                         sessions.spawn(async move {
                             let _permit = permit;
+                            let local_endpoint = tokio::time::timeout(
+                                SETUP_TIMEOUT,
+                                endpoint_provider.endpoint(),
+                            )
+                            .await
+                            .context("local HEV lazy start timed out")??;
                             let mut local = tokio::time::timeout(
                                 SETUP_TIMEOUT,
                                 TcpStream::connect(local_endpoint),
@@ -253,11 +266,21 @@ impl MeshSocksRelayService {
         let cancel = CancellationToken::new();
         let mut reservation = self.reserve_token(source_peer_id, &cancel).await?;
         let token = reservation.token;
-        let local_proxy_addr = select_local_proxy_addr(
-            proxy_addr,
-            request.built_in_proxy,
-            self.local_socks_endpoint,
-        )?;
+        let local_socks_endpoint = if request.built_in_proxy {
+            let provider = self
+                .local_socks_endpoint_provider
+                .as_ref()
+                .context("built-in HEV has no endpoint provider")?;
+            Some(
+                tokio::time::timeout(SETUP_TIMEOUT, provider.endpoint())
+                    .await
+                    .context("local HEV lazy start timed out")??,
+            )
+        } else {
+            None
+        };
+        let local_proxy_addr =
+            select_local_proxy_addr(proxy_addr, request.built_in_proxy, local_socks_endpoint)?;
         let (control, native_udp, upstream_relay) =
             open_local_socks_udp(local_proxy_addr, credentials.as_ref()).await?;
         if request.stream_version >= UOT_VERSION {
@@ -1547,6 +1570,20 @@ mod tests {
 
     #[tokio::test]
     async fn relays_built_in_tcp_from_mesh_data_plane_to_local_endpoint() {
+        struct CountingEndpointProvider {
+            endpoint: SocketAddr,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl LocalSocksEndpointProvider for CountingEndpointProvider {
+            async fn endpoint(&self) -> anyhow::Result<SocketAddr> {
+                self.calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(self.endpoint)
+            }
+        }
+
         let peer_a = create_mock_peer_manager().await;
         let peer_b = create_mock_peer_manager().await;
         connect_peer_manager(peer_a.clone(), peer_b.clone()).await;
@@ -1581,8 +1618,23 @@ mod tests {
 
         let local_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let local_endpoint = local_listener.local_addr().unwrap();
-        let relay = MeshSocksRelayService::new(&peer_b, data_plane_b.clone(), Some(local_endpoint));
+        let endpoint_provider = Arc::new(CountingEndpointProvider {
+            endpoint: local_endpoint,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let relay = MeshSocksRelayService::new(
+            &peer_b,
+            data_plane_b.clone(),
+            Some(endpoint_provider.clone()),
+        );
         relay.start_local_tcp_ingress().await.unwrap();
+        assert_eq!(
+            endpoint_provider
+                .calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "registering the mesh ingress must not start the local SOCKS runtime",
+        );
         let local_server = tokio::spawn(async move {
             let (mut stream, _) = local_listener.accept().await.unwrap();
             let mut request = [0u8; 4];
@@ -1601,6 +1653,12 @@ mod tests {
         let mut reply = [0u8; 4];
         stream.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply, b"pong");
+        assert_eq!(
+            endpoint_provider
+                .calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+        );
         local_server.await.unwrap();
         drop(stream);
 
