@@ -8,8 +8,8 @@
 
 - Linux 与 Android 的 Leaf v1 基础功能、托管 HEV、mesh 共存、GeoSite/GeoIP、自定义域名/IP、TCP chain、连接级 fallback、显式 mesh UDP、故障恢复和清理已经取得实机证据。
 - 境外分流使用 `lv1g2` 与 `lv1g3` 完成，未使用只能访问中国大陆网络的主机代替境外出口验证。
-- `d307a4e460a230599f595e1f59b832453d20b888` 的 Linux 与 Android workflow、精确 SHA、制品哈希、Linux Build ID/符号/目标和 Android 签名均通过。
-- 当前性能数据能够证明托管 HEV 和策略路径可实际工作且没有灾难性吞吐问题，但还不能严格证明“相对 policy-off 或 EasyTier 2.9.10 无明显性能回退”，因为缺少同一环境、同一目标、同一参数下的 A/B 基线、CPU 利用率和 chain 最大吞吐对照。
+- 最终候选 `1a321cd6acfff4012836028d6615de04fb48be7c` 的 Linux 与 Android workflow、精确 SHA、制品哈希、Linux Build ID/符号/目标和 Android 签名均通过；它替代发生 smoltcp receive-window panic 的早期候选。
+- Linux 与 Android 已取得同一环境、同一目标、同一参数下的 policy-off、DIRECT 和 managed HEV A/B 数据，Linux 另有显式 mesh SOCKS、native SOCKS chain 与 fallback/failback 对照。结果支持“首版范围内未见明显全局性能回退”；策略、SOCKS 和额外 mesh hop 的固有成本仍需按路径分别理解。
 - 显式 `via: mesh` 加用户指定 SOCKS 端口的独立场景尚未单独执行。已通过的是端口省略的托管 HEV mesh actor，以及经 mesh 到 peer 本地 native SOCKS 的 chain。
 
 因此，冻结的 Linux/Android Leaf v1 功能边界基本闭环，但原目标中的完整性能回退结论和全部 SOCKS 形态验证尚未完成，不能把整个目标标记为完成。
@@ -238,3 +238,68 @@ Leaf `2f622081...` 保留永久切换的三次、至少 30 秒防抖门槛，但
 ### 有意差异与修复选择
 
 EasyTier 的 Leaf TUN 数据面已经通过 `netstack-smoltcp` 集成 smoltcp；为了维持现有解耦边界，不引入 Mihomo 的整套 gVisor/sing-tun，也不在 EasyTier 内重写 TCP sequence/window 算法。采用包含官方修复和官方回归测试的 smoltcp `0.13.1`，失败行为保持为丢弃最近通告窗口之外的数据并继续连接状态机。兼容门槛是远程 `--locked` crate/Leaf 预检、Android 同参数 DIRECT 吞吐复现、managed HEV 复测和 policy-off 对照；在这些证据完成前不得声称 Android 门槛关闭。
+
+## 2026-07-16 Linux 最终 fallback、资源与退出证据
+
+精确制品：`7b708f4009952aedfe009b03f80b601a29c0a8be`，Linux workflow `29471422081`。三节点测试网为隔离的 `10.250.0.0/24`：策略入口位于 `.37`，managed HEV 备出口位于 `.38`，chain + native SOCKS 主出口位于 `.160`；这里只记录内网地址，不在仓库中保存境外节点公网名称。
+
+### fallback 故障与恢复
+
+- 主 native SOCKS 在线：连续 `5/5` HTTP 200；`.160` 的 GOST 日志确认请求经过 loopback SOCKS 主链。
+- 停止主 SOCKS：从 `t=0` 到 `t=28s` 的 `14/14` 请求全部 HTTP 200，随后稳定备份 `10/10` 全部 HTTP 200；总计观察到 `24/24` 成功，没有 Reject 或 timeout。
+- 故障期间目标端源地址为 `.38`，证明流量已由 managed HEV 备出口承接，而非本机 DIRECT 假阳性。
+- 重启主 SOCKS：两组恢复请求各 `10/10` HTTP 200；目标日志显示源地址从 `.38` 切回 `.160`，约 48 秒后全部恢复到主链。该时序符合“差异探测成功后新连接可先使用临时主节点，但 pinned actor 仍需满足既有观察门槛才替换”的稳定 fallback 语义。
+
+### 运行中资源与正常退出
+
+主链正常时的单点快照：EasyTier core RSS `18984 KiB`、线程 `9`、FD `34`；Leaf RSS `7020 KiB`、线程 `4`、FD `31`；HEV RSS `260 KiB`、线程 `2`、FD `12`。
+
+正常发送 TERM 后，当前精确 core、Leaf、HEV PID 均消失，策略 TUN `etpf1`、当前策略路由/规则、当前临时文件均消失，当前运行创建的 `/tmp/easytier-hev-2MRYhr` 已删除。验证前已经存在的 hash 命名旧目录未归因给本次运行，也未作为本次清理成功的证据。
+
+### 精确 policy-off CPU 基线
+
+同一 workflow 制品、同一 `.37 -> 10.250.0.2:26500` 测试路径：TCP receiver `563 Mbit/s`、sender `562 Mbit/s`，本轮有 `1560` 次 retransmit。EasyTier core CPU `170.91%`、RSS `28828 KiB`、线程 `9`、FD `30`；常驻 managed egress HEV sidecar CPU `0%`、RSS `252 KiB`、线程 `2`、FD `12`。没有 Leaf worker、策略 TUN、策略规则或 `ET_POLICY_*` 环境变量。HEV sidecar 是 mesh 的常驻可选 egress 服务，其存在不能被解释为 policy 已启用。
+
+该基线与此前 policy-enabled mesh bypass 的 `477 Mbit/s`、DIRECT 的 `943 Mbit/s`、managed HEV 的 `497 Mbit/s`、显式 mesh SOCKS 的 `506 Mbit/s`、chain 的 `518 Mbit/s` 一起构成当前 Linux 功能/性能矩阵。不同路径承担的用户态转发工作不同，不能仅按吞吐绝对值推导回退；首版结论是 policy-off 不创建 Leaf/TUN/rule，mesh bypass 保持原 mesh 数据面，策略出口按所选 actor 承担对应的 Leaf/HEV CPU。
+
+### smoltcp 修复候选预检边界
+
+修复候选 `1a321cd6acfff4012836028d6615de04fb48be7c` 将 registry smoltcp 从 `0.12.0` 升级到 `0.13.1`。远程 builder 上 `cargo check --locked --package netstack-smoltcp --package easytier-policy --features easytier-policy/leaf-runtime` 通过，无 EasyTier API 适配；锁文件保留了与本修复无关的 bindgen/itertools 原解析。官方单测源码及 `test_recv_out_of_recv_win` 已核对，但独立编译该依赖测试时 builder 205G 挂载耗尽，失败原因为 `No space left on device`，不是测试断言或源码编译错误。本轮创建的 24 MiB 临时测试 target 已单独删除，没有清理共享缓存。最终门槛仍由该精确候选的 Linux/Android workflow 和 Android DIRECT/managed HEV 实机复测关闭。
+
+## 2026-07-16 最终 Android 同参数矩阵与候选结论
+
+### 精确候选与验证条件
+
+- 最终候选：`1a321cd6acfff4012836028d6615de04fb48be7c`。它在原验证基线 `d307a4e460a230599f595e1f59b832453d20b888` 上仅补入 smoltcp `0.13.1` receive-window 修复及本报告；Linux workflow `29473713550`、Android workflow `29473713549` 均成功。
+- Android 制品的 `BUILD_INFO.txt`、SHA256、目标架构和 APK v2 签名均与上述精确候选一致；Linux musl 制品也已核对 commit、build ID、symbols、target 和 SHA256。
+- 设备：`192.168.234.227:5555`；测试期间 Wi-Fi 始终开启，thermal status 为 `0`，电池温度约 `32 C`。没有通过断开 Wi-Fi 破坏 wireless ADB。
+- 三种模式都使用同一个 Android 进程、同一个 EasyTier 网络和 `stealth_mode: true`，吞吐参数统一为 iperf3 TCP `3 x 10 s`。测试中发现服务端与客户端 stealth 设置不一致会造成握手 reset；恢复用户原配置后 TCP/QUIC mesh 均正常。该现象是测试拓扑配置不一致，不是候选回归。
+
+### Android 功能、吞吐与资源对照
+
+| 模式 | 规则/路径证据 | 3 次接收吞吐 (Mbps) | 中位数 | 进程 CPU | VmRSS (KiB) | FD | 线程 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| policy-off | 无 Leaf policy；访问 mesh 虚拟地址 `10.247.0.1`，服务端看到源 `10.247.0.3` | 82.7 / 83.1 / 83.8 | 83.1 | 99.55% | 269556 | 317 | 65 |
+| DIRECT | `MATCH,DIRECT`；目标 `.38:25454` 看到源 `192.168.6.36`，证明由 Android 物理出口直连而非 mesh | 89.3 / 91.3 / 91.3 | 91.3 | 57.84% | 275400 | 330 | 69 |
+| managed HEV | `MATCH,linux-hev`，actor 使用 `server.virtual-ip: 10.247.0.1`、`via: mesh`、`udp: true`；`.38` 三次均看到源 `192.168.1.37` | 54.9 / 57.2 / 56.8 | 56.8 | 114.66% | 273068 | 325 | 68 |
+
+补充证据：
+
+- DIRECT 连续 30 秒、3 次传输后 Android PID 始终为 `5862`，logcat 未出现 `panic`、`underflow`、`smoltcp` 或 `SIGABRT`。这覆盖了旧 smoltcp `0.12` 候选可稳定触发的 `SeqNumber::sub -> Socket::window_to_update -> dispatch` 路径。
+- managed HEV 三次 sender 吞吐为 `67.6 / 71.0 / 69.3 Mbps`，重传为 `8 / 11 / 14`；`.37` 内置 `easytier-hev-socks-egress` 保持运行，采样为 VmRSS `276 KiB`、FD `22`、线程 `2`。
+- Android 的 CPU 是采样窗口内进程总 CPU，可能超过 100%，因为该进程为多线程；RSS/FD/线程是每个场景结束时的点采样。它们适合用于同设备同参数相对比较，不应解释为跨平台绝对基准。
+- 正常 stop 后运行实例列表为空且 `tun0` 消失；force-stop 后候选进程退出，Wi-Fi 仍开启。`vpn_management` 保留已授权包的 owner 记录，但 `Active vpn type: -1`、无 TUN、无候选进程和活跃服务，因此它不是残留 VPN 会话。
+
+### smoltcp 修复闭环与证据边界
+
+- 上游问题 `smoltcp-rs/smoltcp#1048`、`#1051` 与修复 PR `#1079` 对应 receive-window/sequence-number underflow；修复已包含在 smoltcp `0.13` 系列。本候选更新到 `0.13.1`，没有在 EasyTier 中复制或魔改 TCP 状态机。
+- 远程 builder 上 `cargo check --locked --package netstack-smoltcp --package easytier-policy --features easytier-policy/leaf-runtime` 通过；Linux 精确候选 DIRECT smoke 为 receiver `939 Mbps`、sender `943 Mbps`、零重传，无 panic，与旧正常基线 `943 Mbps` 同量级。
+- smoltcp 上游已有 `test_recv_out_of_recv_win` 回归测试。由于 `.160` 的 `/workspace` 205G 磁盘已满，独立执行该上游测试的临时编译没有完成；这里不把它记为已执行。产品路径由 Android 原故障复现矩阵、Linux smoke、远程 locked check 和两套精确候选 workflow 共同闭环。builder 磁盘容量是后续诊断环境维护项，不是 Leaf 产品发布阻塞。
+
+### Leaf v1 最终发布判断
+
+- 在首版边界“Linux + Android、单 policy-enabled 实例、DIRECT/REJECT、基础域名/GeoSite/GeoIP、managed HEV、显式 mesh SOCKS、native SOCKS chain、fallback/failback、Magic DNS 归 mesh”内，当前没有架构级或功能级重大发布阻塞。
+- Linux 已覆盖 policy-off、mesh bypass、DIRECT、managed HEV、显式 `via: mesh` 用户 SOCKS 端口、native SOCKS chain、fallback/failback、TCP/UDP、资源采样和正常清理；Android 已完成本节 A/B/C 同参数矩阵和停止清理。境外 `lv1g2/lv1g3` 的 GeoSite、GeoIP、自定义域名/IP、chain、mesh UDP 与 fallback/failback 证据见本报告前文。
+- 显式用户 SOCKS 的 UDP 能力仍以实际服务端为准：配置 `udp: true` 不会把不支持 UDP 的 peer SOCKS 自动变成可用。首版按既定语义失败并报告错误，不做隐藏回退；用户需要可靠 UDP 时应选择支持 UDP 的节点或 managed HEV 出口。
+- 未纳入首版承诺的 split-DNS、在线 Geo 更新、HTTP actor、netns、多实例、高吞吐 UDP 和所有高级 chain/fallback 组合继续作为实验/后续矩阵，不应在首版文档中宣称完全兼容。
+- 性能结论是“未见明显全局回退”，不是“所有策略路径零成本”：Linux policy-off 与原生 mesh 同量级，DIRECT 接近线速；Android policy-off/DIRECT 受无线链路限制约 `83-91 Mbps`，managed HEV 多一层 SOCKS 与 mesh 转发后约 `57 Mbps`。该差异符合路径复杂度，未观察到持续 RSS/FD/线程增长或进程重启。
