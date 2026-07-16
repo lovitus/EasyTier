@@ -15,7 +15,7 @@ use tokio::sync::oneshot;
 use tokio::sync::{Mutex, Notify};
 #[cfg(feature = "tun")]
 use tokio::task::JoinSet;
-#[cfg(feature = "magic-dns")]
+#[cfg(any(feature = "magic-dns", feature = "leaf-policy-proxy"))]
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -628,6 +628,12 @@ struct SocksEgressGuard {
 
 #[cfg(feature = "leaf-policy-proxy")]
 impl SocksEgressGuard {
+    fn is_finished(&self) -> bool {
+        self.task
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
+
     async fn shutdown(mut self) {
         self.cancel.cancel();
         let Some(mut task) = self.task.take() else {
@@ -725,8 +731,13 @@ impl SocksEgressManager {
         anyhow::bail!("built-in HEV is unavailable on this platform host")
     }
 
-    async fn endpoint(&self) -> anyhow::Result<std::net::SocketAddr> {
+    async fn ensure_endpoint(&self) -> anyhow::Result<std::net::SocketAddr> {
         let mut guard = self.guard.lock().await;
+        if guard.as_ref().is_some_and(SocksEgressGuard::is_finished)
+            && let Some(stale) = guard.take()
+        {
+            stale.shutdown().await;
+        }
         if let Some(guard) = guard.as_ref() {
             return Ok(guard.endpoint);
         }
@@ -749,7 +760,7 @@ impl SocksEgressManager {
 #[async_trait::async_trait]
 impl crate::policy_proxy::LocalSocksEndpointProvider for SocksEgressManager {
     async fn endpoint(&self) -> anyhow::Result<std::net::SocketAddr> {
-        self.endpoint().await
+        self.ensure_endpoint().await
     }
 }
 
@@ -1232,22 +1243,10 @@ impl Instance {
         let proxy_prepared_store = Arc::new(PreparedProxyStore::default());
 
         #[cfg(feature = "kcp")]
-        #[cfg(feature = "leaf-policy-proxy")]
-        let mesh_data_plane_kcp_enabled =
-            crate::policy_proxy::is_configured_for(self.global_ctx.config.as_ref());
-        #[cfg(feature = "kcp")]
-        #[cfg(not(feature = "leaf-policy-proxy"))]
-        let mesh_data_plane_kcp_enabled = false;
-
-        #[cfg(feature = "kcp")]
-        if self.global_ctx.get_flags().enable_kcp_proxy || mesh_data_plane_kcp_enabled {
+        if self.global_ctx.get_flags().enable_kcp_proxy {
             let src_proxy =
                 KcpProxySrc::new(self.get_peer_manager(), Some(proxy_prepared_store.clone())).await;
-            if self.global_ctx.get_flags().enable_kcp_proxy {
-                src_proxy.start().await;
-            } else {
-                src_proxy.start_endpoint_only().await;
-            }
+            src_proxy.start().await;
             self.kcp_proxy_src = Some(src_proxy);
         }
 
@@ -1342,11 +1341,8 @@ impl Instance {
                     .as_ref()
                     .filter(|_| self.global_ctx.get_flags().enable_kcp_proxy)
                     .map(|x| Arc::downgrade(&x.get_kcp_endpoint())),
-                #[cfg(feature = "kcp")]
-                self.kcp_proxy_src
-                    .as_ref()
-                    .filter(|_| mesh_data_plane_kcp_enabled)
-                    .map(|x| Arc::downgrade(&x.get_kcp_endpoint())),
+                #[cfg(any(feature = "kcp", feature = "quic"))]
+                self.proxy_failover_selector.clone(),
             )
             .await?;
 

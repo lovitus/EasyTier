@@ -372,7 +372,16 @@ message ClosePolicyUdpRelayRequest { bytes token = 1; }
 
 message ClosePolicyUdpRelayResponse {}
 
+message PreparePolicyTcpRelayRequest {
+  uint32 source_peer_id = 1;
+  common.SocketAddr proxy_addr = 2;
+}
+
+message PreparePolicyTcpRelayResponse { common.SocketAddr proxy_addr = 1; }
+
 service PolicyUdpRelayRpc {
+  rpc PreparePolicyTcpRelay(PreparePolicyTcpRelayRequest)
+      returns (PreparePolicyTcpRelayResponse);
   rpc OpenPolicyUdpRelay(OpenPolicyUdpRelayRequest)
       returns (OpenPolicyUdpRelayResponse);
   rpc ClosePolicyUdpRelay(ClosePolicyUdpRelayRequest)

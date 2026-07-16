@@ -25,7 +25,6 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Context as _;
 use hotpath::instant::Instant;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -37,7 +36,6 @@ use super::{
     decrement_entry_count, insert_entry_and_increment_count, try_insert_entry_and_increment_count,
 };
 
-const MESH_KCP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 use crate::gateway::tokio_smoltcp::{Net, TcpListener};
 
 struct DataPlaneRef {
@@ -310,7 +308,7 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<DataPlaneTcpStream, Error> {
-        self.data_plane_tcp_connect_inner(dst_addr, timeout, true, false, false)
+        self.data_plane_tcp_connect_inner(dst_addr, timeout, true, true, false)
             .await
     }
 
@@ -319,7 +317,11 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<DataPlaneTcpStream, Error> {
-        self.data_plane_tcp_connect_inner(dst_addr, timeout, false, true, true)
+        // The policy adapter supplies only a mesh destination. This generic
+        // data plane asks the mesh-owned selector to honor configured QUIC/KCP
+        // acceleration and destination capabilities, then falls back to its
+        // userspace smoltcp path before exposing a stream to the caller.
+        self.data_plane_tcp_connect_inner(dst_addr, timeout, false, false, true)
             .await
     }
 
@@ -328,20 +330,15 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<DataPlaneTcpStream, Error> {
-        self.data_plane_tcp_connect_inner(dst_addr, timeout, false, true, true)
+        self.data_plane_tcp_connect_mesh_only(dst_addr, timeout)
             .await
     }
 
     #[cfg(feature = "kcp")]
     async fn data_plane_kcp_endpoint(
         &self,
-        use_mesh_data_plane_kcp_endpoint: bool,
     ) -> Option<std::sync::Weak<kcp_sys::endpoint::KcpEndpoint>> {
-        if use_mesh_data_plane_kcp_endpoint {
-            self.mesh_data_plane_kcp_endpoint.lock().await.clone()
-        } else {
-            self.kcp_endpoint.lock().await.clone()
-        }
+        self.kcp_endpoint.lock().await.clone()
     }
 
     async fn data_plane_tcp_connect_inner(
@@ -349,8 +346,8 @@ impl Socks5Server {
         dst_addr: SocketAddr,
         timeout: Duration,
         allow_kernel_fallback: bool,
-        fallback_to_smoltcp_on_kcp_failure: bool,
-        _use_mesh_data_plane_kcp_endpoint: bool,
+        _use_kcp_endpoint: bool,
+        use_mesh_stream_selector: bool,
     ) -> Result<DataPlaneTcpStream, Error> {
         let data_plane_ref = self.acquire_data_plane_ref();
         let deadline = Instant::now() + timeout;
@@ -362,102 +359,40 @@ impl Socks5Server {
         let local_port = smoltcp_net.get_port();
         let local_addr = SocketAddr::new(IpAddr::V4(ipv4_addr.address()), local_port);
         #[cfg(feature = "kcp")]
-        let kcp_endpoint = self
-            .data_plane_kcp_endpoint(_use_mesh_data_plane_kcp_endpoint)
-            .await;
-        #[cfg(feature = "kcp")]
-        let selected_kcp = if kcp_endpoint.is_some() {
-            match self.peer_manager.upgrade() {
-                Some(peer_manager) => peer_manager.check_allow_kcp_to_dst(&dst_addr.ip()).await,
-                None => false,
-            }
+        let kcp_endpoint = if _use_kcp_endpoint {
+            self.data_plane_kcp_endpoint().await
         } else {
-            false
+            None
         };
-        #[cfg(not(feature = "kcp"))]
-        let selected_kcp = false;
+        #[cfg(any(feature = "kcp", feature = "quic"))]
+        let mesh_stream_selector = if use_mesh_stream_selector {
+            self.mesh_stream_selector.lock().await.clone()
+        } else {
+            None
+        };
         let connector = Socks5AutoConnector {
             #[cfg(feature = "kcp")]
             kcp_endpoint: kcp_endpoint.clone(),
+            #[cfg(any(feature = "kcp", feature = "quic"))]
+            mesh_stream_selector,
             peer_mgr: self.peer_manager.clone(),
             entries: self.entries.clone(),
-            smoltcp_net: Some(smoltcp_net.clone()),
+            smoltcp_net: Some(smoltcp_net),
             src_addr: local_addr,
             entry_count: self.entry_count.clone(),
             inner_connector: parking_lot::Mutex::new(None),
             allow_kernel_fallback,
         };
 
-        let first_deadline = if selected_kcp && fallback_to_smoltcp_on_kcp_failure {
-            deadline.min(Instant::now() + MESH_KCP_ATTEMPT_TIMEOUT)
-        } else {
-            deadline
-        };
-        let first_remaining = first_deadline.saturating_duration_since(Instant::now());
-        let first_timeout_s = first_remaining.as_secs().saturating_add(1);
-        let first_result = tokio::time::timeout(
-            first_remaining,
-            connector.tcp_connect(dst_addr, first_timeout_s),
-        )
-        .await;
-
-        let (stream, connector) = match first_result {
-            Ok(Ok(stream)) => (stream, connector),
-            Ok(Err(error)) if selected_kcp && fallback_to_smoltcp_on_kcp_failure => {
-                tracing::debug!(
-                    ?dst_addr,
-                    ?error,
-                    "mesh KCP data-plane connect failed; retrying once through smoltcp"
-                );
-                let fallback = Socks5AutoConnector {
-                    #[cfg(feature = "kcp")]
-                    kcp_endpoint: None,
-                    peer_mgr: self.peer_manager.clone(),
-                    entries: self.entries.clone(),
-                    smoltcp_net: Some(smoltcp_net),
-                    src_addr: local_addr,
-                    entry_count: self.entry_count.clone(),
-                    inner_connector: parking_lot::Mutex::new(None),
-                    allow_kernel_fallback,
-                };
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                let timeout_s = remaining.as_secs().saturating_add(1);
-                let stream =
-                    tokio::time::timeout(remaining, fallback.tcp_connect(dst_addr, timeout_s))
-                        .await
-                        .with_context(|| "smoltcp data-plane fallback timeout")?
-                        .map_err(anyhow::Error::from)?;
-                (stream, fallback)
-            }
-            Err(error) if selected_kcp && fallback_to_smoltcp_on_kcp_failure => {
-                tracing::debug!(
-                    ?dst_addr,
-                    ?error,
-                    "mesh KCP data-plane connect timed out; retrying once through smoltcp"
-                );
-                let fallback = Socks5AutoConnector {
-                    #[cfg(feature = "kcp")]
-                    kcp_endpoint: None,
-                    peer_mgr: self.peer_manager.clone(),
-                    entries: self.entries.clone(),
-                    smoltcp_net: Some(smoltcp_net),
-                    src_addr: local_addr,
-                    entry_count: self.entry_count.clone(),
-                    inner_connector: parking_lot::Mutex::new(None),
-                    allow_kernel_fallback,
-                };
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                let timeout_s = remaining.as_secs().saturating_add(1);
-                let stream =
-                    tokio::time::timeout(remaining, fallback.tcp_connect(dst_addr, timeout_s))
-                        .await
-                        .with_context(|| "smoltcp data-plane fallback timeout")?
-                        .map_err(anyhow::Error::from)?;
-                (stream, fallback)
-            }
-            Ok(Err(error)) => return Err(anyhow::Error::from(error).into()),
-            Err(error) => return Err(anyhow::Error::from(error).into()),
-        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let timeout_s = remaining.as_secs().saturating_add(1);
+        let stream =
+            match tokio::time::timeout(remaining, connector.tcp_connect(dst_addr, timeout_s)).await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => return Err(anyhow::Error::from(error).into()),
+                Err(error) => return Err(anyhow::Error::from(error).into()),
+            };
         Ok(DataPlaneTcpStream {
             stream,
             local_addr,
@@ -543,7 +478,7 @@ mod tests {
 
     /// Brings up two peers connected by a ring tunnel, each with a virtual IPv4
     /// and a running `Socks5Server`, and waits until the route to `b`'s IPv4 is
-    /// visible from `a`. `run(None, None)` leaves both kcp endpoints unset, so the
+    /// visible from `a`. `run(None, None)` leaves user and mesh accelerators unset, so the
     /// connect path goes through smoltcp, matching the listener side under test.
     async fn setup_pair() -> (Endpoint, Endpoint) {
         let a = create_mock_peer_manager().await;
@@ -561,7 +496,7 @@ mod tests {
             .run(
                 #[cfg(feature = "kcp")]
                 None,
-                #[cfg(feature = "kcp")]
+                #[cfg(any(feature = "kcp", feature = "quic"))]
                 None,
             )
             .await
@@ -570,7 +505,7 @@ mod tests {
             .run(
                 #[cfg(feature = "kcp")]
                 None,
-                #[cfg(feature = "kcp")]
+                #[cfg(any(feature = "kcp", feature = "quic"))]
                 None,
             )
             .await
@@ -734,39 +669,5 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
-    }
-
-    #[cfg(feature = "kcp")]
-    #[tokio::test]
-    async fn mesh_data_plane_kcp_endpoint_is_isolated_from_user_socks_endpoint() {
-        let peer = create_mock_peer_manager().await;
-        let server = Socks5Server::new(peer.get_global_ctx(), peer, None);
-        let user_endpoint = std::sync::Arc::new(kcp_sys::endpoint::KcpEndpoint::new());
-        let mesh_data_plane_endpoint = std::sync::Arc::new(kcp_sys::endpoint::KcpEndpoint::new());
-
-        *server.kcp_endpoint.lock().await = Some(std::sync::Arc::downgrade(&user_endpoint));
-        *server.mesh_data_plane_kcp_endpoint.lock().await =
-            Some(std::sync::Arc::downgrade(&mesh_data_plane_endpoint));
-
-        let selected_user = server
-            .data_plane_kcp_endpoint(false)
-            .await
-            .and_then(|endpoint| endpoint.upgrade())
-            .unwrap();
-        let selected_mesh_data_plane = server
-            .data_plane_kcp_endpoint(true)
-            .await
-            .and_then(|endpoint| endpoint.upgrade())
-            .unwrap();
-
-        assert!(std::sync::Arc::ptr_eq(&selected_user, &user_endpoint));
-        assert!(std::sync::Arc::ptr_eq(
-            &selected_mesh_data_plane,
-            &mesh_data_plane_endpoint
-        ));
-        assert!(!std::sync::Arc::ptr_eq(
-            &selected_user,
-            &selected_mesh_data_plane
-        ));
     }
 }

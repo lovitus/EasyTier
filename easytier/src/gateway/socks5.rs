@@ -17,6 +17,8 @@ use tokio_util::task::AbortOnDropHandle;
 
 #[cfg(feature = "kcp")]
 use crate::gateway::kcp_proxy::NatDstKcpConnector;
+#[cfg(any(feature = "kcp", feature = "quic"))]
+use crate::gateway::proxy_failover::{DeferredProxySelector, FlowKey};
 use crate::{
     common::{config::PortForwardConfig, global_ctx::GlobalCtxEvent, join_joinset_background},
     gateway::{
@@ -83,8 +85,8 @@ impl SocksUdpSocket {
 enum SocksTcpStream {
     Tcp(tokio::net::TcpStream),
     SmolTcp(super::tokio_smoltcp::TcpStream),
-    #[cfg(feature = "kcp")]
-    Kcp(crate::gateway::proxy_failover::BoxProxyStream),
+    #[cfg(any(feature = "kcp", feature = "quic"))]
+    Accelerated(crate::gateway::proxy_failover::BoxProxyStream),
 }
 
 impl AsyncRead for SocksTcpStream {
@@ -96,8 +98,8 @@ impl AsyncRead for SocksTcpStream {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
-            #[cfg(feature = "kcp")]
-            SocksTcpStream::Kcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+            #[cfg(any(feature = "kcp", feature = "quic"))]
+            SocksTcpStream::Accelerated(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
         }
     }
 }
@@ -111,8 +113,8 @@ impl AsyncWrite for SocksTcpStream {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
-            #[cfg(feature = "kcp")]
-            SocksTcpStream::Kcp(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+            #[cfg(any(feature = "kcp", feature = "quic"))]
+            SocksTcpStream::Accelerated(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
         }
     }
 
@@ -123,8 +125,8 @@ impl AsyncWrite for SocksTcpStream {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_flush(cx),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_flush(cx),
-            #[cfg(feature = "kcp")]
-            SocksTcpStream::Kcp(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+            #[cfg(any(feature = "kcp", feature = "quic"))]
+            SocksTcpStream::Accelerated(stream) => std::pin::Pin::new(stream).poll_flush(cx),
         }
     }
 
@@ -135,8 +137,8 @@ impl AsyncWrite for SocksTcpStream {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
             SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
-            #[cfg(feature = "kcp")]
-            SocksTcpStream::Kcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+            #[cfg(any(feature = "kcp", feature = "quic"))]
+            SocksTcpStream::Accelerated(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
         }
     }
 }
@@ -355,13 +357,15 @@ impl AsyncTcpConnector for Socks5KcpConnector {
             .connect(self.src_addr, addr, None)
             .await
             .map_err(super::fast_socks5::SocksError::Other)?;
-        Ok(SocksTcpStream::Kcp(ret))
+        Ok(SocksTcpStream::Accelerated(ret))
     }
 }
 
 struct Socks5AutoConnector {
     #[cfg(feature = "kcp")]
     kcp_endpoint: Option<Weak<KcpEndpoint>>,
+    #[cfg(any(feature = "kcp", feature = "quic"))]
+    mesh_stream_selector: Option<DeferredProxySelector>,
     peer_mgr: Weak<PeerManager>,
     entries: Socks5EntrySet,
     entry_count: Arc<AtomicUsize>,
@@ -390,7 +394,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
     async fn tcp_connect(
         &self,
         mut addr: SocketAddr,
-        timeout_s: u64,
+        mut timeout_s: u64,
     ) -> crate::gateway::fast_socks5::Result<SocksTcpStream> {
         if self.inner_connector.lock().is_some() {
             return Err(anyhow::anyhow!("inner connector is already set").into());
@@ -436,6 +440,36 @@ impl AsyncTcpConnector for Socks5AutoConnector {
             return Ok(SocksTcpStream::Tcp(
                 tcp_connect_with_timeout(addr, timeout_s).await?,
             ));
+        }
+
+        #[cfg(any(feature = "kcp", feature = "quic"))]
+        if let Some(selector) = &self.mesh_stream_selector {
+            let deadline = std::time::Instant::now() + Duration::from_secs(timeout_s);
+            if let Some((transport, stream)) = selector
+                .connect_mesh_stream(
+                    FlowKey {
+                        src: self.src_addr,
+                        dst: addr,
+                    },
+                    deadline,
+                )
+                .await
+            {
+                tracing::trace!(
+                    ?addr,
+                    ?transport,
+                    "socks5 mesh connector selected accelerator"
+                );
+                self.inner_connector.lock().replace(Box::new(()));
+                return Ok(SocksTcpStream::Accelerated(stream));
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(
+                    anyhow::anyhow!("mesh stream accelerator exhausted connect timeout").into(),
+                );
+            }
+            timeout_s = remaining.as_secs().saturating_add(1);
         }
 
         let dst_allow_kcp = peer_mgr_arc.check_allow_kcp_to_dst(&addr.ip()).await;
@@ -638,8 +672,8 @@ pub struct Socks5Server {
 
     #[cfg(feature = "kcp")]
     kcp_endpoint: Mutex<Option<Weak<KcpEndpoint>>>,
-    #[cfg(feature = "kcp")]
-    mesh_data_plane_kcp_endpoint: Mutex<Option<Weak<KcpEndpoint>>>,
+    #[cfg(any(feature = "kcp", feature = "quic"))]
+    mesh_stream_selector: Mutex<Option<DeferredProxySelector>>,
 
     socks5_enabled: Arc<AtomicBool>,
     #[cfg(feature = "ffi-dataplane")]
@@ -880,8 +914,8 @@ impl Socks5Server {
 
             #[cfg(feature = "kcp")]
             kcp_endpoint: Mutex::new(None),
-            #[cfg(feature = "kcp")]
-            mesh_data_plane_kcp_endpoint: Mutex::new(None),
+            #[cfg(any(feature = "kcp", feature = "quic"))]
+            mesh_stream_selector: Mutex::new(None),
 
             socks5_enabled: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "ffi-dataplane")]
@@ -1017,12 +1051,17 @@ impl Socks5Server {
     pub async fn run(
         self: &Arc<Self>,
         #[cfg(feature = "kcp")] kcp_endpoint: Option<Weak<KcpEndpoint>>,
-        #[cfg(feature = "kcp")] mesh_data_plane_kcp_endpoint: Option<Weak<KcpEndpoint>>,
+        #[cfg(any(feature = "kcp", feature = "quic"))] mesh_stream_selector: Option<
+            DeferredProxySelector,
+        >,
     ) -> Result<(), Error> {
         #[cfg(feature = "kcp")]
         {
             *self.kcp_endpoint.lock().await = kcp_endpoint.clone();
-            *self.mesh_data_plane_kcp_endpoint.lock().await = mesh_data_plane_kcp_endpoint;
+        }
+        #[cfg(any(feature = "kcp", feature = "quic"))]
+        {
+            *self.mesh_stream_selector.lock().await = mesh_stream_selector;
         }
         if let Some(proxy_url) = self.global_ctx.config.get_socks5_portal() {
             #[cfg(feature = "kcp")]
@@ -1061,6 +1100,8 @@ impl Socks5Server {
                                 entries: entries.clone(),
                                 #[cfg(feature = "kcp")]
                                 kcp_endpoint: kcp_endpoint.clone(),
+                                #[cfg(any(feature = "kcp", feature = "quic"))]
+                                mesh_stream_selector: None,
                                 peer_mgr: peer_manager.clone(),
                                 src_addr: addr,
                                 inner_connector: parking_lot::Mutex::new(None),
@@ -1248,6 +1289,8 @@ impl Socks5Server {
                 let connector = Socks5AutoConnector {
                     #[cfg(feature = "kcp")]
                     kcp_endpoint: kcp_endpoint.clone(),
+                    #[cfg(any(feature = "kcp", feature = "quic"))]
+                    mesh_stream_selector: None,
                     peer_mgr: peer_mgr.clone(),
                     entries: entries.clone(),
                     smoltcp_net,

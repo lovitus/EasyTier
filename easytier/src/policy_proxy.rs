@@ -36,6 +36,7 @@ pub(crate) use macos_routing::PolicyRoutingGuard;
 pub(crate) use mesh_socks_bridge::{MeshProxyBridgeSet, MeshProxyTarget};
 pub(crate) use mesh_udp_relay::{
     LocalSocksEndpointProvider, MeshSocksRelayService, RemoteUdpAssociation,
+    prepare_remote_tcp_egress,
 };
 #[cfg(target_os = "linux")]
 pub(crate) use policy_routing::PolicyRoutingGuard;

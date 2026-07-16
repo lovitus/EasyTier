@@ -637,6 +637,97 @@ impl DeferredProxySelector {
         transports
     }
 
+    /// Opens one mesh-owned accelerated stream using the configured QUIC/KCP
+    /// priority, destination capabilities, readiness ACKs, and health state.
+    /// `None` tells the caller to use its native mesh transport; policy is not
+    /// involved in this decision.
+    pub async fn connect_mesh_stream(
+        &self,
+        flow: FlowKey,
+        deadline: Instant,
+    ) -> Option<(ProxyTransport, BoxProxyStream)> {
+        let SocketAddr::V4(dst) = flow.dst else {
+            return None;
+        };
+        let mut route_restarts = 0u8;
+        loop {
+            let (peer, capabilities) = self.target_snapshot(*dst.ip()).await?;
+            for transport in self.available_transports(capabilities) {
+                let kind = transport.transport();
+                if !self.health_allows(peer, kind).await {
+                    continue;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return None;
+                }
+                let candidate_budget = PREPARE_TIMEOUT.min(remaining);
+                let result = tokio::time::timeout(
+                    candidate_budget + Duration::from_millis(10),
+                    transport.prepare(
+                        flow,
+                        peer,
+                        capabilities.prepare_ack_version,
+                        Instant::now() + candidate_budget,
+                    ),
+                )
+                .await;
+                match result {
+                    Ok(Ok(stream)) => {
+                        let current = self.target_snapshot(*dst.ip()).await;
+                        if current.as_ref().map(|(peer, _)| *peer) != Some(peer) {
+                            drop(stream);
+                            break;
+                        }
+                        self.record_prepare_result(peer, kind, true).await;
+                        tracing::debug!(?flow, ?peer, ?kind, "mesh stream selected accelerator");
+                        return Some((kind, stream));
+                    }
+                    Ok(Err(error)) => {
+                        match error.class {
+                            ProxyPrepareFailureClass::Transport => {
+                                self.record_prepare_result(peer, kind, false).await;
+                            }
+                            ProxyPrepareFailureClass::AmbiguousTimeout => {
+                                self.record_ambiguous_timeout(peer, kind).await;
+                            }
+                            ProxyPrepareFailureClass::Destination
+                            | ProxyPrepareFailureClass::Policy
+                            | ProxyPrepareFailureClass::BusinessTimeout => {
+                                self.clear_ambiguous_timeout(peer, kind).await;
+                            }
+                            ProxyPrepareFailureClass::RouteStale => {}
+                        }
+                        tracing::debug!(
+                            ?flow,
+                            ?peer,
+                            ?kind,
+                            ?error,
+                            "mesh stream accelerator unavailable"
+                        );
+                    }
+                    Err(error) => {
+                        self.record_prepare_result(peer, kind, false).await;
+                        tracing::debug!(
+                            ?flow,
+                            ?peer,
+                            ?kind,
+                            ?error,
+                            "mesh stream accelerator timed out"
+                        );
+                    }
+                }
+            }
+            let current = self.target_snapshot(*dst.ip()).await;
+            if current.as_ref().map(|(peer, _)| *peer) == Some(peer)
+                || route_restarts >= MAX_ROUTE_RESTARTS
+            {
+                return None;
+            }
+            route_restarts = route_restarts.saturating_add(1);
+        }
+    }
+
     async fn health_allows(&self, peer: PeerId, transport: ProxyTransport) -> bool {
         let health = self.health_entry(peer, transport).await;
         health.lock().await.allows_attempt(Instant::now())
@@ -1771,6 +1862,46 @@ mod tests {
             transports,
             Arc::new(PreparedProxyStore::default()),
         )
+    }
+
+    #[tokio::test]
+    async fn direct_mesh_stream_prefers_quic_then_kcp_before_native_fallback() {
+        let dst = "10.44.0.3".parse().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.set_route(
+            dst,
+            9,
+            CapabilitySnapshot {
+                quic: true,
+                kcp: true,
+                prepare_ack_version: 1,
+            },
+        );
+        let quic = Arc::new(FakeTransport::new(
+            ProxyTransport::Quic,
+            [FakePrepareResult::Failure(
+                ProxyPrepareFailureClass::Transport,
+            )],
+        ));
+        let kcp = Arc::new(FakeTransport::new(
+            ProxyTransport::Kcp,
+            [FakePrepareResult::Success],
+        ));
+        let selector = fake_selector(runtime, vec![kcp.clone(), quic.clone()]);
+        let selected = selector
+            .connect_mesh_stream(
+                FlowKey {
+                    src: "10.44.0.2:32000".parse().unwrap(),
+                    dst: "10.44.0.3:443".parse().unwrap(),
+                },
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("KCP should follow the failed QUIC attempt");
+
+        assert_eq!(selected.0, ProxyTransport::Kcp);
+        assert_eq!(quic.calls.lock().await.as_slice(), &[9]);
+        assert_eq!(kcp.calls.lock().await.as_slice(), &[9]);
     }
 
     #[tokio::test]

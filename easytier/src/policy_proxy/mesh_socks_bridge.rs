@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
@@ -20,7 +20,7 @@ use crate::{
     peers::peer_manager::PeerManager,
     policy_proxy::{
         PolicyProxyCredentials, RemoteUdpAssociation, negotiate_policy_proxy_auth,
-        tune_policy_udp_socket,
+        prepare_remote_tcp_egress, tune_policy_udp_socket,
     },
 };
 
@@ -104,10 +104,16 @@ impl MeshProxyTarget {
 struct RemoteState {
     target: Option<MeshProxyTarget>,
     generation: CancellationToken,
+    preparation: Arc<RemoteTcpPreparation>,
 }
 
 struct RemoteSlot {
     state: Mutex<RemoteState>,
+}
+
+struct RemoteTcpPreparation {
+    endpoint: RwLock<Option<SocketAddr>>,
+    lock: tokio::sync::Mutex<()>,
 }
 
 struct RelaySocksContext {
@@ -118,6 +124,52 @@ struct RelaySocksContext {
     password: String,
     credentials: Option<PolicyProxyCredentials>,
     generation: CancellationToken,
+    preparation: Arc<RemoteTcpPreparation>,
+}
+
+impl RemoteTcpPreparation {
+    fn new() -> Self {
+        Self {
+            endpoint: RwLock::new(None),
+            lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    async fn ensure(
+        &self,
+        peer_mgr: &Arc<PeerManager>,
+        remote: MeshProxyTarget,
+    ) -> Option<SocketAddr> {
+        let default_endpoint = remote.endpoints().first().copied()?;
+        if !remote.is_built_in() {
+            return Some(default_endpoint);
+        }
+        if let Some(endpoint) = *self.endpoint.read().unwrap() {
+            return Some(endpoint);
+        }
+        let _guard = self.lock.lock().await;
+        if let Some(endpoint) = *self.endpoint.read().unwrap() {
+            return Some(endpoint);
+        }
+        match prepare_remote_tcp_egress(peer_mgr, remote.peer_id, default_endpoint).await {
+            Ok(endpoint) => {
+                *self.endpoint.write().unwrap() = Some(endpoint);
+                Some(endpoint)
+            }
+            Err(error) => {
+                tracing::debug!(
+                    peer_id = remote.peer_id,
+                    ?error,
+                    "built-in mesh egress prepare unavailable; data plane will use capability fallback"
+                );
+                Some(default_endpoint)
+            }
+        }
+    }
+
+    fn invalidate(&self) {
+        *self.endpoint.write().unwrap() = None;
+    }
 }
 
 impl RemoteSlot {
@@ -126,15 +178,26 @@ impl RemoteSlot {
             state: Mutex::new(RemoteState {
                 target: Some(target),
                 generation: CancellationToken::new(),
+                preparation: Arc::new(RemoteTcpPreparation::new()),
             }),
         }
     }
 
-    fn snapshot(&self) -> Option<(MeshProxyTarget, CancellationToken)> {
+    fn snapshot(
+        &self,
+    ) -> Option<(
+        MeshProxyTarget,
+        CancellationToken,
+        Arc<RemoteTcpPreparation>,
+    )> {
         let state = self.state.lock().unwrap();
-        state
-            .target
-            .map(|target| (target, state.generation.child_token()))
+        state.target.map(|target| {
+            (
+                target,
+                state.generation.child_token(),
+                state.preparation.clone(),
+            )
+        })
     }
 
     fn replace(&self, target: Option<MeshProxyTarget>) {
@@ -145,6 +208,7 @@ impl RemoteSlot {
         state.generation.cancel();
         state.target = target;
         state.generation = CancellationToken::new();
+        state.preparation = Arc::new(RemoteTcpPreparation::new());
     }
 }
 
@@ -325,7 +389,7 @@ async fn run_listener(
                 let session_name = name.clone();
                 let password = password.clone();
                 let credentials = credentials.clone();
-                let Some((remote, generation)) = remote.snapshot() else {
+                let Some((remote, generation, preparation)) = remote.snapshot() else {
                     rejected_for_limit = rejected_for_limit.saturating_add(1);
                     if rejected_for_limit.is_power_of_two() {
                         tracing::warn!(proxy = %name, rejected_for_limit, "mesh proxy endpoint is unavailable");
@@ -345,6 +409,7 @@ async fn run_listener(
                             password,
                             credentials,
                             generation,
+                            preparation,
                         },
                     )
                     .await;
@@ -362,11 +427,18 @@ async fn run_listener(
 async fn connect_remote(
     data_plane: &Socks5Server,
     remote: MeshProxyTarget,
+    prepared_endpoint: Option<SocketAddr>,
 ) -> anyhow::Result<DataPlaneTcpStream> {
     let mut failures = Vec::new();
+    let mut endpoints = prepared_endpoint.into_iter().collect::<Vec<_>>();
     for endpoint in remote.endpoints() {
+        if !endpoints.contains(endpoint) {
+            endpoints.push(*endpoint);
+        }
+    }
+    for endpoint in endpoints {
         match data_plane
-            .data_plane_tcp_connect_mesh_only(*endpoint, CONNECT_TIMEOUT)
+            .data_plane_tcp_connect_mesh_only(endpoint, CONNECT_TIMEOUT)
             .await
         {
             Ok(stream) => return Ok(stream),
@@ -392,6 +464,7 @@ async fn relay_socks5(
         password,
         credentials,
         generation,
+        preparation,
     } = context;
     let command = tokio::select! {
         _ = generation.cancelled() => anyhow::bail!("mesh proxy route generation changed"),
@@ -404,8 +477,32 @@ async fn relay_socks5(
 
     match command {
         1 => {
-            let mut upstream = connect_remote(&data_plane, remote).await?;
-            negotiate_policy_proxy_auth(&mut upstream, credentials.as_ref()).await?;
+            let attempts = if remote.is_built_in() { 2 } else { 1 };
+            let mut last_error = None;
+            let mut upstream = None;
+            for attempt in 0..attempts {
+                let prepared_endpoint = preparation.ensure(&peer_mgr, remote).await;
+                let result = async {
+                    let mut stream = connect_remote(&data_plane, remote, prepared_endpoint).await?;
+                    negotiate_policy_proxy_auth(&mut stream, credentials.as_ref()).await?;
+                    Ok::<_, anyhow::Error>(stream)
+                }
+                .await;
+                match result {
+                    Ok(stream) => {
+                        upstream = Some(stream);
+                        break;
+                    }
+                    Err(error) if attempt + 1 < attempts => {
+                        preparation.invalidate();
+                        last_error = Some(error);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let mut upstream = upstream.ok_or_else(|| {
+                last_error.unwrap_or_else(|| anyhow::anyhow!("mesh SOCKS upstream unavailable"))
+            })?;
             relay_socks_connect_command(&mut client, &mut upstream, request).await?;
             tokio::select! {
                 _ = generation.cancelled() => {}
@@ -818,14 +915,14 @@ mod tests {
     async fn route_identity_change_cancels_only_the_old_generation() {
         let first = MeshProxyTarget::explicit(7, "10.44.0.7:1080".parse().unwrap());
         let slot = RemoteSlot::new(first);
-        let (_, old_generation) = slot.snapshot().unwrap();
+        let (_, old_generation, _) = slot.snapshot().unwrap();
         slot.replace(Some(first));
         assert!(!old_generation.is_cancelled());
 
         let second = MeshProxyTarget::explicit(8, first.endpoints()[0]);
         slot.replace(Some(second));
         assert!(old_generation.is_cancelled());
-        let (current, new_generation) = slot.snapshot().unwrap();
+        let (current, new_generation, _) = slot.snapshot().unwrap();
         assert_eq!(current, second);
         assert!(!new_generation.is_cancelled());
 

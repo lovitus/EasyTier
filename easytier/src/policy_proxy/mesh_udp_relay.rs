@@ -29,7 +29,7 @@ use crate::{
         peer_rpc::{
             ClosePolicyUdpRelayRequest, ClosePolicyUdpRelayResponse, OpenPolicyUdpRelayRequest,
             OpenPolicyUdpRelayResponse, PolicyUdpRelayRpc, PolicyUdpRelayRpcClientFactory,
-            PolicyUdpRelayRpcServer,
+            PolicyUdpRelayRpcServer, PreparePolicyTcpRelayRequest, PreparePolicyTcpRelayResponse,
         },
         rpc_impl::RpcController,
         rpc_types::{
@@ -104,7 +104,7 @@ pub(crate) struct MeshSocksRelayService {
     associations: Arc<DashMap<AssociationToken, AssociationOwner>>,
     capacity_lock: tokio::sync::Mutex<()>,
     cancel: CancellationToken,
-    tcp_ingress_task: Mutex<Option<JoinHandle<()>>>,
+    tcp_ingress_tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl MeshSocksRelayService {
@@ -120,7 +120,7 @@ impl MeshSocksRelayService {
             associations: Arc::new(DashMap::new()),
             capacity_lock: tokio::sync::Mutex::new(()),
             cancel: CancellationToken::new(),
-            tcp_ingress_task: Mutex::new(None),
+            tcp_ingress_tasks: Mutex::new(Vec::new()),
         })
     }
 
@@ -150,18 +150,29 @@ impl MeshSocksRelayService {
             .local_socks_endpoint_provider
             .clone()
             .context("built-in HEV has no endpoint provider")?;
-        let mut listener = self
-            .data_plane
-            .data_plane_tcp_bind(BUILT_IN_MESH_SOCKS_PORT, SETUP_TIMEOUT)
-            .await
-            .context("failed to bind built-in HEV mesh TCP ingress")?;
-        let mut task_slot = self.tcp_ingress_task.lock().unwrap();
-        if task_slot.is_some() {
+        let mut listeners =
+            Vec::with_capacity(easytier_socks_egress::DEFAULT_PORT_CANDIDATES.len());
+        for port in easytier_socks_egress::DEFAULT_PORT_CANDIDATES {
+            listeners.push(
+                self.data_plane
+                    .data_plane_tcp_bind(port, SETUP_TIMEOUT)
+                    .await
+                    .with_context(|| {
+                        format!("failed to bind built-in HEV mesh TCP ingress {port}")
+                    })?,
+            );
+        }
+        let mut task_slots = self.tcp_ingress_tasks.lock().unwrap();
+        if !task_slots.is_empty() {
             bail!("built-in HEV mesh TCP ingress is already running");
         }
         let cancel = self.cancel.child_token();
-        *task_slot = Some(tokio::spawn(async move {
-            let permits = Arc::new(Semaphore::new(TCP_RELAY_LIMIT));
+        let permits = Arc::new(Semaphore::new(TCP_RELAY_LIMIT));
+        for mut listener in listeners {
+            let cancel = cancel.child_token();
+            let permits = permits.clone();
+            let endpoint_provider = endpoint_provider.clone();
+            task_slots.push(tokio::spawn(async move {
             let mut sessions = JoinSet::new();
             loop {
                 tokio::select! {
@@ -211,7 +222,8 @@ impl MeshSocksRelayService {
             }
             sessions.abort_all();
             while sessions.join_next().await.is_some() {}
-        }));
+            }));
+        }
         Ok(())
     }
 
@@ -220,14 +232,15 @@ impl MeshSocksRelayService {
         for association in self.associations.iter() {
             association.value().cancel.cancel();
         }
-        let task = self.tcp_ingress_task.lock().unwrap().take();
-        if let Some(mut task) = task
-            && tokio::time::timeout(Duration::from_secs(5), &mut task)
+        let tasks = std::mem::take(&mut *self.tcp_ingress_tasks.lock().unwrap());
+        for mut task in tasks {
+            if tokio::time::timeout(Duration::from_secs(5), &mut task)
                 .await
                 .is_err()
-        {
-            task.abort();
-            let _ = task.await;
+            {
+                task.abort();
+                let _ = task.await;
+            }
         }
     }
 
@@ -417,7 +430,7 @@ impl MeshSocksRelayService {
 impl Drop for MeshSocksRelayService {
     fn drop(&mut self) {
         self.cancel.cancel();
-        if let Some(task) = self.tcp_ingress_task.lock().unwrap().take() {
+        for task in std::mem::take(&mut *self.tcp_ingress_tasks.lock().unwrap()) {
             task.abort();
         }
         for association in self.associations.iter() {
@@ -429,6 +442,54 @@ impl Drop for MeshSocksRelayService {
 #[async_trait::async_trait]
 impl PolicyUdpRelayRpc for MeshSocksRelayService {
     type Controller = BaseController;
+
+    async fn prepare_policy_tcp_relay(
+        &self,
+        controller: BaseController,
+        request: PreparePolicyTcpRelayRequest,
+    ) -> Result<PreparePolicyTcpRelayResponse, rpc_types::error::Error> {
+        let source_peer_id = controller.source_peer_id().ok_or_else(|| {
+            rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                "policy TCP relay RPC has no source peer"
+            ))
+        })?;
+        let result = async {
+            if request.source_peer_id != source_peer_id {
+                bail!("policy TCP relay source peer does not match the RPC caller");
+            }
+            let peer_mgr = self
+                .peer_mgr
+                .upgrade()
+                .context("peer manager is no longer available")?;
+            peer_virtual_ipv4(&peer_mgr, source_peer_id)
+                .await
+                .context("requesting peer has no routed virtual IPv4 address")?;
+            let requested: SocketAddr = request
+                .proxy_addr
+                .context("policy TCP relay request has no proxy address")?
+                .into();
+            let local_ip = peer_mgr
+                .get_global_ctx()
+                .get_ipv4()
+                .context("destination peer has no virtual IPv4 address")?
+                .address();
+            if requested != SocketAddr::new(IpAddr::V4(local_ip), BUILT_IN_MESH_SOCKS_PORT) {
+                bail!("policy TCP relay only prepares this peer's built-in mesh SOCKS endpoint");
+            }
+            let provider = self
+                .local_socks_endpoint_provider
+                .as_ref()
+                .context("built-in HEV has no endpoint provider")?;
+            let endpoint = tokio::time::timeout(SETUP_TIMEOUT, provider.endpoint())
+                .await
+                .context("local HEV lazy start timed out")??;
+            Ok::<_, anyhow::Error>(PreparePolicyTcpRelayResponse {
+                proxy_addr: Some(SocketAddr::new(IpAddr::V4(local_ip), endpoint.port()).into()),
+            })
+        }
+        .await;
+        result.map_err(rpc_types::error::Error::ExecutionError)
+    }
 
     async fn open_policy_udp_relay(
         &self,
@@ -463,6 +524,38 @@ impl PolicyUdpRelayRpc for MeshSocksRelayService {
         }
         Ok(ClosePolicyUdpRelayResponse {})
     }
+}
+
+pub(crate) async fn prepare_remote_tcp_egress(
+    peer_mgr: &Arc<PeerManager>,
+    dst_peer_id: PeerId,
+    proxy_addr: SocketAddr,
+) -> anyhow::Result<SocketAddr> {
+    let client = peer_mgr
+        .get_peer_rpc_mgr()
+        .rpc_client()
+        .scoped_client::<PolicyUdpRelayRpcClientFactory<RpcController>>(
+            peer_mgr.my_peer_id(),
+            dst_peer_id,
+            peer_mgr.get_global_ctx().get_network_name(),
+        );
+    let response = tokio::time::timeout(
+        SETUP_TIMEOUT,
+        client.prepare_policy_tcp_relay(
+            RpcController::default(),
+            PreparePolicyTcpRelayRequest {
+                source_peer_id: peer_mgr.my_peer_id(),
+                proxy_addr: Some(proxy_addr.into()),
+            },
+        ),
+    )
+    .await
+    .context("policy TCP relay prepare RPC timed out")?
+    .map_err(anyhow::Error::from)?;
+    Ok(response
+        .proxy_addr
+        .context("policy TCP relay prepare returned no endpoint")?
+        .into())
 }
 
 pub(crate) struct RemoteUdpAssociation {
@@ -1275,7 +1368,7 @@ mod tests {
             .run(
                 #[cfg(feature = "kcp")]
                 None,
-                #[cfg(feature = "kcp")]
+                #[cfg(any(feature = "kcp", feature = "quic"))]
                 None,
             )
             .await
@@ -1284,7 +1377,7 @@ mod tests {
             .run(
                 #[cfg(feature = "kcp")]
                 None,
-                #[cfg(feature = "kcp")]
+                #[cfg(any(feature = "kcp", feature = "quic"))]
                 None,
             )
             .await
@@ -1404,7 +1497,7 @@ mod tests {
             .run(
                 #[cfg(feature = "kcp")]
                 None,
-                #[cfg(feature = "kcp")]
+                #[cfg(any(feature = "kcp", feature = "quic"))]
                 None,
             )
             .await
@@ -1413,7 +1506,7 @@ mod tests {
             .run(
                 #[cfg(feature = "kcp")]
                 None,
-                #[cfg(feature = "kcp")]
+                #[cfg(any(feature = "kcp", feature = "quic"))]
                 None,
             )
             .await
@@ -1569,7 +1662,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relays_built_in_tcp_from_mesh_data_plane_to_local_endpoint() {
+    async fn prepares_then_relays_built_in_tcp_from_mesh_data_plane() {
         struct CountingEndpointProvider {
             endpoint: SocketAddr,
             calls: std::sync::atomic::AtomicUsize,
@@ -1601,7 +1694,7 @@ mod tests {
             .run(
                 #[cfg(feature = "kcp")]
                 None,
-                #[cfg(feature = "kcp")]
+                #[cfg(any(feature = "kcp", feature = "quic"))]
                 None,
             )
             .await
@@ -1610,7 +1703,7 @@ mod tests {
             .run(
                 #[cfg(feature = "kcp")]
                 None,
-                #[cfg(feature = "kcp")]
+                #[cfg(any(feature = "kcp", feature = "quic"))]
                 None,
             )
             .await
@@ -1644,6 +1737,27 @@ mod tests {
         });
 
         let mesh_endpoint = SocketAddr::new(IpAddr::V4(ip_b.address()), BUILT_IN_MESH_SOCKS_PORT);
+        let mut controller = BaseController::default();
+        controller.set_source_peer_id(peer_a.my_peer_id());
+        let prepared = relay
+            .prepare_policy_tcp_relay(
+                controller,
+                PreparePolicyTcpRelayRequest {
+                    source_peer_id: peer_a.my_peer_id(),
+                    proxy_addr: Some(mesh_endpoint.into()),
+                },
+            )
+            .await
+            .unwrap();
+        let prepared: SocketAddr = prepared.proxy_addr.unwrap().into();
+        assert_eq!(prepared.ip(), mesh_endpoint.ip());
+        assert_eq!(prepared.port(), local_endpoint.port());
+        assert_eq!(
+            endpoint_provider
+                .calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+        );
         let mut stream = data_plane_a
             .data_plane_tcp_connect_mesh_only(mesh_endpoint, SETUP_TIMEOUT)
             .await
@@ -1657,7 +1771,7 @@ mod tests {
             endpoint_provider
                 .calls
                 .load(std::sync::atomic::Ordering::Relaxed),
-            1,
+            2,
         );
         local_server.await.unwrap();
         drop(stream);

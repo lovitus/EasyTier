@@ -16,7 +16,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: easytier-linux-profiling-beta
+  group: ${{ inputs.audit_comparator && 'easytier-no-leaf-profiling-comparator' || 'easytier-linux-profiling-beta' }}
   cancel-in-progress: false
 
 env:
@@ -32,6 +32,7 @@ defaults:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_dispatch' || inputs.audit_comparator != true
     name: Build symbolized Linux profiling binaries
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -140,18 +141,6 @@ jobs:
           do
             timeout 600 "$easytier_test_bin" "$test_filter" --nocapture
           done
-          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.audit_comparator }}" == "true" ]]; then
-            timeout 1800 cargo build \
-              --locked \
-              --release \
-              --target "$TARGET" \
-              --package easytier \
-              --bin easytier-core \
-              --features jemalloc
-            audit_core="$RUNNER_TEMP/easytier-core-no-leaf"
-            install -m 0755 "target/$TARGET/release/easytier-core" "$audit_core"
-            echo "AUDIT_NO_LEAF_BINARY=$audit_core" >> "$GITHUB_ENV"
-          fi
           timeout 1800 cargo build \
             --locked \
             --release \
@@ -183,14 +172,6 @@ jobs:
           grep -q "Build ID:" profiling-build-id.txt
           grep -qE '\.debug_info|\.debug_line' profiling-sections.txt
           test -s profiling-symbols.txt
-          if [[ -n "${AUDIT_NO_LEAF_BINARY:-}" ]]; then
-            file "$AUDIT_NO_LEAF_BINARY" | tee -a profiling-file-info.txt
-            {
-              echo "== no-Leaf audit comparator =="
-              readelf -n "$AUDIT_NO_LEAF_BINARY"
-            } >> profiling-build-id.txt
-            grep -q "easytier-core-no-leaf:.*not stripped" profiling-file-info.txt
-          fi
 
       - name: Package profiling bundle
         run: |
@@ -202,9 +183,6 @@ jobs:
           cp "target/$TARGET/release/easytier-cli" "staging/$bundle/"
           cp "target/$TARGET/release/easytier-leaf-worker" "staging/$bundle/"
           cp "$HEV_EGRESS_BINARY" "staging/$bundle/"
-          if [[ -n "${AUDIT_NO_LEAF_BINARY:-}" ]]; then
-            cp "$AUDIT_NO_LEAF_BINARY" "staging/$bundle/"
-          fi
           cp profiling-file-info.txt profiling-build-id.txt profiling-sections.txt \
             "staging/$bundle/"
 
@@ -215,7 +193,7 @@ jobs:
             echo "run_number=$GITHUB_RUN_NUMBER"
             echo "target=$TARGET"
             echo "hev_server_commit=$HEV_SERVER_COMMIT"
-            echo "audit_comparator=${AUDIT_NO_LEAF_BINARY:+true}"
+            echo "audit_comparator=false"
             rustc -Vv
             cargo -V
           } > "staging/$bundle/BUILD_INFO.txt"
@@ -228,9 +206,6 @@ jobs:
               easytier-leaf-worker
               easytier-hev-socks-egress
             )
-            if [[ -f easytier-core-no-leaf ]]; then
-              checksum_files+=(easytier-core-no-leaf)
-            fi
             sha256sum "${checksum_files[@]}" > SHA256SUMS.txt
           )
 
@@ -282,3 +257,95 @@ jobs:
             --notes-file artifacts/RELEASE_NOTES.txt \
             --prerelease \
             --latest=false
+
+  comparator:
+    if: github.event_name == 'workflow_dispatch' && inputs.audit_comparator == true
+    name: Build same-SHA no-Leaf comparator only
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Prepare build environment
+        uses: ./.github/actions/prepare-build
+        with:
+          target: ${{ env.TARGET }}
+          gui: false
+          pnpm: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: profiling-comparator
+          shared-key: linux-x86_64-musl
+          cache-targets: true
+          cache-on-failure: true
+
+      - name: Build no-Leaf comparator
+        run: |
+          set -euo pipefail
+          timeout 1800 cargo build \
+            --locked \
+            --release \
+            --target "$TARGET" \
+            --package easytier \
+            --bin easytier-core \
+            --features jemalloc
+          install -m 0755 \
+            "target/$TARGET/release/easytier-core" \
+            "$RUNNER_TEMP/easytier-core-no-leaf"
+
+      - name: Verify comparator metadata
+        run: |
+          set -euo pipefail
+          comparator="$RUNNER_TEMP/easytier-core-no-leaf"
+          file "$comparator" | tee profiling-file-info.txt
+          readelf -n "$comparator" > profiling-build-id.txt
+          readelf -S "$comparator" > profiling-sections.txt
+          nm -n "$comparator" > profiling-symbols.txt
+          grep -q 'not stripped' profiling-file-info.txt
+          grep -q 'Build ID:' profiling-build-id.txt
+          grep -qE '\.debug_info|\.debug_line' profiling-sections.txt
+          test -s profiling-symbols.txt
+
+      - name: Package comparator
+        run: |
+          set -euo pipefail
+          bundle="easytier-no-leaf-comparator-linux-x86_64-musl"
+          mkdir -p "staging/$bundle" artifacts
+          cp "$RUNNER_TEMP/easytier-core-no-leaf" "staging/$bundle/"
+          cp profiling-file-info.txt profiling-build-id.txt profiling-sections.txt \
+            "staging/$bundle/"
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "ref=$GITHUB_REF_NAME"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_number=$GITHUB_RUN_NUMBER"
+            echo "target=$TARGET"
+            echo "feature_set=jemalloc"
+            echo "leaf_policy_features=false"
+            echo "audit_comparator=true"
+            rustc -Vv
+            cargo -V
+          } > "staging/$bundle/BUILD_INFO.txt"
+          (
+            cd "staging/$bundle"
+            sha256sum easytier-core-no-leaf > SHA256SUMS.txt
+          )
+          tar -C staging -czf "artifacts/$bundle.tar.gz" "$bundle"
+          (
+            cd artifacts
+            sha256sum "$bundle.tar.gz" > SHA256SUMS.txt
+          )
+
+      - name: Upload comparator
+        uses: actions/upload-artifact@v5
+        with:
+          name: easytier-no-leaf-comparator-linux-x86_64-musl
+          if-no-files-found: error
+          retention-days: 14
+          path: artifacts/*
