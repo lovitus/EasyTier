@@ -498,10 +498,16 @@ impl RemoteUdpAssociation {
                     .stream_destination
                     .context("policy UoT relay returned no destination")?
                     .into();
-                let mut stream = data_plane
-                    .data_plane_tcp_connect_mesh_uot(stream_addr, SETUP_TIMEOUT)
-                    .await
-                    .context("failed to connect private policy UoT stream")?;
+                let mut stream = if built_in_proxy {
+                    data_plane
+                        .data_plane_tcp_connect_mesh_uot(stream_addr, SETUP_TIMEOUT)
+                        .await
+                } else {
+                    data_plane
+                        .data_plane_tcp_connect_mesh_without_kcp(stream_addr, SETUP_TIMEOUT)
+                        .await
+                }
+                .context("failed to connect private policy UoT stream")?;
                 stream.write_all(&token).await?;
                 stream
                     .write_all(&encode_uot_connect_request(destination))
