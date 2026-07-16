@@ -84,7 +84,7 @@ const runtimeNoticeSeverity = computed(() => {
   return 'warn'
 })
 const runtimeNoticeKey = computed(() => runtimeNotice.value
-  ? `policy.editor.runtime_${runtimeNotice.value.replaceAll('-', '_')}`
+  ? `policy.editor.runtime_${runtimeNotice.value.replace(/-/g, '_')}`
   : '')
 
 const sourceMode = computed({
