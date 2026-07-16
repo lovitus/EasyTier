@@ -120,7 +120,27 @@ fn suspicious_interface_name(name: &str) -> bool {
         || name.contains("wintun")
 }
 
+fn native_interface_inspection_active() -> bool {
+    !cfg!(any(
+        target_os = "android",
+        target_os = "ios",
+        all(target_os = "macos", feature = "macos-ne"),
+        target_env = "ohos"
+    ))
+}
+
 async fn source_interface_signal(global_ctx: &ArcGlobalCtx, ip: IpAddr) -> Option<(String, bool)> {
+    // Mihomo/sing-tun invalidates its interface cache from the platform network
+    // monitor instead of enumerating interfaces on every dial. Mobile VPN hosts
+    // likewise own network changes and socket protection. Besides duplicating
+    // that ownership, pnet enumeration is denied by Android SELinux and turns
+    // every reconnect preflight into packet-socket and /proc/sysfs retries.
+    // The hard managed-IP guards above remain active on every platform; this
+    // optional interface-name signal only contributes a soft breaker strike.
+    if !native_interface_inspection_active() {
+        return None;
+    }
+
     for iface in IPCollector::collect_interfaces(global_ctx.net_ns.clone(), false).await {
         if !iface.ips.iter().any(|network| network.ip() == ip) {
             continue;
@@ -134,22 +154,11 @@ async fn source_interface_signal(global_ctx: &ArcGlobalCtx, ip: IpAddr) -> Optio
     None
 }
 
-fn bind_device_source_filter_active() -> bool {
-    !cfg!(any(
-        target_os = "android",
-        any(
-            target_os = "ios",
-            all(target_os = "macos", feature = "macos-ne")
-        ),
-        target_env = "ohos"
-    ))
-}
-
 async fn bind_device_sources(
     global_ctx: &ArcGlobalCtx,
     remote_addr: SocketAddr,
 ) -> Vec<SocketAddr> {
-    if !global_ctx.get_flags().bind_device || !bind_device_source_filter_active() {
+    if !global_ctx.get_flags().bind_device || !native_interface_inspection_active() {
         return Vec::new();
     }
 
@@ -313,7 +322,7 @@ pub async fn sanitize_underlay_candidate(
         }));
     }
 
-    if global_ctx.get_flags().bind_device && bind_device_source_filter_active() {
+    if global_ctx.get_flags().bind_device && native_interface_inspection_active() {
         let reason = if remote_addr.is_ipv4() {
             "no usable IPv4 bind-device source"
         } else {
@@ -381,6 +390,19 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use super::*;
+
+    #[test]
+    fn native_interface_inspection_matches_platform_ownership() {
+        assert_eq!(
+            native_interface_inspection_active(),
+            !cfg!(any(
+                target_os = "android",
+                target_os = "ios",
+                all(target_os = "macos", feature = "macos-ne"),
+                target_env = "ohos"
+            ))
+        );
+    }
     use crate::common::global_ctx::{UnderlayBreakerScope, tests::get_mock_global_ctx};
     use crate::tunnel::IpScheme;
 

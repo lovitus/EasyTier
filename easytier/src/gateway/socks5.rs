@@ -370,10 +370,7 @@ struct Socks5AutoConnector {
 
     inner_connector: parking_lot::Mutex<Option<Box<dyn Any + Send>>>,
     allow_kernel_fallback: bool,
-    fallback_to_smoltcp_on_kcp_failure: bool,
 }
-
-const POLICY_KCP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Socks5AutoConnector {
     fn smoltcp_connector(&self) -> Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send> {
@@ -445,11 +442,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
         tracing::debug!("dst_allow_kcp: {:?}", dst_allow_kcp);
 
         #[cfg(feature = "kcp")]
-        let selected_kcp = self.kcp_endpoint.is_some() && dst_allow_kcp;
-        #[cfg(not(feature = "kcp"))]
-        let selected_kcp = false;
-        #[cfg(feature = "kcp")]
-        let mut connector: Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send> =
+        let connector: Box<dyn AsyncTcpConnector<S = SocksTcpStream> + Send> =
             match (&self.kcp_endpoint, dst_allow_kcp) {
                 (Some(kcp_endpoint), true) => {
                     tracing::trace!(
@@ -477,7 +470,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
                 }
             };
         #[cfg(not(feature = "kcp"))]
-        let mut connector = {
+        let connector = {
             tracing::trace!(
                 ?addr,
                 src_addr = ?self.src_addr,
@@ -487,28 +480,7 @@ impl AsyncTcpConnector for Socks5AutoConnector {
             self.smoltcp_connector()
         };
 
-        let mut ret = if selected_kcp && self.fallback_to_smoltcp_on_kcp_failure {
-            match timeout(
-                POLICY_KCP_ATTEMPT_TIMEOUT,
-                connector.tcp_connect(addr, timeout_s),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => Err(anyhow::anyhow!("policy UoT KCP connect timed out").into()),
-            }
-        } else {
-            connector.tcp_connect(addr, timeout_s).await
-        };
-        if selected_kcp && ret.is_err() && self.fallback_to_smoltcp_on_kcp_failure {
-            tracing::debug!(
-                ?addr,
-                src_addr = ?self.src_addr,
-                "KCP data-plane connect failed; retrying the policy UoT stream once through smoltcp"
-            );
-            connector = self.smoltcp_connector();
-            ret = connector.tcp_connect(addr, timeout_s).await;
-        }
+        let ret = connector.tcp_connect(addr, timeout_s).await;
         self.inner_connector.lock().replace(Box::new(connector));
         ret
     }
@@ -667,7 +639,7 @@ pub struct Socks5Server {
     #[cfg(feature = "kcp")]
     kcp_endpoint: Mutex<Option<Weak<KcpEndpoint>>>,
     #[cfg(feature = "kcp")]
-    policy_kcp_endpoint: Mutex<Option<Weak<KcpEndpoint>>>,
+    mesh_data_plane_kcp_endpoint: Mutex<Option<Weak<KcpEndpoint>>>,
 
     socks5_enabled: Arc<AtomicBool>,
     #[cfg(feature = "ffi-dataplane")]
@@ -909,7 +881,7 @@ impl Socks5Server {
             #[cfg(feature = "kcp")]
             kcp_endpoint: Mutex::new(None),
             #[cfg(feature = "kcp")]
-            policy_kcp_endpoint: Mutex::new(None),
+            mesh_data_plane_kcp_endpoint: Mutex::new(None),
 
             socks5_enabled: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "ffi-dataplane")]
@@ -1045,12 +1017,12 @@ impl Socks5Server {
     pub async fn run(
         self: &Arc<Self>,
         #[cfg(feature = "kcp")] kcp_endpoint: Option<Weak<KcpEndpoint>>,
-        #[cfg(feature = "kcp")] policy_kcp_endpoint: Option<Weak<KcpEndpoint>>,
+        #[cfg(feature = "kcp")] mesh_data_plane_kcp_endpoint: Option<Weak<KcpEndpoint>>,
     ) -> Result<(), Error> {
         #[cfg(feature = "kcp")]
         {
             *self.kcp_endpoint.lock().await = kcp_endpoint.clone();
-            *self.policy_kcp_endpoint.lock().await = policy_kcp_endpoint;
+            *self.mesh_data_plane_kcp_endpoint.lock().await = mesh_data_plane_kcp_endpoint;
         }
         if let Some(proxy_url) = self.global_ctx.config.get_socks5_portal() {
             #[cfg(feature = "kcp")]
@@ -1093,7 +1065,6 @@ impl Socks5Server {
                                 src_addr: addr,
                                 inner_connector: parking_lot::Mutex::new(None),
                                 allow_kernel_fallback: true,
-                                fallback_to_smoltcp_on_kcp_failure: false,
                                 entry_count: entry_count.clone(),
                             };
                             if let Some(net) = net.lock().await.as_ref() {
@@ -1284,7 +1255,6 @@ impl Socks5Server {
                     entry_count: entry_count.clone(),
                     inner_connector: parking_lot::Mutex::new(None),
                     allow_kernel_fallback: true,
-                    fallback_to_smoltcp_on_kcp_failure: false,
                 };
 
                 forward_tasks

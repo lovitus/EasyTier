@@ -303,3 +303,163 @@ EasyTier 的 Leaf TUN 数据面已经通过 `netstack-smoltcp` 集成 smoltcp；
 - 显式用户 SOCKS 的 UDP 能力仍以实际服务端为准：配置 `udp: true` 不会把不支持 UDP 的 peer SOCKS 自动变成可用。首版按既定语义失败并报告错误，不做隐藏回退；用户需要可靠 UDP 时应选择支持 UDP 的节点或 managed HEV 出口。
 - 未纳入首版承诺的 split-DNS、在线 Geo 更新、HTTP actor、netns、多实例、高吞吐 UDP 和所有高级 chain/fallback 组合继续作为实验/后续矩阵，不应在首版文档中宣称完全兼容。
 - 性能结论是“未见明显全局回退”，不是“所有策略路径零成本”：Linux policy-off 与原生 mesh 同量级，DIRECT 接近线速；Android policy-off/DIRECT 受无线链路限制约 `83-91 Mbps`，managed HEV 多一层 SOCKS 与 mesh 转发后约 `57 Mbps`。该差异符合路径复杂度，未观察到持续 RSS/FD/线程增长或进程重启。
+
+## 2026-07-16 `c48816f4` 解耦、禁用成本与恢复复核（当前权威补充）
+
+本节覆盖本文较早的“显式端口未验证”“policy-off 固定成本不明确”和“网络切换资源仅有单轮证据”等描述。产品代码保持 `de1a894b` 的 Android DNS 修复边界；`c48816f4300f5853525b62d5793d9778923aed80` 只为 profiling workflow 增加手动、默认关闭的 no-Leaf comparator，没有修改 mesh、Leaf 或策略行为。错误修改 mesh transport 的 `c5e8ba42` 已由 `f47657f2` 完整回退，本轮没有依赖该错误逻辑。
+
+### 精确制品
+
+- Linux workflow：`29486876174`，run number `157`，输入 `audit_comparator=true`。
+- 同一 run 同时产生 `easytier-core`（`jemalloc,leaf-policy-proxy`）和 `easytier-core-no-leaf`（`jemalloc`）。两者均为 `x86_64-unknown-linux-musl` static PIE，带独立 Build ID 和 debug info。
+- `BUILD_INFO.txt`、commit、run ID、target 和 `SHA256SUMS.txt` 全部匹配；测试只使用这一套精确制品。
+
+### policy-off 固定成本
+
+`.37/.38` 使用相同网络、相同虚拟 IP、相同显式 listener 和相同 peer。三种运行形态分别为：不编译 Leaf、编译 Leaf 但目录/PATH 中没有 HEV、编译 Leaf 且打包 HEV。
+
+| 形态 | core RSS | core threads | core FD | 额外进程 | 10 秒空闲 CPU |
+| --- | --- | --- | --- | --- | --- |
+| no-Leaf | `16272/16560 KiB` | `9/9` | `25/27` | 无 | 两端 `0 tick` |
+| Leaf、无 HEV 文件 | `17912/17644 KiB` | 稳定后约 `10/10` | `26/26` | 无 | `1/2 tick`，约 `0.1/0.2%` |
+| Leaf、打包 HEV | core `17960/17564 KiB` | core `9/9` | `26/27` | 每端 HEV `252/256 KiB`、`2 threads`、`12 FD` | core+HEV 每端约 `0.1%` |
+
+因此不能再写“禁用策略等于零资源开销”。portless `via: mesh` 为了让未配置本地策略的 peer 也能被远端选为 managed exit，当前会在 HEV 文件存在时常驻 HEV。它的 CPU/RSS 很小，但 `2 threads + 12 FD` 是真实固定成本。若未来要求严格零常驻成本，应改为由 mesh adapter 在首个 managed-exit 请求时惰性启动，而不是把启动条件简单绑定到本机 `policy-config`；后者会破坏“目标 peer 不需显式打开 exit-node 开关”的既定体验。
+
+### 固定单 tunnel 数据面对照
+
+为排除自动 P2P 发现的多个 UDP/QUIC tunnel 造成的路径抖动，两组均使用 `--disable-p2p true`，保留全部显式 listener，但只建立同一个显式 UDP peer。
+
+| 形态 | TCP 5 秒成功样本 | 成功样本均值 | 控制连接 reset | UDP 50 Mbit/s loss |
+| --- | --- | ---: | ---: | --- |
+| no-Leaf | `702/721/685/693 Mbit/s` | `700 Mbit/s` | `2/6` | `17%/6.9%/12%` |
+| Leaf + HEV，policy-off | `721/710/718/713/675 Mbit/s` | `707 Mbit/s` | `1/6` | `15%/14%/16%` |
+
+TCP 没有可见回退。reset 在 no-Leaf 也出现且次数更多，不能归因给 Leaf。UDP 两组区间重叠，Leaf 组均值约高 3 个百分点，但该单 UDP tunnel 基线本身已经不稳定；现有证据只能写“未证明 Leaf 导致 UDP 回退”，不能写“UDP 无回退”。
+
+### portless 与显式端口 actor
+
+同一个 `.38` peer、同一个 EasyTier UDP mesh、同一个 `203.0.113.10:27000` 受控 HTTP 目标：
+
+- portless actor 使用目标 EasyTier 托管 HEV，`20/20` HTTP 200；目标自建 HEV 日志保持为空。
+- 显式 `port: 11081` actor 使用目标自建 HEV，`20/20` HTTP 200；自建 HEV 精确记录 20 条目标连接。
+- 两组 mesh RTT 均约 `0.52 ms`，请求都出现约 `3 ms` 与约 `204-208 ms` 两档延迟，没有发现端口省略路径绕开或修改正常 mesh transport 的证据。
+
+结论：有端口与无端口都通过现有 mesh adapter 到达同一 peer；端口只决定目标是用户 SOCKS 还是 EasyTier 托管 HEV。overlay、UDP/QUIC/KCP 和 smoltcp 仍由原 EasyTier mesh 能力与配置决定，Leaf 不应重新选择或改写。
+
+### fallback、断链和 worker ownership
+
+- fallback 主成员为显式 `11081`，备成员为同一 peer 的 portless managed HEV。主成员在线时 `5/5` HTTP 200，目标自建 HEV 日志 `186 -> 191`。
+- 停止主 SOCKS 后，新连接 `10/10` HTTP 200，自建 HEV日志不再增长，证明由 managed secondary 接管。
+- 用两条精确 iptables 规则只阻断唯一 EasyTier UDP peer 时，mesh `3/3` 丢失，策略 HTTP 在 10 秒内没有 DIRECT 逃逸。删除规则后 1 秒内 mesh 恢复，HTTP 200。
+- core PID 和 managed HEV PID 保持不变；Leaf worker 从 `26470` 重建为 `27363`，旧 worker 已退出。恢复语义是 network-generation worker replacement，不是同一个 Leaf runtime 原地修复。
+- 正常 SIGTERM 后 core、Leaf、HEV、TUN 和本轮临时配置均清理；Linux 隔离测试结束后 `.37/.38` 无残留进程、TUN、回环地址或防火墙规则。
+
+### 失败 UDP association 的资源窗口
+
+显式 actor 的第三方 HEV 接受 UDP association，但 payload 未到达受控 echo server。按既定 v1 语义直接向用户暴露失败，没有新增协议猜测或隐式 fallback。约 50 次两秒超时后资源峰值为：
+
+- `.37` core FD `29 -> 91`，Leaf FD `23 -> 80`。
+- `.38` core FD `25 -> 182`，自建 HEV FD `16 -> 111`。
+
+70 秒时仍未回基线；约 190 秒时大部分回收；约 330 秒时两端 core 和 managed HEV 精确回到原 FD，Leaf 比初始多 3 FD，自建 HEV 多 2 FD，线程稳定、RSS下降。现有证据更像首次 UDP 使用后的常驻 runtime/socket 池，而不是每个 association 永久泄漏，但尚未完成多轮相同 wave 后的线性增长检验，因此不能写“所有 UDP association 资源完全回基线”。
+
+### Android 三次 Wi-Fi 切换
+
+设备保留原有三个 EasyTier 包，没有卸载、覆盖安装或模拟点击；活动包始终为 `com.kkrainbow.easytier.policycandidate`。每次关闭 Wi-Fi 前都先用设备侧 `setsid` 任务安排 10 秒后重新打开 Wi-Fi，截图没有参与控制或判断。
+
+- 三次 Wi-Fi -> outage/蜂窝 -> Wi-Fi 后，PID 始终为 `11615`，`tun0` ifindex 始终为 `190`，地址始终为 `10.44.0.88/16`。
+- 新 Wi-Fi network key 携带 DNS `fda9:52cf:9966::1` 和 `192.168.234.1`；Google/百度分别持续返回 204/200，FakeDNS 地址随 generation 重新分配。
+- mesh `10.44.0.8` 恢复，但该公网路径前后均约 `20%` ICMP loss、RTT 约 `154 ms`，属于当前网络基线。
+- RSS 从首轮前约 `230040 KiB` 上升到约 `238268-238424 KiB` 后趋于平台；后两轮没有线性增长。线程在 `69-71` 间波动。
+
+Android 当前仍有一个需要归因的性能风险：稳定后 20 秒进程 CPU 为 `205 ticks`（约单核 `10.25%`），此前样本约 `14%`；同期有 25 次 SELinux denial，包括 12 次 `/proc/net` read、7 次 packet socket create 和 6 次 `sysfs/net` search。线程采样中两个长期 EasyTier `tokio-rt-worker` 各约 2%，Leaf worker 约 0.3%。这说明高空闲 CPU 主要不在 Leaf worker，但仍需同一 APK、同一 mesh 配置的 policy-off 对照才能判断是否由 policy 引入的全局网络观察 hook 放大；在取得该对照前，既不能归因给 Leaf，也不能宣称 Android 无空闲性能回退。
+
+### 解耦与兼容结论
+
+- 规则、DNS、Geo 数据、outbound 和 fallback 仍在 `easytier-policy`/Leaf 边界；EasyTier core 的职责应限于配置、TUN/worker lifecycle、mesh actor bridge 和 network-generation 通知。
+- `via: mesh` 的有端口/无端口实测均复用原 mesh 数据面，错误 transport 补丁已经回退，没有证据显示当前 Leaf 改写 overlay/KCP/smoltcp 选择。
+- 仍需收窄的耦合包括：policy 驱动但作用于普通 mesh 的全局 OSPF generation restart、policy-only KCP endpoint，以及 policy-off 时 managed HEV 常驻。它们必须保留明确 gate/adapter 边界，不能继续向普通 mesh 热路径扩散。
+- 当前 Unix datagram/raw-FD bridge 和平台 `cfg` 只支持 Linux/Android v1 证据。Windows/macOS 不能据此声明运行时兼容；全平台设计应替换 transport adapter，而不是在 mesh core 复制平台分支。
+- 当前 no-Leaf comparator 仍基于最新 core，包含最新 core 的全局 hook；它证明 feature/sidecar 相对成本，但不是 EasyTier 2.9.10 精确旧二进制对照。因此配置和 mesh 行为未发现明显破坏，不等于已经证明与 2.9.10 性能完全一致。
+
+### 新增 core hook 逐项审计
+
+审计基线为引入 Leaf 前的 `030d17e7`，范围覆盖 `instance`、`virtual_nic`、通用 SOCKS dataplane、KCP、OSPF route、underlay guard、peer RPC 和平台 runtime。结论不是“没有看到明显问题”，而是逐项判断是否满足三条硬边界：Leaf 只拥有规则/DNS/outbound，policy adapter 只拥有 bridge/lifecycle，mesh 继续拥有 route/overlay/KCP/smoltcp。
+
+| hook | 判定 | 理由与处理 |
+| --- | --- | --- |
+| policy 配置 envelope、CLI/RPC 校验、单实例 lease | 保留：必要 lifecycle adapter | 不进入 peer route 或 overlay 算法；未启用时不创建 runtime。 |
+| `POLICY_SOCKET_MARK` 传播到 underlay socket | 保留：必要 loop-prevention adapter | 只在启用 policy 时设置，防止 Leaf 捕获 EasyTier 自身 underlay；不改变路径选择。 |
+| `VirtualNic` 的 `PacketClassifier`、Leaf writer queue、peer/policy TUN 合流 | 保留：必要 packet bridge | policy 关闭时 `policy=None`，不创建队列和额外转发任务；开启后有界队列 fail-closed。固定 tunnel A/B 未见吞吐回退。 |
+| `data_plane_tcp_connect_mesh_only` 禁止 kernel fallback | 保留并通用化命名 | 这是 `via: mesh` fail-closed 的必要能力，仍调用原 `Socks5AutoConnector`/route/smoltcp；不应带 Leaf 规则语义。 |
+| `MeshSocksRelayService` 与 peer RPC open/close UDP association | 保留 bridge 能力，但应去 policy 命名 | UDP association/UoT 需要跨 peer 生命周期控制；它不应叫 `PolicyUdpRelayRpc`，更合适的边界是通用 `MeshSocksRelayRpc`，供任何 mesh SOCKS consumer 使用。 |
+| managed HEV 与 TCP ingress | 保留能力，收窄为 lazy lifecycle | 当前 feature build 无条件启动 sidecar，造成 policy-off `2 threads + 12 FD`。严格零常驻要求下应在首个 managed request 惰性启动，而不是要求本机 policy 或用户打开 exit-node 开关。 |
+| `policy_kcp_endpoint` / `start_endpoint_only` | 可选性能 adapter，不是首版正确性依赖 | KCP 仍由 mesh endpoint 处理，但 policy 专用 endpoint 被直接存入通用 `Socks5Server`。应改为注入通用 mesh stream capability；首版也可退回 smoltcp，而不应扩散 policy 字段。 |
+| KCP 首次尝试超时与失败后 smoltcp retry | 已从通用 connector 解耦 | `Socks5AutoConnector` 只按 endpoint/capability 连接；5 秒 KCP 尝试与一次 smoltcp fallback 归 `gateway::socks5::dataplane` 所有。`.160` 的 endpoint isolation、mesh-only fail-closed 和 UoT smoltcp burst 回归均通过。 |
+| peer 删除后 OSPF `restart_local_generation` | 不属于 policy adapter | 这是普通 mesh route correctness 修改，policy-off 也执行。独立精确回归 `peer_removal_restarts_remaining_generation_and_invalidates_remote_cache` 已通过；发布前仍需放入 no-Leaf 部署比较，不能作为 Leaf 必需 hook 混入兼容结论。 |
+| underlay preflight 的 `source_interface_signal()` | 不属于 policy adapter，移动端原生接口探测已门控 | 先前把 Android 扫描归因于 `collect_local_ip_addrs_now()` 不准确：bind-address 刷新本来就在 Android 禁用；实际每次 preflight 调用 pnet 的是软判据 `source_interface_signal()`。本候选在 Android、iOS、macOS Network Extension 和 OHOS 禁用它，保留 managed-IP 等硬判据；桌面 bind-address 刷新仍应按 network generation 缓存。 |
+| public IPv6 updater 接受 `policy_owns_default_route` | 保留但抽象为 route-owner capability | 避免两个组件同时拥有默认路由是必要 lifecycle 协调；不应让 IPv6 updater直接理解 Leaf，只应接收“外部 route owner”状态。 |
+| netlink route/rule 列举与 replace helper | 保留：平台 route adapter | 只有 policy routing 调用时产生行为，普通 mesh 热路径无新增工作。 |
+| QUIC bind mode、loopback 不使用 `SO_BINDTODEVICE` | 独立通用网络修复 | 与 Leaf 规则无关。应单独保留测试和变更说明，不能拿它证明 Leaf 兼容，也不能把其风险归给 Leaf。 |
+
+因此，“所有新增 mesh hook 都是必要 adapter”当前不成立。至少以下三项必须在最终兼容结论前处理：
+
+1. 把通用 `Socks5AutoConnector` 内的 policy KCP timeout/fallback 移回 actor adapter，或将其重构为无 policy 语义的 transport strategy。
+2. 将 OSPF generation restart 作为独立 mesh correctness 变更审查和验证，不再作为 Leaf 实现的一部分。
+3. 将 uncached underlay interface scan 改为 network-generation 级缓存刷新；先用同 APK policy-off/`bind_device` 对照确认 Android CPU 与 denial 因果。
+
+### Windows/macOS 未来平台边界
+
+当前实现不能称为全平台宿主已解耦：
+
+- `LeafPacketBridge` 只在 Unix 构建，底层是 `UnixDatagram::pair()` 和 raw FD。
+- 外部 Leaf worker 继承固定 TUN FD；Linux 与传统 macOS 可以采用该模型，Windows 没有对应实现。
+- Android in-process runtime 同样以 `RawFd` 为入口，并维护全局 runtime ID/reaper；这是移动宿主实现，不是跨平台接口。
+- `run_for_mobile` 只有 Android 会启动 policy runtime；iOS 和 macOS Network Extension 虽能得到 TUN FD，当前没有等价 policy host。
+- `VirtualNic` 中大量 `cfg(unix/android/linux/macos)` 直接包围 policy 字段和启动逻辑，新增 Windows 或 Apple NE 时会继续复制分支。
+
+目标结构应先固定平台无关接口，再由各平台实现：
+
+```text
+PolicyRuntimeHost
+  start(document, PacketIo, NetworkContext)
+  update_network(NetworkContext)
+  stop()
+
+PacketIo
+  send_to_policy(packet)
+  recv_from_policy(packet)
+
+ManagedMeshEgressHost
+  ensure_started()
+  endpoint()
+  stop()
+```
+
+- Linux/传统 macOS：Unix datagram + external worker adapter。
+- Android：in-process Leaf + VPN FD adapter。
+- Windows：Windows TUN/channel 或 in-process FFI adapter，不模拟 Unix FD。
+- iOS/macOS NE：packet-flow/NE-provided FD adapter，不启动不允许的外部进程。
+
+mesh actor 只依赖 `PacketIo` 和通用 mesh stream/datagram capability，不能依赖 Unix socket、Android runtime ID 或 Leaf process。完成该 trait 边界前，只能声明 Linux/Android v1 运行证据，不能宣称未来 Windows/macOS 不会被当前特殊设计绑住。
+
+### 网络变化语义参考与 EasyTier 整改边界
+
+按仓库要求核对的参考实现与可观察语义：
+
+- Mihomo `/Users/fanli/Documents/mihomo-rev/listener/sing_tun/server.go`：`tun.NewNetworkUpdateMonitor` 驱动 `tun.NewDefaultInterfaceMonitor`；默认接口变化回调才调用 `iface.FlushCache()` 和 `resolver.ResetConnection()`。它不在每次 dial/reconnect 失败时扫描接口。
+- Mihomo `/Users/fanli/Documents/mihomo-rev/listener/sing_tun/iface.go`：`defaultInterfaceFinder.Update` 明确负责 flush 后重建接口缓存；普通 `Interfaces`/`ByAddr` 使用缓存，只有发现系统对象存在而缓存缺失时才更新。
+- Mihomo `/Users/fanli/Documents/mihomo-rev/component/dialer/dialer.go`：dial/listen 从原子 `DefaultInterface` 或 `DefaultInterfaceFinder` 取得当前接口，loopback 明确清空 interface bind；拨号器消费当前状态，不拥有网络变化轮询。
+- Android 宿主 `/Users/fanli/Documents/clashmeta-android-rev/service/src/main/java/com/github/kr328/clash/service/clash/module/NetworkObserveModule.kt`：`ConnectivityManager.NetworkCallback` 接收 `onAvailable`、`onLosing`、`onLost`、`onLinkPropertiesChanged`，通过 conflated channel 和 2 秒 debounce 计算 network key/DNS，再通知 core。
+- Android 宿主 `/Users/fanli/Documents/clashmeta-android-rev/service/src/main/java/com/github/kr328/clash/service/TunService.kt`：旧 Android 版本把选中的系统 `Network` 传给 `setUnderlyingNetworks`，VPN ownership 与网络观察保持在宿主层。
+
+EasyTier 可以因多 peer、bind-device 和 OSPF generation 与 Mihomo 不同，但不能把“网络变化恢复”实现为每次连接重试都无缓存枚举系统接口。应遵循同一外部语义：
+
+1. Android 继续由现有 VPN network callback 提供 network key、DNS 和可用网络信息；network generation 变化时只触发一次接口/IP cache invalidation。
+2. Linux/传统 macOS 由 netlink/route monitor 或现有 underlay generation 事件触发 invalidation；拨号器只读取该 generation 的缓存快照。
+3. 移动端/受限 host 不调用 `source_interface_signal()` 的原生 pnet 枚举，由 host network callback 提供 generation；桌面端 `bind_device_sources` 在同一 generation 内不得重复枚举接口。首次构建失败可有界重试，但不能随每个 peer reconnect 放大。
+4. 网络丢失时保持 fail-closed；恢复后新 generation 丢弃旧 bind address、DNS connection 和 Leaf runtime，不能保留旧地址继续拨号。
+5. 修复验证必须同时记录 Android policy-off 与 policy-on 的 CPU、SELinux denial 数、mesh/DNS恢复时间，证明减少轮询没有牺牲切网恢复。
+
+这是与 Mihomo 一致的“事件驱动失效、拨号消费快照”语义；有意差异仅是 EasyTier 还需把 generation 传播给 OSPF/Leaf lifecycle，而不是把接口发现放进 policy 或 connector 热路径。

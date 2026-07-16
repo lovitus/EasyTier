@@ -5,12 +5,27 @@
 
 ## Candidate state
 
+- Current audit snapshot: `c48816f4300f5853525b62d5793d9778923aed80`, Linux profiling run `29486876174`. This commit changes only the manually enabled workflow comparator; product behavior remains the preceding candidate plus the isolated Android DNS fix. Exact no-Leaf and Leaf binaries from one run were verified and deployed together.
+- Fixed single-UDP-tunnel comparison found no TCP throughput regression (`700` versus `707 Mbit/s` successful-sample mean). Portless and explicit-port mesh actors each passed `20/20` controlled HTTP requests to the same peer/target; fallback, fail-closed, network restoration, and normal cleanup passed.
+- Policy-off is not zero-resource: when packaged, managed HEV remains resident at about `252-256 KiB`, `2 threads`, and `12 FD` per instance. This is the cost of making a peer usable as a portless exit without a local exit-node switch.
+- Android survived three scripted Wi-Fi outages with the same PID/TUN and working FakeDNS/Google/Baidu. RSS plateaued after the first reload, but stable idle CPU remained about `10-14%` of one core with frequent SELinux-denied network probes. Attribution against a same-APK policy-off baseline remains open.
+
 - Exact validated runtime baseline: `824ac5a1d47d568113a7e2190d57fecf049dd47b`. Linux run `29461390271` and Android run `29461390297` are the unique automatic workflow pair; both succeeded. Exact artifacts, hashes, signer, symbols, build ID, Linux mesh/policy coexistence, Android VPN ownership, TCP, UDP/UoT, Wi-Fi/route recovery, worker recovery, configuration retention, and cleanup were verified.
 - Data-plane baseline: `e1a54d87e08eda80f3d081f10b9a9546cbb268d5`. It closed policy-only KCP performance, bounded smoltcp fallback, OSPF generation recovery, Android native stop, Wi-Fi recovery, and repeated Linux/Android lifecycle/resource cleanup.
 - `318497c4` adds build-capability fail-closed enforcement: enabled policy is rejected on builds without a runtime while disabled configuration remains portable and preserved. Native Windows MSVC no-run and exact unsupported-runtime tests passed; supported Linux/Android behavior remained valid.
 - Current release work is user-facing capability closure, not core architecture repair: the safe chain/fallback and explicit UDP boundary is frozen in documentation and a compiled example, and overseas GeoSite/custom-rule egress evidence is complete.
 
 ## P0 gates
+
+- [ ] Before claiming Android has no idle performance regression, run a same-APK, same-mesh policy-off comparator and attribute the `10-14%` idle CPU plus SELinux-denied packet/proc/sysfs probes. Do not fix this by changing mesh transport without evidence.
+- [ ] Decide explicitly whether the portless-exit convenience justifies policy-off managed HEV residency. If strict zero residency is required, design lazy adapter-owned startup; do not require a user-visible exit-node switch and do not bind startup only to local policy configuration.
+- [ ] Repeat at least two concurrent failed-UDP association waves and verify the post-300-second Leaf/HEV FD plateau does not grow beyond the observed one-time `+3/+2 FD`. UDP payload failure itself remains an exposed capability error, not an automatic fallback trigger.
+- [ ] Do not claim exact EasyTier 2.9.10 performance equivalence from the current no-Leaf comparator; it isolates feature/sidecar cost but still contains current-core global hooks.
+- [x] Disable optional native `source_interface_signal()` inspection on Android/iOS/macOS-NE/OHOS while retaining managed-IP hard checks. The earlier `collect_local_ip_addrs_now()` Android attribution was incorrect because bind-address refresh was already mobile-disabled. `.160` compile and platform-ownership unit test passed.
+- [ ] Repeat Android idle CPU/SELinux-denial measurement on the exact candidate; desktop bind-address discovery still needs one refresh per network generation. This is a global mesh performance gate, not a Leaf worker optimization.
+- [x] Remove policy-specific KCP timeout/fallback semantics from generic `Socks5AutoConnector`; transport selection remains mesh-owned and KCP-to-smoltcp retry is isolated in the mesh dataplane adapter. Endpoint-isolation, fail-closed and UoT fallback tests passed on `.160`.
+- [ ] Keep OSPF generation restart classified as an independent ordinary-mesh correctness change. Its exact regression passed on `.160`; deployed no-Leaf compatibility evidence remains required and it must not be counted as a necessary Leaf adapter hook.
+- [ ] Define platform-neutral `PolicyRuntimeHost`, `PacketIo`, and managed-egress lifecycle boundaries before claiming Windows/macOS extensibility. Unix raw FD and Android runtime-ID ownership remain platform adapters only.
 
 - [x] Android native VPN stop is independent of WebView readiness and JavaScript queue progress.
 - [x] Native success does not schedule a redundant second stop through the frontend.

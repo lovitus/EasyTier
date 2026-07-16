@@ -1137,14 +1137,14 @@ impl Instance {
 
         #[cfg(feature = "kcp")]
         #[cfg(feature = "leaf-policy-proxy")]
-        let policy_kcp_enabled =
+        let mesh_data_plane_kcp_enabled =
             crate::policy_proxy::is_configured_for(self.global_ctx.config.as_ref());
         #[cfg(feature = "kcp")]
         #[cfg(not(feature = "leaf-policy-proxy"))]
-        let policy_kcp_enabled = false;
+        let mesh_data_plane_kcp_enabled = false;
 
         #[cfg(feature = "kcp")]
-        if self.global_ctx.get_flags().enable_kcp_proxy || policy_kcp_enabled {
+        if self.global_ctx.get_flags().enable_kcp_proxy || mesh_data_plane_kcp_enabled {
             let src_proxy =
                 KcpProxySrc::new(self.get_peer_manager(), Some(proxy_prepared_store.clone())).await;
             if self.global_ctx.get_flags().enable_kcp_proxy {
@@ -1249,7 +1249,7 @@ impl Instance {
                 #[cfg(feature = "kcp")]
                 self.kcp_proxy_src
                     .as_ref()
-                    .filter(|_| policy_kcp_enabled)
+                    .filter(|_| mesh_data_plane_kcp_enabled)
                     .map(|x| Arc::downgrade(&x.get_kcp_endpoint())),
             )
             .await?;
