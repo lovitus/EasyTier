@@ -4966,7 +4966,7 @@ dependencies = [
 [[package]]
 name = "leaf"
 version = "0.1.2"
-source = "git+https://github.com/lovitus/leaf.git?rev=b1e33b50e37ea3b396e3cee2a1d60bb0c599655c#b1e33b50e37ea3b396e3cee2a1d60bb0c599655c"
+source = "git+https://github.com/lovitus/leaf.git?rev=2f62208187f7980d066e479bd70bb55613c066d2#2f62208187f7980d066e479bd70bb55613c066d2"
 dependencies = [
  "aho-corasick",
  "anyhow",
