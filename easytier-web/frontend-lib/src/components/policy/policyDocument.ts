@@ -6,6 +6,10 @@ export type PolicyProxyVia = 'mesh' | 'native'
 export type PolicyGroupKind = 'chain' | 'fallback'
 export const DEFAULT_POLICY_PROXY_DNS = 'doh:cloudflare-dns.com@1.1.1.1'
 
+export function policyRuleSupportsNoResolve(type: string): boolean {
+  return ['IP-CIDR', 'GEOIP', 'COUNTRY'].includes(type.trim().toUpperCase())
+}
+
 // Reference semantics:
 // - Mihomo rules/parser.go::ParseRule, rules/common/geosite.go::GEOSITE.Match,
 //   and rules/common/geoip.go::GEOIP.Match keep ordered, first-match GeoX rules.
@@ -101,11 +105,11 @@ rules:
   - GEOSITE,spotify,media-exit
   - GEOSITE,CN,domestic-exit
   - GEOSITE,geolocation-!cn,other-exit
-  - GEOIP,google,google-exit
-  - GEOIP,netflix,media-exit
-  - GEOIP,telegram,telegram-exit
-  - GEOIP,twitter,social-exit
-  - GEOIP,CN,domestic-exit
+  - GEOIP,google,google-exit,no-resolve
+  - GEOIP,netflix,media-exit,no-resolve
+  - GEOIP,telegram,telegram-exit,no-resolve
+  - GEOIP,twitter,social-exit,no-resolve
+  - GEOIP,CN,domestic-exit,no-resolve
   - MATCH,default-exit
 `
 
@@ -256,11 +260,11 @@ export function emptyPolicyDocument(): PolicyEditorDocument {
       { type: 'GEOSITE', operand: 'spotify', target: 'media-exit', noResolve: false },
       { type: 'GEOSITE', operand: 'CN', target: 'domestic-exit', noResolve: false },
       { type: 'GEOSITE', operand: 'geolocation-!cn', target: 'other-exit', noResolve: false },
-      { type: 'GEOIP', operand: 'google', target: 'google-exit', noResolve: false },
-      { type: 'GEOIP', operand: 'netflix', target: 'media-exit', noResolve: false },
-      { type: 'GEOIP', operand: 'telegram', target: 'telegram-exit', noResolve: false },
-      { type: 'GEOIP', operand: 'twitter', target: 'social-exit', noResolve: false },
-      { type: 'GEOIP', operand: 'CN', target: 'domestic-exit', noResolve: false },
+      { type: 'GEOIP', operand: 'google', target: 'google-exit', noResolve: true },
+      { type: 'GEOIP', operand: 'netflix', target: 'media-exit', noResolve: true },
+      { type: 'GEOIP', operand: 'telegram', target: 'telegram-exit', noResolve: true },
+      { type: 'GEOIP', operand: 'twitter', target: 'social-exit', noResolve: true },
+      { type: 'GEOIP', operand: 'CN', target: 'domestic-exit', noResolve: true },
       { type: 'MATCH', operand: '', target: 'default-exit', noResolve: false },
     ],
   }

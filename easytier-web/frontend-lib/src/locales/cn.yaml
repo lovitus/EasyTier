@@ -221,6 +221,12 @@ policy:
     dns_proxy: 代理域名解析器
     dns_proxy_help: 每行一个带固定引导 IP 的 DoH；查询跟随所选代理组，兼容仅 TCP 的代理链，失败时绝不回落到直连 DNS。
     dns_isolation_help: DNS 与应用流量使用相同的有序域名规则选择解析器集合。某一集合失败时直接失败，不会跨集合查询；EasyTier Magic DNS 始终留在 Mesh 路径。
+    runtime_linux_supported: Linux 策略代理已支持并纳入首版实机验证。
+    runtime_android_experimental: Android 策略代理目前属于首版实验性支持；配置由 VpnService 内运行时接管，请在实际网络切换和应用流量中验证。
+    runtime_macos_partial: macOS 当前仅部分支持策略配置；此构建报告的运行时能力决定是否可以启用，透明策略路由尚未作为首版承诺。
+    runtime_windows_unsupported: Windows 当前暂不支持透明策略路由；可以查看配置，但不能在此构建中启用。
+    runtime_supported: "{platform} 当前构建报告策略运行时可用，但尚未纳入首版完整验证矩阵。"
+    runtime_unsupported: "{platform} 当前构建不提供策略运行时；可以查看配置，但不能启用。"
     rule_sets: Geo 规则数据
     advanced_yaml: 高级 YAML
     advanced_features: 实验性高级能力
@@ -248,6 +254,16 @@ policy:
     add_group: 添加分组
     add_rule: 添加规则
     add_rule_set: 添加标准 Geo 数据
+    nodes_empty: 尚未配置代理节点。可以先使用默认 DIRECT 分组，或添加 Mesh / Native SOCKS 节点。
+    unnamed_node: 未命名节点
+    udp_capable: 此 SOCKS 节点支持 UDP
+    rule_priority: "规则 #{index}"
+    move_up: 上移规则
+    move_down: 下移规则
+    remove_node: 删除代理节点
+    remove_group: 删除分组
+    remove_rule: 删除规则
+    remove_rule_data: 删除规则数据
     managed_source: 官方数据源
     update_rule_data: 下载并校验
     rule_data_help: GeoSite 和 GeoIP 已内置，无需下载即可使用；Country MMDB 仍为可选资源。高级 YAML 中显式配置的同类数据文件优先于内置数据。

@@ -220,6 +220,12 @@ policy:
     dns_proxy: Proxied-domain resolvers
     dns_proxy_help: One bootstrap-pinned DoH resolver per line. Queries follow the selected proxy group, including TCP-only chains, and never fall back to direct DNS.
     dns_isolation_help: Resolver sets are selected by the same ordered domain rules as application traffic. A failed set fails closed; it is never replaced by the other set. EasyTier Magic DNS remains on the mesh path.
+    runtime_linux_supported: Linux policy proxy is supported and included in first-release device validation.
+    runtime_android_experimental: Android policy proxy is experimental first-release support. VpnService owns the runtime path; validate it with real network changes and application traffic.
+    runtime_macos_partial: macOS currently has partial policy configuration support. The runtime capability reported by this build determines whether it can be enabled; transparent policy routing is not a first-release commitment.
+    runtime_windows_unsupported: Transparent policy routing is not currently supported on Windows. The configuration remains visible but cannot be enabled in this build.
+    runtime_supported: "This {platform} build reports an available policy runtime, but it is not covered by the complete first-release validation matrix."
+    runtime_unsupported: "This {platform} build has no policy runtime. The configuration remains visible but cannot be enabled."
     rule_sets: Geo rule data
     advanced_yaml: Advanced YAML
     advanced_features: Experimental advanced features
@@ -247,6 +253,16 @@ policy:
     add_group: Add group
     add_rule: Add rule
     add_rule_set: Add standard geo data
+    nodes_empty: No proxy node is configured. Keep the default DIRECT groups or add a Mesh / Native SOCKS node.
+    unnamed_node: Unnamed node
+    udp_capable: This SOCKS node supports UDP
+    rule_priority: "Rule #{index}"
+    move_up: Move rule up
+    move_down: Move rule down
+    remove_node: Remove proxy node
+    remove_group: Remove group
+    remove_rule: Remove rule
+    remove_rule_data: Remove rule data
     managed_source: Managed source
     update_rule_data: Download and verify
     rule_data_help: GeoSite and GeoIP are bundled and work without a download. Country MMDB remains optional. Explicit rule-set paths in advanced YAML override bundled data.

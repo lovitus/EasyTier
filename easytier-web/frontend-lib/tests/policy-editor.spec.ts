@@ -62,6 +62,39 @@ const TextareaStub = defineComponent({
   },
 })
 
+const InputTextStub = defineComponent({
+  name: 'InputText',
+  inheritAttrs: false,
+  props: { modelValue: String, id: String },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    return () => h('input', {
+      ...attrs,
+      id: props.id,
+      value: props.modelValue,
+      onInput: (event: Event) => emit('update:modelValue', (event.target as HTMLInputElement).value),
+    })
+  },
+})
+
+const SelectStub = defineComponent({
+  name: 'Select',
+  inheritAttrs: false,
+  props: { modelValue: String, options: Array },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    return () => h('select', {
+      ...attrs,
+      value: props.modelValue,
+      onChange: (event: Event) => emit('update:modelValue', (event.target as HTMLSelectElement).value),
+    }, [
+      h('option', { value: props.modelValue }, props.modelValue),
+      h('option', { value: 'GEOIP' }, 'GEOIP'),
+      h('option', { value: 'IP-CIDR' }, 'IP-CIDR'),
+    ])
+  },
+})
+
 function mountEditor(config: NetworkConfig, api?: import('../src/modules/api').RemoteClient) {
   const model = reactive(config) as NetworkConfig
   const wrapper = mount(PolicyEditor, {
@@ -74,11 +107,11 @@ function mountEditor(config: NetworkConfig, api?: import('../src/modules/api').R
         Column: true,
         DataTable: true,
         InputNumber: true,
-        InputText: true,
+        InputText: InputTextStub,
         Message: MessageStub,
         Panel: PanelStub,
         Password: true,
-        Select: true,
+        Select: SelectStub,
         SelectButton: true,
         Textarea: TextareaStub,
       },
@@ -106,7 +139,7 @@ describe('PolicyEditor', () => {
     expect(wrapper.find('[data-header="policy.editor.rules"]').exists()).toBe(true)
     expect(wrapper.find('[data-header="policy.editor.dns"]').exists()).toBe(true)
     expect(wrapper.find('[data-header="policy.editor.groups"]').exists()).toBe(true)
-    expect(wrapper.find('#policy_advanced_features').exists()).toBe(true)
+    expect(wrapper.find('#policy_advanced_features').exists()).toBe(false)
     expect(model.policy_config_inline).toContain('doh:cloudflare-dns.com@1.1.1.1')
   })
 
@@ -150,31 +183,17 @@ rules: ["MATCH,DIRECT"]
     expect(model.policy_config_inline).toContain('MATCH,DIRECT')
   })
 
-  it('reveals experimental creation controls only after an explicit unlock', async () => {
+  it('keeps DNS and groups visible without an experimental feature gate', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const { model, wrapper } = mountEditor(config)
-    const original = model.policy_config_inline
-
-    expect(wrapper.find('[data-header="policy.editor.dns"]').exists()).toBe(false)
-    expect(wrapper.find('[data-header="policy.editor.groups"]').exists()).toBe(false)
-
-    await wrapper.find<HTMLInputElement>('#policy_advanced_features').setValue(true)
-    await nextTick()
-
     expect(wrapper.find('[data-header="policy.editor.dns"]').exists()).toBe(true)
     expect(wrapper.find('[data-header="policy.editor.groups"]').exists()).toBe(true)
-
-    await wrapper.find<HTMLInputElement>('#policy_advanced_features').setValue(false)
-    await nextTick()
-
-    expect(wrapper.find('[data-header="policy.editor.dns"]').exists()).toBe(false)
-    expect(wrapper.find('[data-header="policy.editor.groups"]').exists()).toBe(false)
-    expect(model.policy_config_inline).toBe(original)
+    expect(wrapper.find('#policy_advanced_features').exists()).toBe(false)
   })
 
-  it('keeps existing advanced documents visible and byte-stable without unlocking', async () => {
+  it('keeps existing advanced documents visible and byte-stable', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
     config.policy_config_inline = `version: 1
@@ -194,18 +213,47 @@ rules: ["MATCH,preferred"]
     const { model, wrapper } = mountEditor(config)
     const serialized = model.policy_config_inline
 
-    expect(wrapper.find<HTMLInputElement>('#policy_advanced_features').element.checked).toBe(false)
     expect(wrapper.find('[data-header="policy.editor.groups"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('policy.editor.advanced_existing_help')
-
-    await wrapper.find<HTMLInputElement>('#policy_advanced_features').setValue(true)
-    await wrapper.find<HTMLInputElement>('#policy_advanced_features').setValue(false)
     await nextTick()
 
     expect(model.policy_config_inline).toBe(serialized)
     expect(model.policy_config_inline).toContain('type: fallback')
     expect(model.policy_config_inline).toContain('via: native')
     expect(model.policy_config_inline).toContain('udp: true')
+  })
+
+  it('keeps the Android keyboard target mounted while a proxy name changes', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = `version: 1
+proxies:
+  exit:
+    type: socks5
+    server: { virtual-ip: 10.44.0.8 }
+    via: mesh
+rules: ["MATCH,exit"]
+`
+    const { model, wrapper } = mountEditor(config)
+    const input = wrapper.find<HTMLInputElement>('[data-testid="policy-proxy-name-0"]')
+    const originalElement = input.element
+
+    await input.setValue('renamed-exit')
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="policy-proxy-name-0"]').element).toBe(originalElement)
+    expect(model.policy_config_inline).toContain('renamed-exit:')
+  })
+
+  it('enables no-resolve when a custom rule changes to an IP-based kind', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["DOMAIN,example.com,DIRECT"]\n'
+    const { model, wrapper } = mountEditor(config)
+
+    await wrapper.find<HTMLSelectElement>('[data-testid="policy-rule-type-0"]').setValue('GEOIP')
+    await nextTick()
+
+    expect(model.policy_config_inline).toContain('GEOIP,example.com,DIRECT,no-resolve')
   })
 
   it('does not overwrite invalid advanced YAML with the last visual document', async () => {
@@ -263,6 +311,29 @@ rules: ["MATCH,preferred"]
 
     expect(model.policy_outbound_interface).toBe('')
     expect(wrapper.text()).toContain('policy.editor.outbound_automatic')
+    expect(wrapper.text()).toContain('policy.editor.runtime_android_experimental')
+  })
+
+  it('shows partial macOS and unavailable Windows runtime status even while disabled', async () => {
+    for (const [platform, key] of [
+      ['darwin', 'policy.editor.runtime_macos_partial'],
+      ['windows', 'policy.editor.runtime_windows_unsupported'],
+    ] as const) {
+      const api = {
+        list_policy_outbound_interfaces: vi.fn(async () => ({
+          platform,
+          required: false,
+          supported: false,
+          interfaces: [],
+        })),
+      } as unknown as import('../src/modules/api').RemoteClient
+      const { wrapper } = mountEditor(DEFAULT_NETWORK_CONFIG(), api)
+      await flushPromises()
+
+      expect(wrapper.text()).toContain(key)
+      expect(wrapper.find<HTMLInputElement>('#enable_policy_proxy').element.disabled).toBe(true)
+      wrapper.unmount()
+    }
   })
 
   it('applies the GeoSite and GeoIP preset without serializing resource paths', async () => {
