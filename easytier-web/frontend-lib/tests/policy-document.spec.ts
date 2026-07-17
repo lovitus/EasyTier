@@ -121,8 +121,12 @@ rules:
   it('adds safe split-DNS defaults to legacy policy documents', () => {
     const document = parsePolicyDocument('version: 1\nrules: ["MATCH,DIRECT"]\n')
     expect(document.dns).toEqual({
-      direct: [],
-      proxy: ['doh:cloudflare-dns.com@1.1.1.1'],
+      direct: ['system', '223.5.5.5', '119.29.29.29', '114.114.114.114'],
+      proxy: [
+        'doh:cloudflare-dns.com@1.1.1.1',
+        'doh:dns.google@8.8.8.8',
+        'doh:dns.quad9.net@9.9.9.9',
+      ],
       fakeIpRange: DEFAULT_FAKE_DNS_IPV4_RANGE,
       fakeIpRange6: DEFAULT_FAKE_DNS_IPV6_RANGE,
     })

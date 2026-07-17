@@ -9,6 +9,8 @@ use dashmap::{DashMap, DashSet};
 use guarden::defer;
 use hotpath::instant::Instant;
 use rand::seq::SliceRandom as _;
+#[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+use socket2::SockRef;
 use tokio::{net::UdpSocket, sync::Mutex, task::JoinSet};
 use tracing::{Instrument, Level, instrument};
 use zerocopy::FromBytes as _;
@@ -20,9 +22,7 @@ use crate::{
         global_ctx::{
             ArcGlobalCtx, UnderlayBreakerKey, UnderlayBreakerScope, UnderlayPreflightGuard,
         },
-        join_joinset_background,
-        netns::NetNS,
-        underlay_guard, upnp,
+        join_joinset_background, underlay_guard, upnp,
     },
     peers::peer_manager::PeerManager,
     proto::common::NatType,
@@ -62,6 +62,25 @@ pub(crate) async fn prepare_hole_punch_attempt(
 }
 
 pub(crate) const HOLE_PUNCH_PACKET_BODY_LEN: u16 = 16;
+
+pub(crate) fn apply_hole_punch_socket_mark(
+    socket: &UdpSocket,
+    global_ctx: &ArcGlobalCtx,
+) -> Result<(), Error> {
+    // Mihomo parity: component/dialer.DialContext and ListenPacket attach
+    // DefaultRoutingMark through bindMarkToControl (options.go/mark_linux.go)
+    // before the first network I/O. Hole-punch sockets send before connect, so
+    // they must inherit EasyTier's existing global socket_mark immediately
+    // after bind or policy routing can feed their underlay packets into Leaf.
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    if let Some(mark) = global_ctx.config.get_flags().socket_mark {
+        SockRef::from(socket).set_mark(mark)?;
+    }
+    #[cfg(not(any(target_os = "android", target_os = "fuchsia", target_os = "linux")))]
+    let _ = (socket, global_ctx);
+    Ok(())
+}
+
 // This cap is per mode. Keeping separate bounded pools prevents a burst of
 // stealth listeners from starving the occasional legacy/plain negotiation.
 const MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS: usize = 4;
@@ -270,7 +289,7 @@ pub(crate) struct PunchedUdpSocket {
 pub(crate) struct UdpSocketArray {
     sockets: Arc<DashMap<SocketAddr, Arc<UdpSocket>>>,
     max_socket_count: usize,
-    net_ns: NetNS,
+    global_ctx: ArcGlobalCtx,
     tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
 
     intreast_tids: Arc<DashSet<u32>>,
@@ -278,14 +297,14 @@ pub(crate) struct UdpSocketArray {
 }
 
 impl UdpSocketArray {
-    pub fn new(max_socket_count: usize, net_ns: NetNS) -> Self {
+    pub fn new(max_socket_count: usize, global_ctx: ArcGlobalCtx) -> Self {
         let tasks = Arc::new(std::sync::Mutex::new(JoinSet::new()));
         join_joinset_background(tasks.clone(), "UdpSocketArray".to_owned());
 
         Self {
             sockets: Arc::new(DashMap::new()),
             max_socket_count,
-            net_ns,
+            global_ctx,
             tasks,
 
             intreast_tids: Arc::new(DashSet::new()),
@@ -358,8 +377,10 @@ impl UdpSocketArray {
 
         while self.sockets.len() < self.max_socket_count {
             let socket = {
-                let _g = self.net_ns.guard();
-                Arc::new(UdpSocket::bind("0.0.0.0:0").await?)
+                let _g = self.global_ctx.net_ns.guard();
+                let socket = UdpSocket::bind("0.0.0.0:0").await?;
+                apply_hole_punch_socket_mark(&socket, &self.global_ctx)?;
+                Arc::new(socket)
             };
 
             self.add_new_socket(socket).await?;
@@ -445,9 +466,12 @@ impl UdpHolePunchListener {
         port: Option<u16>,
         stealth_enabled: bool,
     ) -> Result<Self, Error> {
+        let global_ctx = peer_mgr.get_global_ctx();
         let socket = {
-            let _g = peer_mgr.get_global_ctx().net_ns.guard();
-            Arc::new(UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port.unwrap_or(0))).await?)
+            let _g = global_ctx.net_ns.guard();
+            let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port.unwrap_or(0))).await?;
+            apply_hole_punch_socket_mark(&socket, &global_ctx)?;
+            Arc::new(socket)
         };
         let local_port = socket.local_addr()?.port();
         let listen_url: url::Url = format!("udp://0.0.0.0:{local_port}").parse().unwrap();
@@ -848,6 +872,7 @@ async fn check_udp_socket_local_addr(
     remote_mapped_addr: SocketAddr,
 ) -> Result<(), Error> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    apply_hole_punch_socket_mark(&socket, &global_ctx)?;
     socket.connect(remote_mapped_addr).await?;
     if let Ok(local_addr) = socket.local_addr()
         && let Some(err) = easytier_managed_local_addr_error(&global_ctx, local_addr)
@@ -1056,6 +1081,36 @@ mod tests {
             crate::tunnel::IpScheme::Udp,
             crate::common::global_ctx::ProtocolLoopScope::HolePunch,
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires CAP_NET_ADMIN to set and inspect SO_MARK"]
+    async fn hole_punch_socket_inherits_global_socket_mark() {
+        use std::os::fd::AsRawFd;
+
+        let peer_mgr = create_mock_peer_manager_with_mock_stun(NatType::PortRestricted).await;
+        let global_ctx = peer_mgr.get_global_ctx();
+        let mut flags = global_ctx.config.get_flags();
+        flags.socket_mark = Some(0x4554_5001);
+        global_ctx.set_flags(flags);
+
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        super::apply_hole_punch_socket_mark(&socket, &global_ctx).unwrap();
+
+        let mut value: nix::libc::c_int = 0;
+        let mut len = std::mem::size_of::<nix::libc::c_int>() as nix::libc::socklen_t;
+        let result = unsafe {
+            nix::libc::getsockopt(
+                socket.as_raw_fd(),
+                nix::libc::SOL_SOCKET,
+                nix::libc::SO_MARK,
+                &mut value as *mut _ as *mut nix::libc::c_void,
+                &mut len,
+            )
+        };
+        assert_eq!(result, 0, "getsockopt(SO_MARK) failed");
+        assert_eq!(value as u32, 0x4554_5001);
     }
 
     #[test]

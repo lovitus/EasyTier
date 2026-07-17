@@ -7,6 +7,12 @@ export type PolicyGroupKind = 'chain' | 'fallback'
 export const DEFAULT_POLICY_PROXY_DNS = 'doh:cloudflare-dns.com@1.1.1.1'
 export const DEFAULT_FAKE_DNS_IPV6_RANGE = 'fd65:6173:7974::/64'
 export const DEFAULT_FAKE_DNS_IPV4_RANGE = '198.19.0.0/16'
+const DEFAULT_POLICY_DIRECT_DNS = ['system', '223.5.5.5', '119.29.29.29', '114.114.114.114']
+const DEFAULT_POLICY_PROXY_DNS_SERVERS = [
+  DEFAULT_POLICY_PROXY_DNS,
+  'doh:dns.google@8.8.8.8',
+  'doh:dns.quad9.net@9.9.9.9',
+]
 
 export function policyRuleSupportsNoResolve(type: string): boolean {
   return ['IP-CIDR', 'GEOIP', 'COUNTRY'].includes(type.trim().toUpperCase())
@@ -31,8 +37,15 @@ dns:
   fake-ip-range: 198.19.0.0/16
   # Used only when EasyTier IPv6 is enabled. Change it if this ULA overlaps your network.
   fake-ip-range6: fd65:6173:7974::/64
+  direct:
+    - system
+    - 223.5.5.5
+    - 119.29.29.29
+    - 114.114.114.114
   proxy:
     - doh:cloudflare-dns.com@1.1.1.1
+    - doh:dns.google@8.8.8.8
+    - doh:dns.quad9.net@9.9.9.9
 
 # Mesh SOCKS example: select an EasyTier peer by virtual IP or instance ID.
 # proxies:
@@ -243,8 +256,8 @@ export function emptyPolicyDocument(): PolicyEditorDocument {
     version: 1,
     extra: {},
     dns: {
-      direct: [],
-      proxy: [DEFAULT_POLICY_PROXY_DNS],
+      direct: [...DEFAULT_POLICY_DIRECT_DNS],
+      proxy: [...DEFAULT_POLICY_PROXY_DNS_SERVERS],
       fakeIpRange: DEFAULT_FAKE_DNS_IPV4_RANGE,
       fakeIpRange6: DEFAULT_FAKE_DNS_IPV6_RANGE,
     },
@@ -292,10 +305,19 @@ export function parsePolicyDocument(source: string): PolicyEditorDocument {
     Object.entries(root).filter(([key]) =>
       !knownRootFields.has(key) && !['__proto__', 'constructor', 'prototype'].includes(key)),
   )
+  const dnsIsMissing = !Object.prototype.hasOwnProperty.call(root, 'dns')
   const dnsValue = optionalMap(root, 'dns')
   const dns = {
-    direct: optionalStringList(dnsValue.direct, 'dns.direct'),
-    proxy: optionalStringList(dnsValue.proxy, 'dns.proxy', [DEFAULT_POLICY_PROXY_DNS]),
+    direct: optionalStringList(
+      dnsValue.direct,
+      'dns.direct',
+      dnsIsMissing ? [...DEFAULT_POLICY_DIRECT_DNS] : [],
+    ),
+    proxy: optionalStringList(
+      dnsValue.proxy,
+      'dns.proxy',
+      dnsIsMissing ? [...DEFAULT_POLICY_PROXY_DNS_SERVERS] : [DEFAULT_POLICY_PROXY_DNS],
+    ),
     fakeIpRange: optionalString(
       dnsValue['fake-ip-range'],
       'dns.fake-ip-range',

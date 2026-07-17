@@ -140,7 +140,10 @@ describe('PolicyEditor', () => {
     expect(wrapper.find('[data-header="policy.editor.dns"]').exists()).toBe(true)
     expect(wrapper.find('[data-header="policy.editor.groups"]').exists()).toBe(true)
     expect(wrapper.find('#policy_advanced_features').exists()).toBe(false)
+    expect(model.policy_config_inline).toContain('114.114.114.114')
     expect(model.policy_config_inline).toContain('doh:cloudflare-dns.com@1.1.1.1')
+    expect(model.policy_config_inline).toContain('doh:dns.google@8.8.8.8')
+    expect(model.policy_config_inline).toContain('doh:dns.quad9.net@9.9.9.9')
   })
 
   it('adds the managed mesh HEV actor with automatic port and UDP enabled', async () => {

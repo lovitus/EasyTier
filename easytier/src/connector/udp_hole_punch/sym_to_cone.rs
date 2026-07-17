@@ -20,8 +20,9 @@ use crate::{
     common::{PeerId, global_ctx::ArcGlobalCtx, stun::StunInfoCollectorTrait},
     connector::udp_hole_punch::{
         common::{
-            HOLE_PUNCH_PACKET_BODY_LEN, disable_udp_stealth_for_selected_listener,
-            send_symmetric_hole_punch_packet, should_request_udp_stealth, try_connect_with_socket,
+            HOLE_PUNCH_PACKET_BODY_LEN, apply_hole_punch_socket_mark,
+            disable_udp_stealth_for_selected_listener, send_symmetric_hole_punch_packet,
+            should_request_udp_stealth, try_connect_with_socket,
         },
         handle_rpc_result,
     },
@@ -237,7 +238,7 @@ impl PunchSymToConeHoleClient {
 
         let udp_array = Arc::new(UdpSocketArray::new(
             UDP_ARRAY_SIZE_FOR_HARD_SYM,
-            self.peer_mgr.get_global_ctx().net_ns.clone(),
+            self.peer_mgr.get_global_ctx(),
         ));
         udp_array.start().await?;
         wlocked.replace(udp_array.clone());
@@ -471,16 +472,19 @@ impl PunchSymToConeHoleClient {
         preflight.commit();
 
         // try direct connect first
-        if self.try_direct_connect.load(Ordering::Relaxed)
-            && let Ok(tunnel) = try_connect_with_socket(
+        if self.try_direct_connect.load(Ordering::Relaxed) {
+            let socket = UdpSocket::bind("0.0.0.0:0").await?;
+            apply_hole_punch_socket_mark(&socket, &global_ctx)?;
+            if let Ok(tunnel) = try_connect_with_socket(
                 global_ctx.clone(),
-                Arc::new(UdpSocket::bind("0.0.0.0:0").await?),
+                Arc::new(socket),
                 remote_mapped_addr.into(),
                 disable_udp_stealth,
             )
             .await
-        {
-            return Ok(Some(tunnel));
+            {
+                return Ok(Some(tunnel));
+            }
         }
 
         let stun_info = global_ctx.get_stun_info_collector().get_stun_info();

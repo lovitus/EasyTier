@@ -8,8 +8,9 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::{
     common::{PeerId, upnp},
     connector::udp_hole_punch::common::{
-        HOLE_PUNCH_PACKET_BODY_LEN, UdpSocketArray, disable_udp_stealth_for_selected_listener,
-        should_request_udp_stealth, try_connect_with_socket,
+        HOLE_PUNCH_PACKET_BODY_LEN, UdpSocketArray, apply_hole_punch_socket_mark,
+        disable_udp_stealth_for_selected_listener, should_request_udp_stealth,
+        try_connect_with_socket,
     },
     connector::udp_hole_punch::handle_rpc_result,
     peers::peer_manager::PeerManager,
@@ -121,7 +122,7 @@ impl PunchConeHoleClient {
             anyhow::bail!("udp hole punch peer is gated by underlay breaker");
         }
         let use_stealth = should_request_udp_stealth(&global_ctx, disable_udp_stealth);
-        let udp_array = UdpSocketArray::new(1, global_ctx.net_ns.clone());
+        let udp_array = UdpSocketArray::new(1, global_ctx.clone());
 
         let rpc_stub = self
             .peer_mgr
@@ -162,7 +163,9 @@ impl PunchConeHoleClient {
 
         let local_socket = {
             let _g = self.peer_mgr.get_global_ctx().net_ns.guard();
-            Arc::new(UdpSocket::bind("0.0.0.0:0").await?)
+            let socket = UdpSocket::bind("0.0.0.0:0").await?;
+            apply_hole_punch_socket_mark(&socket, &global_ctx)?;
+            Arc::new(socket)
         };
         let local_addr = local_socket
             .local_addr()

@@ -228,3 +228,34 @@ It is local execution state, not a reason to trigger a workflow by itself.
 - During `.160` wait: review lockfile, platform cfg, generated protobuf, workflow pins, release-note risks, and frontend test scope without starting another Cargo job.
 - During GitHub wait: prepare the warning-first beta notes, artifact verification commands, and known-risk matrix; do not mutate the in-flight snapshot.
 - Status: Leaf dependency preflight passed; frontend pnpm 9.12.1 frozen install, VPN plugin build, GUI production build, and 34 focused Vitest assertions passed. EasyTier `.160` final `--locked` no-run and focused suite passed after removing unrelated resolver drift. Ready for one immutable candidate commit/push.
+
+## 2026-07-17 default YAML DNS correction candidate
+
+- Snapshot: base `f8b0ca79c7ab5d3c33eedc60cb7da9d15bbb2570`, frontend diff SHA-256 `96168808eb5d6ca25445bdba6af1905007407cb3065767331eb467e45311268b` (live workboard excluded).
+- Scope: correct only `DEFAULT_POLICY_TEMPLATE`; add direct resolvers `system`, `223.5.5.5`, `119.29.29.29`, `114.114.114.114`, and proxy DoH resolvers Cloudflare, Google, Quad9. Preserve backend omitted-field compatibility and all routing semantics.
+- `.160` evidence: focused `policy-editor.spec.ts` and `policy-document.spec.ts`, frontend-lib build, and GUI production build with Node 22/pnpm 9.12.1.
+- Workflow evidence: after `.160` passes, one push to `codex/profiling-beta`; accept only the automatic exact-SHA Linux/Android runs and update the rolling warning prerelease after artifact verification.
+- Status: `.160` frontend preflight pending.
+
+## Candidate: policy TUN / UDP hole-punch recursion (2026-07-17)
+
+- Shared base artifact: `f8b0ca79c7ab5d3c33eedc60cb7da9d15bbb2570`; profiling run `29577571146`; Linux build ID `13b6895f6df3a66d7379bd77636aa0080bdb7e09`.
+- Workstream: mark every production UDP hole-punch socket before its first send.
+- Objective: prevent EasyTier underlay discovery/punch packets from re-entering Linux policy TUN and being recursively forwarded through Leaf.
+- Build-affecting: yes, Rust core only.
+- Status: implementation complete; remote preflight pending.
+- Exact diagnosis: clean namespace syscall trace showed unmarked 28-byte UDP punch packets from EasyTier to `47.115.208.211:11010`. A temporary single-destination OUTPUT mark matched 18 packets and reduced empty-runtime synthetic policy `FlowKey` creation to zero in 8 seconds.
+- Reference semantics: Mihomo `component/dialer/options.go` (`DialContext`, `ListenPacket`), `component/dialer/mark_linux.go` (`bindMarkToControl`), and `component/dialer/dialer.go` (`DefaultRoutingMark`) apply the routing mark before outbound network I/O. EasyTier intentionally uses its existing global `socket_mark`; non-policy mode remains `None`.
+- Compatibility boundary: no Leaf/HEV changes, no QUIC/KCP selection changes, no packet/retry/lifecycle changes, and no per-packet work. Linux/Android/Fuchsia perform one `setsockopt(SO_MARK)` per created hole-punch socket only when configured; other platforms and `None` are no-ops.
+- Focused test: `hole_punch_socket_inherits_global_socket_mark` (Linux, CAP_NET_ADMIN, ignored by default).
+- `.160` gate: `scripts/leaf-remote-preflight.sh` complete batch, then run the ignored SO_MARK test directly from the exact compiled lib test binary.
+- Diff/dispatch checks: inspect Cargo.lock, target cfg, workflow pins, generated files, and the complete candidate diff after preflight. No dependency/generated/workflow change is intended.
+- GitHub workflows: one automatic Linux + Android candidate set only after the complete `.160` gate passes; no narrow manual dispatch.
+- Linux artifact evidence: clean policy namespace idle stability, no synthetic stream/FD growth, relay route, explicit mesh SOCKS policy traffic, hole-punch/P2P recovery, stop/start cleanup.
+- Android artifact evidence: preserve app data, semantic start/status, captured-UID TLS policy probe, relay-backed explicit mesh SOCKS, network/DNS change recovery, stop/start cleanup.
+- Work during waits: review locked Leaf boundary and complete diff; prepare namespace/ADB probes and resource baselines without mutating the in-flight snapshot.
+- Preflight result (2026-07-17): 192.168.2.160 locked no-run passed for easytier, easytier-policy, and netstack-smoltcp; the standard focused suite passed.
+- Exact mark evidence: the exact EasyTier debug lib test binary ran hole_punch_socket_inherits_global_socket_mark with --exact --ignored; 1 passed, 0 failed.
+- Frontend compatibility decision: when the root dns section is entirely absent, legacy policy documents inherit the current template's four direct and three proxy DNS servers. An explicitly present dns section retains field-level behavior and is not replaced wholesale.
+- Frontend evidence: 192.168.2.160 pnpm 9.12.1 focused Vitest passed 24/24; frontend-lib production vue-tsc and Vite build passed. The remote Rollup optional dependency was repaired with a frozen-lockfile install; no lockfile changed.
+- Dispatch status: ready after final metadata check; one batched profiling-beta push, then Linux and Android validation from the exact artifacts.
