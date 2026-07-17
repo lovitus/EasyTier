@@ -87,11 +87,17 @@ impl SocksUdpSocket {
 // differs because a mesh-only policy actor must terminate TCP in the userspace
 // smoltcp adapter when configured QUIC/KCP acceleration is unavailable. A 128
 // KiB window capped the measured 260-300 ms Android/KR path at about 3.7 Mbit/s.
-// Give only a bounded number of policy fallback streams a 2 MiB BDP window;
-// accelerated and ordinary EasyTier streams keep their existing allocation.
-const POLICY_MESH_TCP_BUFFER_SIZE: usize = 2 * 1024 * 1024;
+// Only the receive side needs the measured high-BDP window. Keeping TX at the
+// established 128 KiB avoids reserving memory that cannot enlarge the remote
+// peer's receive window. Four concurrent native fallback streams reserve at
+// most 8.5 MiB in total (about 7.5 MiB above the ordinary buffers), which keeps
+// the feature usable on mobile and embedded targets. Later streams remain on
+// the same mesh-only path with the ordinary buffers; they never fall
+// back to a kernel socket.
+const POLICY_MESH_TCP_RX_BUFFER_SIZE: usize = 2 * 1024 * 1024;
+const POLICY_MESH_TCP_TX_BUFFER_SIZE: usize = 128 * 1024;
 #[cfg(feature = "ffi-dataplane")]
-const POLICY_MESH_TCP_LARGE_WINDOW_STREAMS: usize = 32;
+const POLICY_MESH_TCP_LARGE_WINDOW_STREAMS: usize = 4;
 
 enum SocksTcpStream {
     Tcp(tokio::net::TcpStream),
@@ -316,8 +322,8 @@ impl AsyncTcpConnector for SmolTcpConnector {
                 .as_ref()
                 .and_then(|permits| permits.clone().try_acquire_owned().ok());
             let buffer_size = large_window_permit.as_ref().map(|_| BufferSize {
-                tcp_rx_size: POLICY_MESH_TCP_BUFFER_SIZE,
-                tcp_tx_size: POLICY_MESH_TCP_BUFFER_SIZE,
+                tcp_rx_size: POLICY_MESH_TCP_RX_BUFFER_SIZE,
+                tcp_tx_size: POLICY_MESH_TCP_TX_BUFFER_SIZE,
                 ..Default::default()
             });
             let remote_socket = timeout(

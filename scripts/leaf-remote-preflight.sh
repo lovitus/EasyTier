@@ -27,6 +27,7 @@ readonly -a BUILD_SSH_OPTIONS=(
 
 readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   core::tests::check_config_fully_parses_policy_only_input_like_mihomo_test_mode
+  gateway::socks5::dataplane::tests::mesh_only_connect_never_falls_back_to_kernel
   peers::peer_ospf_route::tests::peer_removal_restarts_remaining_generation_and_invalidates_remote_cache
   policy_proxy::mesh_socks_bridge::tests::proactive_tcping_is_limited_to_portless_built_in_actors
   policy_proxy::mesh_udp_relay::tests

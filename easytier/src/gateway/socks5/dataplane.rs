@@ -475,6 +475,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::Socks5Server;
+    use crate::gateway::socks5::POLICY_MESH_TCP_LARGE_WINDOW_STREAMS;
     use crate::peers::peer_manager::PeerManager;
     use crate::peers::tests::{connect_peer_manager, create_mock_peer_manager};
     use crate::tunnel::common::tests::wait_for_condition;
@@ -678,9 +679,11 @@ mod tests {
         let listen_addr =
             std::net::SocketAddr::new(b.ip.address().into(), listener.local_addr().port());
         let accepted = tokio::spawn(async move {
-            let first = listener.accept().await.unwrap().0;
-            let second = listener.accept().await.unwrap().0;
-            (first, second)
+            let mut streams = Vec::new();
+            for _ in 0..(POLICY_MESH_TCP_LARGE_WINDOW_STREAMS + 2) {
+                streams.push(listener.accept().await.unwrap().0);
+            }
+            streams
         });
 
         let ordinary = a
@@ -693,15 +696,29 @@ mod tests {
             Some((128 * 1024, 128 * 1024)),
             "ordinary data-plane sockets must retain the established memory bound"
         );
-        let mesh_only = a
+        let mut large_window_streams = Vec::new();
+        for _ in 0..POLICY_MESH_TCP_LARGE_WINDOW_STREAMS {
+            let mesh_only = a
+                .server
+                .data_plane_tcp_connect_mesh_only(listen_addr, timeout)
+                .await
+                .unwrap();
+            assert_eq!(
+                mesh_only.smoltcp_buffer_capacities(),
+                Some((2 * 1024 * 1024, 128 * 1024)),
+                "mesh-only native fallback needs a high-BDP receive window"
+            );
+            large_window_streams.push(mesh_only);
+        }
+        let bounded = a
             .server
             .data_plane_tcp_connect_mesh_only(listen_addr, timeout)
             .await
             .unwrap();
         assert_eq!(
-            mesh_only.smoltcp_buffer_capacities(),
-            Some((2 * 1024 * 1024, 2 * 1024 * 1024)),
-            "mesh-only native fallback needs a high-BDP receive window"
+            bounded.smoltcp_buffer_capacities(),
+            Some((128 * 1024, 128 * 1024)),
+            "permit exhaustion must retain the mesh path with ordinary buffers"
         );
         let _accepted = accepted.await.unwrap();
 

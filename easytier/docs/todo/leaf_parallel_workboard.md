@@ -155,3 +155,24 @@ It is local execution state, not a reason to trigger a workflow by itself.
 - Linux artifact evidence: startup probe reaches the prepared portless built-in endpoint; explicit actor remains untouched; native/KCP/QUIC selector behavior and stop/start cleanup remain unchanged.
 - Android artifact evidence: on USB ADB device over 4G, repeat cold start and immediate first request against `lv1g2` and `lv1g3`; require full HTTP bytes without the observed approximately 20-second zero-byte failure. Recheck explicit actor, native portless, accelerated portless, stop/start, and process/FD/task cleanup from the same exact APK.
 - Workflow wait work: prepare bounded Android probe commands, preserve application data, preflight VPS fixed-byte endpoints, and prepare Linux isolated-host cleanup without mutating the in-flight snapshot.
+
+## 2026-07-17 high-BDP memory correction and VPS dual-stack matrix
+
+- User rejected the previous `32 * (2 MiB RX + 2 MiB TX)` bound. The buffers are eagerly allocated with `vec![0; size]`, so the old absolute capacity was approximately 128 MiB and approximately 120 MiB above ordinary buffers; it is not acceptable for Android, iOS, or embedded Linux.
+- Frozen correction: native policy fallback uses `2 MiB RX + 128 KiB TX` for at most four simultaneous streams. Absolute capacity is approximately 8.5 MiB and incremental capacity approximately 7.5 MiB. The fifth and later streams stay mesh-only with `128 KiB + 128 KiB`; they do not wait, fail, or use a kernel socket.
+- Test requirement: hold four high-window streams concurrently, prove the fifth uses ordinary capacities, and preserve the existing no-kernel-fallback assertion.
+- Physical `lv1g2`/`lv1g3` baseline on isolated port `24990`: single TCP IPv4 forward/reverse `7.77/8.73 Gbit/s`; IPv6 forward/reverse `8.30/8.48 Gbit/s`. Dual-stack hostname HTTP selected IPv4 automatically in both directions; forced IPv4 and IPv6 each returned the complete controlled 1 MiB object.
+- UDP physical control at requested `1 Gbit/s`: IPv4 and IPv6 forward receivers reached `827/775 Mbit/s` with `16%/21%` loss; reverse senders sustained the requested rate. This is a capacity/path control, not a lossless product target.
+- Existing evidence is insufficient for the requested Leaf conclusion: the prior portless run used only a `tcp6` underlay, while the prior explicit actor targeted the separate `.8:24443` peer. The new exact artifact must cover `tcp4`, `tcp6`, and dual-stack selection between the same two VPS hosts for explicit, portless native, and configured KCP/QUIC paths.
+
+## 2026-07-17 low-memory dual-stack candidate manifest
+
+- Intended parent: `62014be7448c9a5efdb672df227cdc812728961e`; the final commit SHA will be recorded from the commit result.
+- Included implementation: one best-effort portless built-in actor TCP prewarm before Leaf startup; high-BDP native fallback limited to `2 MiB RX + 128 KiB TX` for four streams; fifth and later streams retain mesh-only routing with ordinary buffers.
+- Included tests: portless-only prewarm boundary; remote prepare/relay primitive; four simultaneous large-window streams; fifth-stream ordinary-buffer degradation; no kernel fallback; standard Leaf/HEV lifecycle, UDP relay, policy-domain and netstack wakeup tests.
+- `.160` gate: standard `scripts/leaf-remote-preflight.sh`, one locked library no-run build and exact direct test binaries. The complete implementation passed with the high-window test in the permanent standard filter list.
+- Lock/cfg/workflow gate: `Cargo.lock`, generated files, platform `cfg`, and workflow pins must remain unchanged; run `git diff --check` and one complete candidate diff review before commit.
+- GitHub workflows: one automatic Linux profiling-beta and one automatic Android policy candidate run from the same final SHA. Query exact-SHA runs and do not manually duplicate them.
+- Linux/VPS evidence: verify artifact metadata and hashes; deploy isolated instances to `lv1g2` and `lv1g3`; collect physical and EasyTier `tcp4`, `tcp6`, dual-stack-selection controls; explicit actor, portless native, KCP/QUIC, IPv4/IPv6 destinations, throughput, CPU/RSS/FD/tasks, stop/start and cleanup.
+- Android evidence: preserve app data and install with `adb install -r`; over LTE run same-target DIRECT, explicit actor, portless native and KCP/QUIC against both VPS targets; repeat cold-start immediate first traffic, byte completeness, IPv4/IPv6, CPU/RSS/FD/tasks and cleanup. Android is mobile-platform evidence, not the sole capacity baseline.
+- Workflow wait work: prepare isolated listener ports and cleanup commands on both VPS hosts; retain the fixed-byte servers; preserve Android stores; do not mutate the in-flight SHA.
