@@ -344,7 +344,12 @@ impl TcpListenerRunner {
                 socket_set.remove(socket_handle);
             }
 
-            if !iface_ingress_tx_avail.load(Ordering::Acquire) {
+            if iface_ingress_tx_avail.load(Ordering::Acquire) {
+                // handle_packet and handle_socket are sibling futures in the same select.
+                // Keep this branch cooperative: without an await, a stale/persistent ingress
+                // flag lets this loop monopolize a Leaf runtime worker and starve packet input.
+                tokio::task::yield_now().await;
+            } else {
                 let next_duration = iface
                     .poll_delay(before_poll, &socket_set)
                     .unwrap_or(Duration::from_millis(5));
