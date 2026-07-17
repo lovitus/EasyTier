@@ -2,10 +2,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     task::{Context, Poll, Waker},
 };
 
@@ -22,16 +19,16 @@ use spin::Mutex as SpinMutex;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     sync::{
+        mpsc::{unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender},
         Notify,
-        mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, unbounded_channel},
     },
 };
 use tracing::{error, trace};
 
 use crate::{
-    Runner,
     device::VirtualDevice,
     packet::{AnyIpPktFrame, IpPacket},
+    Runner,
 };
 
 // NOTE: Default buffer could contain 20 AEAD packets
@@ -76,8 +73,7 @@ impl TcpListenerRunner {
     fn create(
         device: VirtualDevice,
         iface: Interface,
-        iface_ingress_tx: UnboundedSender<Vec<u8>>,
-        iface_ingress_tx_avail: Arc<AtomicBool>,
+        iface_ingress_tx: Sender<Vec<u8>>,
         tcp_rx: Receiver<AnyIpPktFrame>,
         stream_tx: UnboundedSender<TcpStream>,
         sockets: HashMap<SocketHandle, SharedControl>,
@@ -86,8 +82,8 @@ impl TcpListenerRunner {
             let notify = Arc::new(Notify::new());
             let (socket_tx, socket_rx) = unbounded_channel::<TcpSocketCreation>();
             let res = tokio::select! {
-                v = Self::handle_packet(notify.clone(), iface_ingress_tx, iface_ingress_tx_avail.clone(), tcp_rx, stream_tx, socket_tx) => v,
-                v = Self::handle_socket(notify, device, iface, iface_ingress_tx_avail, sockets, socket_rx) => v,
+                v = Self::handle_packet(notify.clone(), iface_ingress_tx, tcp_rx, stream_tx, socket_tx) => v,
+                v = Self::handle_socket(notify, device, iface, sockets, socket_rx) => v,
             };
             res?;
             trace!("VirtDevice::poll thread exited");
@@ -97,8 +93,7 @@ impl TcpListenerRunner {
 
     async fn handle_packet(
         notify: SharedNotify,
-        iface_ingress_tx: UnboundedSender<Vec<u8>>,
-        iface_ingress_tx_avail: Arc<AtomicBool>,
+        iface_ingress_tx: Sender<Vec<u8>>,
         mut tcp_rx: Receiver<AnyIpPktFrame>,
         stream_tx: UnboundedSender<TcpStream>,
         socket_tx: UnboundedSender<TcpSocketCreation>,
@@ -116,8 +111,8 @@ impl TcpListenerRunner {
             if matches!(packet.protocol(), IpProtocol::Icmp | IpProtocol::Icmpv6) {
                 iface_ingress_tx
                     .send(frame)
+                    .await
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))?;
-                iface_ingress_tx_avail.store(true, Ordering::Release);
                 notify.notify_one();
                 continue;
             }
@@ -185,8 +180,8 @@ impl TcpListenerRunner {
             // Pipeline tcp stream packet
             iface_ingress_tx
                 .send(frame)
+                .await
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))?;
-            iface_ingress_tx_avail.store(true, Ordering::Release);
             notify.notify_one();
         }
         Ok(())
@@ -196,18 +191,25 @@ impl TcpListenerRunner {
         notify: SharedNotify,
         mut device: VirtualDevice,
         mut iface: Interface,
-        iface_ingress_tx_avail: Arc<AtomicBool>,
         mut sockets: HashMap<SocketHandle, SharedControl>,
         mut socket_rx: UnboundedReceiver<TcpSocketCreation>,
     ) -> std::io::Result<()> {
         let mut socket_set = SocketSet::new(vec![]);
         loop {
+            if device.output_closed() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "stack output channel is closed",
+                ));
+            }
+
             while let Ok(TcpSocketCreation { control, socket }) = socket_rx.try_recv() {
                 let handle = socket_set.add(socket);
                 sockets.insert(handle, control);
             }
 
             let before_poll = Instant::now();
+            device.begin_poll();
             let updated_sockets = iface.poll(before_poll, &mut device, &mut socket_set);
             if matches!(
                 updated_sockets,
@@ -346,16 +348,60 @@ impl TcpListenerRunner {
                 socket_set.remove(socket_handle);
             }
 
-            if !iface_ingress_tx_avail.load(Ordering::Acquire) {
-                let next_duration = iface
-                    .poll_delay(before_poll, &socket_set)
-                    .unwrap_or(Duration::from_millis(5));
-                if next_duration != Duration::ZERO {
-                    let _ = tokio::time::timeout(
-                        tokio::time::Duration::from(next_duration),
-                        notify.notified(),
-                    )
-                    .await;
+            if device.output_closed() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "stack output channel is closed",
+                ));
+            }
+
+            if device.output_blocked_this_poll() {
+                device.wait_output_capacity().await?;
+                continue;
+            }
+
+            Self::wait_for_next_poll(
+                notify.as_ref(),
+                &device,
+                iface.poll_delay(before_poll, &socket_set),
+            )
+            .await?;
+        }
+    }
+
+    async fn wait_for_next_poll(
+        notify: &Notify,
+        device: &VirtualDevice,
+        next_duration: Option<Duration>,
+    ) -> std::io::Result<()> {
+        let output_closed = || {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "stack output channel is closed",
+            )
+        };
+
+        match next_duration {
+            Some(Duration::ZERO) => {
+                // A genuine immediate smoltcp deadline may need several polls, but
+                // it must still consume Tokio's cooperative budget so shutdown and
+                // sibling futures cannot be starved by one runner.
+                tokio::task::consume_budget().await;
+                Ok(())
+            }
+            Some(duration) => {
+                tokio::select! {
+                    _ = notify.notified() => Ok(()),
+                    _ = device.wait_output_closed() => Err(output_closed()),
+                    _ = tokio::time::sleep(tokio::time::Duration::from(duration)) => Ok(()),
+                }
+            }
+            None => {
+                // No smoltcp timer exists. Socket/ingress producers notify this
+                // runner, while dropping Stack closes output and terminates it.
+                tokio::select! {
+                    _ = notify.notified() => Ok(()),
+                    _ = device.wait_output_closed() => Err(output_closed()),
                 }
             }
         }
@@ -371,7 +417,11 @@ impl TcpListener {
         tcp_rx: Receiver<AnyIpPktFrame>,
         stack_tx: Sender<AnyIpPktFrame>,
     ) -> std::io::Result<(Runner, Self)> {
-        let (mut device, iface_ingress_tx, iface_ingress_tx_avail) = VirtualDevice::new(stack_tx);
+        // Reuse the configured upstream TCP queue capacity for the internal staging
+        // queue. This retains at most the same number of validated IP frames and
+        // propagates backpressure instead of growing an unbounded Vec queue.
+        let ingress_capacity = tcp_rx.max_capacity();
+        let (mut device, iface_ingress_tx) = VirtualDevice::new(stack_tx, ingress_capacity);
         let iface = Self::create_interface(&mut device)?;
 
         let (stream_tx, stream_rx) = unbounded_channel();
@@ -380,7 +430,6 @@ impl TcpListener {
             device,
             iface,
             iface_ingress_tx,
-            iface_ingress_tx_avail,
             tcp_rx,
             stream_tx,
             HashMap::new(),
@@ -572,6 +621,7 @@ impl AsyncWrite for TcpStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration as StdDuration;
     use tokio::io::AsyncWriteExt as _;
 
     #[tokio::test]
@@ -601,5 +651,42 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runner_exits_when_output_receiver_is_dropped() {
+        let (tcp_tx, tcp_rx) = tokio::sync::mpsc::channel(1);
+        let (stack_tx, stack_rx) = tokio::sync::mpsc::channel(1);
+        let (runner, _listener) = TcpListener::new(tcp_rx, stack_tx).unwrap();
+        drop(stack_rx);
+
+        let err = tokio::time::timeout(StdDuration::from_secs(1), runner)
+            .await
+            .expect("runner did not observe closed output")
+            .expect_err("runner unexpectedly succeeded");
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+        drop(tcp_tx);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn immediate_poll_path_keeps_runtime_cooperative() {
+        let (out_tx, _out_rx) = tokio::sync::mpsc::channel(1);
+        let (device, _in_tx) = VirtualDevice::new(out_tx, 1);
+        let notify = Notify::new();
+
+        let spinner = tokio::spawn(async move {
+            loop {
+                TcpListenerRunner::wait_for_next_poll(&notify, &device, Some(Duration::ZERO))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        tokio::time::timeout(StdDuration::from_secs(1), async {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        })
+        .await
+        .expect("immediate poll loop starved the current-thread runtime");
+        spinner.abort();
     }
 }
