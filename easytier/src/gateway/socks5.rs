@@ -82,29 +82,9 @@ impl SocksUdpSocket {
     }
 }
 
-// Mihomo's common/net/sing.go::Relay copies between kernel net.Conn values and
-// does not insert another fixed TCP receive window. EasyTier intentionally
-// differs because a mesh-only policy actor must terminate TCP in the userspace
-// smoltcp adapter when configured QUIC/KCP acceleration is unavailable. A 128
-// KiB window capped the measured 260-300 ms Android/KR path at about 3.7 Mbit/s.
-// Only the receive side needs the measured high-BDP window. Keeping TX at the
-// established 128 KiB avoids reserving memory that cannot enlarge the remote
-// peer's receive window. Four concurrent native fallback streams reserve at
-// most 8.5 MiB in total (about 7.5 MiB above the ordinary buffers), which keeps
-// the feature usable on mobile and embedded targets. Later streams remain on
-// the same mesh-only path with the ordinary buffers; they never fall
-// back to a kernel socket.
-const POLICY_MESH_TCP_RX_BUFFER_SIZE: usize = 2 * 1024 * 1024;
-const POLICY_MESH_TCP_TX_BUFFER_SIZE: usize = 128 * 1024;
-#[cfg(feature = "ffi-dataplane")]
-const POLICY_MESH_TCP_LARGE_WINDOW_STREAMS: usize = 4;
-
 enum SocksTcpStream {
     Tcp(tokio::net::TcpStream),
-    SmolTcp(
-        super::tokio_smoltcp::TcpStream,
-        Option<tokio::sync::OwnedSemaphorePermit>,
-    ),
+    SmolTcp(super::tokio_smoltcp::TcpStream),
     #[cfg(any(feature = "kcp", feature = "quic"))]
     Accelerated(crate::gateway::proxy_failover::BoxProxyStream),
 }
@@ -117,7 +97,7 @@ impl AsyncRead for SocksTcpStream {
     ) -> std::task::Poll<std::io::Result<()>> {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
-            SocksTcpStream::SmolTcp(stream, _) => std::pin::Pin::new(stream).poll_read(cx, buf),
+            SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
             #[cfg(any(feature = "kcp", feature = "quic"))]
             SocksTcpStream::Accelerated(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
         }
@@ -132,7 +112,7 @@ impl AsyncWrite for SocksTcpStream {
     ) -> std::task::Poll<Result<usize, std::io::Error>> {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
-            SocksTcpStream::SmolTcp(stream, _) => std::pin::Pin::new(stream).poll_write(cx, buf),
+            SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
             #[cfg(any(feature = "kcp", feature = "quic"))]
             SocksTcpStream::Accelerated(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
         }
@@ -144,7 +124,7 @@ impl AsyncWrite for SocksTcpStream {
     ) -> std::task::Poll<Result<(), std::io::Error>> {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_flush(cx),
-            SocksTcpStream::SmolTcp(stream, _) => std::pin::Pin::new(stream).poll_flush(cx),
+            SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_flush(cx),
             #[cfg(any(feature = "kcp", feature = "quic"))]
             SocksTcpStream::Accelerated(stream) => std::pin::Pin::new(stream).poll_flush(cx),
         }
@@ -156,7 +136,7 @@ impl AsyncWrite for SocksTcpStream {
     ) -> std::task::Poll<Result<(), std::io::Error>> {
         match self.get_mut() {
             SocksTcpStream::Tcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
-            SocksTcpStream::SmolTcp(stream, _) => std::pin::Pin::new(stream).poll_shutdown(cx),
+            SocksTcpStream::SmolTcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
             #[cfg(any(feature = "kcp", feature = "quic"))]
             SocksTcpStream::Accelerated(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
         }
@@ -272,7 +252,6 @@ struct SmolTcpConnector {
     entries: Socks5EntrySet,
     entry_count: Arc<AtomicUsize>,
     current_entry: std::sync::Mutex<Option<Socks5Entry>>,
-    large_window_permits: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 #[async_trait::async_trait]
@@ -317,27 +296,16 @@ impl AsyncTcpConnector for SmolTcpConnector {
                 tcp_connect_with_timeout(modified_addr, timeout_s).await?,
             ))
         } else {
-            let large_window_permit = self
-                .large_window_permits
-                .as_ref()
-                .and_then(|permits| permits.clone().try_acquire_owned().ok());
-            let buffer_size = large_window_permit.as_ref().map(|_| BufferSize {
-                tcp_rx_size: POLICY_MESH_TCP_RX_BUFFER_SIZE,
-                tcp_tx_size: POLICY_MESH_TCP_TX_BUFFER_SIZE,
-                ..Default::default()
-            });
             let remote_socket = timeout(
                 Duration::from_secs(timeout_s),
-                self.net
-                    .tcp_connect_with_buffer_size(addr, port, buffer_size),
+                self.net.tcp_connect(addr, port),
             )
             .await
             .with_context(|| "connect to remote timeout")?;
 
-            Ok(SocksTcpStream::SmolTcp(
-                remote_socket.map_err(|e| super::fast_socks5::SocksError::Other(e.into()))?,
-                large_window_permit,
-            ))
+            Ok(SocksTcpStream::SmolTcp(remote_socket.map_err(|e| {
+                super::fast_socks5::SocksError::Other(e.into())
+            })?))
         }
     }
 }
@@ -406,7 +374,6 @@ struct Socks5AutoConnector {
 
     inner_connector: parking_lot::Mutex<Option<Box<dyn Any + Send>>>,
     allow_kernel_fallback: bool,
-    large_window_permits: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl Socks5AutoConnector {
@@ -416,7 +383,6 @@ impl Socks5AutoConnector {
             entries: self.entries.clone(),
             entry_count: self.entry_count.clone(),
             current_entry: std::sync::Mutex::new(None),
-            large_window_permits: self.large_window_permits.clone(),
         })
     }
 }
@@ -715,8 +681,6 @@ pub struct Socks5Server {
     // Tracks whether the smoltcp `net` is ready for data-plane callers.
     #[cfg(feature = "ffi-dataplane")]
     data_plane_net_ready: tokio::sync::watch::Sender<bool>,
-    #[cfg(feature = "ffi-dataplane")]
-    policy_mesh_tcp_window_permits: Arc<tokio::sync::Semaphore>,
     cancel_tokens: Arc<DashMap<PortForwardConfig, DropGuard>>,
     port_forward_list_change_notifier: Arc<Notify>,
     entry_count: Arc<AtomicUsize>,
@@ -958,10 +922,6 @@ impl Socks5Server {
             data_plane_refs: Arc::new(AtomicUsize::new(0)),
             #[cfg(feature = "ffi-dataplane")]
             data_plane_net_ready: tokio::sync::watch::channel(false).0,
-            #[cfg(feature = "ffi-dataplane")]
-            policy_mesh_tcp_window_permits: Arc::new(tokio::sync::Semaphore::new(
-                POLICY_MESH_TCP_LARGE_WINDOW_STREAMS,
-            )),
             cancel_tokens: Arc::new(DashMap::new()),
             port_forward_list_change_notifier: Arc::new(Notify::new()),
             entry_count: Arc::new(AtomicUsize::new(0)),
@@ -1146,7 +1106,6 @@ impl Socks5Server {
                                 src_addr: addr,
                                 inner_connector: parking_lot::Mutex::new(None),
                                 allow_kernel_fallback: true,
-                                large_window_permits: None,
                                 entry_count: entry_count.clone(),
                             };
                             if let Some(net) = net.lock().await.as_ref() {
@@ -1339,7 +1298,6 @@ impl Socks5Server {
                     entry_count: entry_count.clone(),
                     inner_connector: parking_lot::Mutex::new(None),
                     allow_kernel_fallback: true,
-                    large_window_permits: None,
                 };
 
                 forward_tasks

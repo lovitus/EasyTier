@@ -261,45 +261,6 @@ impl MeshProxyBridgeSet {
             ));
         }
 
-        // Mihomo keeps mesh SOCKS availability separate from configuration and
-        // actively retries its tailnet listener from
-        // component/tsnet/tsnet.go::{onUse,retryStartSocks5TCP}. EasyTier's
-        // portless actor has a different failure boundary: the owner and remote
-        // HEV can already be prepared while a new source runtime's mesh TCP path
-        // is still converging. Perform one ordinary mesh TCP connect before Leaf
-        // starts accepting policy traffic. This is deliberately only a tcping:
-        // it creates no new transport, readiness state, retry loop, or fallback
-        // policy, and explicit user-supplied SOCKS endpoints remain untouched.
-        // The primitive path is covered by
-        // `prepares_then_relays_built_in_tcp_from_mesh_data_plane`.
-        for (name, remote) in &remotes {
-            let Some((target, _generation, preparation)) = remote.snapshot() else {
-                continue;
-            };
-            if !target.is_built_in() {
-                continue;
-            }
-            let prepared_endpoint = preparation.ensure(&peer_mgr, target).await;
-            match connect_remote(&data_plane, target, prepared_endpoint).await {
-                Ok(stream) => {
-                    drop(stream);
-                    tracing::debug!(
-                        proxy = %name,
-                        peer_id = target.peer_id,
-                        endpoint = ?prepared_endpoint,
-                        "proactive portless mesh TCP path is reachable"
-                    );
-                }
-                Err(error) => tracing::warn!(
-                    proxy = %name,
-                    peer_id = target.peer_id,
-                    endpoints = ?target.endpoints(),
-                    ?error,
-                    "proactive portless mesh TCP path is not ready; retaining normal request retry and fallback"
-                ),
-            }
-        }
-
         let mut listeners = Vec::with_capacity(pending.len());
         for (name, udp_enabled, password, credentials, remote, listener) in pending {
             let data_plane = data_plane.clone();
@@ -948,14 +909,6 @@ mod tests {
             assert!(limit.try_accept());
         }
         assert!(!limit.try_accept());
-    }
-
-    #[test]
-    fn proactive_tcping_is_limited_to_portless_built_in_actors() {
-        let explicit = MeshProxyTarget::explicit(7, "10.44.0.7:1080".parse().unwrap());
-        let portless = MeshProxyTarget::built_in(8, "10.44.0.8".parse().unwrap());
-        assert!(!explicit.is_built_in());
-        assert!(portless.is_built_in());
     }
 
     #[tokio::test]

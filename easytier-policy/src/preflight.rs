@@ -106,6 +106,13 @@ fn diagnostic_for_error(error: &PolicyError) -> PolicyDiagnostic {
             ("rule_set.invalid", format!("rule-sets.{name}"))
         }
         PolicyError::InvalidDns { set, .. } => ("dns.resolver_invalid", format!("dns.{set}")),
+        PolicyError::InvalidFakeDnsIpv4Range { .. } => {
+            ("dns.fake_ip_range_invalid", "dns.fake-ip-range".to_owned())
+        }
+        PolicyError::InvalidFakeDnsIpv6Range { .. } => (
+            "dns.fake_ip_range6_invalid",
+            "dns.fake-ip-range6".to_owned(),
+        ),
     };
     PolicyDiagnostic {
         severity: DiagnosticSeverity::Error,

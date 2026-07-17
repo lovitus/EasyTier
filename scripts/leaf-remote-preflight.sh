@@ -26,14 +26,17 @@ readonly -a BUILD_SSH_OPTIONS=(
 )
 
 readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
+  common::underlay_guard::tests::should_block_configured_and_runtime_addresses_when_enabled
   core::tests::check_config_fully_parses_policy_only_input_like_mihomo_test_mode
   gateway::socks5::dataplane::tests::mesh_only_connect_never_falls_back_to_kernel
   peers::peer_ospf_route::tests::peer_removal_restarts_remaining_generation_and_invalidates_remote_cache
-  policy_proxy::mesh_socks_bridge::tests::proactive_tcping_is_limited_to_portless_built_in_actors
   policy_proxy::mesh_udp_relay::tests
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
 )
 readonly -a DEFAULT_POLICY_TEST_FILTERS=(
+  config::tests::validates_custom_ipv4_fake_dns_range
+  config::tests::validates_custom_ipv6_fake_dns_range
+  leaf_config::tests::explicit_dns_sets_replace_platform_direct_and_keep_proxy_separate
   leaf_config::tests::preserves_unresolved_domain_contract_for_direct_socks_and_fallback
 )
 readonly -a DEFAULT_NETSTACK_TEST_FILTERS=(

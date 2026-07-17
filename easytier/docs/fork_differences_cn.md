@@ -128,7 +128,7 @@ v2.6.9 发布说明见 [release_notes/v2.6.9.md](release_notes/v2.6.9.md)。
 | `--disable-legacy-udp-hole-punch` | `ET_DISABLE_LEGACY_UDP_HOLE_PUNCH` | 拒绝旧版 UDP 打洞 RPC。 | 只拒绝“没有 stealth 偏好字段”的旧请求，不拒绝新节点显式请求 plain。 |
 | `--transport-priority <rules>` | `ET_TRANSPORT_PRIORITY` | 重排 direct-connect 协议顺序。 | 格式必须是 `scope:proto,...;scope:proto,...`，例如 `global:quic,faketcp,ws,wg,udp,tcp`。 |
 | `--underlay-candidate-guard` | `ET_UNDERLAY_CANDIDATE_GUARD` | 过滤污染 underlay candidate。 | 默认开启；不改变 listener 绑定。 |
-| `--underlay-exclude-cidrs <cidrs>` | `ET_UNDERLAY_EXCLUDE_CIDRS` | 用户附加的排除 CIDR，会用于 IP 通告、direct candidate、hole-punch candidate，以及相关路由源 / bind-source 校验。 | 默认 `198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,192.19.0.0/24`；这组常见 fake-IP 网段在 guard 开启时也是内置 base set，清空后仍保留运行态 EasyTier 虚拟地址过滤和内置 base set。 |
+| `--underlay-exclude-cidrs <cidrs>` | `ET_UNDERLAY_EXCLUDE_CIDRS` | 用户附加的排除 CIDR，会用于 IP 通告、direct candidate、hole-punch candidate，以及相关路由源 / bind-source 校验。 | 默认 `198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,fd65:6173:7974::/48,192.19.0.0/24`；这组常见 fake-IP 网段在 guard 开启时也是内置 base set，清空后仍保留运行态 EasyTier 虚拟地址过滤和内置 base set。 |
 | `--nic-backend <tun|veth|auto>` | 无 | 选择 Linux 虚拟 NIC 后端。 | 仅 Linux `tun` 构建的 CLI 提供；默认 `tun`，不序列化到 TOML/protobuf。 |
 
 上游原本就有 `--enable-kcp-proxy`、`--enable-quic-proxy`、
@@ -237,7 +237,7 @@ stealth_protocols = "udp,tcp,faketcp,quic,wg,ws,wss"
 disable_legacy_udp_hole_punch = false
 transport_priority = "global:quic,faketcp,ws,wg,udp,tcp"
 underlay_candidate_guard = true
-underlay_exclude_cidrs = "198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,192.19.0.0/24"
+underlay_exclude_cidrs = "198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,fd65:6173:7974::/48,192.19.0.0/24"
 enable_quic_proxy = true
 enable_kcp_proxy = true
 disable_quic_input = false

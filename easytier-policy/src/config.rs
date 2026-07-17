@@ -19,7 +19,22 @@ const MAX_ACTORS: usize = 1_024;
 const MAX_EXPANDED_CHAIN_ACTORS: usize = 32;
 const MAX_GROUP_REFERENCES: usize = 64;
 const MAX_DNS_SERVERS_PER_SET: usize = 8;
-const DEFAULT_PROXY_DNS: &str = "doh:cloudflare-dns.com@1.1.1.1";
+// Reference boundary: Mihomo config/config.go::UnmarshalRawConfig keeps bootstrap,
+// direct, and general resolvers as separate sets. EasyTier's narrower Leaf v1 syntax
+// intentionally presets only resolver forms accepted by the pinned Leaf parser.
+const DEFAULT_DIRECT_DNS: [&str; 4] = [
+    "system",
+    "doh:dns.alidns.com@223.5.5.5",
+    "223.5.5.5",
+    "119.29.29.29",
+];
+const DEFAULT_PROXY_DNS: [&str; 3] = [
+    "doh:cloudflare-dns.com@1.1.1.1",
+    "doh:dns.google@8.8.8.8",
+    "doh:dns.quad9.net@9.9.9.9",
+];
+pub const DEFAULT_FAKE_DNS_IPV6_RANGE: &str = "fd65:6173:7974::/64";
+pub const DEFAULT_FAKE_DNS_IPV4_RANGE: &str = "198.19.0.0/16";
 
 #[derive(Debug, Error)]
 pub enum PolicyError {
@@ -61,6 +76,10 @@ pub enum PolicyError {
         server: String,
         reason: String,
     },
+    #[error("DNS fake-ip-range6 {range} is invalid: {reason}")]
+    InvalidFakeDnsIpv6Range { range: String, reason: String },
+    #[error("DNS fake-ip-range {range} is invalid: {reason}")]
+    InvalidFakeDnsIpv4Range { range: String, reason: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -171,26 +190,53 @@ pub struct Group {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyDns {
-    /// Empty means use the safe platform resolvers supplied by EasyTier.
-    #[serde(default)]
+    /// An explicitly empty list means use the safe platform resolvers supplied by
+    /// EasyTier. An omitted list uses the built-in direct resolver preset.
+    #[serde(default = "default_direct_dns")]
     pub direct: Vec<String>,
     /// Proxy DNS is intentionally bootstrap-pinned DoH so TCP-only actors work
     /// and the resolver hostname never needs an unclassified DNS query.
     #[serde(default = "default_proxy_dns")]
     pub proxy: Vec<String>,
+    /// IPv4 FakeIP prefix. The first four addresses are reserved.
+    #[serde(default = "default_fake_dns_ipv4_range", rename = "fake-ip-range")]
+    pub fake_ip_range: String,
+    /// IPv6 FakeIP prefix. It is used only while EasyTier IPv6 is enabled.
+    #[serde(default = "default_fake_dns_ipv6_range", rename = "fake-ip-range6")]
+    pub fake_ip_range6: String,
 }
 
 impl Default for PolicyDns {
     fn default() -> Self {
         Self {
-            direct: Vec::new(),
+            direct: default_direct_dns(),
             proxy: default_proxy_dns(),
+            fake_ip_range: default_fake_dns_ipv4_range(),
+            fake_ip_range6: default_fake_dns_ipv6_range(),
         }
     }
 }
 
+fn default_direct_dns() -> Vec<String> {
+    DEFAULT_DIRECT_DNS
+        .iter()
+        .map(|resolver| (*resolver).to_owned())
+        .collect()
+}
+
 fn default_proxy_dns() -> Vec<String> {
-    vec![DEFAULT_PROXY_DNS.to_owned()]
+    DEFAULT_PROXY_DNS
+        .iter()
+        .map(|resolver| (*resolver).to_owned())
+        .collect()
+}
+
+fn default_fake_dns_ipv6_range() -> String {
+    DEFAULT_FAKE_DNS_IPV6_RANGE.to_owned()
+}
+
+fn default_fake_dns_ipv4_range() -> String {
+    DEFAULT_FAKE_DNS_IPV4_RANGE.to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -478,6 +524,8 @@ impl PolicyDocument {
     }
 
     fn validate_dns(&self) -> Result<(), PolicyError> {
+        validate_fake_dns_ipv4_range(&self.dns.fake_ip_range)?;
+        validate_fake_dns_ipv6_range(&self.dns.fake_ip_range6)?;
         for (set, servers) in [("direct", &self.dns.direct), ("proxy", &self.dns.proxy)] {
             if servers.len() > MAX_DNS_SERVERS_PER_SET {
                 return Err(PolicyError::Limit {
@@ -942,6 +990,50 @@ impl PolicyDocument {
     }
 }
 
+fn validate_fake_dns_ipv6_range(range: &str) -> Result<(), PolicyError> {
+    let invalid = |reason: &str| PolicyError::InvalidFakeDnsIpv6Range {
+        range: range.to_owned(),
+        reason: reason.to_owned(),
+    };
+    let (address, prefix) = range
+        .split_once('/')
+        .ok_or_else(|| invalid("expected an IPv6 CIDR"))?;
+    address
+        .parse::<std::net::Ipv6Addr>()
+        .map_err(|_| invalid("address is not IPv6"))?;
+    let prefix = prefix
+        .parse::<u8>()
+        .map_err(|_| invalid("prefix length is not an integer"))?;
+    if prefix > 118 {
+        return Err(invalid(
+            "prefix must provide the four reserved addresses and 1000 bounded FakeIP slots (/118 or larger)",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fake_dns_ipv4_range(range: &str) -> Result<(), PolicyError> {
+    let invalid = |reason: &str| PolicyError::InvalidFakeDnsIpv4Range {
+        range: range.to_owned(),
+        reason: reason.to_owned(),
+    };
+    let (address, prefix) = range
+        .split_once('/')
+        .ok_or_else(|| invalid("expected an IPv4 CIDR"))?;
+    address
+        .parse::<std::net::Ipv4Addr>()
+        .map_err(|_| invalid("address is not IPv4"))?;
+    let prefix = prefix
+        .parse::<u8>()
+        .map_err(|_| invalid("prefix length is not an integer"))?;
+    if prefix > 22 {
+        return Err(invalid(
+            "prefix must provide the four reserved addresses and 1000 bounded FakeIP slots (/22 or larger)",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_dns_server(set: &'static str, server: &str) -> Result<(), PolicyError> {
     let invalid = |reason: &str| PolicyError::InvalidDns {
         set,
@@ -1084,8 +1176,73 @@ rules: ["FINAL,exit"]
             first.group_order.as_ref(),
             ["chain", "final-tcp", "final-udp"]
         );
-        assert!(first.document.dns.direct.is_empty());
-        assert_eq!(first.document.dns.proxy, [DEFAULT_PROXY_DNS]);
+        assert_eq!(first.document.dns.direct, default_direct_dns());
+        assert_eq!(first.document.dns.proxy, default_proxy_dns());
+    }
+
+    #[test]
+    fn omitted_direct_dns_uses_builtin_preset() {
+        let source = r#"
+version: 1
+dns:
+  proxy: ["doh:cloudflare-dns.com@1.1.1.1"]
+rules: ["MATCH,DIRECT"]
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        assert_eq!(revision.document.dns.direct, default_direct_dns());
+        assert_eq!(
+            revision.document.dns.fake_ip_range6,
+            DEFAULT_FAKE_DNS_IPV6_RANGE
+        );
+        assert_eq!(
+            revision.document.dns.fake_ip_range,
+            DEFAULT_FAKE_DNS_IPV4_RANGE
+        );
+    }
+
+    #[test]
+    fn validates_custom_ipv6_fake_dns_range() {
+        let source = r#"
+version: 1
+dns:
+  fake-ip-range6: fd12:3456:789a::1/112
+rules: ["MATCH,DIRECT"]
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        assert_eq!(
+            revision.document.dns.fake_ip_range6,
+            "fd12:3456:789a::1/112"
+        );
+
+        for range in ["198.18.0.0/16", "fd12::/120", "not-a-prefix"] {
+            let source =
+                format!("version: 1\ndns:\n  fake-ip-range6: {range}\nrules: [\"MATCH,DIRECT\"]\n");
+            assert!(matches!(
+                PolicyRevision::parse(source, Path::new(".")),
+                Err(PolicyError::InvalidFakeDnsIpv6Range { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn validates_custom_ipv4_fake_dns_range() {
+        let source = r#"
+version: 1
+dns:
+  fake-ip-range: 198.19.64.1/22
+rules: ["MATCH,DIRECT"]
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        assert_eq!(revision.document.dns.fake_ip_range, "198.19.64.1/22");
+
+        for range in ["fd12::/64", "198.19.0.0/24", "not-a-prefix"] {
+            let source =
+                format!("version: 1\ndns:\n  fake-ip-range: {range}\nrules: [\"MATCH,DIRECT\"]\n");
+            assert!(matches!(
+                PolicyRevision::parse(source, Path::new(".")),
+                Err(PolicyError::InvalidFakeDnsIpv4Range { .. })
+            ));
+        }
     }
 
     #[test]

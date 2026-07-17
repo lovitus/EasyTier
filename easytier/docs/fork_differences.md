@@ -159,7 +159,7 @@ and are part of this fork's operator-facing surface.
 | `--disable-legacy-udp-hole-punch` | `ET_DISABLE_LEGACY_UDP_HOLE_PUNCH` | Reject legacy UDP hole-punch RPCs without stealth preference. | New peers that explicitly request plain remain allowed. |
 | `--transport-priority <rules>` | `ET_TRANSPORT_PRIORITY` | Reorder direct-connect underlays. | Format is `scope:proto,...;scope:proto,...`, for example `global:quic,faketcp,ws,udp,tcp`. |
 | `--underlay-candidate-guard` | `ET_UNDERLAY_CANDIDATE_GUARD` | Filter polluted underlay candidates. | Defaults to true; does not change listener binding. |
-| `--underlay-exclude-cidrs <cidrs>` | `ET_UNDERLAY_EXCLUDE_CIDRS` | User-added CIDRs excluded from IP advertisement, direct candidates, hole-punch candidates, and related route-source / bind-source checks. | Defaults to `198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,192.19.0.0/24`; these common fake-IP ranges are also a built-in base set while the guard is enabled, so empty keeps runtime EasyTier virtual-address filtering plus the built-in base set. |
+| `--underlay-exclude-cidrs <cidrs>` | `ET_UNDERLAY_EXCLUDE_CIDRS` | User-added CIDRs excluded from IP advertisement, direct candidates, hole-punch candidates, and related route-source / bind-source checks. | Defaults to `198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,fd65:6173:7974::/48,192.19.0.0/24`; these common fake-IP ranges are also a built-in base set while the guard is enabled, so empty keeps runtime EasyTier virtual-address filtering plus the built-in base set. |
 | `--nic-backend <tun|veth|auto>` | None | Select the Linux virtual NIC backend. | CLI-only in Linux `tun` builds; defaults to `tun` and is not serialized to TOML/protobuf. |
 
 Upstream-style proxy flags such as `--enable-kcp-proxy`, `--enable-quic-proxy`,
@@ -292,7 +292,7 @@ stealth_protocols = "udp,tcp,faketcp,quic,wg,ws,wss"
 disable_legacy_udp_hole_punch = false
 transport_priority = "global:quic,faketcp,ws,wg,udp,tcp"
 underlay_candidate_guard = true
-underlay_exclude_cidrs = "198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,192.19.0.0/24"
+underlay_exclude_cidrs = "198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,fd65:6173:7974::/48,192.19.0.0/24"
 enable_quic_proxy = true
 enable_kcp_proxy = true
 disable_quic_input = false

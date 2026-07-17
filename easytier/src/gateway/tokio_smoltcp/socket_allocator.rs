@@ -55,16 +55,13 @@ impl SocketAlloctor {
         &self.sockets
     }
     pub fn new_tcp_socket(&self) -> SocketHandle {
-        self.new_tcp_socket_with_buffer_size(self.buffer_size)
-    }
-    pub fn new_tcp_socket_with_buffer_size(&self, buffer_size: BufferSize) -> SocketHandle {
         let mut set = self.sockets.lock();
-        let handle = set.add(Self::alloc_tcp_socket(buffer_size));
+        let handle = set.add(self.alloc_tcp_socket());
         SocketHandle::new(handle, self.sockets.clone())
     }
-    fn alloc_tcp_socket(buffer_size: BufferSize) -> tcp::Socket<'static> {
-        let rx_buffer = tcp::SocketBuffer::new(vec![0; buffer_size.tcp_rx_size]);
-        let tx_buffer = tcp::SocketBuffer::new(vec![0; buffer_size.tcp_tx_size]);
+    fn alloc_tcp_socket(&self) -> tcp::Socket<'static> {
+        let rx_buffer = tcp::SocketBuffer::new(vec![0; self.buffer_size.tcp_rx_size]);
+        let tx_buffer = tcp::SocketBuffer::new(vec![0; self.buffer_size.tcp_tx_size]);
         let mut tcp = tcp::Socket::new(rx_buffer, tx_buffer);
         tcp.set_nagle_enabled(false);
         tcp.set_keep_alive(Some(Duration::from_secs(10)));

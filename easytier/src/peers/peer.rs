@@ -349,6 +349,18 @@ impl Peer {
             conns.push(conn.clone());
         }
 
+        let priority = TransportPriority::parse(&self.global_ctx.get_flags().transport_priority)
+            .expect("transport_priority is validated while loading configuration");
+        let default_conn_id = self.default_conn_id.load();
+        conns.sort_by_key(|conn| {
+            (
+                conn.get_conn_id() != default_conn_id,
+                self.conn_preference_key(&priority, conn),
+                conn.get_stats().latency_us,
+                conn.get_conn_id().as_u128(),
+            )
+        });
+
         let mut ret = Vec::new();
         for conn in conns {
             let info = conn.get_conn_info();

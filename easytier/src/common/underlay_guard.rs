@@ -19,7 +19,7 @@ use crate::{
 };
 
 pub const DEFAULT_UNDERLAY_EXCLUDE_CIDRS: &str =
-    "198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,192.19.0.0/24";
+    "198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,fd65:6173:7974::/48,192.19.0.0/24";
 pub const BUILTIN_UNDERLAY_GUARD_CIDRS: &str = DEFAULT_UNDERLAY_EXCLUDE_CIDRS;
 
 type ParsedCidrCache = Option<(String, Arc<Vec<cidr::IpCidr>>)>;
@@ -445,6 +445,10 @@ mod tests {
         assert!(should_block_underlay_ip(
             &global_ctx,
             IpAddr::V6("fdfe:dcba:9876::1".parse::<Ipv6Addr>().unwrap())
+        ));
+        assert!(should_block_underlay_ip(
+            &global_ctx,
+            IpAddr::V6("fd65:6173:7974::4".parse::<Ipv6Addr>().unwrap())
         ));
         assert!(should_block_underlay_ip(
             &global_ctx,

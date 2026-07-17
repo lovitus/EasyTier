@@ -401,6 +401,7 @@ const rateInterval = 2000
 let prevTxSum = 0
 let prevRxSum = 0
 let prevRateInstanceId: string | undefined
+let ratePausedWhileHidden = false
 const txRateBytes = ref(0)
 const rxRateBytes = ref(0)
 const dialogNowMs = ref(Date.now())
@@ -415,11 +416,25 @@ onMounted(() => {
   prevRateInstanceId = props.curNetworkInst?.instance_id
 
   rateIntervalId = window.setInterval(() => {
+    if (document.hidden) {
+      ratePausedWhileHidden = true
+      return
+    }
+
     const curTxSum = txGlobalSum()
+    const curRxSum = rxGlobalSum()
+    if (ratePausedWhileHidden) {
+      prevTxSum = curTxSum
+      prevRxSum = curRxSum
+      txRateBytes.value = 0
+      rxRateBytes.value = 0
+      ratePausedWhileHidden = false
+      return
+    }
+
     txRateBytes.value = curTxSum >= prevTxSum ? (curTxSum - prevTxSum) / (rateInterval / 1000) : 0
     prevTxSum = curTxSum
 
-    const curRxSum = rxGlobalSum()
     rxRateBytes.value = curRxSum >= prevRxSum ? (curRxSum - prevRxSum) / (rateInterval / 1000) : 0
     prevRxSum = curRxSum
   }, rateInterval)

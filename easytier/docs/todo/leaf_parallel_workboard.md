@@ -3,6 +3,33 @@
 This is the live execution board for batching independent Leaf/policy work into one exact candidate.
 It is local execution state, not a reason to trigger a workflow by itself.
 
+## 2026-07-17 protocol status ordering
+
+- Workstream: stabilize the status-page protocol list without adding RPC fields or duplicating transport-priority parsing in the frontend.
+- Objective: show the currently selected live connection first and the remaining live protocols in the configured transport-preference order; a transient five-second `default_conn_id` cache clear must not reorder the display while that connection remains live.
+- Build-affecting: yes, Rust peer status ordering and frontend display normalization/tests.
+- Evidence target: existing Rust transport-priority coverage plus frontend regression covering selected, transient zero UUID, candidate order, and active-connection removal snapshots; `.160` locked no-run/focused Rust test plus focused Vitest and frontend production build when the complete shared candidate is ready.
+- Status: implementation and local Rust formatting complete; `git diff --check` passed. Remote Rust/frontend preflight remains pending until the shared worktree candidate is frozen; no build, push, or workflow dispatched.
+
+## 2026-07-17 mobile UI wakeup reduction
+
+- Workstream: minimal frontend-only battery optimization; no Leaf, HEV, mesh, RPC schema, or lifecycle change.
+- Objective: halve active full-status polling (`1s -> 2s`), halve idle polling (`5s -> 10s`), and skip shell health/config-server/chart timers while the WebView is hidden.
+- Build-affecting: frontend only.
+- Evidence target: existing visibility/pause/backoff scheduler tests updated for the new cadence; focused RemoteManagement/Status tests and frontend production build on `.160` with the complete shared candidate.
+- Status: implementation prepared locally; no build, push, or workflow dispatched.
+
+## 2026-07-17 cleanup candidate: reject speculative performance fixes
+
+- Base SHA: `be019d7182f2ac81a508102fd897134407d0c957`.
+- Retained implementation: netstack `PollSender` lost-waker fix, existing mesh-owned KCP/QUIC selection, ordinary 128 KiB smoltcp buffers, HEV ownership and reserved ingress behavior.
+- Removed implementation: policy mesh large-window semaphore/per-socket buffer override and portless startup proactive TCP connect.
+- Retained independent work: Android captured-UID HTTP probe, policy editor changes, runtime platform notices, tests unrelated to the rejected mechanisms, and historical validation records.
+- Mihomo reference reconfirmed: `common/net/sing.go::Relay` copies between kernel `net.Conn` values without an added userspace TCP window; `component/tsnet/tsnet.go::{onUse,retryStartSocks5TCP,retryStartSocks5UDP}` owns mesh listener readiness separately from policy startup.
+- Evidence boundary: `lv1g2`/`lv1g3` physical IPv4/IPv6 capacity and same-artifact Linux relative controls remain valid. Android cellular-to-VPS throughput is too variable to authorize memory or startup-path changes and is retained only as functional/path evidence.
+- Build-affecting status: local cleanup prepared. No build, test, commit, push, or workflow has been run for this snapshot.
+- Next gate, only after explicit validation request: format locally, run the complete standard `.160` preflight once, inspect the full cleanup diff/lockfile/cfg/workflow pins, then create one candidate and one workflow pair if runtime validation is still required.
+
 ## 2026-07-17 current candidate: high-BDP mesh actor fallback
 
 - Base artifact: exact `c7a8d8aff17e7121847782b84a4fb11c93c8d849`; Linux run `29553340531` and Android run `29553340566` passed and their checksums/build metadata matched.
@@ -10,7 +37,7 @@ It is local execution state, not a reason to trigger a workflow by itself.
 - Three-sided localization: VPS-to-KR sent and ACKed the 32 MiB body in about 3.14 seconds. KR's inner `10.44.0.8:24443 -> 10.44.0.90` socket took about 101 seconds, reported approximately `3.7 Mbps`, and was receive-window-limited for `57.6%` of busy time. Its advertised receive window was the EasyTier smoltcp data plane's fixed 128 KiB buffer.
 - Linux shared-path evidence: native SOCKS transferred 8 MiB in `77.099 s` (`108802 B/s`); Leaf explicit actor transferred only `4589392/8388608` bytes in 210 seconds (`21854 B/s`) and timed out. Absolute `.37` bandwidth is not a performance baseline, but the same-host A/B confirms a shared adapter regression rather than Android-only DNS/VPN behavior.
 - Browser harness boundary: the apparent post-transfer hang is not accepted as a product tail-loss result. Android kernel queues held approximately 4.8 MiB on the Chrome virtual socket and 5.5 MiB on Leaf's loopback socket while the CDP-created background page stopped consuming. Replace it with the captured-UID instrumentation HTTP stream mode.
-- Reference semantics: locked Leaf is exactly `2f62208187f7980d066e479bd70bb55613c066d2`; `leaf/src/app/dispatcher.rs` uses bounded asynchronous copy and does not create the mesh TCP window. Mihomo `/Users/fanli/Documents/mihomo-rev/common/net/sing.go::Relay` copies between kernel `net.Conn` values with half-close and likewise inserts no fixed userspace TCP window. EasyTier intentionally differs only because native mesh fallback terminates TCP in `tokio_smoltcp`.
+- Reference semantics: locked Leaf is exactly `4af133266367bc6ef1d369b4b519a0a56da48760`; `leaf/src/app/dispatcher.rs` uses bounded asynchronous copy and does not create the mesh TCP window. Mihomo `/Users/fanli/Documents/mihomo-rev/common/net/sing.go::Relay` copies between kernel `net.Conn` values with half-close and likewise inserts no fixed userspace TCP window. EasyTier intentionally differs only because native mesh fallback terminates TCP in `tokio_smoltcp`.
 - Candidate implementation: a 2 MiB RX/TX buffer only for policy mesh smoltcp fallback, limited to 32 simultaneous streams (128 MiB additional hard bound). KCP/QUIC streams do not consume permits; excess and ordinary streams retain 128 KiB and do not fail.
 - `.160` gate: standard `scripts/leaf-remote-preflight.sh`; the existing `mesh_only_connect_never_falls_back_to_kernel` test now also proves 2 MiB mesh-only and unchanged 128 KiB ordinary capacities. Android workflow must build the captured-UID HTTP probe.
 - Exact artifact evidence target: Android instrumentation DIRECT/explicit 32 MiB A/B plus KR advertised-window proof; Linux native/Leaf A/B; KCP-only, QUIC-only, native fallback, portless HEV, stop/start and RSS/FD/thread return from one batched artifact.
@@ -176,3 +203,28 @@ It is local execution state, not a reason to trigger a workflow by itself.
 - Linux/VPS evidence: verify artifact metadata and hashes; deploy isolated instances to `lv1g2` and `lv1g3`; collect physical and EasyTier `tcp4`, `tcp6`, dual-stack-selection controls; explicit actor, portless native, KCP/QUIC, IPv4/IPv6 destinations, throughput, CPU/RSS/FD/tasks, stop/start and cleanup.
 - Android evidence: preserve app data and install with `adb install -r`; over LTE run same-target DIRECT, explicit actor, portless native and KCP/QUIC against both VPS targets; repeat cold-start immediate first traffic, byte completeness, IPv4/IPv6, CPU/RSS/FD/tasks and cleanup. Android is mobile-platform evidence, not the sole capacity baseline.
 - Workflow wait work: prepare isolated listener ports and cleanup commands on both VPS hosts; retain the fixed-byte servers; preserve Android stores; do not mutate the in-flight SHA.
+
+## 2026-07-17 IPv6 FakeDNS bounded/configurable candidate
+
+- Status: implementation in progress; build affecting; not dispatched.
+- Objective: enable AAAA FakeIP only when EasyTier IPv6 is enabled, keep Leaf isolated from mesh transport ownership, bound mobile/embedded memory, and permit YAML range customization.
+- Mihomo parity references: `/Users/fanli/Documents/mihomo-rev/config/config.go::{parseDNS,parseIPV6}` parses `dns.fake-ip-range6`, rejects non-IPv6 prefixes, and removes pool6 when IPv6 is disabled; `component/fakeip/pool.go::{New,get}` masks the configured prefix and cycles addresses; `component/fakeip/memory.go::newMemoryStore` and `config/config.go::parseDNS` cap the in-memory pool at 1000 entries.
+- Intentional difference: EasyTier uses the low-collision default `fd65:6173:7974::/64` instead of the common Mihomo example range, reserves the first four addresses, and cycles exactly 1000 slots. Invalid or too-small YAML ranges fail policy validation and Leaf construction; IPv6-disabled mode emits no AAAA FakeIP.
+- Evidence target: `.160` locked no-run plus focused Leaf allocation/config tests and EasyTier policy/config tests; frontend codec test/build; exact Linux and Android artifacts later validate A/AAAA coexistence, custom range, IPv6-off NODATA, TCP/UDP reverse mapping, bounded RSS, lifecycle, and unchanged IPv4/mesh behavior.
+- IPv4 extension added to the same candidate: `dns.fake-ip-range`, default `198.19.0.0/16`, first four addresses reserved (including virtual DNS `198.19.0.1`), fixed 1000-slot cyclic storage, and `/22` minimum address space. This replaces the common Mihomo/Clash `198.18.0.0/16` default without using LAN or CGNAT space; the same `.160`, frontend, Linux, and Android candidate evidence must cover both address families.
+- Review corrections before preflight: fixed free-function range validation calls; moved JSON fields from the accidentally matched NF structure to TUN; restored Leaf's existing two-argument `FakeDns::new` and IPv4 `query_fake_ip` API; bounded frontend remembered-connection state to 1024; added `fd65:6173:7974::/48` to EasyTier's built-in underlay guard.
+- Leaf standalone preflight exception: upstream does not commit a workspace `Cargo.lock`, so standalone `--locked` fails before dependency resolution. `PROTO_GEN=1` also regenerates unrelated lite-runtime `geosite.rs`, whose existing tests require `MessageFull`; only the generated `config.rs` is retained, then the original geosite output is restored and the exact Leaf feature set is compiled/tested without `PROTO_GEN`. The final EasyTier dependency build remains `--locked` against the committed Leaf SHA.
+
+## 2026-07-17 dual-stack FakeDNS beta candidate manifest
+
+- Snapshot: base `be019d7182f2ac81a508102fd897134407d0c957`, preflight code/config diff SHA-256 `68a0c118ef08e2c45ee073e1c149d11e087910a5de753bf26c72c454f5b15652` (live workboard excluded); final commit SHA is recorded after the preflighted tree is committed without source changes.
+- Dependency: Leaf fork `4af133266367bc6ef1d369b4b519a0a56da48760`; exact-feature library check and `leaf/tests/fake_dns_ranges.rs` passed on `192.168.2.160` (3 tests). Standalone Leaf `cargo test --lib` remains blocked by the pre-existing GeoSite lite-runtime/full-message test mismatch; this is not hidden as candidate evidence.
+- Included functions: bounded configurable IPv4/IPv6 FakeDNS pools; IPv6 opt-in following EasyTier IPv6; Android virtual-DNS reservation; direct/proxy DNS presets; IPv6 FakeIP underlay guard; GUI YAML round-trip; deterministic status ordering; bounded frontend peer cache; reduced/paused GUI polling; removal of rejected large-smoltcp-window and proactive-portless-tcping experiments; documentation and focused tests.
+- `.160` gate: run `scripts/leaf-remote-preflight.sh` against the complete snapshot, including `--locked` no-run builds and focused underlay/FakeDNS/DNS tests. Run focused frontend Vitest files and the production frontend build with Node 22 in `easytier-debug-builder`.
+- Lock/cfg/generated/workflow review: verify Cargo.lock pins Leaf `4af1332`, generated Leaf protobuf matches the source schema, IPv6 behavior remains feature/config gated, and profiling-beta workflow pins are unchanged.
+- GitHub workflows: one push to `codex/profiling-beta`; accept only the automatic Linux profiling-beta and Android profiling-beta runs for the exact candidate SHA. Query exact-SHA runs before any manual action and do not duplicate dispatches.
+- Linux evidence: optimized artifact metadata, checksum, target, symbols, and exact SHA. This beta publication does not claim a new full real-device recovery/performance matrix.
+- Android evidence: workflow APK/artifact metadata, checksum, and exact SHA. This beta publication does not claim a new Wi-Fi/cellular/DNS-transition matrix.
+- During `.160` wait: review lockfile, platform cfg, generated protobuf, workflow pins, release-note risks, and frontend test scope without starting another Cargo job.
+- During GitHub wait: prepare the warning-first beta notes, artifact verification commands, and known-risk matrix; do not mutate the in-flight snapshot.
+- Status: Leaf dependency preflight passed; frontend pnpm 9.12.1 frozen install, VPN plugin build, GUI production build, and 34 focused Vitest assertions passed. EasyTier `.160` final `--locked` no-run and focused suite passed after removing unrelated resolver drift. Ready for one immutable candidate commit/push.

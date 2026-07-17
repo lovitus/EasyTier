@@ -5,6 +5,8 @@ export type PolicyProxyKind = 'socks5' | 'http'
 export type PolicyProxyVia = 'mesh' | 'native'
 export type PolicyGroupKind = 'chain' | 'fallback'
 export const DEFAULT_POLICY_PROXY_DNS = 'doh:cloudflare-dns.com@1.1.1.1'
+export const DEFAULT_FAKE_DNS_IPV6_RANGE = 'fd65:6173:7974::/64'
+export const DEFAULT_FAKE_DNS_IPV4_RANGE = '198.19.0.0/16'
 
 export function policyRuleSupportsNoResolve(type: string): boolean {
   return ['IP-CIDR', 'GEOIP', 'COUNTRY'].includes(type.trim().toUpperCase())
@@ -25,6 +27,10 @@ export const DEFAULT_POLICY_TEMPLATE = `# EasyTier Leaf policy v1
 # proxy failure must be fail-closed instead of falling back to the native connection.
 version: 1
 dns:
+  # The first four addresses are reserved; 198.19.0.1 remains the virtual DNS.
+  fake-ip-range: 198.19.0.0/16
+  # Used only when EasyTier IPv6 is enabled. Change it if this ULA overlaps your network.
+  fake-ip-range6: fd65:6173:7974::/64
   proxy:
     - doh:cloudflare-dns.com@1.1.1.1
 
@@ -116,6 +122,8 @@ rules:
 export interface PolicyDnsSettings {
   direct: string[]
   proxy: string[]
+  fakeIpRange: string
+  fakeIpRange6: string
 }
 
 export interface PolicyRuleSetRow {
@@ -234,7 +242,12 @@ export function emptyPolicyDocument(): PolicyEditorDocument {
   return {
     version: 1,
     extra: {},
-    dns: { direct: [], proxy: [DEFAULT_POLICY_PROXY_DNS] },
+    dns: {
+      direct: [],
+      proxy: [DEFAULT_POLICY_PROXY_DNS],
+      fakeIpRange: DEFAULT_FAKE_DNS_IPV4_RANGE,
+      fakeIpRange6: DEFAULT_FAKE_DNS_IPV6_RANGE,
+    },
     ruleSets: [],
     proxies: [],
     groups: [
@@ -283,6 +296,14 @@ export function parsePolicyDocument(source: string): PolicyEditorDocument {
   const dns = {
     direct: optionalStringList(dnsValue.direct, 'dns.direct'),
     proxy: optionalStringList(dnsValue.proxy, 'dns.proxy', [DEFAULT_POLICY_PROXY_DNS]),
+    fakeIpRange: optionalString(
+      dnsValue['fake-ip-range'],
+      'dns.fake-ip-range',
+    ) || DEFAULT_FAKE_DNS_IPV4_RANGE,
+    fakeIpRange6: optionalString(
+      dnsValue['fake-ip-range6'],
+      'dns.fake-ip-range6',
+    ) || DEFAULT_FAKE_DNS_IPV6_RANGE,
   }
   const ruleSets = Object.entries(optionalMap(root, 'rule-sets')).map(([name, raw]) => {
     const value = requireMap(raw, `rule-sets.${name}`)
@@ -417,6 +438,8 @@ export function serializePolicyDocument(document: PolicyEditorDocument): string 
     dns: compact({
       direct: document.dns.direct.length ? document.dns.direct : undefined,
       proxy: document.dns.proxy,
+      'fake-ip-range': document.dns.fakeIpRange,
+      'fake-ip-range6': document.dns.fakeIpRange6,
     }),
     'rule-sets': Object.keys(ruleSets).length ? ruleSets : undefined,
     proxies: Object.keys(proxies).length ? proxies : undefined,

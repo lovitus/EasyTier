@@ -72,12 +72,35 @@ pub enum LeafConfigError {
     RuleSetIntegrity { name: String, reason: String },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeafConfigOptions {
+    pub fake_dns_ipv6: bool,
+}
+
 pub fn compile_leaf_config(
     revision: &PolicyRevision,
     tun_fd: i32,
     base_dir: &Path,
     resolver: &dyn MeshServerResolver,
     dns_servers: &[IpAddr],
+) -> Result<String, LeafConfigError> {
+    compile_leaf_config_with_options(
+        revision,
+        tun_fd,
+        base_dir,
+        resolver,
+        dns_servers,
+        LeafConfigOptions::default(),
+    )
+}
+
+pub fn compile_leaf_config_with_options(
+    revision: &PolicyRevision,
+    tun_fd: i32,
+    base_dir: &Path,
+    resolver: &dyn MeshServerResolver,
+    dns_servers: &[IpAddr],
+    options: LeafConfigOptions,
 ) -> Result<String, LeafConfigError> {
     if dns_servers.is_empty() {
         return Err(LeafConfigError::NoDnsServers);
@@ -170,6 +193,9 @@ pub fn compile_leaf_config(
             "settings": {
                 "fd": tun_fd,
                 "fakeDnsInclude": ["*"],
+                "fakeDnsRange": document.dns.fake_ip_range,
+                "fakeDnsIpv6": options.fake_dns_ipv6,
+                "fakeDnsIpv6Range": document.dns.fake_ip_range6,
                 "tun2socks": "smoltcp",
             },
         }],
@@ -701,7 +727,15 @@ rules:
         assert_eq!(config["inbounds"][0]["settings"]["fd"], 7);
         assert_eq!(
             config["dns"]["servers"],
-            serde_json::json!(["direct:1.1.1.1", "doh:cloudflare-dns.com@1.1.1.1"])
+            serde_json::json!([
+                "direct:system",
+                "direct:doh:dns.alidns.com@223.5.5.5",
+                "direct:223.5.5.5",
+                "direct:119.29.29.29",
+                "doh:cloudflare-dns.com@1.1.1.1",
+                "doh:dns.google@8.8.8.8",
+                "doh:dns.quad9.net@9.9.9.9"
+            ])
         );
         assert_eq!(config["outbounds"][2]["tag"], "native");
         assert_eq!(config["outbounds"][2]["protocol"], "socks");
@@ -762,12 +796,15 @@ dns:
 rules: ["MATCH,DIRECT"]
 "#;
         let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
-        let config = compile_leaf_config(
+        let config = compile_leaf_config_with_options(
             &revision,
             7,
             Path::new("."),
             &Unresolved,
             &["192.0.2.53".parse().unwrap()],
+            LeafConfigOptions {
+                fake_dns_ipv6: true,
+            },
         )
         .unwrap();
         let config: serde_json::Value = serde_json::from_str(&config).unwrap();
@@ -779,6 +816,15 @@ rules: ["MATCH,DIRECT"]
                 "doh:cloudflare-dns.com@1.1.1.1",
                 "doh:dns.google@8.8.8.8"
             ])
+        );
+        assert_eq!(config["inbounds"][0]["settings"]["fakeDnsIpv6"], true);
+        assert_eq!(
+            config["inbounds"][0]["settings"]["fakeDnsRange"],
+            crate::DEFAULT_FAKE_DNS_IPV4_RANGE
+        );
+        assert_eq!(
+            config["inbounds"][0]["settings"]["fakeDnsIpv6Range"],
+            crate::DEFAULT_FAKE_DNS_IPV6_RANGE
         );
     }
 

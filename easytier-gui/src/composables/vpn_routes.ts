@@ -24,9 +24,9 @@ export interface StaticVpnBootstrap {
  * Selects the DNS address published by Android VpnService.
  *
  * The pinned Leaf TUN inbound intercepts UDP/53 before dispatch and restores
- * domains through FakeDNS. 198.19.0.1 is inside the reserved 198.18.0.0/15
- * benchmark range but outside Leaf's 198.18.0.0/16 allocation pool, so it is
- * only a stable packet destination and can never alias an allocated FakeIP.
+ * domains through FakeDNS. 198.19.0.1 is reserved below Leaf's bounded
+ * 198.19.0.4+ allocation pool, so it is only a stable packet destination and
+ * can never alias an allocated FakeIP.
  * Magic DNS keeps priority because its exact address remains mesh-owned; using
  * both mechanisms requires the separately tracked split-DNS adapter.
  */

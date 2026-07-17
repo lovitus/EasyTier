@@ -3,8 +3,19 @@
 version: 1
 
 dns:
+  # The first four addresses are reserved; 198.19.0.1 remains the virtual DNS.
+  fake-ip-range: 198.19.0.0/16
+  # Used only when EasyTier IPv6 is enabled. Change it if this ULA overlaps your network.
+  fake-ip-range6: fd65:6173:7974::/64
+  direct:
+    - system
+    - doh:dns.alidns.com@223.5.5.5
+    - 223.5.5.5
+    - 119.29.29.29
   proxy:
     - doh:cloudflare-dns.com@1.1.1.1
+    - doh:dns.google@8.8.8.8
+    - doh:dns.quad9.net@9.9.9.9
 
 proxies:
   mesh-hop:

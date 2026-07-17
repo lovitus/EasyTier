@@ -2134,6 +2134,7 @@ impl NicCtx {
             peer_mgr.clone(),
             peer_mgr.my_peer_id(),
             &routes,
+            self.global_ctx.get_flags().enable_ipv6,
             None,
         )
         .await
@@ -2182,6 +2183,7 @@ impl NicCtx {
         peer_mgr: Arc<PeerManager>,
         self_peer_id: u32,
         routes: &[crate::proto::api::instance::Route],
+        fake_dns_ipv6: bool,
         dns_servers: Option<Arc<[IpAddr]>>,
     ) -> anyhow::Result<PolicyActiveRuntime> {
         let mesh_endpoints = Self::resolve_policy_mesh_endpoints(&revision, self_peer_id, routes)?;
@@ -2200,13 +2202,14 @@ impl NicCtx {
                 easytier_policy::system_dns_servers().map_err(anyhow::Error::msg)?,
             ),
         };
-        let runtime = LeafProcessRuntime::start_with_dns_servers(
+        let runtime = LeafProcessRuntime::start_with_dns_servers_and_options(
             &config.leaf_executable,
             &config.base_dir,
             Some(&config.outbound_interface),
             mesh_bridges.as_ref(),
             dns_servers.as_ref(),
             revision,
+            easytier_policy::LeafConfigOptions { fake_dns_ipv6 },
         )
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
@@ -2261,6 +2264,7 @@ impl NicCtx {
             peer_mgr.clone(),
             peer_mgr.my_peer_id(),
             route_table,
+            global_ctx.get_flags().enable_ipv6,
             dns_servers,
         )
         .await
@@ -2636,6 +2640,7 @@ impl NicCtx {
                     peer_mgr.clone(),
                     peer_mgr.my_peer_id(),
                     &route_table,
+                    global_ctx.get_flags().enable_ipv6,
                     dns_monitor.current_arc(),
                 )
                 .await
@@ -2718,6 +2723,7 @@ impl NicCtx {
                 peer_mgr.clone(),
                 peer_mgr.my_peer_id(),
                 &routes,
+                self.global_ctx.get_flags().enable_ipv6,
             )
             .await
             {
@@ -2768,6 +2774,7 @@ impl NicCtx {
         peer_mgr: Arc<PeerManager>,
         self_peer_id: u32,
         routes: &[crate::proto::api::instance::Route],
+        fake_dns_ipv6: bool,
     ) -> anyhow::Result<PolicyActiveRuntime> {
         let mesh_endpoints =
             Self::resolve_policy_mesh_endpoints(&document.revision, self_peer_id, routes)?;
@@ -2784,11 +2791,12 @@ impl NicCtx {
             .map(usize::from)
             .unwrap_or(1)
             .min(2);
-        let factory = InProcessLeafFactory::new(
+        let factory = InProcessLeafFactory::new_with_options(
             document.base_dir.clone(),
             mesh_bridges.clone(),
             dns_servers.to_vec(),
             worker_threads,
+            easytier_policy::LeafConfigOptions { fake_dns_ipv6 },
         )
         .map_err(anyhow::Error::msg)?;
         let runtime: Arc<InProcessLeafRuntime> = factory
@@ -2977,6 +2985,7 @@ impl NicCtx {
                     peer_mgr.clone(),
                     peer_mgr.my_peer_id(),
                     &routes,
+                    global_ctx.get_flags().enable_ipv6,
                 )
                 .await
                 {

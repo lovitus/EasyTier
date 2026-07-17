@@ -80,7 +80,7 @@ Overlay 的 `forward_counter > 7` 只能阻止 overlay 路由循环，见 [peer_
 - 能过滤广告地址、direct candidate、IPv6 hole-punch，以及 public UDP direct 的路由源。
 - 修复后，generic connector 解析出的候选目标地址也会被 guard 检查；建立连接前还会使用同一 netns、同一 address family、同一 `socket_mark` 创建临时 connected UDP socket，验证系统实际选择的本地源地址。如果目标或源地址命中 guarded 网段，则跳过该候选。
 - 该修复堵住了 idle 状态下 TCP/WS/QUIC/WG/FakeTCP 等通用 connector 因源地址选择进入 Mihomo TUN 的主要路径，但仍不承诺所有 manual/bootstrap/generic underlay 在所有平台上具备内核级 TUN bypass。
-- `198.18.0.0/15`、`fc00::/18`、`fdfe:dcba:9876::/48` 和 `192.19.0.0/24` 已作为 guard 内置 base set；即使用户配置的 `underlay_exclude_cidrs` 为空或缺项，常见 Mihomo/Clash、sing-box、V2Ray/Xray、Surge fake-IP 源/目标仍会被过滤。
+- `198.18.0.0/15`、`fc00::/18`、`fdfe:dcba:9876::/48`、`fd65:6173:7974::/48` 和 `192.19.0.0/24` 已作为 guard 内置 base set；即使用户配置的 `underlay_exclude_cidrs` 为空或缺项，常见代理及 EasyTier Leaf fake-IP 源/目标仍会被过滤。
 - Mihomo 的 `10/8 DIRECT` 只处理 overlay 地址；EasyTier underlay 通常连接公网 IP，不属于 `10/8`。
 - 进程 DIRECT 规则也不等于路由层 bypass，数据仍可能先进入 utun。
 

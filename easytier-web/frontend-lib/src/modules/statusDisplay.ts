@@ -360,6 +360,46 @@ export function normalizeRunningInfo(raw: any): NetworkInstanceRunningInfo | und
 }
 
 const peerConnCache = new WeakMap<PeerRoutePair, any[]>()
+const lastDefaultConnByPeer = new Map<string, string>()
+const MAX_REMEMBERED_DEFAULT_CONNECTIONS = 1024
+
+function rememberDefaultConn(cacheKey: string, connId: string) {
+  if (lastDefaultConnByPeer.has(cacheKey))
+    lastDefaultConnByPeer.delete(cacheKey)
+  else if (lastDefaultConnByPeer.size >= MAX_REMEMBERED_DEFAULT_CONNECTIONS) {
+    const oldest = lastDefaultConnByPeer.keys().next().value
+    if (oldest !== undefined)
+      lastDefaultConnByPeer.delete(oldest)
+  }
+  lastDefaultConnByPeer.set(cacheKey, connId)
+}
+
+function peerCacheKey(info: PeerRoutePair): string | undefined {
+  const peerId = numericValue(info.peer?.peer_id ?? info.route?.peer_id)
+  if (peerId === undefined)
+    return undefined
+
+  return `${info.route?.inst_id ?? ''}:${peerId}`
+}
+
+function stableDefaultConnId(info: PeerRoutePair, conns: any[]): string | undefined {
+  const current = defaultConnId(info)
+  const liveConnIds = new Set(conns.map(conn => String(conn.conn_id ?? '')))
+  const cacheKey = peerCacheKey(info)
+  if (current && liveConnIds.has(current)) {
+    if (cacheKey)
+      rememberDefaultConn(cacheKey, current)
+    return current
+  }
+
+  const retained = cacheKey ? lastDefaultConnByPeer.get(cacheKey) : undefined
+  if (retained && liveConnIds.has(retained))
+    return retained
+
+  if (cacheKey)
+    lastDefaultConnByPeer.delete(cacheKey)
+  return undefined
+}
 
 export function peerConns(info: PeerRoutePair) {
   const cached = peerConnCache.get(info)
@@ -367,7 +407,7 @@ export function peerConns(info: PeerRoutePair) {
     return cached
 
   const conns = info.peer?.conns || []
-  const connId = defaultConnId(info)
+  const connId = stableDefaultConnId(info, conns)
   const sorted = [...conns].sort((a, b) => {
     if (connId) {
       if (a.conn_id === connId)
@@ -376,12 +416,9 @@ export function peerConns(info: PeerRoutePair) {
         return 1
     }
 
-    const aTunnel = a.tunnel?.tunnel_type ?? ''
-    const bTunnel = b.tunnel?.tunnel_type ?? ''
-    if (aTunnel !== bTunnel)
-      return aTunnel.localeCompare(bTunnel)
-
-    return String(a.conn_id ?? '').localeCompare(String(b.conn_id ?? ''))
+    // The backend already orders candidates by transport preference. Preserve
+    // that order instead of inventing a second priority model in the UI.
+    return 0
   })
   peerConnCache.set(info, sorted)
   return sorted
@@ -393,7 +430,7 @@ export function defaultConnId(info: PeerRoutePair) {
     return undefined
 
   if (typeof defaultConn === 'string')
-    return defaultConn
+    return /^0{8}-0{4}-0{4}-0{4}-0{12}$/i.test(defaultConn) ? undefined : defaultConn
 
   const part1 = numericValue(defaultConn.part1) ?? 0
   const part2 = numericValue(defaultConn.part2) ?? 0

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DEFAULT_FAKE_DNS_IPV4_RANGE,
+  DEFAULT_FAKE_DNS_IPV6_RANGE,
   DEFAULT_POLICY_TEMPLATE,
   emptyPolicyDocument,
   parsePolicyDocument,
@@ -54,6 +56,8 @@ version: 1
 dns:
   direct: [223.5.5.5]
   proxy: ["doh:cloudflare-dns.com@1.1.1.1"]
+  fake-ip-range: 198.19.64.0/22
+  fake-ip-range6: fd12:3456:789a::/112
 rule-sets:
   site:
     type: geosite
@@ -103,6 +107,8 @@ rules:
     expect(document.dns).toEqual({
       direct: ['223.5.5.5'],
       proxy: ['doh:cloudflare-dns.com@1.1.1.1'],
+      fakeIpRange: '198.19.64.0/22',
+      fakeIpRange6: 'fd12:3456:789a::/112',
     })
     expect(document.rules.map(rule => rule.type)).toEqual(['GEOSITE', 'GEOIP', 'NETWORK', 'MATCH'])
     expect(document.rules[1].noResolve).toBe(true)
@@ -117,9 +123,13 @@ rules:
     expect(document.dns).toEqual({
       direct: [],
       proxy: ['doh:cloudflare-dns.com@1.1.1.1'],
+      fakeIpRange: DEFAULT_FAKE_DNS_IPV4_RANGE,
+      fakeIpRange6: DEFAULT_FAKE_DNS_IPV6_RANGE,
     })
     const serialized = serializePolicyDocument(document)
     expect(serialized).toContain('doh:cloudflare-dns.com@1.1.1.1')
+    expect(serialized).toContain(`fake-ip-range: ${DEFAULT_FAKE_DNS_IPV4_RANGE}`)
+    expect(serialized).toContain(`fake-ip-range6: ${DEFAULT_FAKE_DNS_IPV6_RANGE}`)
   })
 
   it('preserves an explicitly empty proxy DNS set for backend validation', () => {

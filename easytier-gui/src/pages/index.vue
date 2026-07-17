@@ -265,13 +265,14 @@ watch(clientRunning, async (newVal, oldVal) => {
 onMounted(async () => {
   clientRunning.value = await isClientRunning().catch(() => false)
   const timer = setInterval(async () => {
+    if (document.hidden) return
     try {
       clientRunning.value = await isClientRunning()
     } catch (e) {
       clientRunning.value = false
       console.error("Error checking client running status", e)
     }
-  }, 1000)
+  }, 2000)
 
   onUnmounted(() => {
     clearInterval(timer)
@@ -424,10 +425,11 @@ async function onConfigServerSave() {
 }
 onMounted(() => {
   const timer = setInterval(async () => {
+    if (document.hidden) return;
     if (currentMode.value.mode !== 'normal') return;
     if (!currentMode.value.config_server_url) return;
     configServerConnected.value = await isWebClientConnected();
-  }, 1000)
+  }, 5000)
 
   onUnmounted(() => {
     clearInterval(timer)

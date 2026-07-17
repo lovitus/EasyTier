@@ -573,8 +573,8 @@ const actionMenu: Ref<MenuItem[]> = ref([
     }
 ]);
 
-const ACTIVE_REFRESH_MS = 1000;
-const IDLE_REFRESH_MS = 5000;
+const ACTIVE_REFRESH_MS = 2000;
+const IDLE_REFRESH_MS = 10000;
 const IDLE_AFTER_MS = 60000;
 const FAILURE_BACKOFF_MS = [5000, 10000, 30000] as const;
 

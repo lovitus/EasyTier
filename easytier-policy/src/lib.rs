@@ -16,8 +16,9 @@ mod preflight;
 mod supervisor;
 
 pub use config::{
-    ChainKind, PolicyDns, PolicyDocument, PolicyError, PolicyMode, PolicyRevision, Proxy,
-    ProxyKind, ProxyServer, ProxyVia, RuleSet, RuleSetKind, reload_policy_file_if_changed,
+    ChainKind, DEFAULT_FAKE_DNS_IPV4_RANGE, DEFAULT_FAKE_DNS_IPV6_RANGE, PolicyDns, PolicyDocument,
+    PolicyError, PolicyMode, PolicyRevision, Proxy, ProxyKind, ProxyServer, ProxyVia, RuleSet,
+    RuleSetKind, reload_policy_file_if_changed,
     reload_policy_file_if_changed_with_rule_set_provider, validate_policy_file,
     validate_policy_file_with_rule_set_provider,
 };
@@ -25,7 +26,8 @@ pub use geodata::{ManagedRuleDataKind, validate_managed_rule_data};
 #[cfg(all(unix, feature = "leaf-inprocess"))]
 pub use inprocess::{InProcessLeafFactory, InProcessLeafRuntime};
 pub use leaf_config::{
-    LeafConfigError, MeshServerResolver, ResolvedMeshServer, compile_leaf_config,
+    LeafConfigError, LeafConfigOptions, MeshServerResolver, ResolvedMeshServer,
+    compile_leaf_config, compile_leaf_config_with_options,
 };
 #[cfg(unix)]
 pub use leaf_process::{LeafProcessFactory, LeafProcessRuntime, system_dns_servers};

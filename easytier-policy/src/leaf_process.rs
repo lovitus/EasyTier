@@ -82,9 +82,37 @@ impl LeafProcessRuntime {
         dns_servers: &[std::net::IpAddr],
         revision: Arc<PolicyRevision>,
     ) -> Result<Arc<Self>, String> {
+        Self::start_with_dns_servers_and_options(
+            executable,
+            base_dir,
+            outbound_interface,
+            resolver,
+            dns_servers,
+            revision,
+            crate::LeafConfigOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn start_with_dns_servers_and_options(
+        executable: &Path,
+        base_dir: &Path,
+        outbound_interface: Option<&str>,
+        resolver: &dyn MeshServerResolver,
+        dns_servers: &[std::net::IpAddr],
+        revision: Arc<PolicyRevision>,
+        options: crate::LeafConfigOptions,
+    ) -> Result<Arc<Self>, String> {
         let (bridge, endpoint) = LeafPacketBridge::pair().map_err(|error| error.to_string())?;
-        let config = compile_leaf_config(&revision, LEAF_TUN_FD, base_dir, resolver, dns_servers)
-            .map_err(|error| error.to_string())?;
+        let config = crate::compile_leaf_config_with_options(
+            &revision,
+            LEAF_TUN_FD,
+            base_dir,
+            resolver,
+            dns_servers,
+            options,
+        )
+        .map_err(|error| error.to_string())?;
         let config_path = std::env::temp_dir().join(format!(
             "easytier-leaf-{}-{}-{}.json",
             std::process::id(),

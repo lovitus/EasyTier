@@ -498,11 +498,11 @@ describe('RemoteManagement status refresh', () => {
         .mockResolvedValueOnce(undefined)
         .mockResolvedValueOnce(undefined)
 
-      vi.advanceTimersByTime(1000)
+      vi.advanceTimersByTime(2000)
       await settleAsync()
       expect(wrapper.find('[data-stub="status"]').text()).toBe('stable-a')
 
-      vi.advanceTimersByTime(1000)
+      vi.advanceTimersByTime(2000)
       await settleAsync()
       expect(wrapper.find('[data-stub="status"]').text()).toBe('empty')
     } finally {
@@ -538,7 +538,7 @@ describe('RemoteManagement status refresh', () => {
       vi.runOnlyPendingTimers()
       await settleAsync()
       if (requests.length < 2) {
-        vi.advanceTimersByTime(1000)
+        vi.advanceTimersByTime(2000)
         await settleAsync()
       }
       expect(requests.length).toBeGreaterThanOrEqual(2)
@@ -664,7 +664,7 @@ describe('RemoteManagement status refresh', () => {
     }
   })
 
-  it('switches from active 1s refresh to idle 5s refresh after 60 seconds of no activity', async () => {
+  it('switches from active 2s refresh to idle 10s refresh after 60 seconds of no activity', async () => {
     vi.useFakeTimers()
     const getNetworkInfo = vi.fn().mockResolvedValue(runningInfo('idle-mode'))
     const api = makeStatusApi(getNetworkInfo)
@@ -688,16 +688,16 @@ describe('RemoteManagement status refresh', () => {
       getNetworkInfo.mockClear()
 
       await advanceAndSettle(59000)
-      expect(getNetworkInfo).toHaveBeenCalledTimes(59)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(29)
 
       await advanceAndSettle(1000)
-      expect(getNetworkInfo).toHaveBeenCalledTimes(60)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(30)
 
-      await advanceAndSettle(4000)
-      expect(getNetworkInfo).toHaveBeenCalledTimes(60)
+      await advanceAndSettle(9000)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(30)
 
       await advanceAndSettle(1000)
-      expect(getNetworkInfo).toHaveBeenCalledTimes(61)
+      expect(getNetworkInfo).toHaveBeenCalledTimes(31)
     } finally {
       wrapper.unmount()
     }
@@ -738,6 +738,8 @@ describe('RemoteManagement status refresh', () => {
       expect(getNetworkInfo).toHaveBeenCalledTimes(1)
 
       getNetworkInfo.mockClear()
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).not.toHaveBeenCalled()
       await advanceAndSettle(1000)
       expect(getNetworkInfo).toHaveBeenCalledTimes(1)
     } finally {
@@ -781,6 +783,8 @@ describe('RemoteManagement status refresh', () => {
 
       getNetworkInfo.mockClear()
       await advanceAndSettle(1000)
+      expect(getNetworkInfo).not.toHaveBeenCalled()
+      await advanceAndSettle(1000)
       expect(getNetworkInfo).toHaveBeenCalledTimes(1)
     } finally {
       wrapper.unmount()
@@ -812,7 +816,7 @@ describe('RemoteManagement status refresh', () => {
       await advanceAndSettle(60000)
       getNetworkInfo.mockClear()
 
-      await advanceAndSettle(4000)
+      await advanceAndSettle(9000)
       expect(getNetworkInfo).not.toHaveBeenCalled()
 
       document.dispatchEvent(new Event('pointerdown'))
@@ -820,6 +824,8 @@ describe('RemoteManagement status refresh', () => {
       expect(getNetworkInfo).toHaveBeenCalledTimes(1)
 
       getNetworkInfo.mockClear()
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).not.toHaveBeenCalled()
       await advanceAndSettle(1000)
       expect(getNetworkInfo).toHaveBeenCalledTimes(1)
     } finally {
@@ -855,7 +861,7 @@ describe('RemoteManagement status refresh', () => {
       const pendingRequest = deferred<any>()
       getNetworkInfo.mockImplementationOnce(() => pendingRequest.promise)
 
-      await advanceAndSettle(1000)
+      await advanceAndSettle(2000)
       expect(getNetworkInfo).toHaveBeenCalledTimes(initialCallCount + 1)
 
       wrapper.unmount()
@@ -900,7 +906,7 @@ describe('RemoteManagement status refresh', () => {
       getNetworkInfo.mockReset()
       getNetworkInfo.mockRejectedValue(new Error('rpc failed'))
 
-      await advanceAndSettle(1000)
+      await advanceAndSettle(2000)
       expect(getNetworkInfo).toHaveBeenCalledTimes(1)
 
       getNetworkInfo.mockClear()
@@ -924,6 +930,8 @@ describe('RemoteManagement status refresh', () => {
       expect(getNetworkInfo).toHaveBeenCalledTimes(1)
 
       getNetworkInfo.mockClear()
+      await advanceAndSettle(1000)
+      expect(getNetworkInfo).not.toHaveBeenCalled()
       await advanceAndSettle(1000)
       expect(getNetworkInfo).toHaveBeenCalledTimes(1)
     } finally {

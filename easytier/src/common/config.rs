@@ -2073,7 +2073,7 @@ socket_mark = 66
         assert!(dumped.contains("transport_priority = \"global:quic,faketcp,ws,wg,udp,tcp\""));
         assert!(dumped.contains("underlay_candidate_guard = true"));
         assert!(dumped.contains(
-            "underlay_exclude_cidrs = \"198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,192.19.0.0/24\""
+            "underlay_exclude_cidrs = \"198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,fd65:6173:7974::/48,192.19.0.0/24\""
         ));
     }
 

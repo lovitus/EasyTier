@@ -36,6 +36,7 @@ pub struct InProcessLeafFactory {
     resolver: Arc<dyn MeshServerResolver + Send + Sync>,
     dns_servers: Arc<[std::net::IpAddr]>,
     worker_threads: usize,
+    options: crate::LeafConfigOptions,
 }
 
 impl InProcessLeafFactory {
@@ -44,6 +45,22 @@ impl InProcessLeafFactory {
         resolver: Arc<dyn MeshServerResolver + Send + Sync>,
         dns_servers: Vec<std::net::IpAddr>,
         worker_threads: usize,
+    ) -> Result<Self, String> {
+        Self::new_with_options(
+            base_dir,
+            resolver,
+            dns_servers,
+            worker_threads,
+            crate::LeafConfigOptions::default(),
+        )
+    }
+
+    pub fn new_with_options(
+        base_dir: PathBuf,
+        resolver: Arc<dyn MeshServerResolver + Send + Sync>,
+        dns_servers: Vec<std::net::IpAddr>,
+        worker_threads: usize,
+        options: crate::LeafConfigOptions,
     ) -> Result<Self, String> {
         if dns_servers.is_empty() {
             return Err("in-process Leaf requires at least one underlying DNS server".to_owned());
@@ -56,6 +73,7 @@ impl InProcessLeafFactory {
             resolver,
             dns_servers: dns_servers.into(),
             worker_threads,
+            options,
         })
     }
 
@@ -68,6 +86,7 @@ impl InProcessLeafFactory {
             self.resolver.as_ref(),
             &self.dns_servers,
             self.worker_threads,
+            self.options,
             revision,
         )
         .await
@@ -95,16 +114,23 @@ impl InProcessLeafRuntime {
         resolver: &(dyn MeshServerResolver + Send + Sync),
         dns_servers: &[std::net::IpAddr],
         worker_threads: usize,
+        options: crate::LeafConfigOptions,
         revision: Arc<PolicyRevision>,
     ) -> Result<Arc<Self>, String> {
         let (bridge, endpoint) = LeafPacketBridge::pair().map_err(|error| error.to_string())?;
         let packet_fd = LeafPacketFd::new(endpoint.into_raw_fd())?;
         let endpoint_fd = packet_fd.raw_fd();
-        let config =
-            match compile_leaf_config(&revision, endpoint_fd, base_dir, resolver, dns_servers) {
-                Ok(config) => config,
-                Err(error) => return Err(error.to_string()),
-            };
+        let config = match crate::compile_leaf_config_with_options(
+            &revision,
+            endpoint_fd,
+            base_dir,
+            resolver,
+            dns_servers,
+            options,
+        ) {
+            Ok(config) => config,
+            Err(error) => return Err(error.to_string()),
+        };
         let mut config = match leaf::config::from_string(&config) {
             Ok(config) => config,
             Err(error) => return Err(format!("Leaf rejected generated config: {error}")),

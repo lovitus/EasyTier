@@ -1,6 +1,8 @@
 # Leaf TUN scheduler investigation (2026-07-17)
 
-Status: diagnostic fix awaiting exact workflow artifact validation. The Android explicit actor and Linux portless actor remain separate release gates even though both use the same Leaf TUN backend.
+Status: the lost-waker correction is retained. The high-BDP large-window implementation and the portless startup prewarm are rejected pending controlled evidence. Android explicit actor and portless managed HEV remain separate release gates.
+
+Superseding decision, 2026-07-17: the Android/KR receive-window observation remains useful diagnostic evidence, but the mobile-to-VPS path was too variable to authorize a permanent per-stream memory increase. EasyTier therefore keeps the ordinary 128 KiB smoltcp buffers and relies on the user's existing KCP/QUIC settings when acceleration is required. The earlier 32-stream and later four-stream large-window candidates are historical rejected experiments, not the current design.
 
 ## 2026-07-17 high-BDP explicit actor diagnosis
 

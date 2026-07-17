@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { latencyMs, lossRate, normalizeNatTypeValue, normalizeRunningInfo, numericValue } from '../src/modules/statusDisplay'
+import {
+  latencyMs,
+  lossRate,
+  normalizeNatTypeValue,
+  normalizeRunningInfo,
+  numericValue,
+  peerConns,
+} from '../src/modules/statusDisplay'
 
 describe('statusDisplay', () => {
   it('parses REST uint64 strings as numbers instead of concatenating them', () => {
@@ -71,6 +78,46 @@ describe('statusDisplay', () => {
     } as any
 
     expect(latencyMs(info)).toBe('42ms')
+  })
+
+  it('keeps the live active connection first across the runtime cache-clear window', () => {
+    const connections = [
+      { conn_id: 'kcp-conn', tunnel: { tunnel_type: 'kcp' } },
+      { conn_id: 'quic-conn', tunnel: { tunnel_type: 'quic' } },
+      { conn_id: 'tcp-conn', tunnel: { tunnel_type: 'tcp' } },
+    ]
+    const selected = {
+      route: { peer_id: 77, inst_id: 'network-a' },
+      peer: { peer_id: 77, default_conn_id: 'quic-conn', conns: connections },
+    } as any
+    expect(peerConns(selected).map(conn => conn.conn_id)).toEqual([
+      'quic-conn',
+      'kcp-conn',
+      'tcp-conn',
+    ])
+
+    const temporarilyCleared = {
+      route: { peer_id: 77, inst_id: 'network-a' },
+      peer: {
+        peer_id: 77,
+        default_conn_id: '00000000-0000-0000-0000-000000000000',
+        conns: connections,
+      },
+    } as any
+    expect(peerConns(temporarilyCleared).map(conn => conn.conn_id)).toEqual([
+      'quic-conn',
+      'kcp-conn',
+      'tcp-conn',
+    ])
+
+    const activeRemoved = {
+      route: { peer_id: 77, inst_id: 'network-a' },
+      peer: { peer_id: 77, conns: [connections[0], connections[2]] },
+    } as any
+    expect(peerConns(activeRemoved).map(conn => conn.conn_id)).toEqual([
+      'kcp-conn',
+      'tcp-conn',
+    ])
   })
 
   it('normalizes mixed camelCase running info at the API boundary', () => {
