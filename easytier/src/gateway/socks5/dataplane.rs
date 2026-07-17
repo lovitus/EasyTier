@@ -174,7 +174,7 @@ impl DataPlaneTcpListener {
             },
         );
         let accepted = DataPlaneTcpStream {
-            stream: SocksTcpStream::SmolTcp(stream),
+            stream: SocksTcpStream::SmolTcp(stream, None),
             local_addr,
             _data_plane_ref: self._data_plane_ref.clone(),
             _route: DataPlaneTcpStreamRoute::Accepted(route),
@@ -190,6 +190,16 @@ impl AsyncRead for DataPlaneTcpStream {
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
+    }
+}
+
+#[cfg(test)]
+impl DataPlaneTcpStream {
+    fn smoltcp_buffer_capacities(&self) -> Option<(usize, usize)> {
+        match &self.stream {
+            SocksTcpStream::SmolTcp(stream, _) => Some(stream.buffer_capacities()),
+            _ => None,
+        }
     }
 }
 
@@ -382,6 +392,8 @@ impl Socks5Server {
             entry_count: self.entry_count.clone(),
             inner_connector: parking_lot::Mutex::new(None),
             allow_kernel_fallback,
+            large_window_permits: use_mesh_stream_selector
+                .then(|| self.policy_mesh_tcp_window_permits.clone()),
         };
 
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -660,7 +672,39 @@ mod tests {
 
     #[tokio::test]
     async fn mesh_only_connect_never_falls_back_to_kernel() {
-        let (a, _b) = setup_pair().await;
+        let (a, b) = setup_pair().await;
+        let timeout = Duration::from_secs(10);
+        let mut listener = b.server.data_plane_tcp_bind(0, timeout).await.unwrap();
+        let listen_addr =
+            std::net::SocketAddr::new(b.ip.address().into(), listener.local_addr().port());
+        let accepted = tokio::spawn(async move {
+            let first = listener.accept().await.unwrap().0;
+            let second = listener.accept().await.unwrap().0;
+            (first, second)
+        });
+
+        let ordinary = a
+            .server
+            .data_plane_tcp_connect_inner(listen_addr, timeout, false, false, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            ordinary.smoltcp_buffer_capacities(),
+            Some((128 * 1024, 128 * 1024)),
+            "ordinary data-plane sockets must retain the established memory bound"
+        );
+        let mesh_only = a
+            .server
+            .data_plane_tcp_connect_mesh_only(listen_addr, timeout)
+            .await
+            .unwrap();
+        assert_eq!(
+            mesh_only.smoltcp_buffer_capacities(),
+            Some((2 * 1024 * 1024, 2 * 1024 * 1024)),
+            "mesh-only native fallback needs a high-BDP receive window"
+        );
+        let _accepted = accepted.await.unwrap();
+
         let result = a
             .server
             .data_plane_tcp_connect_mesh_only(

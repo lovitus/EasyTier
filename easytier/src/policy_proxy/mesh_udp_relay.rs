@@ -152,6 +152,16 @@ impl MeshSocksRelayService {
             .context("built-in HEV has no endpoint provider")?;
         let mut listeners =
             Vec::with_capacity(easytier_socks_egress::DEFAULT_PORT_CANDIDATES.len());
+        // IMPORTANT REVIEW BOUNDARY: these three smoltcp ports are one atomic,
+        // EasyTier-reserved virtual-ingress set, not independent availability
+        // candidates. Feature-on startup owns all three before external data-plane
+        // callers can run, so any bind failure is an internal initialization/order
+        // violation and the whole set intentionally fails closed. This is separate
+        // from the supported HEV *kernel-listener* fallback across the same port
+        // numbers, which is validated with an external `nc`/listener owner. Do not
+        // retain a partial smoltcp set or introduce a dynamic HEV/ingress intersection
+        // unless the reserved-port contract itself is deliberately changed; under
+        // the current contract, all-or-none binding is not a port-fallback defect.
         for port in easytier_socks_egress::DEFAULT_PORT_CANDIDATES {
             listeners.push(
                 self.data_plane

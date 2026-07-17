@@ -112,8 +112,14 @@ impl TcpStream {
         reactor: Arc<Reactor>,
         local_endpoint: IpEndpoint,
         remote_endpoint: IpEndpoint,
+        buffer_size: Option<super::socket_allocator::BufferSize>,
     ) -> io::Result<TcpStream> {
-        let handle = reactor.socket_allocator().new_tcp_socket();
+        let handle = match buffer_size {
+            Some(buffer_size) => reactor
+                .socket_allocator()
+                .new_tcp_socket_with_buffer_size(buffer_size),
+            None => reactor.socket_allocator().new_tcp_socket(),
+        };
 
         // see https://github.com/spacemeowx2/tokio-smoltcp/pull/12
         let connect_result = {
@@ -179,6 +185,11 @@ impl TcpStream {
     }
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
         Ok(self.peer_addr)
+    }
+    #[cfg(test)]
+    pub(crate) fn buffer_capacities(&self) -> (usize, usize) {
+        let socket = self.reactor.get_socket::<tcp::Socket>(*self.handle);
+        (socket.recv_capacity(), socket.send_capacity())
     }
     pub fn poll_connected(&self, cx: &Context<'_>) -> Poll<io::Result<()>> {
         let mut socket = self.reactor.get_socket::<tcp::Socket>(*self.handle);

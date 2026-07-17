@@ -150,10 +150,26 @@ impl Net {
     }
     /// Opens a TCP connection to a remote host.
     pub async fn tcp_connect(&self, addr: SocketAddr, local_port: u16) -> io::Result<TcpStream> {
+        self.tcp_connect_with_buffer_size(addr, local_port, None)
+            .await
+    }
+
+    /// Opens a TCP connection with a per-socket buffer override.
+    ///
+    /// The override is intentionally per connection: high-BDP policy mesh
+    /// streams need a larger advertised window, while listeners and ordinary
+    /// EasyTier SOCKS/TCP proxy flows retain the existing bounded defaults.
+    pub async fn tcp_connect_with_buffer_size(
+        &self,
+        addr: SocketAddr,
+        local_port: u16,
+        buffer_size: Option<BufferSize>,
+    ) -> io::Result<TcpStream> {
         TcpStream::connect(
             self.reactor.clone(),
             (self.ip_addr.address(), local_port).into(),
             addr.into(),
+            buffer_size,
         )
         .await
     }

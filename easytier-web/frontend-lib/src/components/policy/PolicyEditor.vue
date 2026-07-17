@@ -2,8 +2,6 @@
 import {
   Button,
   Checkbox,
-  Column,
-  DataTable,
   InputNumber,
   InputText,
   Message,
@@ -17,11 +15,12 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type * as Api from '../../modules/api'
 import type { NetworkConfig } from '../../types/network'
-import { canEnablePolicyProxy } from './policyRuntimeSupport'
+import { canEnablePolicyProxy, policyRuntimeNotice } from './policyRuntimeSupport'
 import {
   DEFAULT_POLICY_TEMPLATE,
   emptyPolicyDocument,
   parsePolicyDocument,
+  policyRuleSupportsNoResolve,
   serializePolicyDocument,
   type PolicyEditorDocument,
   type PolicyGroupRow,
@@ -50,36 +49,15 @@ const updatingRuleData = ref<PolicyRuleSetKind | ''>('')
 const outboundInfo = ref<Api.ListPolicyOutboundInterfacesResponse>()
 const outboundLoading = ref(false)
 const outboundError = ref('')
-const advancedPolicyFeatures = ref(false)
 let lastSerialized = ''
-
-const DEFAULT_PROXY_DNS = 'doh:cloudflare-dns.com@1.1.1.1'
-const hasExistingAdvancedPolicyFeatures = computed(() => {
-  const customDns = document.value.dns.direct.length > 0
-    || document.value.dns.proxy.length !== 1
-    || document.value.dns.proxy[0] !== DEFAULT_PROXY_DNS
-  const advancedProxy = document.value.proxies.some(proxy => proxy.via === 'native' || proxy.udp)
-  const advancedRule = document.value.rules.some(rule =>
-    rule.type.toUpperCase() === 'NETWORK' && rule.operand.toLowerCase() === 'udp',
-  )
-  const onlineRuleData = document.value.ruleSets.some(row =>
-    row.sourceUrl.trim() !== '' || row.update !== 'manual',
-  )
-  return customDns
-    || advancedProxy
-    || document.value.groups.length > 0
-    || advancedRule
-    || onlineRuleData
-})
-const showAdvancedPolicyFeatures = computed(() =>
-  advancedPolicyFeatures.value || hasExistingAdvancedPolicyFeatures.value,
-)
+const rowKeys = new WeakMap<object, number>()
+let nextRowKey = 1
 
 const sourceOptions = computed(() => [
   { label: t('policy.editor.inline'), value: 'inline' },
   { label: t('policy.editor.file'), value: 'file' },
 ])
-const proxyViaOptions = computed(() => showAdvancedPolicyFeatures.value ? ['mesh', 'native'] : ['mesh'])
+const proxyViaOptions = ['mesh', 'native']
 const groupTypeOptions = ['fallback', 'chain']
 const outboundOptions = computed(() => (outboundInfo.value?.interfaces ?? []).map(item => ({
   label: item.addresses.length
@@ -97,6 +75,17 @@ const actorOptions = computed(() => [
   ...document.value.proxies.map(proxy => proxy.name).filter(Boolean),
   ...document.value.groups.map(group => group.name).filter(Boolean),
 ])
+const runtimeNotice = computed(() => outboundInfo.value
+  ? policyRuntimeNotice(outboundInfo.value)
+  : undefined)
+const runtimeNoticeSeverity = computed(() => {
+  if (runtimeNotice.value === 'linux-supported' || runtimeNotice.value === 'supported') return 'success'
+  if (runtimeNotice.value === 'windows-unsupported' || runtimeNotice.value === 'unsupported') return 'error'
+  return 'warn'
+})
+const runtimeNoticeKey = computed(() => runtimeNotice.value
+  ? `policy.editor.runtime_${runtimeNotice.value.replace(/-/g, '_')}`
+  : '')
 
 const sourceMode = computed({
   get: () => config.value.policy_config_file?.trim() ? 'file' : 'inline',
@@ -245,6 +234,21 @@ function removeAt<T>(rows: T[], index: number) {
   rows.splice(index, 1)
 }
 
+function rowKey(row: object) {
+  const existing = rowKeys.get(row)
+  if (existing !== undefined) return existing
+  const key = nextRowKey++
+  rowKeys.set(row, key)
+  return key
+}
+
+function moveRule(index: number, offset: number) {
+  const destination = index + offset
+  if (destination < 0 || destination >= document.value.rules.length) return
+  const [row] = document.value.rules.splice(index, 1)
+  document.value.rules.splice(destination, 0, row)
+}
+
 function updateMembers(row: PolicyGroupRow, value: string) {
   row.members = value.split(',').map(member => member.trim()).filter(Boolean)
 }
@@ -260,8 +264,12 @@ function ruleNeedsOperand(type: string) {
   return !['MATCH', 'FINAL'].includes(type.toUpperCase())
 }
 
-function ruleSupportsNoResolve(type: string) {
-  return ['IP-CIDR', 'GEOIP', 'COUNTRY'].includes(type.toUpperCase())
+function updateRuleType(row: PolicyRuleRow, value: string) {
+  const previouslySupported = policyRuleSupportsNoResolve(row.type)
+  row.type = value
+  const supported = policyRuleSupportsNoResolve(value)
+  if (!supported) row.noResolve = false
+  else if (!previouslySupported) row.noResolve = true
 }
 
 function managedRuleDataSource(type: PolicyRuleSetKind) {
@@ -324,6 +332,13 @@ onMounted(() => {
 
 <template>
   <div class="flex flex-col gap-4">
+    <Message v-if="outboundInfo && runtimeNoticeKey" :severity="runtimeNoticeSeverity" :closable="false">
+      {{ t(runtimeNoticeKey, { platform: outboundInfo.platform }) }}
+    </Message>
+    <Message v-else-if="outboundError" severity="warn" :closable="false">
+      {{ t('policy.editor.outbound_load_failed') }}: {{ outboundError }}
+    </Message>
+
     <div class="flex items-center gap-3">
       <Checkbox input-id="enable_policy_proxy" :model-value="config.enable_policy_proxy"
         :disabled="!config.enable_policy_proxy && outboundInfo?.supported === false" binary
@@ -356,9 +371,6 @@ onMounted(() => {
         <Message v-else-if="outboundInfo" severity="warn" :closable="false">
           {{ t('policy.editor.outbound_unavailable', { platform: outboundInfo.platform }) }}
         </Message>
-        <Message v-if="outboundError" severity="warn" :closable="false">
-          {{ t('policy.editor.outbound_load_failed') }}: {{ outboundError }}
-        </Message>
         <div v-if="outboundInfo?.required" class="flex flex-col gap-2 grow min-w-64">
           <label for="policy_leaf_executable">{{ t('policy_leaf_executable') }}</label>
           <InputText id="policy_leaf_executable" v-model="config.policy_leaf_executable"
@@ -385,115 +397,115 @@ onMounted(() => {
         </Message>
 
         <template v-if="!parseError">
-          <div class="flex flex-col gap-2 rounded-lg border border-surface-200 p-3 dark:border-surface-700">
-            <div class="flex items-center gap-2">
-              <Checkbox input-id="policy_advanced_features" v-model="advancedPolicyFeatures" binary />
-              <label for="policy_advanced_features" class="font-semibold">
-                {{ t('policy.editor.advanced_features') }}
-              </label>
-            </div>
-            <small class="text-surface-500">{{ t('policy.editor.advanced_features_help') }}</small>
-            <Message v-if="hasExistingAdvancedPolicyFeatures" severity="warn" :closable="false">
-              {{ t('policy.editor.advanced_existing_help') }}
-            </Message>
-          </div>
-
-          <Panel v-if="showAdvancedPolicyFeatures" :header="t('policy.editor.dns')" toggleable collapsed>
-            <div class="grid gap-4 md:grid-cols-2">
-              <div class="flex flex-col gap-2">
+          <Panel :header="t('policy.editor.dns')" toggleable>
+            <div class="flex flex-col gap-4">
+              <Message severity="info" :closable="false">{{ t('policy.editor.dns_isolation_help') }}</Message>
+              <div class="grid gap-4 lg:grid-cols-2">
+                <div class="flex flex-col gap-2 rounded-xl border border-surface-200 bg-surface-50 p-4 dark:border-surface-700 dark:bg-surface-900">
+                  <span class="text-xs font-semibold uppercase tracking-wide text-surface-500">DIRECT</span>
                 <label for="policy_dns_direct" class="font-semibold">{{ t('policy.editor.dns_direct') }}</label>
                 <Textarea id="policy_dns_direct" :model-value="document.dns.direct.join('\n')" rows="4"
-                  auto-resize :placeholder="t('policy.editor.dns_direct_placeholder')"
+                  auto-resize class="w-full" :placeholder="t('policy.editor.dns_direct_placeholder')"
                   @update:model-value="updateDnsServers('direct', String($event))" />
                 <small class="text-surface-500">{{ t('policy.editor.dns_direct_help') }}</small>
               </div>
-              <div class="flex flex-col gap-2">
+                <div class="flex flex-col gap-2 rounded-xl border border-surface-200 bg-surface-50 p-4 dark:border-surface-700 dark:bg-surface-900">
+                  <span class="text-xs font-semibold uppercase tracking-wide text-surface-500">PROXY</span>
                 <label for="policy_dns_proxy" class="font-semibold">{{ t('policy.editor.dns_proxy') }}</label>
                 <Textarea id="policy_dns_proxy" :model-value="document.dns.proxy.join('\n')" rows="4"
-                  auto-resize placeholder="doh:cloudflare-dns.com@1.1.1.1"
+                  auto-resize class="w-full" placeholder="doh:cloudflare-dns.com@1.1.1.1"
                   @update:model-value="updateDnsServers('proxy', String($event))" />
                 <small class="text-surface-500">{{ t('policy.editor.dns_proxy_help') }}</small>
+                </div>
               </div>
             </div>
-            <Message severity="info" :closable="false">{{ t('policy.editor.dns_isolation_help') }}</Message>
           </Panel>
 
           <Panel :header="t('policy.editor.nodes')" toggleable>
             <div class="flex flex-col gap-3">
-              <DataTable :value="document.proxies" data-key="name" responsive-layout="scroll">
-                <Column field="name" :header="t('policy.editor.name')">
-                  <template #body="{ data }"><InputText v-model="data.name" class="w-36" /></template>
-                </Column>
-                <Column field="via" :header="t('policy.editor.path')">
-                  <template #body="{ data }">
-                    <Select v-model="data.via" :options="proxyViaOptions" class="w-28" />
-                  </template>
-                </Column>
-                <Column :header="t('policy.editor.server')">
-                  <template #body="{ data }">
-                    <div v-if="data.via === 'mesh'" class="flex flex-col gap-1 min-w-56">
-                      <InputText v-model="data.instanceId" :placeholder="t('policy.editor.instance_id')" />
-                      <InputText v-model="data.virtualIp" :placeholder="t('policy.editor.virtual_ip')" />
+              <Message v-if="document.proxies.length === 0" severity="secondary" :closable="false">
+                {{ t('policy.editor.nodes_empty') }}
+              </Message>
+              <article v-for="(data, index) in document.proxies" :key="rowKey(data)"
+                class="flex flex-col gap-4 rounded-xl border border-surface-200 p-4 dark:border-surface-700">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="flex items-center gap-2">
+                    <span class="rounded-full bg-primary-100 px-2 py-1 text-xs font-semibold text-primary-700 dark:bg-primary-900 dark:text-primary-200">#{{ index + 1 }}</span>
+                    <strong>{{ data.name || t('policy.editor.unnamed_node') }}</strong>
+                  </div>
+                  <Button icon="pi pi-trash" severity="danger" text :aria-label="t('policy.editor.remove_node')"
+                    @click="removeAt(document.proxies, index)" />
+                </div>
+                <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                  <div class="flex flex-col gap-2">
+                    <label :for="`policy_proxy_name_${index}`" class="font-semibold">{{ t('policy.editor.name') }}</label>
+                    <InputText :id="`policy_proxy_name_${index}`" v-model="data.name" class="w-full"
+                      :data-testid="`policy-proxy-name-${index}`" />
+                  </div>
+                  <div class="flex flex-col gap-2">
+                    <label class="font-semibold">{{ t('policy.editor.path') }}</label>
+                    <Select v-model="data.via" :options="proxyViaOptions" class="w-full" />
+                  </div>
+                  <div class="flex flex-col gap-2 sm:col-span-2">
+                    <label class="font-semibold">{{ t('policy.editor.server') }}</label>
+                    <div v-if="data.via === 'mesh'" class="grid gap-2 sm:grid-cols-2">
+                      <InputText v-model="data.instanceId" class="w-full" :placeholder="t('policy.editor.instance_id')" />
+                      <InputText v-model="data.virtualIp" class="w-full" :placeholder="t('policy.editor.virtual_ip')" />
                     </div>
-                    <InputText v-else v-model="data.address" placeholder="host / IP" class="min-w-48" />
-                  </template>
-                </Column>
-                <Column field="port" :header="t('policy.editor.port')">
-                  <template #body="{ data }">
+                    <InputText v-else v-model="data.address" placeholder="host / IP" class="w-full" />
+                  </div>
+                  <div class="flex flex-col gap-2">
+                    <label class="font-semibold">{{ t('policy.editor.port') }}</label>
                     <InputNumber
                       v-model="data.port"
                       :min="1"
                       :max="65535"
                       :use-grouping="false"
                       :placeholder="data.via === 'mesh' ? 'auto' : undefined"
-                      class="w-28"
+                      class="w-full"
                     />
-                  </template>
-                </Column>
-                <Column field="udp" header="UDP">
-                  <template #body="{ data }"><Checkbox v-model="data.udp" binary /></template>
-                </Column>
-                <Column :header="t('policy.editor.credentials')">
-                  <template #body="{ data }">
-                    <div class="flex flex-col gap-1 min-w-40">
-                      <InputText v-model="data.username" :placeholder="t('username')" />
-                      <Password v-model="data.password" :placeholder="t('password')" :feedback="false" toggle-mask />
+                  </div>
+                  <div class="flex flex-col gap-2">
+                    <span class="font-semibold">UDP</span>
+                    <div class="flex min-h-10 items-center gap-2">
+                      <Checkbox :input-id="`policy_proxy_udp_${index}`" v-model="data.udp" binary />
+                      <label :for="`policy_proxy_udp_${index}`">{{ t('policy.editor.udp_capable') }}</label>
                     </div>
-                  </template>
-                </Column>
-                <Column header-style="width: 4rem">
-                  <template #body="{ index }">
-                    <Button icon="pi pi-trash" severity="danger" text
-                      @click="removeAt(document.proxies, index)" />
-                  </template>
-                </Column>
-              </DataTable>
+                  </div>
+                  <div class="flex flex-col gap-2 sm:col-span-2">
+                    <label class="font-semibold">{{ t('policy.editor.credentials') }}</label>
+                    <div class="grid gap-2 sm:grid-cols-2">
+                      <InputText v-model="data.username" class="w-full" :placeholder="t('username')" />
+                      <Password v-model="data.password" class="w-full" :placeholder="t('password')" :feedback="false" toggle-mask />
+                    </div>
+                  </div>
+                </div>
+              </article>
               <Button icon="pi pi-plus" :label="t('policy.editor.add_node')" class="self-start" @click="addProxy" />
             </div>
           </Panel>
 
-          <Panel v-if="showAdvancedPolicyFeatures" :header="t('policy.editor.groups')" toggleable collapsed>
+          <Panel :header="t('policy.editor.groups')" toggleable collapsed>
             <div class="flex flex-col gap-3">
-              <DataTable :value="document.groups" data-key="name" responsive-layout="scroll">
-                <Column field="name" :header="t('policy.editor.name')">
-                  <template #body="{ data }"><InputText v-model="data.name" /></template>
-                </Column>
-                <Column field="type" :header="t('policy.editor.group_type')">
-                  <template #body="{ data }"><Select v-model="data.type" :options="groupTypeOptions" /></template>
-                </Column>
-                <Column :header="t('policy.editor.members')">
-                  <template #body="{ data }">
-                    <InputText :model-value="data.members.join(',')" class="w-full min-w-64"
+              <article v-for="(data, index) in document.groups" :key="rowKey(data)"
+                class="grid gap-4 rounded-xl border border-surface-200 p-4 sm:grid-cols-2 lg:grid-cols-[minmax(10rem,1fr)_12rem_minmax(16rem,2fr)_auto] dark:border-surface-700">
+                <div class="flex flex-col gap-2">
+                  <label class="font-semibold">{{ t('policy.editor.name') }}</label>
+                  <InputText v-model="data.name" class="w-full" />
+                </div>
+                <div class="flex flex-col gap-2">
+                  <label class="font-semibold">{{ t('policy.editor.group_type') }}</label>
+                  <Select v-model="data.type" :options="groupTypeOptions" class="w-full" />
+                </div>
+                <div class="flex flex-col gap-2 sm:col-span-2 lg:col-span-1">
+                  <label class="font-semibold">{{ t('policy.editor.members') }}</label>
+                  <InputText :model-value="data.members.join(',')" class="w-full"
                       :placeholder="t('policy.editor.members_hint')"
                       @update:model-value="updateMembers(data, String($event))" />
-                  </template>
-                </Column>
-                <Column header-style="width: 4rem">
-                  <template #body="{ index }">
-                    <Button icon="pi pi-trash" severity="danger" text @click="removeAt(document.groups, index)" />
-                  </template>
-                </Column>
-              </DataTable>
+                </div>
+                <Button icon="pi pi-trash" severity="danger" text class="self-end justify-self-end"
+                  :aria-label="t('policy.editor.remove_group')" @click="removeAt(document.groups, index)" />
+              </article>
               <Button icon="pi pi-plus" :label="t('policy.editor.add_group')" class="self-start" @click="addGroup" />
             </div>
           </Panel>
@@ -510,36 +522,44 @@ onMounted(() => {
                 <Button :label="t('policy.editor.preset_direct')" severity="secondary" outlined
                   @click="applyPreset('direct')" />
               </div>
-              <DataTable :value="document.rules" responsive-layout="scroll"
-                @row-reorder="document.rules = $event.value">
-                <Column row-reorder header-style="width: 3rem" />
-                <Column field="type" :header="t('policy.editor.rule_type')">
-                  <template #body="{ data }">
-                    <Select v-model="data.type" :options="ruleTypeOptions" editable class="min-w-44" />
-                  </template>
-                </Column>
-                <Column :header="t('policy.editor.rule_value')">
-                  <template #body="{ data }">
-                    <InputText v-if="ruleNeedsOperand(data.type)" v-model="data.operand" class="w-full min-w-48" />
-                    <span v-else class="text-surface-500">{{ t('policy.editor.any') }}</span>
-                  </template>
-                </Column>
-                <Column field="target" :header="t('policy.editor.target')">
-                  <template #body="{ data }">
-                    <Select v-model="data.target" :options="actorOptions" editable class="w-full min-w-40" />
-                  </template>
-                </Column>
-                <Column :header="t('policy.editor.no_resolve')" header-style="width: 7rem">
-                  <template #body="{ data }">
-                    <Checkbox v-if="ruleSupportsNoResolve(data.type)" v-model="data.noResolve" binary />
-                  </template>
-                </Column>
-                <Column header-style="width: 4rem">
-                  <template #body="{ index }">
-                    <Button icon="pi pi-trash" severity="danger" text @click="removeAt(document.rules, index)" />
-                  </template>
-                </Column>
-              </DataTable>
+              <article v-for="(data, index) in document.rules" :key="rowKey(data)"
+                class="flex flex-col gap-4 rounded-xl border border-surface-200 p-4 dark:border-surface-700">
+                <div class="flex items-center justify-between gap-3">
+                  <span class="text-sm font-semibold text-surface-500">{{ t('policy.editor.rule_priority', { index: index + 1 }) }}</span>
+                  <div class="flex gap-1">
+                    <Button icon="pi pi-arrow-up" severity="secondary" text :disabled="index === 0"
+                      :aria-label="t('policy.editor.move_up')" @click="moveRule(index, -1)" />
+                    <Button icon="pi pi-arrow-down" severity="secondary" text :disabled="index === document.rules.length - 1"
+                      :aria-label="t('policy.editor.move_down')" @click="moveRule(index, 1)" />
+                    <Button icon="pi pi-trash" severity="danger" text :aria-label="t('policy.editor.remove_rule')"
+                      @click="removeAt(document.rules, index)" />
+                  </div>
+                </div>
+                <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-[minmax(10rem,1fr)_minmax(12rem,2fr)_minmax(10rem,1fr)_9rem]">
+                  <div class="flex flex-col gap-2">
+                    <label class="font-semibold">{{ t('policy.editor.rule_type') }}</label>
+                    <Select :model-value="data.type" :options="ruleTypeOptions" editable class="w-full"
+                      :data-testid="`policy-rule-type-${index}`"
+                      @update:model-value="updateRuleType(data, String($event))" />
+                  </div>
+                  <div class="flex flex-col gap-2">
+                    <label class="font-semibold">{{ t('policy.editor.rule_value') }}</label>
+                    <InputText v-if="ruleNeedsOperand(data.type)" v-model="data.operand" class="w-full" />
+                    <div v-else class="flex min-h-10 items-center text-surface-500">{{ t('policy.editor.any') }}</div>
+                  </div>
+                  <div class="flex flex-col gap-2">
+                    <label class="font-semibold">{{ t('policy.editor.target') }}</label>
+                    <Select v-model="data.target" :options="actorOptions" editable class="w-full" />
+                  </div>
+                  <div class="flex flex-col gap-2">
+                    <span class="font-semibold">{{ t('policy.editor.no_resolve') }}</span>
+                    <div class="flex min-h-10 items-center">
+                      <Checkbox v-if="policyRuleSupportsNoResolve(data.type)" v-model="data.noResolve" binary />
+                      <span v-else class="text-surface-400">-</span>
+                    </div>
+                  </div>
+                </div>
+              </article>
               <Button icon="pi pi-plus" :label="t('policy.editor.add_rule')" class="self-start" @click="addRule" />
             </div>
           </Panel>
@@ -549,52 +569,38 @@ onMounted(() => {
               <Message severity="info" :closable="false">{{ t('policy.editor.rule_data_help') }}</Message>
               <Message v-if="ruleDataMessage" severity="success" :closable="false">{{ ruleDataMessage }}</Message>
               <Message v-if="ruleDataError" severity="error" :closable="false">{{ ruleDataError }}</Message>
-              <DataTable :value="ruleDataRows" data-key="type" responsive-layout="scroll">
-                <Column field="type" :header="t('policy.editor.rule_set_type')">
-                  <template #body="{ data }">
-                    <div class="flex flex-col gap-1">
-                      <span class="font-semibold">{{ t(`policy.editor.resource_${data.type}`) }}</span>
-                      <span class="text-xs text-surface-500">{{ data.type }}</span>
-                    </div>
+              <article v-for="data in ruleDataRows" :key="data.type"
+                class="grid gap-4 rounded-xl border border-surface-200 p-4 lg:grid-cols-[12rem_minmax(16rem,1fr)_12rem] dark:border-surface-700">
+                <div class="flex flex-col gap-1">
+                  <span class="font-semibold">{{ t(`policy.editor.resource_${data.type}`) }}</span>
+                  <span class="text-xs text-surface-500">{{ data.type }}</span>
+                </div>
+                <div class="flex flex-col gap-2">
+                  <template v-if="usesBundledRuleData(data)">
+                    <div class="break-all font-mono text-xs">{{ managedRuleDataSource(data.type) }}</div>
+                    <small class="text-surface-500">{{ t('policy.editor.builtin_help') }}</small>
                   </template>
-                </Column>
-                <Column :header="t('policy.editor.managed_source')">
-                  <template #body="{ data }">
-                    <template v-if="usesBundledRuleData(data)">
-                      <div class="font-mono text-xs break-all min-w-72">{{ managedRuleDataSource(data.type) }}</div>
-                      <small class="text-surface-500">{{ t('policy.editor.builtin_help') }}</small>
-                    </template>
-                    <template v-else-if="showAdvancedPolicyFeatures">
-                      <InputText :model-value="ruleDataSource(data)" class="w-full min-w-96"
-                        :aria-label="t('policy.editor.rule_data_source')"
-                        @update:model-value="setRuleDataSource(data, String($event))" />
-                      <small class="text-surface-500">{{ t('policy.editor.rule_data_source_help') }}</small>
-                    </template>
-                    <small v-else class="text-surface-500">{{ t('policy.editor.advanced_features_required') }}</small>
+                  <template v-else>
+                    <InputText :model-value="ruleDataSource(data)" class="w-full"
+                      :aria-label="t('policy.editor.rule_data_source')"
+                      @update:model-value="setRuleDataSource(data, String($event))" />
+                    <small class="text-surface-500">{{ t('policy.editor.rule_data_source_help') }}</small>
                   </template>
-                </Column>
-                <Column :header="t('policy.editor.status')">
-                  <template #body="{ data }">
-                    <div class="flex flex-col gap-2 min-w-36">
-                      <span :class="isManagedRuleDataInstalled(data) || usesBundledRuleData(data) ? 'text-green-600' : 'text-surface-500'">
-                        {{ managedRuleDataStatus(data) }}
-                      </span>
-                      <Button v-if="showAdvancedPolicyFeatures && !usesBundledRuleData(data)" icon="pi pi-refresh"
-                        :label="t('policy.editor.update_rule_data')" size="small"
-                        :loading="updatingRuleData === data.type"
-                        :disabled="!props.api?.update_policy_rule_data || !config.instance_id || Boolean(updatingRuleData)"
-                        @click="updateRuleData(data)" />
-                    </div>
-                  </template>
-                </Column>
-                <Column header-style="width: 4rem">
-                  <template #body="{ data }">
-                    <Button v-if="showAdvancedPolicyFeatures && isManagedRuleDataInstalled(data) && !usesBundledRuleData(data)"
-                      icon="pi pi-trash" severity="danger" text
-                      @click="removeRuleData(data)" />
-                  </template>
-                </Column>
-              </DataTable>
+                </div>
+                <div class="flex flex-col items-start gap-2">
+                  <span :class="isManagedRuleDataInstalled(data) || usesBundledRuleData(data) ? 'text-green-600' : 'text-surface-500'">
+                    {{ managedRuleDataStatus(data) }}
+                  </span>
+                  <Button v-if="!usesBundledRuleData(data)" icon="pi pi-refresh"
+                    :label="t('policy.editor.update_rule_data')" size="small"
+                    :loading="updatingRuleData === data.type"
+                    :disabled="!props.api?.update_policy_rule_data || !config.instance_id || Boolean(updatingRuleData)"
+                    @click="updateRuleData(data)" />
+                  <Button v-if="isManagedRuleDataInstalled(data) && !usesBundledRuleData(data)"
+                    icon="pi pi-trash" severity="danger" text :aria-label="t('policy.editor.remove_rule_data')"
+                    @click="removeRuleData(data)" />
+                </div>
+              </article>
             </div>
           </Panel>
         </template>

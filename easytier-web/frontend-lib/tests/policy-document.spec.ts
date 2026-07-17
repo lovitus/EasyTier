@@ -3,6 +3,7 @@ import {
   DEFAULT_POLICY_TEMPLATE,
   emptyPolicyDocument,
   parsePolicyDocument,
+  policyRuleSupportsNoResolve,
   serializePolicyDocument,
 } from '../src/components/policy/policyDocument'
 
@@ -36,6 +37,15 @@ describe('policy visual document codec', () => {
     expect(DEFAULT_POLICY_TEMPLATE).toContain('port: 7890')
     expect(DEFAULT_POLICY_TEMPLATE).toContain('type: chain')
     expect(DEFAULT_POLICY_TEMPLATE).toContain('members: [mesh-exit, native-socks, DIRECT]')
+    expect(document.rules.filter(rule => rule.type === 'GEOIP').every(rule => rule.noResolve)).toBe(true)
+    expect(DEFAULT_POLICY_TEMPLATE).toContain('GEOIP,CN,domestic-exit,no-resolve')
+  })
+
+  it('defaults no-resolve capability for IP and CIDR rule kinds', () => {
+    expect(policyRuleSupportsNoResolve('GEOIP')).toBe(true)
+    expect(policyRuleSupportsNoResolve('COUNTRY')).toBe(true)
+    expect(policyRuleSupportsNoResolve('IP-CIDR')).toBe(true)
+    expect(policyRuleSupportsNoResolve('DOMAIN-SUFFIX')).toBe(false)
   })
 
   it('round-trips mesh/native nodes, ordered groups, geo data and ordered rules', () => {
@@ -130,7 +140,7 @@ rules: ["MATCH,DIRECT"]
 
     const serialized = serializePolicyDocument(document)
     expect(serialized.indexOf('GEOSITE,CN,preferred')).toBeLessThan(serialized.indexOf('GEOIP,CN,DIRECT'))
-    expect(serialized.indexOf('GEOIP,CN,DIRECT,no-resolve')).toBeLessThan(serialized.indexOf('MATCH,DIRECT'))
+    expect(serialized.indexOf('GEOIP,CN,DIRECT,no-resolve')).toBeLessThan(serialized.indexOf('MATCH,default-exit'))
   })
 
   it('does not emit empty optional credentials or geo sections', () => {

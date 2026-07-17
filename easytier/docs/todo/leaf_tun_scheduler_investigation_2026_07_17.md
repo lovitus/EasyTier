@@ -2,6 +2,19 @@
 
 Status: diagnostic fix awaiting exact workflow artifact validation. The Android explicit actor and Linux portless actor remain separate release gates even though both use the same Leaf TUN backend.
 
+## 2026-07-17 high-BDP explicit actor diagnosis
+
+Exact `c7a8d8af` evidence separates the earlier scheduler loss from a second, independent throughput limit.
+
+- Locked sources inspected: Leaf `2f62208187f7980d066e479bd70bb55613c066d2`; smoltcp `0a926767a68bc88d5512afefa7529c5ecdade4ea`. The similarly versioned crates.io smoltcp checkout was explicitly rejected as invalid audit evidence.
+- EasyTier path: `mesh_socks_bridge.rs::relay_socks5` -> `data_plane_tcp_connect_mesh_only` -> `Socks5AutoConnector` -> `SmolTcpConnector` when the mesh-owned selector has no usable QUIC/KCP stream.
+- Current allocation: `Socks5ServerNet` constructs the shared smoltcp net with `tcp_rx_size = tcp_tx_size = 128 KiB`. smoltcp chooses window scaling from that fixed buffer at connection setup and the locked revision has no runtime resize API.
+- Android 4G/KR RTT was approximately 260-300 ms. A 128 KiB receive window has a 3.5-4.0 Mbps bandwidth-delay ceiling; KR measured about 3.7 Mbps and 57.6% receive-window-limited time. This is direct causal evidence.
+- Mihomo parity boundary: `common/net/sing.go::Relay` uses buffered bidirectional copy and `CloseWrite` over kernel TCP sockets; it does not add a userspace TCP receive window. EasyTier cannot copy that exact architecture because the policy process UID cannot safely route a kernel connection back through its own mobile VPN. The documented intentional difference is a bounded larger smoltcp window for native mesh fallback.
+- Leaf boundary: `leaf/src/app/dispatcher.rs` passes `LINK_BUFFER_SIZE * 1024` (default 2 KiB) to its asynchronous copy loop. That block size may be a later CPU tuning candidate, but it does not advertise the 128 KiB TCP window and is not included in this root-cause fix.
+- Memory boundary: native fallback gets 2 MiB in each direction for at most 32 active streams. Maximum additional allocation is 128 MiB. Further streams use the existing 128 KiB buffers instead of failing. Accelerated KCP/QUIC and ordinary EasyTier SOCKS/TCP proxy paths are unchanged.
+- Validation tooling boundary: Chrome CDP page navigation is rejected for throughput completion evidence after Android exposed multi-megabyte unread kernel queues. The packaged captured-UID instrumentation probe gains bounded raw HTTP download, byte count, body time and Mbps fields.
+
 ## Scope and configuration boundary
 
 The reported Android configuration is an explicit user SOCKS actor:

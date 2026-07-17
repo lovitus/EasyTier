@@ -641,6 +641,18 @@ impl DeferredProxySelector {
     /// priority, destination capabilities, readiness ACKs, and health state.
     /// `None` tells the caller to use its native mesh transport; policy is not
     /// involved in this decision.
+    ///
+    /// IMPORTANT REVIEW BOUNDARY: unlike `resolve_pending`, this direct-stream
+    /// adapter may record a failed `(old_peer, transport)` attempt and try the next
+    /// transport before observing a concurrent route change. This is accepted P3
+    /// recovery-latency/health technical debt: health is keyed by peer, every
+    /// successful stream is revalidated against the current route before return,
+    /// and native fallback remains mesh-only. It cannot return an old-peer stream
+    /// for a new route, degrade the new peer, or create kernel/DIRECT leakage. Do
+    /// not reclassify the known ordering difference as a correctness or v1 release
+    /// defect, and do not refactor the two state machines during exact-candidate
+    /// validation. Share a selector primitive post-v1, or earlier only if exact
+    /// network-switch evidence proves material excess recovery delay.
     pub async fn connect_mesh_stream(
         &self,
         flow: FlowKey,

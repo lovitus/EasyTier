@@ -1533,7 +1533,6 @@ impl NicCtx {
         });
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", unix))]
     fn do_forward_peers_and_policy_to_nic(
         &mut self,
         mut sink: Pin<Box<dyn ZCPacketSink>>,

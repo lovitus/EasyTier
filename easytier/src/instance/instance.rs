@@ -1348,6 +1348,14 @@ impl Instance {
 
         #[cfg(feature = "leaf-policy-proxy")]
         {
+            // This relay and all built-in virtual ingress candidates are
+            // intentionally registered for every feature-on instance, even when
+            // this node has no local policy document. A remote portless mesh actor
+            // must be able to select this node as an egress without requiring an
+            // unrelated local policy switch. Registration only reserves the
+            // userspace mesh ports; SocksEgressManager still starts HEV lazily on
+            // the first built-in TCP/UDP request. Do not make this conditional on
+            // local policy configuration as a disabled-mode optimization.
             let socks_egress = Arc::new(SocksEgressManager::new());
             let endpoint_provider: Arc<dyn crate::policy_proxy::LocalSocksEndpointProvider> =
                 socks_egress.clone();
