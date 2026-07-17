@@ -4,13 +4,14 @@ use smoltcp::{
     phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken},
     time::Instant,
 };
-use tokio::sync::mpsc::{channel, error::TrySendError, Permit, Receiver, Sender};
+use tokio::sync::mpsc::{channel, error::TrySendError, OwnedPermit, Permit, Receiver, Sender};
 
 use crate::packet::AnyIpPktFrame;
 
 pub(super) struct VirtualDevice {
     in_buf: Receiver<Vec<u8>>,
     out_buf: Sender<AnyIpPktFrame>,
+    reserved_output: Option<OwnedPermit<AnyIpPktFrame>>,
     output_blocked_this_poll: bool,
 }
 
@@ -24,6 +25,7 @@ impl VirtualDevice {
             Self {
                 in_buf: iface_ingress_rx,
                 out_buf: iface_egress_tx,
+                reserved_output: None,
                 output_blocked_this_poll: false,
             },
             iface_ingress_tx,
@@ -42,23 +44,33 @@ impl VirtualDevice {
         self.out_buf.is_closed()
     }
 
-    pub(super) async fn wait_output_capacity(&self) -> std::io::Result<()> {
-        let permit = self
-            .out_buf
-            .reserve()
-            .await
-            .map_err(|_| Error::new(ErrorKind::BrokenPipe, "stack output channel is closed"))?;
-        drop(permit);
+    pub(super) async fn wait_output_capacity(&mut self) -> std::io::Result<()> {
+        if self.reserved_output.is_some() {
+            return Ok(());
+        }
+
+        self.reserved_output =
+            Some(self.out_buf.clone().reserve_owned().await.map_err(|_| {
+                Error::new(ErrorKind::BrokenPipe, "stack output channel is closed")
+            })?);
         Ok(())
+    }
+
+    pub(super) fn release_unused_output_permit(&mut self) {
+        drop(self.reserved_output.take());
     }
 
     pub(super) async fn wait_output_closed(&self) {
         self.out_buf.closed().await;
     }
 
-    fn reserve_output(&mut self) -> Option<Permit<'_, AnyIpPktFrame>> {
+    fn reserve_output(&mut self) -> Option<VirtualOutputPermit<'_>> {
+        if let Some(permit) = self.reserved_output.take() {
+            return Some(VirtualOutputPermit::Owned(permit));
+        }
+
         match self.out_buf.try_reserve() {
-            Ok(permit) => Some(permit),
+            Ok(permit) => Some(VirtualOutputPermit::Borrowed(permit)),
             Err(TrySendError::Full(_)) => {
                 // Keep this sticky for the complete smoltcp poll. Capacity may be
                 // restored before the runner examines it, but the interrupted poll
@@ -81,17 +93,30 @@ impl Device for VirtualDevice {
         let Self {
             in_buf,
             out_buf,
+            reserved_output,
             output_blocked_this_poll,
         } = self;
-        let permit = match out_buf.try_reserve() {
-            Ok(permit) => permit,
-            Err(TrySendError::Full(_)) => {
-                *output_blocked_this_poll = true;
+        let permit = if let Some(permit) = reserved_output.take() {
+            VirtualOutputPermit::Owned(permit)
+        } else {
+            match out_buf.try_reserve() {
+                Ok(permit) => VirtualOutputPermit::Borrowed(permit),
+                Err(TrySendError::Full(_)) => {
+                    *output_blocked_this_poll = true;
+                    return None;
+                }
+                Err(TrySendError::Closed(_)) => return None,
+            }
+        };
+        let buffer = match in_buf.try_recv() {
+            Ok(buffer) => buffer,
+            Err(_) => {
+                if let VirtualOutputPermit::Owned(permit) = permit {
+                    *reserved_output = Some(permit);
+                }
                 return None;
             }
-            Err(TrySendError::Closed(_)) => return None,
         };
-        let buffer = in_buf.try_recv().ok()?;
 
         Some((Self::RxToken { buffer }, Self::TxToken { permit }))
     }
@@ -121,8 +146,13 @@ impl RxToken for VirtualRxToken {
     }
 }
 
+enum VirtualOutputPermit<'a> {
+    Borrowed(Permit<'a, AnyIpPktFrame>),
+    Owned(OwnedPermit<AnyIpPktFrame>),
+}
+
 pub(super) struct VirtualTxToken<'a> {
-    permit: Permit<'a, Vec<u8>>,
+    permit: VirtualOutputPermit<'a>,
 }
 
 impl<'a> TxToken for VirtualTxToken<'a> {
@@ -132,7 +162,10 @@ impl<'a> TxToken for VirtualTxToken<'a> {
     {
         let mut buffer = vec![0u8; len];
         let result = f(&mut buffer);
-        self.permit.send(buffer);
+        match self.permit {
+            VirtualOutputPermit::Borrowed(permit) => permit.send(buffer),
+            VirtualOutputPermit::Owned(permit) => drop(permit.send(buffer)),
+        }
         result
     }
 }
@@ -140,7 +173,9 @@ impl<'a> TxToken for VirtualTxToken<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{future::poll_fn, poll};
     use std::time::Duration as StdDuration;
+    use tokio_util::sync::PollSender;
 
     #[tokio::test]
     async fn full_output_preserves_ingress_until_capacity_returns() {
@@ -199,5 +234,56 @@ mod tests {
             drop(tx);
         }
         assert_eq!(packets, vec![vec![1], vec![2], vec![3]]);
+    }
+
+    #[tokio::test]
+    async fn capacity_wait_makes_progress_with_queued_output_sender() {
+        let (out_tx, mut out_rx) = channel(1);
+        out_tx.send(vec![0xaa]).await.unwrap();
+        let (mut device, in_tx) = VirtualDevice::new(out_tx.clone(), 1);
+        in_tx.send(vec![1, 2, 3]).await.unwrap();
+
+        device.begin_poll();
+        assert!(device.receive(Instant::from_millis(0)).is_none());
+        assert!(device.output_blocked_this_poll());
+
+        // Queue the runner first, then a second output producer that models the
+        // UDP PollSender sharing stack_tx. Tokio's bounded channel assigns newly
+        // released capacity to queued reserve calls in FIFO order.
+        let mut runner_wait = Box::pin(device.wait_output_capacity());
+        assert!(poll!(runner_wait.as_mut()).is_pending());
+
+        let mut competing_sender = PollSender::new(out_tx);
+        let mut competing_reserve = Box::pin(poll_fn(|cx| competing_sender.poll_reserve(cx)));
+        assert!(poll!(competing_reserve.as_mut()).is_pending());
+
+        assert_eq!(out_rx.recv().await.unwrap(), vec![0xaa]);
+        runner_wait.await.unwrap();
+
+        device.begin_poll();
+        assert!(
+            device.receive(Instant::from_millis(0)).is_some(),
+            "capacity granted to the runner must produce smoltcp progress before a queued sender takes it"
+        );
+    }
+
+    #[tokio::test]
+    async fn unused_reserved_output_capacity_is_released_after_poll() {
+        let (out_tx, _out_rx) = channel(1);
+        let (mut device, _in_tx) = VirtualDevice::new(out_tx.clone(), 1);
+
+        device.wait_output_capacity().await.unwrap();
+        assert_eq!(
+            out_tx.capacity(),
+            0,
+            "runner must retain the granted permit"
+        );
+
+        device.release_unused_output_permit();
+        assert_eq!(
+            out_tx.capacity(),
+            1,
+            "an idle poll must not permanently reduce output capacity"
+        );
     }
 }
