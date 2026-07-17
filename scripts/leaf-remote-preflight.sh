@@ -27,13 +27,15 @@ readonly -a BUILD_SSH_OPTIONS=(
 
 readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   core::tests::check_config_fully_parses_policy_only_input_like_mihomo_test_mode
-  gateway::socks5::dataplane::tests::policy_kcp_endpoint_is_isolated_from_user_socks_endpoint
   peers::peer_ospf_route::tests::peer_removal_restarts_remaining_generation_and_invalidates_remote_cache
   policy_proxy::mesh_udp_relay::tests
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
 )
 readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   leaf_config::tests::preserves_unresolved_domain_contract_for_direct_socks_and_fallback
+)
+readonly -a DEFAULT_NETSTACK_TEST_FILTERS=(
+  stack::tests::full_ingress_channel_wakes_waiting_stack_sender
 )
 
 usage() {
@@ -87,7 +89,7 @@ check_builder_idle() {
 run_no_run_build() {
   local exit_code=0
   ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
-    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --lib --features easytier/leaf-policy-proxy > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
+    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --package netstack-smoltcp --lib --features easytier/leaf-policy-proxy > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
     || exit_code=$?
 
   ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
@@ -140,8 +142,11 @@ check_builder_idle
 run_no_run_build
 readonly EASYTIER_TEST_BINARY="$(resolve_test_binary easytier)"
 readonly POLICY_TEST_BINARY="$(resolve_test_binary easytier_policy)"
+readonly NETSTACK_TEST_BINARY="$(resolve_test_binary netstack_smoltcp)"
 printf 'Using exact EasyTier library test binary: %s\n' "$EASYTIER_TEST_BINARY"
 printf 'Using exact policy library test binary: %s\n' "$POLICY_TEST_BINARY"
+printf 'Using exact netstack library test binary: %s\n' "$NETSTACK_TEST_BINARY"
 run_focused_tests "$EASYTIER_TEST_BINARY" reset "${DEFAULT_EASYTIER_TEST_FILTERS[@]}" "$@"
+run_focused_tests "$NETSTACK_TEST_BINARY" append "${DEFAULT_NETSTACK_TEST_FILTERS[@]}"
 run_focused_tests "$POLICY_TEST_BINARY" append "${DEFAULT_POLICY_TEST_FILTERS[@]}"
 printf 'Leaf/HEV remote preflight passed. GitHub release artifacts were not built.\n'
