@@ -45,6 +45,15 @@ readonly -a DEFAULT_NETSTACK_TEST_FILTERS=(
   device::tests::bounded_ingress_backpressures_and_preserves_order
   device::tests::capacity_wait_makes_progress_with_queued_output_sender
   device::tests::unused_reserved_output_capacity_is_released_after_poll
+  tcp::tests::socket_and_stream_capacity_and_platform_budget_are_explicit
+  tcp::tests::empty_queue_allocates_no_payload_and_releases_partial_budget
+  tcp::tests::stream_write_waits_for_global_budget_and_wakes_on_release
+  tcp::tests::cancelled_write_retains_at_most_one_permit_until_stream_reset
+  tcp::tests::saturated_write_uses_partial_capacity_without_large_head_waiter
+  tcp::tests::socket_close_cancels_pending_global_budget_wait
+  tcp::tests::per_connection_limit_backpressures_and_wakes_writer
+  tcp::tests::received_bytes_remain_readable_before_half_close_eof
+  tcp::tests::listener_connection_queue_is_bounded_like_ingress
   tcp::tests::runner_exits_when_output_receiver_is_dropped
   tcp::tests::immediate_poll_path_keeps_runtime_cooperative
 )
