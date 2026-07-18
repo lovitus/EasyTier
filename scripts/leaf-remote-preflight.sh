@@ -43,6 +43,8 @@ readonly -a DEFAULT_NETSTACK_TEST_FILTERS=(
   stack::tests::full_ingress_channel_wakes_waiting_stack_sender
   device::tests::full_output_preserves_ingress_until_capacity_returns
   device::tests::bounded_ingress_backpressures_and_preserves_order
+  device::tests::capacity_wait_makes_progress_with_queued_output_sender
+  device::tests::unused_reserved_output_capacity_is_released_after_poll
   tcp::tests::runner_exits_when_output_receiver_is_dropped
   tcp::tests::immediate_poll_path_keeps_runtime_cooperative
 )

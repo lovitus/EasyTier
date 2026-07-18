@@ -211,6 +211,7 @@ impl TcpListenerRunner {
             let before_poll = Instant::now();
             device.begin_poll();
             let updated_sockets = iface.poll(before_poll, &mut device, &mut socket_set);
+            device.release_unused_output_permit();
             if matches!(
                 updated_sockets,
                 smoltcp::iface::PollResult::SocketStateChanged
