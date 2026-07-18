@@ -234,10 +234,12 @@ policy:
     advanced_existing_help: 当前文档已使用实验性字段；界面会继续显示并完整保留，保存前请确认其首版限制。
     advanced_features_required: 解锁实验性高级能力后才能配置自定义在线数据源。
     name: 名称
+    proxy_type: 代理类型
     path: 路径
     server: 服务器
     port: 端口
     credentials: 认证信息
+    cipher: 加密方法
     instance_id: Mesh 实例 ID（可选）
     virtual_ip: Mesh 虚拟 IP（可选）
     group_type: 分组类型

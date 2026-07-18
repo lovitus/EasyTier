@@ -40,11 +40,44 @@ proxies:
     via: mesh
     udp: true
 
+  # Native stream-protocol examples. Keep these commented until credentials and
+  # endpoints are replaced. To route one through mesh, put mesh-hop before its
+  # actor name in a chain; do not change the protocol actor to via: mesh.
+  # trojan-native:
+  #   type: trojan
+  #   server: edge.example.com
+  #   port: 443
+  #   password: change-me
+  #   tls: { server-name: cdn.example.com }
+  #   udp: true
+  # vmess-ws:
+  #   type: vmess
+  #   server: edge.example.com
+  #   port: 80
+  #   uuid: 00000000-0000-0000-0000-000000000000
+  #   alter-id: 0
+  #   cipher: auto
+  #   transport: { type: websocket, path: /vmess, headers: { Host: cdn.example.com } }
+  #   udp: true
+  # vless-wss:
+  #   type: vless
+  #   server: edge.example.com
+  #   port: 443
+  #   uuid: 00000000-0000-0000-0000-000000000000
+  #   transport: { type: websocket, path: /vless, headers: { Host: cdn.example.com } }
+  #   tls: { server-name: cdn.example.com }
+  #   udp: true
+
 groups:
   # TCP only for the v1 support claim. Leaf SOCKS UDP does not reuse chain transport.
   peer-chain:
     type: chain
     members: [mesh-hop, peer-local-socks]
+
+  # The same shape composes a native protocol through mesh:
+  # vless-through-mesh:
+  #   type: chain
+  #   members: [mesh-hop, vless-wss]
 
   # No DIRECT member: selected overseas traffic fails closed when both paths fail.
   overseas-fallback:

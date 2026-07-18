@@ -165,6 +165,30 @@ pub fn compile_leaf_config_with_options(
                     .expect("validated Shadowsocks port") as u16,
                 proxy,
             )),
+            ProxyKind::Trojan => outbounds.extend(crate::trojan::compile_outbounds(
+                name,
+                settings["address"]
+                    .as_str()
+                    .expect("validated Trojan address"),
+                settings["port"].as_u64().expect("validated Trojan port") as u16,
+                proxy,
+            )),
+            ProxyKind::Vmess => outbounds.extend(crate::vmess::compile_outbounds(
+                name,
+                settings["address"]
+                    .as_str()
+                    .expect("validated VMess address"),
+                settings["port"].as_u64().expect("validated VMess port") as u16,
+                proxy,
+            )),
+            ProxyKind::Vless => outbounds.extend(crate::vless::compile_outbounds(
+                name,
+                settings["address"]
+                    .as_str()
+                    .expect("validated VLESS address"),
+                settings["port"].as_u64().expect("validated VLESS port") as u16,
+                proxy,
+            )),
             ProxyKind::Http => unreachable!("policy validation rejects HTTP outbound in v1"),
         }
     }
@@ -692,6 +716,71 @@ mod tests {
             .as_array()
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn compiles_trojan_vmess_and_vless_as_private_transport_chains() {
+        let source = r#"
+version: 1
+proxies:
+  trojan:
+    type: trojan
+    server: edge.example
+    port: 443
+    password: secret
+    tls: { server-name: trojan.example }
+  vmess:
+    type: vmess
+    server: edge.example
+    port: 80
+    uuid: 00000000-0000-0000-0000-000000000001
+    alter-id: 0
+    cipher: auto
+    transport: { type: websocket, path: /vmess, headers: { Host: vmess.example } }
+  vless:
+    type: vless
+    server: edge.example
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000002
+    transport: { type: websocket, path: /vless }
+    tls: { server-name: vless.example }
+rules: ["MATCH,trojan"]
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        let config = compile_leaf_config(
+            &revision,
+            7,
+            Path::new("."),
+            &Unresolved,
+            &["1.1.1.1".parse().unwrap()],
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        let outbounds = config["outbounds"].as_array().unwrap();
+        for name in ["trojan", "vmess", "vless"] {
+            let public = outbounds
+                .iter()
+                .find(|outbound| outbound["tag"] == name)
+                .unwrap();
+            assert_eq!(public["protocol"], "chain");
+        }
+        assert!(outbounds.iter().any(|outbound| {
+            outbound["tag"] == "@et:vmess:protocol"
+                && outbound["settings"]["security"]
+                    == if cfg!(any(
+                        target_arch = "x86_64",
+                        target_arch = "aarch64",
+                        target_arch = "s390x"
+                    )) {
+                        "aes-128-gcm"
+                    } else {
+                        "chacha20-poly1305"
+                    }
+        }));
+        assert!(outbounds.iter().any(|outbound| {
+            outbound["tag"] == "@et:vless:tls"
+                && outbound["settings"]["serverName"] == "vless.example"
+        }));
     }
 
     #[test]

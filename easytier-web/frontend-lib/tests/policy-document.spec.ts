@@ -37,6 +37,9 @@ describe('policy visual document codec', () => {
     expect(DEFAULT_POLICY_TEMPLATE).toContain('virtual-ip: 10.144.144.2')
     expect(DEFAULT_POLICY_TEMPLATE).toContain('server: 127.0.0.1')
     expect(DEFAULT_POLICY_TEMPLATE).toContain('port: 7890')
+    expect(DEFAULT_POLICY_TEMPLATE).toContain('type: shadowsocks')
+    expect(DEFAULT_POLICY_TEMPLATE).toContain('cipher: aes-256-gcm')
+    expect(DEFAULT_POLICY_TEMPLATE).toContain('udp: uot-v2')
     expect(DEFAULT_POLICY_TEMPLATE).toContain('type: chain')
     expect(DEFAULT_POLICY_TEMPLATE).toContain('members: [mesh-exit, native-socks, DIRECT]')
     expect(document.rules.filter(rule => rule.type === 'GEOIP').every(rule => rule.noResolve)).toBe(true)
@@ -170,6 +173,7 @@ rules: ["MATCH,DIRECT"]
       udp: false,
       username: '',
       password: '',
+      cipher: '',
     })
 
     const serialized = serializePolicyDocument(document)
@@ -242,6 +246,7 @@ rules: ["MATCH,broken"]
       udp: false,
       username: '',
       password: '',
+      cipher: '',
     }
     document.proxies.push(proxy, { ...proxy, port: 1081 })
 
@@ -261,8 +266,115 @@ rules: ["MATCH,broken"]
       udp: false,
       username: '',
       password: '',
+      cipher: '',
     })
 
     expect(() => serializePolicyDocument(document)).toThrow('proxy name __proto__ is reserved')
+  })
+
+  it('round-trips Shadowsocks cipher, password, native UDP, and UoT v2', () => {
+    for (const udp of ['off', 'native', 'uot-v2']) {
+      const source = `
+version: 1
+proxies:
+  ss:
+    type: shadowsocks
+    server: 203.0.113.10
+    port: 8388
+    via: native
+    cipher: aes-256-gcm
+    password: secret
+    udp: ${udp}
+rules: ["MATCH,ss"]
+`
+      const document = parsePolicyDocument(source)
+      expect(document.proxies[0]).toMatchObject({
+        type: 'shadowsocks',
+        address: '203.0.113.10',
+        port: 8388,
+        via: 'native',
+        cipher: 'aes-256-gcm',
+        password: 'secret',
+        udp,
+      })
+      expect(parsePolicyDocument(serializePolicyDocument(document))).toEqual(document)
+    }
+  })
+
+  it('normalizes legacy Shadowsocks UDP booleans and rejects invalid SS-only fields', () => {
+    const legacy = parsePolicyDocument(`
+version: 1
+proxies:
+  ss:
+    type: shadowsocks
+    server: 203.0.113.10
+    port: 8388
+    cipher: chacha20-ietf-poly1305
+    password: secret
+    udp: true
+rules: ["MATCH,ss"]
+`)
+    expect(legacy.proxies[0].udp).toBe('native')
+    expect(serializePolicyDocument(legacy)).toContain('udp: native')
+
+    expect(() => parsePolicyDocument(`
+version: 1
+proxies:
+  ss:
+    type: shadowsocks
+    server: { virtual-ip: 10.44.0.8 }
+    via: mesh
+    cipher: aes-256-gcm
+    password: secret
+rules: ["MATCH,ss"]
+`)).toThrow('via must be native')
+  })
+
+  it('round-trips Trojan, VMess WS, and VLESS WSS without exposing internal Leaf actors', () => {
+    const source = `
+version: 1
+proxies:
+  trojan:
+    type: trojan
+    server: edge.example
+    port: 443
+    password: secret
+    tls: { server-name: trojan.example }
+    udp: true
+  vmess:
+    type: vmess
+    server: edge.example
+    port: 80
+    uuid: 00000000-0000-0000-0000-000000000001
+    alter-id: 0
+    cipher: auto
+    transport: { type: websocket, path: /vmess, headers: { Host: vmess.example } }
+  vless:
+    type: vless
+    server: edge.example
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000002
+    transport: { type: websocket, path: /vless, headers: { Host: vless.example } }
+    tls: { server-name: vless.example }
+groups:
+  through-mesh:
+    type: chain
+    members: [mesh-exit, vless]
+rules: ["MATCH,through-mesh"]
+`
+    const document = parsePolicyDocument(source)
+    expect(document.proxies.map(proxy => proxy.type)).toEqual(['trojan', 'vmess', 'vless'])
+    expect(document.proxies[1]).toMatchObject({
+      cipher: 'auto',
+      alterId: 0,
+      transport: 'websocket',
+      wsPath: '/vmess',
+      wsHeaders: { Host: 'vmess.example' },
+    })
+    expect(document.proxies[2]).toMatchObject({
+      tlsEnabled: true,
+      tlsServerName: 'vless.example',
+    })
+    expect(parsePolicyDocument(serializePolicyDocument(document))).toEqual(document)
   })
 })

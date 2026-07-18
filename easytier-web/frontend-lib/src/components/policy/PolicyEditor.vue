@@ -18,6 +18,8 @@ import type { NetworkConfig } from '../../types/network'
 import { canEnablePolicyProxy, policyRuntimeNotice } from './policyRuntimeSupport'
 import {
   DEFAULT_POLICY_TEMPLATE,
+  POLICY_SHADOWSOCKS_CIPHERS,
+  POLICY_VMESS_CIPHERS,
   emptyPolicyDocument,
   parsePolicyDocument,
   policyRuleSupportsNoResolve,
@@ -25,6 +27,7 @@ import {
   type PolicyEditorDocument,
   type PolicyGroupRow,
   type PolicyProxyRow,
+  type PolicyProxyKind,
   type PolicyRuleRow,
   type PolicyRuleSetRow,
   type PolicyRuleSetKind,
@@ -58,6 +61,8 @@ const sourceOptions = computed(() => [
   { label: t('policy.editor.file'), value: 'file' },
 ])
 const proxyViaOptions = ['mesh', 'native']
+const proxyTypeOptions: PolicyProxyKind[] = ['socks5', 'shadowsocks', 'trojan', 'vmess', 'vless', 'http']
+const shadowsocksUdpOptions = ['off', 'native', 'uot-v2']
 const groupTypeOptions = ['fallback', 'chain']
 const outboundOptions = computed(() => (outboundInfo.value?.interfaces ?? []).map(item => ({
   label: item.addresses.length
@@ -189,8 +194,69 @@ function addProxy() {
     udp: true,
     username: '',
     password: '',
+    cipher: '',
+    uuid: '',
+    alterId: 0,
+    transport: 'tcp',
+    wsPath: '/',
+    wsHeaders: {},
+    tlsEnabled: false,
+    tlsServerName: '',
+    tlsInsecure: false,
   }
   document.value.proxies.push(row)
+}
+
+function updateProxyType(row: PolicyProxyRow, value: PolicyProxyKind) {
+  row.type = value
+  if (value === 'shadowsocks') {
+    row.via = 'native'
+    row.instanceId = ''
+    row.virtualIp = ''
+    row.username = ''
+    row.cipher ||= 'aes-256-gcm'
+    row.udp = typeof row.udp === 'boolean' ? (row.udp ? 'native' : 'off') : row.udp
+    return
+  }
+  if (['trojan', 'vmess', 'vless'].includes(value)) {
+    row.via = 'native'
+    row.instanceId = ''
+    row.virtualIp = ''
+    row.username = ''
+    row.udp = typeof row.udp === 'string' ? row.udp === 'native' : row.udp
+    row.transport ||= 'tcp'
+    row.wsPath ||= '/'
+    row.wsHeaders ||= {}
+    row.tlsEnabled = value === 'trojan' || Boolean(row.tlsEnabled)
+    row.alterId = 0
+    row.cipher = value === 'vmess' ? (row.cipher || 'auto') : ''
+    if (value !== 'trojan') row.password = ''
+    return
+  }
+  row.cipher = ''
+  row.uuid = ''
+  row.transport = 'tcp'
+  row.wsPath = '/'
+  row.wsHeaders = {}
+  row.tlsEnabled = false
+  row.tlsServerName = ''
+  row.tlsInsecure = false
+  row.udp = typeof row.udp === 'string' ? row.udp === 'native' : row.udp
+  if (value === 'http') row.udp = false
+}
+
+function proxyViaOptionsFor(row: PolicyProxyRow) {
+  return row.type === 'socks5' ? proxyViaOptions : ['native']
+}
+
+function proxyCipherOptions(row: PolicyProxyRow) {
+  return row.type === 'vmess' ? [...POLICY_VMESS_CIPHERS] : [...POLICY_SHADOWSOCKS_CIPHERS]
+}
+
+function updateWebSocketHost(row: PolicyProxyRow, value: string) {
+  row.wsHeaders ||= {}
+  if (value.trim()) row.wsHeaders.Host = value.trim()
+  else delete row.wsHeaders.Host
 }
 
 function addGroup() {
@@ -443,8 +509,14 @@ onMounted(() => {
                       :data-testid="`policy-proxy-name-${index}`" />
                   </div>
                   <div class="flex flex-col gap-2">
+                    <label class="font-semibold">{{ t('policy.editor.proxy_type') }}</label>
+                    <Select :model-value="data.type" :options="proxyTypeOptions" class="w-full"
+                      :data-testid="`policy-proxy-type-${index}`"
+                      @update:model-value="updateProxyType(data, $event as PolicyProxyKind)" />
+                  </div>
+                  <div class="flex flex-col gap-2">
                     <label class="font-semibold">{{ t('policy.editor.path') }}</label>
-                    <Select v-model="data.via" :options="proxyViaOptions" class="w-full" />
+                    <Select v-model="data.via" :options="proxyViaOptionsFor(data)" class="w-full" />
                   </div>
                   <div class="flex flex-col gap-2 sm:col-span-2">
                     <label class="font-semibold">{{ t('policy.editor.server') }}</label>
@@ -467,18 +539,59 @@ onMounted(() => {
                   </div>
                   <div class="flex flex-col gap-2">
                     <span class="font-semibold">UDP</span>
-                    <div class="flex min-h-10 items-center gap-2">
+                    <Select v-if="data.type === 'shadowsocks'" v-model="data.udp"
+                      :options="shadowsocksUdpOptions" class="w-full"
+                      :data-testid="`policy-proxy-udp-mode-${index}`" />
+                    <div v-else class="flex min-h-10 items-center gap-2">
                       <Checkbox :input-id="`policy_proxy_udp_${index}`" v-model="data.udp" binary />
                       <label :for="`policy_proxy_udp_${index}`">{{ t('policy.editor.udp_capable') }}</label>
                     </div>
                   </div>
-                  <div class="flex flex-col gap-2 sm:col-span-2">
+                  <div v-if="['shadowsocks', 'vmess'].includes(data.type)" class="flex flex-col gap-2">
+                    <label class="font-semibold">{{ t('policy.editor.cipher') }}</label>
+                    <Select v-model="data.cipher" :options="proxyCipherOptions(data)" class="w-full" />
+                  </div>
+                  <div v-if="['socks5', 'http', 'shadowsocks', 'trojan'].includes(data.type)"
+                    class="flex flex-col gap-2" :class="['shadowsocks', 'trojan'].includes(data.type) ? '' : 'sm:col-span-2'">
                     <label class="font-semibold">{{ t('policy.editor.credentials') }}</label>
-                    <div class="grid gap-2 sm:grid-cols-2">
+                    <div v-if="['socks5', 'http'].includes(data.type)" class="grid gap-2 sm:grid-cols-2">
                       <InputText v-model="data.username" class="w-full" :placeholder="t('username')" />
                       <Password v-model="data.password" class="w-full" :placeholder="t('password')" :feedback="false" toggle-mask />
                     </div>
+                    <Password v-else v-model="data.password" class="w-full" :placeholder="t('password')" :feedback="false" toggle-mask />
                   </div>
+                  <div v-if="['vmess', 'vless'].includes(data.type)" class="flex flex-col gap-2 sm:col-span-2">
+                    <label class="font-semibold">UUID</label>
+                    <InputText v-model="data.uuid" class="w-full" placeholder="00000000-0000-0000-0000-000000000000" />
+                  </div>
+                  <template v-if="['trojan', 'vmess', 'vless'].includes(data.type)">
+                    <div class="flex flex-col gap-2">
+                      <label class="font-semibold">Transport</label>
+                      <Select v-model="data.transport" :options="['tcp', 'websocket']" class="w-full" />
+                    </div>
+                    <div v-if="data.transport === 'websocket'" class="flex flex-col gap-2">
+                      <label class="font-semibold">WebSocket path</label>
+                      <InputText v-model="data.wsPath" class="w-full" placeholder="/" />
+                    </div>
+                    <div v-if="data.transport === 'websocket'" class="flex flex-col gap-2 sm:col-span-2">
+                      <label class="font-semibold">WebSocket Host</label>
+                      <InputText :model-value="data.wsHeaders?.Host ?? ''" class="w-full"
+                        @update:model-value="updateWebSocketHost(data, String($event))" />
+                    </div>
+                    <div class="flex min-h-10 items-center gap-2">
+                      <Checkbox :input-id="`policy_proxy_tls_${index}`" v-model="data.tlsEnabled"
+                        :disabled="data.type === 'trojan'" binary />
+                      <label :for="`policy_proxy_tls_${index}`">TLS</label>
+                    </div>
+                    <div v-if="data.tlsEnabled" class="flex flex-col gap-2">
+                      <label class="font-semibold">TLS server name (SNI)</label>
+                      <InputText v-model="data.tlsServerName" class="w-full" placeholder="cdn.example.com" />
+                    </div>
+                    <div v-if="data.tlsEnabled" class="flex min-h-10 items-center gap-2">
+                      <Checkbox :input-id="`policy_proxy_tls_insecure_${index}`" v-model="data.tlsInsecure" binary />
+                      <label :for="`policy_proxy_tls_insecure_${index}`">Allow insecure TLS</label>
+                    </div>
+                  </template>
                 </div>
               </article>
               <Button icon="pi pi-plus" :label="t('policy.editor.add_node')" class="self-start" @click="addProxy" />

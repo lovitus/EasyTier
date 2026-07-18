@@ -87,11 +87,10 @@ const SelectStub = defineComponent({
       ...attrs,
       value: props.modelValue,
       onChange: (event: Event) => emit('update:modelValue', (event.target as HTMLSelectElement).value),
-    }, [
-      h('option', { value: props.modelValue }, props.modelValue),
-      h('option', { value: 'GEOIP' }, 'GEOIP'),
-      h('option', { value: 'IP-CIDR' }, 'IP-CIDR'),
-    ])
+    }, (props.options as unknown[] | undefined ?? [props.modelValue]).map(option => {
+      const value = typeof option === 'string' ? option : String((option as { value: unknown }).value)
+      return h('option', { value }, value)
+    }))
   },
 })
 
@@ -162,6 +161,66 @@ describe('PolicyEditor', () => {
     expect(model.policy_config_inline).toContain('via: mesh')
     expect(model.policy_config_inline).toContain('udp: true')
     expect(model.policy_config_inline).not.toContain('port:')
+  })
+
+  it('edits Shadowsocks cipher and UoT without dropping protocol fields', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = `version: 1
+proxies:
+  ss:
+    type: shadowsocks
+    server: 203.0.113.10
+    port: 8388
+    via: native
+    cipher: aes-256-gcm
+    password: secret
+    udp: native
+rules: ["MATCH,ss"]
+`
+    const { model, wrapper } = mountEditor(config)
+
+    expect(wrapper.find<HTMLSelectElement>('[data-testid="policy-proxy-type-0"]').element.value).toBe('shadowsocks')
+    await wrapper.find<HTMLSelectElement>('[data-testid="policy-proxy-udp-mode-0"]').setValue('uot-v2')
+    await nextTick()
+
+    expect(model.policy_config_inline).toContain('type: shadowsocks')
+    expect(model.policy_config_inline).toContain('cipher: aes-256-gcm')
+    expect(model.policy_config_inline).toContain('password: secret')
+    expect(model.policy_config_inline).toContain('udp: uot-v2')
+    expect(model.policy_config_inline).toContain('via: native')
+  })
+
+  it('edits VMess WebSocket and TLS fields without changing group composition', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = `version: 1
+proxies:
+  vmess:
+    type: vmess
+    server: edge.example
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000001
+    alter-id: 0
+    cipher: auto
+    transport: { type: websocket, path: /vmess, headers: { Host: cdn.example } }
+    tls: { server-name: cdn.example }
+groups:
+  through-mesh: { type: chain, members: [mesh-exit, vmess] }
+rules: ["MATCH,through-mesh"]
+`
+    const { model, wrapper } = mountEditor(config)
+
+    expect(wrapper.find<HTMLSelectElement>('[data-testid="policy-proxy-type-0"]').element.value).toBe('vmess')
+    expect(wrapper.text()).toContain('WebSocket path')
+    await nextTick()
+
+    expect(model.policy_config_inline).toContain('type: vmess')
+    expect(model.policy_config_inline).toContain('cipher: auto')
+    expect(model.policy_config_inline).toContain('path: /vmess')
+    expect(model.policy_config_inline).toContain('server-name: cdn.example')
+    expect(model.policy_config_inline).toContain('members:')
+    expect(model.policy_config_inline).toContain('mesh-exit')
   })
 
   it('edits direct and proxy DNS sets without losing ordered policy rules', async () => {

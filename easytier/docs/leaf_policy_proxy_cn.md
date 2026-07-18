@@ -2,7 +2,7 @@
 
 本文面向 EasyTier Leaf 策略路由 v1。当前正式验证范围是 Linux 和 Android，配置格式为 EasyTier 自己的严格子集，不是 Mihomo、Leaf 或 sing-box 完整配置兼容层。
 
-上一轮完整实机验证候选为 `824ac5a1d47d568113a7e2190d57fecf049dd47b`。Linux 与 Android 已验证 mesh 共存、DIRECT/REJECT、GeoSite/GeoIP、内置 HEV、TCP、UDP/UoT、Wi-Fi/路由恢复、worker 崩溃恢复、配置保留和正常清理。本节新增的 Shadowsocks/UoT v2 候选及其精确制品结果单独记录在 [验证报告](leaf_shadowsocks_uot_validation_report_cn.md)。chain/fallback 的已验证安全边界是：TCP 可以使用 chain/fallback；UDP 使用显式 `NETWORK,udp` 规则指向已验证的 actor，不依赖 payload 超时后的自动回退。
+上一轮完整实机验证候选为 `824ac5a1d47d568113a7e2190d57fecf049dd47b`。Linux 与 Android 已验证 mesh 共存、DIRECT/REJECT、GeoSite/GeoIP、内置 HEV、TCP、UDP/UoT、Wi-Fi/路由恢复、worker 崩溃恢复、配置保留和正常清理。Shadowsocks/UoT v2 的精确制品结果单独记录在 [验证报告](leaf_shadowsocks_uot_validation_report_cn.md)。Trojan、VMess、VLESS 的配置字段已经实现，但正式可用性和性能结论必须以对应精确候选报告为准。chain/fallback 的已验证安全边界是：TCP 可以使用 chain/fallback；UDP 使用显式 `NETWORK,udp` 规则指向已验证的 actor，不依赖 payload 超时后的自动回退。
 
 ## 1. 组件与流量关系
 
@@ -220,6 +220,92 @@ groups:
 首期 cipher 为 `aes-128-gcm`、`aes-256-gcm`、`chacha20-poly1305` 和
 `chacha20-ietf-poly1305`。Shadowsocks 不使用 `username`。
 
+锁定 Leaf 只实现传统 Shadowsocks AEAD 数据路径，不支持 `2022-blake3-*`。配置解析器不会接受 SS2022 cipher，不能用传统 AEAD 成功结果替代 SS2022 证据。
+
+### 3.5 Trojan、VMess 与 VLESS
+
+三种协议是独立的 Leaf actor 编译器，不修改 EasyTier mesh 数据面。TLS 和 WebSocket 会编译为私有 Leaf actor，并由一个保持用户名称不变的内部 chain 包装；用户 group 仍只引用自己配置的名称。
+
+Trojan TLS：
+
+```yaml
+proxies:
+  trojan-native:
+    type: trojan
+    server: edge.example.com
+    port: 443
+    password: change-me
+    tls:
+      server-name: cdn.example.com
+      insecure: false
+    udp: true
+```
+
+Trojan 必须配置 `password` 和 `tls`。`server-name` 省略时使用 `server`；生产环境不建议启用 `insecure`。
+
+VMess WebSocket：
+
+```yaml
+proxies:
+  vmess-ws:
+    type: vmess
+    server: edge.example.com
+    port: 80
+    uuid: 00000000-0000-0000-0000-000000000000
+    alter-id: 0
+    cipher: auto
+    transport:
+      type: websocket
+      path: /vmess
+      headers:
+        Host: cdn.example.com
+    udp: true
+```
+
+VMess 只接受 AEAD `alter-id: 0`。`cipher` 支持 `auto`、`aes-128-gcm`、`chacha20-poly1305` 和 `chacha20-ietf-poly1305`；`auto` 与 Mihomo 一致，在 x86_64、aarch64、s390x 使用 AES-128-GCM，其他目标使用 ChaCha20-Poly1305。
+
+VLESS WebSocket + TLS：
+
+```yaml
+proxies:
+  vless-wss:
+    type: vless
+    server: edge.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+    transport:
+      type: websocket
+      path: /vless
+      headers:
+        Host: cdn.example.com
+    tls:
+      server-name: cdn.example.com
+      insecure: false
+    udp: true
+```
+
+WebSocket `path` 必须以 `/` 开头，`headers` 是字符串 mapping。当前可视化编辑器直接编辑 Host，并在 YAML 往返时保留其他 header。
+
+三种协议经 mesh 使用时不写 `via: mesh`，而是复用现有 mesh SOCKS actor：
+
+```yaml
+proxies:
+  mesh-hop:
+    type: socks5
+    server: { virtual-ip: 10.144.144.2 }
+    via: mesh
+    udp: true
+
+groups:
+  vless-through-mesh:
+    type: chain
+    members: [mesh-hop, vless-wss]
+```
+
+`vless-wss` 仍为 `via: native`。在 chain 中，它使用前序 mesh actor 提供的流，而不是绕过 mesh 自行连接。这个组合首先用于 TCP；UDP-over-stream 和多跳 UDP 必须以精确候选互操作结果为准，不能仅凭每个 actor 都写了 `udp: true` 推断可用。
+
+当前不接受或不宣称 Trojan fingerprint/uTLS、smux、Brutal，VMess legacy alter-id，VLESS flow/XTLS/XUDP/XHTTP，以及 Reality、WebSocket early-data。未知字段会 fail-closed，不能把 Mihomo/sing-box 配置原样粘贴后假定全部生效。
+
 ## 4. chain 与 fallback
 
 ### 4.1 mesh peer 后接 peer 本地 SOCKS
@@ -414,7 +500,7 @@ dns:
 | `version` | integer | v1 必须为 `1` |
 | `dns` | mapping | direct/proxy resolver 集合 |
 | `rule-sets` | mapping | 可选手工 GeoX/MMDB 文件 |
-| `proxies` | mapping | SOCKS5 或 Shadowsocks actor |
+| `proxies` | mapping | SOCKS5、Shadowsocks、Trojan、VMess 或 VLESS actor |
 | `groups` | mapping | chain/fallback group |
 | `rules` | sequence | 有序 first-match 规则，不能为空 |
 
@@ -422,13 +508,17 @@ dns:
 
 | 字段 | 说明 |
 | --- | --- |
-| `type` | `socks5` 或 `shadowsocks`；HTTP 会被拒绝 |
-| `server` | native/SS 使用地址字符串；mesh SOCKS 使用 `virtual-ip`/`instance-id` mapping |
+| `type` | `socks5`、`shadowsocks`、`trojan`、`vmess` 或 `vless`；HTTP 会被拒绝 |
+| `server` | native 协议使用地址字符串；mesh SOCKS 使用 `virtual-ip`/`instance-id` mapping |
 | `port` | native 必需；mesh 省略为托管 HEV，填写则为显式 peer SOCKS 端口 |
-| `via` | `native` 或 `mesh` |
+| `via` | SOCKS5 可用 `native`/`mesh`；其他协议固定 `native`，经 mesh 时使用 chain |
 | `udp` | `false/off`、`true/native` 或 Shadowsocks 专用 `uot-v2` |
-| `username` / `password` | SOCKS 必须同时出现；Shadowsocks 只使用 `password` |
-| `cipher` | Shadowsocks 必需；首期仅支持四种 AEAD cipher |
+| `username` / `password` | SOCKS 凭据必须同时出现；Shadowsocks/Trojan 只使用 `password` |
+| `cipher` | Shadowsocks 或 VMess 必需；支持范围见上文 |
+| `uuid` | VMess/VLESS 必需 |
+| `alter-id` | VMess 可省略或为 `0`；其他值拒绝 |
+| `transport` | Trojan/VMess/VLESS 可选 `{ type: websocket, path, headers }`；省略为 TCP |
+| `tls` | Trojan 必需，VMess/VLESS 可选；字段为 `server-name`、`insecure` |
 
 ### 9.4 group 字段
 
@@ -446,6 +536,8 @@ actor 与 group 名只能使用 ASCII 字母、数字、`_`、`-`、`.`，最长
 - 当前发布声明仅覆盖 Linux 与 Android；macOS/Windows 等目标保留架构兼容设计，但尚不能引用 Linux/Android 结果代替实机验证。
 - 单进程单 policy-enabled 实例；不承诺 netns、多实例、HTTP actor、在线 Geo 更新和完整 split-DNS。
 - native SOCKS/SS 的 UDP 完整性由用户服务负责；`udp: true/native` 不是探测结果。
+- Trojan/VMess/VLESS 当前只承诺本文列出的 TCP、TLS、WebSocket 子集；fingerprint、Reality、early-data、smux、Brutal、flow/XUDP/XHTTP 不在 schema 中。
+- 锁定 Leaf 不支持 Shadowsocks 2022；只支持本文列出的传统 AEAD cipher。
 - UoT v2 使用 TCP，避免 UDP 被封锁时无法建立 association，但仍有 TCP
   head-of-line blocking；它不是无条件的性能加速。
 - chain/fallback 首版主要用于 TCP。UDP 使用显式、已验证的 mesh actor。
@@ -460,5 +552,6 @@ actor 与 group 名只能使用 ASCII 字母、数字、`_`、`-`、`.`，最长
 4. UDP 测试源地址是策略 TUN 虚拟 IP，而不是物理网卡地址。
 5. 停止网络后 Leaf、HEV、策略 TUN、规则和临时配置全部清理。
 6. Android 断 Wi-Fi 前先安排设备侧自动重开 Wi-Fi，再继续 wireless ADB；截图只用于最终视觉确认。
+7. 使用 Trojan/VMess/VLESS 时，分别验证 direct 与 mesh 前置 chain 的 TLS HTTP 请求；UDP 与性能必须引用同一精确候选和同一服务端对照。
 
 实现语义参考：Mihomo `rules/parser.go::ParseRule` 的 first-match 规则形状、`adapter/outboundgroup/{parser.go::ParseProxyGroup,fallback.go::{findAliveProxy,DialContext,ListenPacketContext,SupportUDP}}` 的有序组边界；固定 Leaf `proxy/chain/outbound/{stream,datagram}.rs`、`proxy/failover/{stream,datagram}.rs` 和 `proxy/socks/outbound/datagram.rs::Handler::handle`。EasyTier 的有意差异是严格 v1 schema、无主动公共 URL 健康检查、托管 mesh bridge，以及明确不宣称 SOCKS UDP 多跳。

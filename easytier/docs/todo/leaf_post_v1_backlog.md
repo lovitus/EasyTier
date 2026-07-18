@@ -4,6 +4,10 @@ These items must not silently expand the Leaf v1 release boundary. Promote an it
 
 ## Transports and proxy composition
 
+- Trojan、VMess、VLESS 已获准采用每协议一个窄 actor compiler，并通过现有 mesh SOCKS
+  前置 actor 组合 native、TLS 和 WebSocket；Reality 等未实现 transport 继续留在首版后。
+  当前实现边界和验收矩阵见
+  [`leaf_trojan_vmess_vless_plugins_undecided.md`](leaf_trojan_vmess_vless_plugins_undecided.md)。
 - Shadowsocks TCP/UDP plus explicit UoT v2 support, using the existing policy
   actor compiler and chain composition instead of a new proxy framework. The complete design and validation boundary are
   recorded in [`leaf_shadowsocks_uot_v2.md`](leaf_shadowsocks_uot_v2.md). UoT is

@@ -132,6 +132,9 @@ fn manual_update() -> String {
 pub enum ProxyKind {
     Socks5,
     Shadowsocks,
+    Trojan,
+    Vmess,
+    Vless,
     Http,
 }
 
@@ -202,6 +205,32 @@ pub enum ProxyVia {
     Native,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ProxyTransport {
+    #[default]
+    Tcp,
+    Websocket {
+        #[serde(default = "default_websocket_path")]
+        path: String,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
+}
+
+fn default_websocket_path() -> String {
+    "/".to_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ProxyTls {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+    #[serde(default)]
+    pub insecure: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ProxyServer {
@@ -232,6 +261,23 @@ pub struct Proxy {
     pub password: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cipher: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<Uuid>,
+    #[serde(
+        default,
+        rename = "alter-id",
+        alias = "alterId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub alter_id: Option<u16>,
+    #[serde(default, skip_serializing_if = "is_default_proxy_transport")]
+    pub transport: ProxyTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<ProxyTls>,
+}
+
+fn is_default_proxy_transport(transport: &ProxyTransport) -> bool {
+    *transport == ProxyTransport::Tcp
 }
 
 impl Proxy {
@@ -750,7 +796,7 @@ impl PolicyDocument {
                 if proxy.cipher.is_some() {
                     return Err(PolicyError::InvalidServer {
                         name: name.clone(),
-                        reason: "cipher is only valid for Shadowsocks".to_owned(),
+                        reason: "cipher is only valid for Shadowsocks or VMess".to_owned(),
                     });
                 }
                 if proxy.udp.is_uot_v2() {
@@ -783,6 +829,150 @@ impl PolicyDocument {
                     });
                 }
             }
+            let layered_protocol = matches!(
+                proxy.kind,
+                ProxyKind::Trojan | ProxyKind::Vmess | ProxyKind::Vless
+            );
+            if !layered_protocol
+                && (proxy.uuid.is_some()
+                    || proxy.alter_id.is_some()
+                    || proxy.transport != ProxyTransport::Tcp
+                    || proxy.tls.is_some())
+            {
+                return Err(PolicyError::InvalidServer {
+                    name: name.clone(),
+                    reason: "uuid, alter-id, transport, and tls are only valid for Trojan, VMess, or VLESS"
+                        .to_owned(),
+                });
+            }
+            if layered_protocol {
+                if proxy.username.is_some() {
+                    return Err(PolicyError::InvalidServer {
+                        name: name.clone(),
+                        reason: "Trojan, VMess, and VLESS do not use a username".to_owned(),
+                    });
+                }
+                if proxy.udp.is_uot_v2() {
+                    return Err(PolicyError::InvalidServer {
+                        name: name.clone(),
+                        reason: "uot-v2 is only valid for Shadowsocks".to_owned(),
+                    });
+                }
+                if let ProxyTransport::Websocket { path, headers } = &proxy.transport {
+                    if !path.starts_with('/') || path.len() > 2048 || path.contains(['\r', '\n']) {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason:
+                                "WebSocket path must start with / and contain at most 2048 bytes"
+                                    .to_owned(),
+                        });
+                    }
+                    if headers.len() > 32
+                        || headers.iter().any(|(key, value)| {
+                            key.is_empty()
+                                || key.len() > 128
+                                || value.len() > 4096
+                                || key.contains(['\r', '\n', ':'])
+                                || value.contains(['\r', '\n'])
+                        })
+                    {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason: "WebSocket headers exceed the bounded safe field syntax"
+                                .to_owned(),
+                        });
+                    }
+                }
+                if let Some(tls) = &proxy.tls {
+                    if tls.server_name.as_deref().is_some_and(|server_name| {
+                        server_name.is_empty()
+                            || server_name.len() > 253
+                            || server_name.contains(['\r', '\n'])
+                    }) {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason:
+                                "TLS server-name must be a non-empty DNS name of at most 253 bytes"
+                                    .to_owned(),
+                        });
+                    }
+                }
+            }
+            match proxy.kind {
+                ProxyKind::Trojan => {
+                    let password = proxy.password.as_deref().unwrap_or_default();
+                    if password.is_empty() || password.len() > 1024 || password.contains('\0') {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason: "Trojan password must be 1..=1024 bytes without NUL".to_owned(),
+                        });
+                    }
+                    if proxy.tls.is_none() {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason: "Trojan requires tls settings".to_owned(),
+                        });
+                    }
+                    if proxy.uuid.is_some() || proxy.alter_id.is_some() || proxy.cipher.is_some() {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason: "uuid, alter-id, and cipher are not valid for Trojan"
+                                .to_owned(),
+                        });
+                    }
+                }
+                ProxyKind::Vmess => {
+                    if proxy.password.is_some() {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason: "VMess does not use a password field".to_owned(),
+                        });
+                    }
+                    if proxy.uuid.is_none() {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason: "VMess requires uuid".to_owned(),
+                        });
+                    }
+                    if proxy.alter_id.unwrap_or_default() != 0 {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason:
+                                "the pinned Leaf VMess implementation supports AEAD alter-id 0 only"
+                                    .to_owned(),
+                        });
+                    }
+                    let cipher = proxy.cipher.as_deref().unwrap_or_default();
+                    if !matches!(
+                        cipher,
+                        "auto" | "aes-128-gcm" | "chacha20-poly1305" | "chacha20-ietf-poly1305"
+                    ) {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason: format!("unsupported VMess cipher {cipher}"),
+                        });
+                    }
+                }
+                ProxyKind::Vless => {
+                    if proxy.password.is_some()
+                        || proxy.cipher.is_some()
+                        || proxy.alter_id.is_some()
+                    {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason: "password, cipher, and alter-id are not valid for VLESS"
+                                .to_owned(),
+                        });
+                    }
+                    if proxy.uuid.is_none() {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason: "VLESS requires uuid".to_owned(),
+                        });
+                    }
+                }
+                _ => {}
+            }
             if proxy.kind == ProxyKind::Http && proxy.udp.enabled() {
                 return Err(PolicyError::InvalidServer {
                     name: name.clone(),
@@ -800,7 +990,7 @@ impl PolicyDocument {
             if proxy.via == ProxyVia::Mesh && proxy.kind != ProxyKind::Socks5 {
                 return Err(PolicyError::InvalidServer {
                     name: name.clone(),
-                    reason: "via: mesh is a SOCKS5 actor; compose it before Shadowsocks in a chain"
+                    reason: "via: mesh is a SOCKS5 actor; compose it before the native protocol actor in a chain"
                         .to_owned(),
                 });
             }
@@ -1066,7 +1256,14 @@ impl PolicyDocument {
         }
         if let Some(proxy) = self.proxies.get(actor) {
             return Ok(proxy.udp.enabled()
-                && matches!(proxy.kind, ProxyKind::Socks5 | ProxyKind::Shadowsocks));
+                && matches!(
+                    proxy.kind,
+                    ProxyKind::Socks5
+                        | ProxyKind::Shadowsocks
+                        | ProxyKind::Trojan
+                        | ProxyKind::Vmess
+                        | ProxyKind::Vless
+                ));
         }
         let Some(group) = self.groups.get(actor) else {
             return Err(PolicyError::UnknownReference {
@@ -1303,7 +1500,65 @@ rules: ["MATCH,ss"]
         assert!(matches!(
             PolicyRevision::parse(mesh, Path::new(".")),
             Err(PolicyError::InvalidServer { name, reason })
-                if name == "ss" && reason.contains("compose it before Shadowsocks in a chain")
+                if name == "ss" && reason.contains("compose it before the native protocol actor")
+        ));
+    }
+
+    #[test]
+    fn validates_layered_protocol_fields_without_expanding_mesh_semantics() {
+        let source = r#"
+version: 1
+proxies:
+  trojan:
+    type: trojan
+    server: edge.example
+    port: 443
+    password: secret
+    tls: { server-name: cdn.example }
+    udp: native
+  vmess:
+    type: vmess
+    server: edge.example
+    port: 80
+    uuid: 00000000-0000-0000-0000-000000000001
+    alter-id: 0
+    cipher: auto
+    transport:
+      type: websocket
+      path: /vmess
+      headers: { Host: cdn.example }
+  vless:
+    type: vless
+    server: edge.example
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000002
+    transport: { type: websocket, path: /vless }
+    tls: { server-name: cdn.example }
+groups:
+  via-mesh:
+    type: chain
+    members: [trojan, vmess, vless]
+rules: ["MATCH,via-mesh"]
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        assert!(revision.document.proxies["trojan"].udp.enabled());
+        assert_eq!(revision.document.proxies["vmess"].alter_id, Some(0));
+
+        let invalid_alter_id = source.replace("alter-id: 0", "alter-id: 1");
+        assert!(matches!(
+            PolicyRevision::parse(invalid_alter_id, Path::new(".")),
+            Err(PolicyError::InvalidServer { name, reason })
+                if name == "vmess" && reason.contains("alter-id 0")
+        ));
+
+        let mesh = source.replace(
+            "server: edge.example\n    port: 443\n    password",
+            "server: { virtual-ip: 10.44.0.8 }\n    port: 443\n    via: mesh\n    password",
+        );
+        assert!(matches!(
+            PolicyRevision::parse(mesh, Path::new(".")),
+            Err(PolicyError::InvalidServer { name, reason })
+                if name == "trojan" && reason.contains("compose it before the native protocol actor")
         ));
     }
 

@@ -233,10 +233,12 @@ policy:
     advanced_existing_help: This document already uses experimental fields. They remain visible and are preserved; review their release limitations before saving.
     advanced_features_required: Unlock experimental advanced features to configure custom online data sources.
     name: Name
+    proxy_type: Proxy type
     path: Path
     server: Server
     port: Port
     credentials: Credentials
+    cipher: Cipher
     instance_id: Mesh instance ID (optional)
     virtual_ip: Mesh virtual IP (optional)
     group_type: Group type

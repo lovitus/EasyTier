@@ -1,12 +1,25 @@
 import { parse, stringify } from 'yaml'
 
 export type PolicyRuleSetKind = 'geosite' | 'geoip' | 'mmdb'
-export type PolicyProxyKind = 'socks5' | 'http'
+export type PolicyProxyKind = 'socks5' | 'shadowsocks' | 'trojan' | 'vmess' | 'vless' | 'http'
 export type PolicyProxyVia = 'mesh' | 'native'
+export type PolicyProxyUdp = boolean | 'off' | 'native' | 'uot-v2'
 export type PolicyGroupKind = 'chain' | 'fallback'
 export const DEFAULT_POLICY_PROXY_DNS = 'doh:cloudflare-dns.com@1.1.1.1'
 export const DEFAULT_FAKE_DNS_IPV6_RANGE = 'fd65:6173:7974::/64'
 export const DEFAULT_FAKE_DNS_IPV4_RANGE = '198.19.0.0/16'
+export const POLICY_SHADOWSOCKS_CIPHERS = [
+  'aes-128-gcm',
+  'aes-256-gcm',
+  'chacha20-poly1305',
+  'chacha20-ietf-poly1305',
+] as const
+export const POLICY_VMESS_CIPHERS = [
+  'auto',
+  'aes-128-gcm',
+  'chacha20-poly1305',
+  'chacha20-ietf-poly1305',
+] as const
 const DEFAULT_POLICY_DIRECT_DNS = ['system', '223.5.5.5', '119.29.29.29', '114.114.114.114']
 const DEFAULT_POLICY_PROXY_DNS_SERVERS = [
   DEFAULT_POLICY_PROXY_DNS,
@@ -24,6 +37,11 @@ export function policyRuleSupportsNoResolve(type: string): boolean {
 // - Mihomo adapter/outboundgroup/parser.go::ParseProxyGroup and
 //   adapter/outboundgroup/fallback.go::NewFallback define ordered fallback groups;
 //   current Mihomo explicitly rejects the removed relay group.
+// - Mihomo adapter/parser.go::ParseProxy and
+//   adapter/outbound/shadowsocks.go::{ShadowSocksOption,NewShadowSocks} define
+//   Shadowsocks server/port/cipher/password/UDP fields. EasyTier intentionally
+//   spells the actor kind `shadowsocks` and extends Mihomo's UDP boolean to
+//   off/native/uot-v2 while retaining boolean input compatibility.
 // EasyTier intentionally exposes only its validated v1 actors here. Its `chain` is
 // Leaf's sequential actor chain, not Mihomo's removed relay group, and provider,
 // select, and url-test fields remain unsupported rather than looking effective.
@@ -65,6 +83,48 @@ dns:
 #     udp: true
 #     # username: user
 #     # password: password
+#
+#   native-ss-uot:
+#     type: shadowsocks
+#     server: 203.0.113.10
+#     port: 8388
+#     via: native
+#     cipher: aes-256-gcm
+#     password: change-me
+#     # off, native, or uot-v2; true/false remain accepted for old files.
+#     udp: uot-v2
+#
+#   native-trojan:
+#     type: trojan
+#     server: edge.example.com
+#     port: 443
+#     password: change-me
+#     tls: { server-name: cdn.example.com }
+#     udp: true
+#
+#   native-vmess-ws:
+#     type: vmess
+#     server: edge.example.com
+#     port: 80
+#     uuid: 00000000-0000-0000-0000-000000000000
+#     alter-id: 0
+#     cipher: auto
+#     transport: { type: websocket, path: /vmess, headers: { Host: cdn.example.com } }
+#     udp: true
+#
+#   native-vless-wss:
+#     type: vless
+#     server: edge.example.com
+#     port: 443
+#     uuid: 00000000-0000-0000-0000-000000000000
+#     transport: { type: websocket, path: /vless, headers: { Host: cdn.example.com } }
+#     tls: { server-name: cdn.example.com }
+#     udp: true
+#
+# Compose any native protocol after a mesh SOCKS actor instead of setting via: mesh:
+#   mesh-vless:
+#     type: chain
+#     members: [mesh-exit, native-vless-wss]
 
 groups:
   default-exit:
@@ -156,9 +216,18 @@ export interface PolicyProxyRow {
   instanceId: string
   virtualIp: string
   port: number | null
-  udp: boolean
+  udp: PolicyProxyUdp
   username: string
   password: string
+  cipher: string
+  uuid?: string
+  alterId?: number
+  transport?: 'tcp' | 'websocket'
+  wsPath?: string
+  wsHeaders?: Record<string, string>
+  tlsEnabled?: boolean
+  tlsServerName?: string
+  tlsInsecure?: boolean
 }
 
 export interface PolicyGroupRow {
@@ -214,10 +283,32 @@ function optionalBoolean(value: unknown, path: string): boolean {
   throw new Error(`${path} must be a boolean`)
 }
 
+function proxyUdp(value: unknown, kind: PolicyProxyKind, path: string): PolicyProxyUdp {
+  if (kind === 'shadowsocks') {
+    if (value === undefined || value === false || value === 'off') return 'off'
+    if (value === true || value === 'native') return 'native'
+    if (value === 'uot-v2') return 'uot-v2'
+    throw new Error(`${path} must be off, native, uot-v2, true, or false`)
+  }
+  if (value === 'off') return false
+  if (value === 'native') return true
+  if (value === 'uot-v2') throw new Error(`${path} uot-v2 is only valid for Shadowsocks`)
+  return optionalBoolean(value, path)
+}
+
 function optionalStringList(value: unknown, path: string, fallback: string[] = []): string[] {
   if (value === undefined) return [...fallback]
   if (!Array.isArray(value)) throw new Error(`${path} must be a sequence`)
   return value.map((entry, index) => requiredString(entry, `${path}[${index}]`))
+}
+
+function optionalStringMap(value: unknown, path: string): Record<string, string> {
+  if (value === undefined) return {}
+  const source = requireMap(value, path)
+  return Object.fromEntries(Object.entries(source).map(([key, entry]) => [
+    key,
+    requiredString(entry, `${path}.${key}`),
+  ]))
 }
 
 function requiredPort(value: unknown, path: string): number {
@@ -348,9 +439,56 @@ export function parsePolicyDocument(source: string): PolicyEditorDocument {
     }
     const selector = typeof server === 'string' ? {} : requireMap(server, `proxies.${name}.server`)
     const kind = requiredString(value.type, `proxies.${name}.type`)
-    if (!['socks5', 'http'].includes(kind)) throw new Error(`proxies.${name}.type is unsupported`)
+    if (!['socks5', 'shadowsocks', 'trojan', 'vmess', 'vless', 'http'].includes(kind)) throw new Error(`proxies.${name}.type is unsupported`)
     const via = optionalString(value.via, `proxies.${name}.via`) || 'native'
     if (!['mesh', 'native'].includes(via)) throw new Error(`proxies.${name}.via is unsupported`)
+    if (kind !== 'socks5' && via !== 'native') {
+      throw new Error(`proxies.${name}.via must be native; compose a mesh SOCKS actor before the native protocol actor in a chain`)
+    }
+    if (kind !== 'socks5' && typeof server !== 'string') {
+      throw new Error(`proxies.${name}.server must be an address for ${kind}`)
+    }
+    const cipher = optionalString(value.cipher, `proxies.${name}.cipher`)
+    if (kind === 'shadowsocks' && !POLICY_SHADOWSOCKS_CIPHERS.includes(cipher as typeof POLICY_SHADOWSOCKS_CIPHERS[number])) {
+      throw new Error(`proxies.${name}.cipher is unsupported`)
+    }
+    if (kind === 'vmess' && !POLICY_VMESS_CIPHERS.includes(cipher as typeof POLICY_VMESS_CIPHERS[number])) {
+      throw new Error(`proxies.${name}.cipher is unsupported`)
+    }
+    if (!['shadowsocks', 'vmess'].includes(kind) && cipher) {
+      throw new Error(`proxies.${name}.cipher is only valid for Shadowsocks or VMess`)
+    }
+    const username = optionalString(value.username, `proxies.${name}.username`)
+    if (kind === 'shadowsocks' && username) {
+      throw new Error(`proxies.${name}.username is not valid for Shadowsocks`)
+    }
+    const password = optionalString(value.password, `proxies.${name}.password`)
+    if (kind === 'shadowsocks' && !password) {
+      throw new Error(`proxies.${name}.password is required for Shadowsocks`)
+    }
+    if (kind === 'trojan' && !password) throw new Error(`proxies.${name}.password is required for Trojan`)
+    if (['vmess', 'vless'].includes(kind) && password) {
+      throw new Error(`proxies.${name}.password is not valid for ${kind}`)
+    }
+    const layered = ['trojan', 'vmess', 'vless'].includes(kind)
+    const uuid = optionalString(value.uuid, `proxies.${name}.uuid`)
+    if (['vmess', 'vless'].includes(kind) && !uuid) throw new Error(`proxies.${name}.uuid is required`)
+    if (!['vmess', 'vless'].includes(kind) && uuid) throw new Error(`proxies.${name}.uuid is not valid for ${kind}`)
+    const alterId = value['alter-id'] === undefined && value.alterId === undefined
+      ? 0
+      : requiredInteger(value['alter-id'] ?? value.alterId, `proxies.${name}.alter-id`)
+    if (kind === 'vmess' && alterId !== 0) throw new Error(`proxies.${name}.alter-id must be 0`)
+    if (kind !== 'vmess' && (value['alter-id'] !== undefined || value.alterId !== undefined)) {
+      throw new Error(`proxies.${name}.alter-id is only valid for VMess`)
+    }
+    const transportValue = value.transport === undefined ? {} : requireMap(value.transport, `proxies.${name}.transport`)
+    const transport = optionalString(transportValue.type, `proxies.${name}.transport.type`) || 'tcp'
+    if (!['tcp', 'websocket'].includes(transport)) throw new Error(`proxies.${name}.transport.type is unsupported`)
+    if (!layered && value.transport !== undefined) throw new Error(`proxies.${name}.transport is not valid for ${kind}`)
+    const tlsValue = value.tls === undefined ? {} : requireMap(value.tls, `proxies.${name}.tls`)
+    const tlsEnabled = value.tls !== undefined
+    if (!layered && tlsEnabled) throw new Error(`proxies.${name}.tls is not valid for ${kind}`)
+    if (kind === 'trojan' && !tlsEnabled) throw new Error(`proxies.${name}.tls is required for Trojan`)
     return {
       name,
       type: kind as PolicyProxyKind,
@@ -361,9 +499,18 @@ export function parsePolicyDocument(source: string): PolicyEditorDocument {
       port: via === 'mesh' && value.port == null
         ? null
         : requiredPort(value.port, `proxies.${name}.port`),
-      udp: optionalBoolean(value.udp, `proxies.${name}.udp`),
-      username: optionalString(value.username, `proxies.${name}.username`),
-      password: optionalString(value.password, `proxies.${name}.password`),
+      udp: proxyUdp(value.udp, kind as PolicyProxyKind, `proxies.${name}.udp`),
+      username,
+      password,
+      cipher,
+      uuid,
+      alterId,
+      transport: transport as 'tcp' | 'websocket',
+      wsPath: optionalString(transportValue.path, `proxies.${name}.transport.path`) || '/',
+      wsHeaders: optionalStringMap(transportValue.headers, `proxies.${name}.transport.headers`),
+      tlsEnabled,
+      tlsServerName: optionalString(tlsValue['server-name'], `proxies.${name}.tls.server-name`),
+      tlsInsecure: optionalBoolean(tlsValue.insecure, `proxies.${name}.tls.insecure`),
     }
   })
   const groups = Object.entries(optionalMap(root, 'groups')).map(([name, raw]) => {
@@ -435,9 +582,20 @@ export function serializePolicyDocument(document: PolicyEditorDocument): string 
       server,
       port: row.port ?? undefined,
       via: row.via,
-      udp: row.udp || undefined,
+      udp: row.type === 'shadowsocks'
+        ? (typeof row.udp === 'boolean' ? (row.udp ? 'native' : 'off') : row.udp)
+        : (typeof row.udp === 'string' ? row.udp === 'native' : row.udp) || undefined,
       username: row.username,
       password: row.password,
+      cipher: row.cipher,
+      uuid: row.uuid,
+      'alter-id': row.type === 'vmess' ? row.alterId ?? 0 : undefined,
+      transport: ['trojan', 'vmess', 'vless'].includes(row.type) && row.transport === 'websocket'
+        ? compact({ type: 'websocket', path: row.wsPath || '/', headers: row.wsHeaders })
+        : undefined,
+      tls: ['trojan', 'vmess', 'vless'].includes(row.type) && row.tlsEnabled
+        ? compact({ 'server-name': row.tlsServerName, insecure: row.tlsInsecure || undefined })
+        : undefined,
     })
   }
 

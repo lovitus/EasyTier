@@ -301,6 +301,8 @@ It is local execution state, not a reason to trigger a workflow by itself.
 
 ## 2026-07-18 rejected Stream-staging memory candidates
 
+- Canonical known-bug and failed-implementation record: [`netstack_tcp_buffer_scaling_failed_implementations.md`](../known_bugs/netstack_tcp_buffer_scaling_failed_implementations.md). This workstream is closed as an implementation failure; do not revive a rejected buffer candidate from the shorter workboard notes alone.
+
 - Validated comparator: fairness/event-driven `8201a4a8270a173949e8fa0cf994ac7328aa46b2`, Linux run `29622735384`, Android run `29622735405`. Same-window unloaded median was `868.0 Mbit/s`; 1000 idle Leaf memory was `1,310,816 KiB VmSize / 32,300 KiB RSS`, p99 connect `13.86 ms`, and close returned to 11 FDs.
 - Rejected chunk candidate `0c8894e280528f382d6689131990fef9e22466e6`: Linux `29623951590`, Android `29623951560`. Demand `VecDeque<Bytes>` queues reduced 1000-idle Leaf memory to `673,940 KiB VmSize / 26,080 KiB RSS`, but unloaded median fell to `518.3 Mbit/s` (`-40.3%`). Literal revert `e26c9815`.
 - Rejected restored-capacity chunk candidate `6c92be286802a5f10ebaa65318e5e830218832f4`: Linux `29624958371`, Android `29624958377`. Restoring the old `0x3fff * 20` limit still produced only `536.9 Mbit/s` (`-38.1%`), isolating allocation/free and permit hot-path cost rather than queue capacity. Literal revert `728a8679`.
@@ -310,4 +312,81 @@ It is local execution state, not a reason to trigger a workflow by itself.
 
 - Rejected progress-safe adaptive candidate `5e6d455b513a2aba5e06db2737944dda2a8b7a0d`: Linux run `29628076254`, Android run `29628076268`. The design gave every active direction an unconditional 32 KiB base ring and budgeted only full 320 KiB expansions, eliminating the whole-ring progress dependency. `.160` locked no-run and all 18 netstack tests passed. Exact 128-parallel forward and reverse tests both completed in `8.00s` at `624.4` and `579.9 Mbit/s`, so the prior saturation deadlock was fixed.
 - Rejection reason: reducing each smoltcp RX/TX window to `128 KiB` produced unloaded reverse `624.4 / 659.3 / 658.5 Mbit/s` (median `658.5`), while the exact same-window `8201a4a8` comparator produced `893.2 / 918.0 / 923.4 Mbit/s` (median `918.0`). The `28.3%` relative loss fails the `824.6 Mbit/s` gate and proves 128 KiB is still below the measured local TUN/netstack BDP. Evidence is checksummed under `/private/tmp/netstack-5e6d455b-validation`. Literal revert: `8d4dc0f8`.
-- The next candidate may retain the progress-safe adaptive Stream structure, but must use at least a separately validated larger smoltcp window. Do not infer that 32/64/128 KiB is adequate from “local RTT”; optimized measurements have disproved all values through 128 KiB. A 256 KiB experiment is the next bounded candidate; it still reduces fixed idle window reservation by 20% versus 320 KiB and must independently pass the same-window throughput and 128-flow gates.
+- Fixed-window tuning is closed as a candidate direction. A local, never-pushed 256 KiB experiment (`78278eb3`) was withdrawn by literal revert (`225b0a22`) before workflow dispatch: a universal size cannot preserve high-BDP behavior, and continuing with 512 KiB/1 MiB trials would only move the same unsupported threshold. At 10 Gbit/s the receive-window BDP is approximately 1.25 MiB at 1 ms RTT, 12.5 MiB at 10 ms, and 62.5 MiB at 50 ms.
+- Locked smoltcp `0a926767a68bc88d5512afefa7529c5ecdade4ea`, `src/socket/tcp.rs::{SocketBuffer,Socket::new}`, stores RX/TX in fixed `RingBuffer`s and chooses the receive window scale from the initial capacity during construction. It exposes capacity queries but no established-socket storage replacement or safe growth API. Dynamically allocating only the Leaf Stream staging layer therefore cannot remove the smoltcp window ceiling; true autotuning would require a separately designed smoltcp segmented/resizable buffer plus SYN-time scale negotiation, advertised-window, reassembly, close, and pressure tests.
+- The measured 1000-idle comparator used `1,310,816 KiB VmSize` but only `32,300 KiB RSS`; the large zero-filled socket allocations are predominantly lazily backed. The 32 KiB candidate reduced virtual reservation while increasing RSS by about 18 MiB. Therefore virtual size alone is not evidence of an actionable memory fault, and no buffer rewrite is justified for the runner P0.
+- Accepted scope remains the event-driven/fairness snapshot `8201a4a8270a173949e8fa0cf994ac7328aa46b2`, which changes channel lifecycle, backpressure, and cooperative scheduling while preserving all existing TCP buffer/window semantics. High-BDP TCP autotuning and the O(n) active-socket scan are independent future projects and must not be bundled into this lifecycle fix.
+- Final safe remote snapshot `6c377afee8303d10f0f5e37f6ab165c97838f156` has byte-identical `device.rs` and `tcp.rs` content to `8201a4a8`. Its Linux profiling workflow `29628775508` and Android candidate workflow `29628775467` both completed successfully. The local 256 KiB experiment and its revert have zero net source difference and were never pushed; no additional buffer candidate or real-device installation is authorized by this workstream.
+
+## 2026-07-18 Shadowsocks/UoT v2 candidate manifest
+
+- Shared EasyTier candidate SHA: `1eb6f191cb049b56afd8c399adf0c37c92ecfa86`; `.160`
+  dispatch gate passed and only one batched push is permitted.
+- Locked Leaf base: `4af133266367bc6ef1d369b4b519a0a56da48760` from the pre-change
+  `Cargo.lock`; pinned UoT candidate: `742ad65c441f9d60279916b82628b810efbd48fb`.
+- Scope: `ProxyKind::Shadowsocks`, bool/string UDP compatibility, strict cipher/password
+  validation, minimal JSON compiler module, Leaf Shadowsocks native UDP plus UoT v2
+  datagram mode, existing mesh-chain/fallback composition, documentation and report.
+- Explicitly unchanged: EasyTier mesh/HEV/DNS/rules/group/fallback implementations and
+  Leaf detached runtime lifecycle.
+- `.160` no-run: `scripts/leaf-remote-preflight.sh`, after the Leaf fork commit is pinned
+  and generated protobuf plus `Cargo.lock` are present.
+- Focused policy tests: UDP mode compatibility; SS validation; SOCKS UoT rejection;
+  native/mesh-chain/fallback Leaf actor compilation.
+- Focused Leaf tests: UoT v2 domain/IPv4/IPv6 byte vectors; lazy request; packet boundary;
+  short-buffer alignment; JSON/protobuf mapping; existing Shadowsocks/chain tests.
+- Current evidence: `.160` standard `scripts/leaf-remote-preflight.sh` exact-pin `--locked`
+  no-run passed twice, including the final API/compatibility correction; the final incremental
+  compile took 31.69 seconds and every focused test passed. The four new policy filters each
+  ran one test. Leaf UoT test binary ran five tests and passed after a documented
+  test-harness-only workaround for the pre-existing Tokio-macros and GeoSite lite-protobuf
+  failures.
+- GitHub workflows: one automatic Linux profiling beta and Android candidate pair for the
+  exact EasyTier SHA; query existing runs before any manual dispatch.
+- Linux evidence: Gust `v3.2.9-porty8` SS TCP, SS UDP, sings/UoT, native/mesh chain,
+  fallback/fail-closed, stop/start, FD/task/RSS baseline, throughput/CPU/loss. Primary
+  performance matrix uses the two 10Gbps dual-stack public validation nodes with separate
+  IPv4, IPv6 and dual-stack runs; `10.20.0.65` is not a mainland-IPv4 client baseline.
+- Android evidence: exact upgraded artifact with preserved data, captured-UID policy probe,
+  TCP/UDP/UoT, native/mesh chain, lifecycle and bounded traffic/resource evidence.
+- Build-wait work: prepare Gust configs, isolated ports, host cleanup, checksums, semantic
+  Android commands and result collectors; do not mutate the in-flight snapshot.
+- Prepared interoperability environment: both 10Gbps dual-stack nodes have checksum-verified
+  Gust `v3.2.9-porty8` (`gost` SHA-256 `46ebef5815c6918f1c6e6102cc22a1af5398e92eee4070c05bddd62825c21647`).
+  The server node uses isolated `28388/TCP+UDP` for `ss+ssu` and `28389/TCP` for `sings`;
+  existing services and firewall state are unchanged.
+
+## 2026-07-18 Shadowsocks/UoT v2 候选收口
+
+共享候选 SHA：`1eb6f191cb049b56afd8c399adf0c37c92ecfa86`
+
+| 工作流 | 目标 | 构建影响 | 证据目标 | 状态 |
+|---|---|---:|---|---|
+| Shadowsocks actor | 最小插件化接入四个受控 cipher 与严格字段校验 | 是 | .160 focused tests、Linux/Android 精确 artifact | 完成 |
+| UoT v2 | 支持 `off/native/uot-v2`，保留 bool 兼容 | 是 | sing-box TCP/UDP/UoT interop、IPv4/IPv6 目标 | 完成 |
+| chain | 复用 mesh SOCKS actor 后接 peer-local SS，不增加 `via: mesh` SS 语义 | 否 | mesh -> SS -> UoT，IPv4/IPv6 underlay | 完成 |
+| fallback | 首成员不可用时切换到可用 UoT actor | 否 | dead-first HTTPS/TCP/UDP | 完成 |
+| 性能 | 比较 raw、native、UoT、chain 与 v4/v6 | 否 | 10 Gbps 双栈 lv1g2/lv1g3 | 完成 |
+| 生命周期 | 资源回基线与空闲 CPU | 否 | 5 次 stop/start、60 秒空闲 | 完成 |
+| Android UoT 实包 | captured UID 产生确定 UDP/UoT | 否 | sing-box 服务端 UoT 日志 | 暂缓：设备按维护者要求撤离；不得用 TCP/Chrome 缓存冒充 |
+| 环境清理 | 清除 namespace、规则、进程和专用端口 | 否 | 所有 remaining 计数为 0 | 完成 |
+
+最终判断：实现、Linux 双栈功能、UoT interop、chain、fallback、性能和资源证据已闭环；Android 构建与标准 SS TLS 已闭环，Android UoT 实包按新的设备边界明确留空。文档更新不单独触发 workflow。
+
+## 2026-07-18 Trojan/VMess/VLESS 插件候选
+
+共享候选 SHA：`pending-after-preflight`
+
+| 工作流 | 目标 | 构建影响 | 证据目标 | 状态 |
+|---|---|---:|---|---|
+| 协议 schema | 严格接收 Trojan、VMess AEAD、VLESS 及 TLS/WS 字段 | 是 | `.160` config focused tests、未知字段 fail-closed | `.160` 通过 |
+| Leaf 编译 | 私有 TLS/WS/protocol actors 封装为稳定公开 tag | 是 | `.160` compiler test、精确 JSON actor 顺序 | `.160` 通过 |
+| mesh 组合 | 复用现有 mesh SOCKS actor 作为 chain 第一跳 | 否 | 三协议 direct 与 mesh-prefixed chain | 待 artifact |
+| 前端 | YAML 往返、可视化协议/UUID/cipher/TLS/WS Host | 是 | `.160` Vitest 与 production build | 29/29 + build 通过 |
+| Linux 功能 | TCP、UDP、DNS、fallback、stop/start、资源回基线 | 否 | `.37/.38` 与受控公网服务端 | 待 artifact |
+| 双 VPS 性能 | 同条件 sing-box 对照，分别 direct/mesh、IPv4/IPv6/双栈 | 否 | `lv1g2/lv1g3` 三次中位数、CPU/RSS | 待 artifact |
+| Android | 本批不使用已撤离设备，不伪造实机证据 | 否 | workflow 构建证据；实包待设备恢复 | 受设备边界阻塞 |
+
+候选清单：后端四个新 Leaf feature、三个窄协议编译器、一个 crate-private TLS/WS 编译层、严格字段校验、UDP capability、前端编解码与编辑器、默认注释示例、聚焦测试和文档。`.160` 使用 `scripts/leaf-remote-preflight.sh` 完成一次 `--locked` no-run 与全部默认 focused tests；前端在同一 builder 使用 Node 22 跑两个 policy Vitest 文件和 production build。只有两条预检都通过才提交并推送一次候选；自动 Linux/Android workflow 构建同一 SHA。构建等待期间准备临时节点配置、sing-box 对照配置、隔离端口、清理命令和结果采集器，不修改在途快照。
+
+明确边界：锁定 Leaf 不支持 Shadowsocks 2022；真实凭据只进入远端临时文件。Trojan fingerprint/smux/Brutal、VLESS flow/Reality/XUDP/XHTTP、WebSocket early-data 不进入本候选，必须根据互操作证据另行决定，不能静默接受。
