@@ -31,10 +31,9 @@ use crate::{
     Runner,
 };
 
-// This userspace TCP connection terminates at the local TUN client. Keep two
-// complete TLS/AEAD records per direction without scaling fixed memory with WAN RTT.
-const DEFAULT_TCP_SEND_BUFFER_SIZE: usize = 32 * 1024;
-const DEFAULT_TCP_RECV_BUFFER_SIZE: usize = 32 * 1024;
+// NOTE: Default buffer could contain 20 AEAD packets
+const DEFAULT_TCP_SEND_BUFFER_SIZE: u32 = 0x3FFF * 20;
+const DEFAULT_TCP_RECV_BUFFER_SIZE: u32 = 0x3FFF * 20;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum TcpSocketState {
@@ -140,8 +139,8 @@ impl TcpListenerRunner {
             // TCP first handshake packet, create a new Connection
             if packet.syn() && !packet.ack() {
                 let mut socket = TcpSocket::new(
-                    TcpSocketBuffer::new(vec![0u8; DEFAULT_TCP_RECV_BUFFER_SIZE]),
-                    TcpSocketBuffer::new(vec![0u8; DEFAULT_TCP_SEND_BUFFER_SIZE]),
+                    TcpSocketBuffer::new(vec![0u8; DEFAULT_TCP_RECV_BUFFER_SIZE as usize]),
+                    TcpSocketBuffer::new(vec![0u8; DEFAULT_TCP_SEND_BUFFER_SIZE as usize]),
                 );
                 socket.set_keep_alive(Some(Duration::from_secs(28)));
                 // FIXME: It should follow system's setting. 7200 is Linux's default.
@@ -157,9 +156,9 @@ impl TcpListenerRunner {
                 trace!("created TCP connection for {} <-> {}", src_addr, dst_addr);
 
                 let control = Arc::new(SpinMutex::new(TcpSocketControl {
-                    send_buffer: RingBuffer::new(vec![0u8; DEFAULT_TCP_SEND_BUFFER_SIZE]),
+                    send_buffer: RingBuffer::new(vec![0u8; DEFAULT_TCP_SEND_BUFFER_SIZE as usize]),
                     send_waker: None,
-                    recv_buffer: RingBuffer::new(vec![0u8; DEFAULT_TCP_RECV_BUFFER_SIZE]),
+                    recv_buffer: RingBuffer::new(vec![0u8; DEFAULT_TCP_RECV_BUFFER_SIZE as usize]),
                     recv_waker: None,
                     recv_state: TcpSocketState::Normal,
                     send_state: TcpSocketState::Normal,
@@ -212,7 +211,6 @@ impl TcpListenerRunner {
             let before_poll = Instant::now();
             device.begin_poll();
             let updated_sockets = iface.poll(before_poll, &mut device, &mut socket_set);
-            device.release_unused_output_permit();
             if matches!(
                 updated_sockets,
                 smoltcp::iface::PollResult::SocketStateChanged
@@ -623,68 +621,8 @@ impl AsyncWrite for TcpStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::poll;
     use std::time::Duration as StdDuration;
     use tokio::io::AsyncWriteExt as _;
-
-    #[test]
-    fn default_tcp_buffers_are_32_kib_per_layer() {
-        assert_eq!(DEFAULT_TCP_SEND_BUFFER_SIZE, 32 * 1024);
-        assert_eq!(DEFAULT_TCP_RECV_BUFFER_SIZE, 32 * 1024);
-
-        let socket = TcpSocket::new(
-            TcpSocketBuffer::new(vec![0u8; DEFAULT_TCP_RECV_BUFFER_SIZE]),
-            TcpSocketBuffer::new(vec![0u8; DEFAULT_TCP_SEND_BUFFER_SIZE]),
-        );
-        assert_eq!(socket.recv_capacity(), 32 * 1024);
-        assert_eq!(socket.send_capacity(), 32 * 1024);
-
-        let control = TcpSocketControl {
-            send_buffer: RingBuffer::new(vec![0u8; DEFAULT_TCP_SEND_BUFFER_SIZE]),
-            send_waker: None,
-            recv_buffer: RingBuffer::new(vec![0u8; DEFAULT_TCP_RECV_BUFFER_SIZE]),
-            recv_waker: None,
-            recv_state: TcpSocketState::Normal,
-            send_state: TcpSocketState::Normal,
-        };
-        assert_eq!(control.send_buffer.capacity(), 32 * 1024);
-        assert_eq!(control.recv_buffer.capacity(), 32 * 1024);
-    }
-
-    #[tokio::test]
-    async fn default_stream_send_buffer_backpressures_and_wakes_at_32_kib() {
-        let control = Arc::new(SpinMutex::new(TcpSocketControl {
-            send_buffer: RingBuffer::new(vec![0u8; DEFAULT_TCP_SEND_BUFFER_SIZE]),
-            send_waker: None,
-            recv_buffer: RingBuffer::new(vec![0u8; DEFAULT_TCP_RECV_BUFFER_SIZE]),
-            recv_waker: None,
-            recv_state: TcpSocketState::Normal,
-            send_state: TcpSocketState::Normal,
-        }));
-        let mut stream = TcpStream {
-            src_addr: "10.0.0.1:1234".parse().unwrap(),
-            dst_addr: "10.0.0.2:80".parse().unwrap(),
-            notify: Arc::new(Notify::new()),
-            control: control.clone(),
-        };
-
-        let full_buffer = vec![0xaa; DEFAULT_TCP_SEND_BUFFER_SIZE];
-        assert_eq!(stream.write(&full_buffer).await.unwrap(), full_buffer.len());
-
-        let mut blocked_write = Box::pin(stream.write(&[0xbb]));
-        assert!(poll!(blocked_write.as_mut()).is_pending());
-        assert!(control.lock().send_waker.is_some());
-
-        let mut drained = [0u8; 1];
-        let waker = {
-            let mut control = control.lock();
-            assert_eq!(control.send_buffer.dequeue_slice(&mut drained), 1);
-            control.send_waker.take().unwrap()
-        };
-        waker.wake();
-
-        assert_eq!(blocked_write.await.unwrap(), 1);
-    }
 
     #[tokio::test]
     async fn shutdown_completes_when_fin_is_committed() {
