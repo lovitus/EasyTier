@@ -375,18 +375,20 @@ It is local execution state, not a reason to trigger a workflow by itself.
 
 ## 2026-07-18 Trojan/VMess/VLESS 插件候选
 
-共享候选 SHA：`pending-after-preflight`
+共享候选 SHA：`bfbe4de5129298b1c15ea3a7e1132e376bfcc811` 已被真实互操作否决；WSS ALPN 修复候选已通过 `.160` 预检，待提交。
 
 | 工作流 | 目标 | 构建影响 | 证据目标 | 状态 |
 |---|---|---:|---|---|
 | 协议 schema | 严格接收 Trojan、VMess AEAD、VLESS 及 TLS/WS 字段 | 是 | `.160` config focused tests、未知字段 fail-closed | `.160` 通过 |
 | Leaf 编译 | 私有 TLS/WS/protocol actors 封装为稳定公开 tag | 是 | `.160` compiler test、精确 JSON actor 顺序 | `.160` 通过 |
-| mesh 组合 | 复用现有 mesh SOCKS actor 作为 chain 第一跳 | 否 | 三协议 direct 与 mesh-prefixed chain | 待 artifact |
+| mesh 组合 | 复用现有 mesh SOCKS actor 作为 chain 第一跳 | 否 | 三协议 direct 与 mesh-prefixed chain | direct 已开始；mesh 待修复 artifact |
 | 前端 | YAML 往返、可视化协议/UUID/cipher/TLS/WS Host | 是 | `.160` Vitest 与 production build | 29/29 + build 通过 |
-| Linux 功能 | TCP、UDP、DNS、fallback、stop/start、资源回基线 | 否 | `.37/.38` 与受控公网服务端 | 待 artifact |
-| 双 VPS 性能 | 同条件 sing-box 对照，分别 direct/mesh、IPv4/IPv6/双栈 | 否 | `lv1g2/lv1g3` 三次中位数、CPU/RSS | 待 artifact |
+| Linux 功能 | TCP、UDP、DNS、fallback、stop/start、资源回基线 | 否 | `.37/.38` 与受控公网服务端 | `bfbe4de5` Trojan/VMess direct 通过；VLESS WSS 因 ALPN 失败，修复中 |
+| 双 VPS 性能 | 同条件 sing-box 对照，分别 direct/mesh、IPv4/IPv6/双栈 | 否 | `lv1g2/lv1g3` 三次中位数、CPU/RSS | sing-box IPv4 基线已采集；候选对照待修复 artifact |
 | Android | 本批不使用已撤离设备，不伪造实机证据 | 否 | workflow 构建证据；实包待设备恢复 | 受设备边界阻塞 |
 
 候选清单：后端四个新 Leaf feature、三个窄协议编译器、一个 crate-private TLS/WS 编译层、严格字段校验、UDP capability、前端编解码与编辑器、默认注释示例、聚焦测试和文档。`.160` 使用 `scripts/leaf-remote-preflight.sh` 完成一次 `--locked` no-run 与全部默认 focused tests；前端在同一 builder 使用 Node 22 跑两个 policy Vitest 文件和 production build。只有两条预检都通过才提交并推送一次候选；自动 Linux/Android workflow 构建同一 SHA。构建等待期间准备临时节点配置、sing-box 对照配置、隔离端口、清理命令和结果采集器，不修改在途快照。
 
 明确边界：锁定 Leaf 不支持 Shadowsocks 2022；真实凭据只进入远端临时文件。Trojan fingerprint/smux/Brutal、VLESS flow/Reality/XUDP/XHTTP、WebSocket early-data 不进入本候选，必须根据互操作证据另行决定，不能静默接受。
+
+`bfbe4de5` 的 Linux/Android workflow `29646685998/29646686016` 均成功，Linux artifact 的外层与包内 SHA256、`BUILD_INFO`、musl target 和 Build ID 已核对。双 VPS 真实节点证明 Trojan direct、VMess WS direct 可用且来源地址来自远端代理；VLESS WSS 在 EasyTier 中超时/空响应，而 sing-box 在保留及移除 early-data 两种配置下均成功，排除了 early-data 边界。锁定 Leaf `742ad65c` 和 Mihomo `0a87b948` 均要求 WSS TLS 使用 `http/1.1` ALPN；原编译器未设置 ALPN，允许 Cloudflare 协商 h2 后仍发送 HTTP/1.1 Upgrade。替换候选只为 TLS+WebSocket actor 增加 `alpn: [http/1.1]`，普通 TLS、明文 WS、协议 actor、mesh、HEV、DNS 与规则保持不变。替换快照在 `.160` 的锁定 no-run、完整标准 focused suite 和新 ALPN 编译断言均通过。

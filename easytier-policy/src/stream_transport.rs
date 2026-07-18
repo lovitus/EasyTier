@@ -13,7 +13,8 @@ pub(crate) fn compile_outbounds(
     settings: Value,
     proxy: &Proxy,
 ) -> Vec<Value> {
-    let wrapped = proxy.tls.is_some() || proxy.transport != ProxyTransport::Tcp;
+    let websocket = matches!(&proxy.transport, ProxyTransport::Websocket { .. });
+    let wrapped = proxy.tls.is_some() || websocket;
     let protocol_tag = if wrapped {
         hidden_tag(name, "protocol")
     } else {
@@ -31,13 +32,22 @@ pub(crate) fn compile_outbounds(
     let mut actors = Vec::new();
     if let Some(tls) = &proxy.tls {
         let tag = hidden_tag(name, "tls");
+        let mut settings = serde_json::json!({
+            "serverName": tls.server_name.as_deref().unwrap_or(address),
+            "insecure": tls.insecure,
+        });
+        if websocket {
+            // A WSS actor sends an HTTP/1.1 Upgrade after TLS, so allowing h2
+            // negotiation makes an otherwise valid WebSocket endpoint close the
+            // connection. This follows Mihomo
+            // adapter/outbound/vless.go::StreamConnContext and locked Leaf
+            // config/conf/config.rs external WS actor compilation.
+            settings["alpn"] = serde_json::json!(["http/1.1"]);
+        }
         outbounds.push(serde_json::json!({
             "tag": tag,
             "protocol": "tls",
-            "settings": {
-                "serverName": tls.server_name.as_deref().unwrap_or(address),
-                "insecure": tls.insecure,
-            },
+            "settings": settings,
         }));
         actors.push(tag);
     }

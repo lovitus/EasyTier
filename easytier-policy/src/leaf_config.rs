@@ -777,10 +777,20 @@ rules: ["MATCH,trojan"]
                         "chacha20-poly1305"
                     }
         }));
-        assert!(outbounds.iter().any(|outbound| {
-            outbound["tag"] == "@et:vless:tls"
-                && outbound["settings"]["serverName"] == "vless.example"
-        }));
+        let vless_tls = outbounds
+            .iter()
+            .find(|outbound| outbound["tag"] == "@et:vless:tls")
+            .unwrap();
+        assert_eq!(vless_tls["settings"]["serverName"], "vless.example");
+        assert_eq!(
+            vless_tls["settings"]["alpn"],
+            serde_json::json!(["http/1.1"])
+        );
+        let trojan_tls = outbounds
+            .iter()
+            .find(|outbound| outbound["tag"] == "@et:trojan:tls")
+            .unwrap();
+        assert!(trojan_tls["settings"].get("alpn").is_none());
     }
 
     #[test]
