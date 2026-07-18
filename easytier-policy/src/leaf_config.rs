@@ -257,10 +257,26 @@ fn compile_dns_servers(
     };
     let mut seen = BTreeSet::new();
     let mut servers = Vec::new();
-    for server in direct {
-        let server = format!("direct:{server}");
-        if seen.insert(server.clone()) {
-            servers.push(server);
+    {
+        let mut push_direct = |server: String| {
+            let server = format!("direct:{server}");
+            if seen.insert(server.clone()) {
+                servers.push(server);
+            }
+        };
+        for server in direct {
+            if server.eq_ignore_ascii_case("system") {
+                // Proxy endpoints must be resolved outside the policy TUN. Expanding
+                // `system` to the DNS addresses captured before TUN ownership avoids
+                // feeding a proxy hostname back into Leaf FakeDNS. This follows Mihomo
+                // hub/executor/executor.go::updateDNS, which gives proxy endpoints a
+                // dedicated ProxyServerHostResolver instead of its FakeIP service.
+                for platform_server in platform_servers {
+                    push_direct(platform_server.to_string());
+                }
+            } else {
+                push_direct(server);
+            }
         }
     }
     for server in &document.dns.proxy {
@@ -1022,6 +1038,52 @@ rules: ["MATCH,DIRECT"]
         assert_eq!(
             config["inbounds"][0]["settings"]["fakeDnsIpv6Range"],
             crate::DEFAULT_FAKE_DNS_IPV6_RANGE
+        );
+    }
+
+    #[test]
+    fn expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap() {
+        // Mihomo hub/executor/executor.go::updateDNS and
+        // component/dialer/dialer.go::parseAddr resolve proxy server hostnames with
+        // ProxyServerHostResolver, never through the FakeIP listener. EasyTier has a
+        // narrower DNS surface, so `system` means the platform DNS snapshot supplied
+        // by the host before Leaf takes ownership of the TUN.
+        let source = r#"
+version: 1
+dns:
+  direct: [system, 223.5.5.5, system]
+  proxy: ["doh:cloudflare-dns.com@1.1.1.1"]
+rules: ["MATCH,DIRECT"]
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        let config = compile_leaf_config(
+            &revision,
+            7,
+            Path::new("."),
+            &Unresolved,
+            &[
+                "192.0.2.53".parse().unwrap(),
+                "2001:db8::53".parse().unwrap(),
+                "192.0.2.53".parse().unwrap(),
+            ],
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(
+            config["dns"]["servers"],
+            serde_json::json!([
+                "direct:192.0.2.53",
+                "direct:2001:db8::53",
+                "direct:223.5.5.5",
+                "doh:cloudflare-dns.com@1.1.1.1"
+            ])
+        );
+        assert!(
+            !config["dns"]["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|server| server == "direct:system")
         );
     }
 

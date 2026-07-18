@@ -43,6 +43,7 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   config::tests::validates_custom_ipv4_fake_dns_range
   config::tests::validates_custom_ipv6_fake_dns_range
   leaf_config::tests::explicit_dns_sets_replace_platform_direct_and_keep_proxy_separate
+  leaf_config::tests::expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap
   leaf_config::tests::preserves_unresolved_domain_contract_for_direct_socks_and_fallback
 )
 readonly -a DEFAULT_NETSTACK_TEST_FILTERS=(

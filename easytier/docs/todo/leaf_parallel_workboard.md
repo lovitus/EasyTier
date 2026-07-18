@@ -394,3 +394,14 @@ It is local execution state, not a reason to trigger a workflow by itself.
 `bfbe4de5` 的 Linux/Android workflow `29646685998/29646686016` 均成功，Linux artifact 的外层与包内 SHA256、`BUILD_INFO`、musl target 和 Build ID 已核对。双 VPS 真实节点证明 Trojan direct、VMess WS direct 可用且来源地址来自远端代理；VLESS WSS 在 EasyTier 中超时/空响应，而 sing-box 在保留及移除 early-data 两种配置下均成功，排除了 early-data 边界。`a3634330` 增加 `http/1.1` ALPN 后生成配置正确但仍失败，进一步定位到锁定 Leaf `742ad65c` 无条件发送 `xtls-rprx-vision`，与 Mihomo 仅在显式 flow 时启用 Vision 的语义不符。fork `36ba707f` 改为标准无-flow请求/响应，`.160` 独立 integration test 3/3 通过；主仓库锁 pin 后的标准 preflight 也通过，artifact 与真实节点矩阵尚待完成。
 
 替换候选清单：仅包含 Leaf pin `36ba707f`、既有 WSS ALPN 修复和验证文档；不新增公共配置或数据面逻辑。`.160` 已完成主仓库 `--locked` no-run 与完整默认 focused suite；随后只推送一次候选，由自动 Linux/Android workflow 构建同一 SHA。等待期间准备 lv1g2/lv1g3 共享 `/slab2` 的单次 `ncat + tar` 接收、`udp:true` 临时配置、direct/mesh/forced-v4/forced-v6/fallback/stop-start/资源与三次中位数矩阵，不修改在途快照。
+
+## 2026-07-18 代理端点 FakeDNS 自举回环修复候选
+
+- 状态：实现完成，`.160` 标准 `--locked` no-run 与完整 focused suite 已通过；构建影响；共享候选 SHA 待提交后记录。
+- 被否决 artifact：`de3e03887917dea4765dc83bb5f21db6b266df19`，Linux/Android workflow `29649710067/29649710096` 均成功且 Linux artifact 校验完整，但域名形式的 VLESS WSS 真实流量失败。
+- 交叉验证：同主机、同节点、同目标、相邻时间的 sing-box 完成 64 MiB，约 512 Mbit/s；EasyTier 12 秒零字节。临时 sing-box 服务端上的 plain VLESS、VLESS+WS、VLESS+WSS 均由同一 EasyTier artifact 完成 64 MiB，约 275-295 Mbit/s。CDN 强制 IPv4、强制 IPv6 配置也都通过，约 272/291 Mbit/s。
+- 精确根因：域名配置下 Leaf worker 实际向 FakeIP `198.19.0.4` 和 `fd65:6173:7974::4` 发起大量并发 TCP SYN；默认 `dns.direct: [system, ...]` 被编译为 `direct:system`，而 TUN 接管后的系统解析入口已是 Leaf FakeDNS，导致代理端点 bootstrap 查询回到 FakeDNS。
+- Mihomo 参照：`hub/executor/executor.go::updateDNS` 独立设置 `resolver.ProxyServerHostResolver`，`component/dialer/dialer.go::parseAddr` 用它解析代理服务器地址，不经过 FakeIP service。sing-box `common/dialer/dialer.go::NewWithOptions` 同样为 domain server address 构建 resolve dialer。
+- 修复边界：只在 `easytier-policy/src/leaf_config.rs::compile_dns_servers` 把 `system` 展开成宿主在 TUN 接管前传入的底层 DNS IP，去重并输出 `direct:<IP>`。不修改 Leaf、VLESS、TLS/WS、mesh、HEV、路由、FakeDNS 或代理组逻辑；无平台 DNS 时不退回 `direct:system`，保持 fail-closed。
+- `.160` 目标：标准 `scripts/leaf-remote-preflight.sh` 一次 `--locked` no-run 和完整 focused suite；新增精确测试 `expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap`。
+- Artifact 目标：一次自动 Linux/Android workflow 集；Linux 精确 artifact 重跑域名/强制 v4/v6 的 Trojan、VMess、VLESS direct 与 mesh、UDP、fallback、stop/start、资源及性能矩阵。每个失败均以同主机、同节点、同目标的 sing-box 相邻窗口交叉验证。

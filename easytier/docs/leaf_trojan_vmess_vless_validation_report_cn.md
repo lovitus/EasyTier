@@ -1,6 +1,6 @@
 # Leaf Trojan、VMess、VLESS 验证报告
 
-状态：`bfbe4de5` 与 `a3634330` 已完成精确 artifact 与部分远端矩阵，但均因 VLESS WSS 互操作失败被否决。锁定 Leaf 的 VLESS TCP 无条件启用 Vision 是真实根因；无-flow fork 修复及 EasyTier 替换候选均已通过 `.160` 预检，待精确 artifact 与真实节点矩阵。未完成的单元格不得解释为通过。
+状态：`bfbe4de5`、`a3634330` 与 `de3e0388` 均已被真实互操作否决。`de3e0388` 证明无-flow VLESS 修复本身正确，但暴露了代理端点域名经 `direct:system` 回到 FakeDNS 的独立自举回环；最小编译边界修复已通过 `.160`，待新 artifact。未完成的单元格不得解释为通过。
 
 ## 实现边界
 
@@ -33,6 +33,7 @@
 | Linux workflow / artifact | `29646685998` 成功；精确 musl artifact 已部署 lv1g2/lv1g3 |
 | Android workflow / artifact | `29646686016` 成功；当前无设备，不声称实包通过 |
 | BUILD_INFO / SHA256 / symbols | commit/run/target、外层和包内 SHA256、Build ID、debug info 均通过 |
+| VLESS 无-flow 替换 SHA | `de3e03887917dea4765dc83bb5f21db6b266df19`，Linux/Android `29649710067/29649710096` 成功，artifact 校验通过但域名端点回环，已否决 |
 
 ## 功能矩阵
 
@@ -71,3 +72,11 @@
 ## 发布判断
 
 当前只能判断配置编译与前端集成通过，不能判断真实节点互操作、mesh chain UDP 或性能合格。上述功能、生命周期、资源和性能矩阵闭环后再给出发布结论。
+
+## `de3e0388` 的分层隔离与代理端点 DNS 根因
+
+- 同主机、同节点、同目标、相邻时间的 sing-box 下载 64 MiB 成功，约 512 Mbit/s；`de3e0388` 域名配置 12 秒零字节，因此服务端故障已排除。
+- 临时标准 sing-box 服务端分别提供 plain VLESS、VLESS+WS、VLESS+WSS。`de3e0388` 三组均完整下载 64 MiB，约 275-295 Mbit/s，证明无-flow VLESS、WebSocket、TLS/ALPN 和组合顺序可用。
+- 同一 CDN 节点的强制 IPv4 与强制 IPv6 配置也都完整下载 64 MiB，约 272/291 Mbit/s；地址族和公网链路不是根因。
+- 域名配置运行时，Leaf worker 没有连接真实 CDN 地址，而是并发连接 FakeIP `198.19.0.4:443` 与 `fd65:6173:7974::4:443`，持续停在 `SYN-SENT`。默认 `dns.direct` 的 `system` 被原样编译为 Leaf `direct:system`，TUN 接管后该系统入口已指向 FakeDNS，代理端点 bootstrap 查询因此回到自身。
+- Mihomo `hub/executor/executor.go::updateDNS` 为代理端点单独设置 `ProxyServerHostResolver`，`component/dialer/dialer.go::parseAddr` 用该 resolver 解析节点地址；sing-box `common/dialer/dialer.go::NewWithOptions` 也为 domain server address 构造独立 resolve dialer。EasyTier 的最小等价修复是在配置编译时把 `system` 展开为 TUN 接管前捕获的底层 DNS IP，不修改 Leaf 或任何协议 actor。
