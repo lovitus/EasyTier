@@ -2,10 +2,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     pin::Pin,
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::Arc,
     task::{Context, Poll, Waker},
 };
 
@@ -22,11 +19,10 @@ use spin::Mutex as SpinMutex;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     sync::{
-        mpsc::{channel, Receiver, Sender},
-        Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError,
+        mpsc::{unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender},
+        Notify,
     },
 };
-use tokio_util::sync::PollSemaphore;
 use tracing::{error, trace};
 
 use crate::{
@@ -35,163 +31,9 @@ use crate::{
     Runner,
 };
 
-// The smoltcp window must cover the measured local TUN/netstack BDP. 32 KiB
-// and 128 KiB were insufficient in optimized same-host validation. 256 KiB is
-// the next bounded window below the original 0x3fff * 20 allocation.
-const SMOLTCP_TCP_SEND_BUFFER_SIZE: usize = 256 * 1024;
-const SMOLTCP_TCP_RECV_BUFFER_SIZE: usize = 256 * 1024;
-
-// Stream staging remains large for an unpressured active flow, but it is not
-// allocated for an idle connection. Under global pressure every active
-// direction retains an independent 32 KiB progress buffer; only the expansion
-// from BASE to MAX consumes the shared budget.
-const STREAM_BASE_BUFFER_SIZE: usize = 32 * 1024;
-const STREAM_MAX_BUFFER_SIZE: usize = 0x3FFF * 20;
-// Charge the entire expanded allocation, not merely MAX - BASE: migration
-// briefly holds both rings, so delta accounting would violate the hard budget.
-const STREAM_EXPANSION_ACCOUNTED_BYTES: usize = STREAM_MAX_BUFFER_SIZE;
-#[cfg(target_os = "android")]
-const STREAM_EXPANSION_BUDGET: usize = 32 * 1024 * 1024;
-#[cfg(not(target_os = "android"))]
-const STREAM_EXPANSION_BUDGET: usize = 64 * 1024 * 1024;
-
-struct AdaptiveRing {
-    ring: Option<RingBuffer<'static, u8>>,
-    expansion_permit: Option<OwnedSemaphorePermit>,
-}
-
-impl AdaptiveRing {
-    fn new() -> Self {
-        Self {
-            ring: None,
-            expansion_permit: None,
-        }
-    }
-
-    fn has_storage(&self) -> bool {
-        self.ring.is_some()
-    }
-
-    fn is_expanded(&self) -> bool {
-        self.expansion_permit.is_some()
-    }
-
-    fn install(&mut self, storage: Vec<u8>, permit: Option<OwnedSemaphorePermit>) {
-        assert!(!self.has_storage());
-        let expected = if permit.is_some() {
-            STREAM_MAX_BUFFER_SIZE
-        } else {
-            STREAM_BASE_BUFFER_SIZE
-        };
-        assert_eq!(storage.len(), expected);
-        self.ring = Some(RingBuffer::new(storage));
-        self.expansion_permit = permit;
-    }
-
-    fn expand(&mut self, storage: Vec<u8>, permit: OwnedSemaphorePermit) {
-        assert!(self.has_storage());
-        assert!(!self.is_expanded());
-        assert_eq!(storage.len(), STREAM_MAX_BUFFER_SIZE);
-
-        let mut old = self.ring.take().expect("base stream ring");
-        let mut expanded = RingBuffer::new(storage);
-        while !old.is_empty() {
-            let (copied, ()) = old.dequeue_many_with(|data| {
-                let copied = expanded.enqueue_slice(data);
-                (copied, ())
-            });
-            assert!(copied > 0);
-        }
-        self.ring = Some(expanded);
-        self.expansion_permit = Some(permit);
-    }
-
-    fn release_expansion_if_empty(&mut self) -> bool {
-        if !self.is_expanded() || !self.is_empty() {
-            return false;
-        }
-        self.ring.take();
-        self.expansion_permit.take();
-        true
-    }
-
-    fn clear_and_release(&mut self) {
-        self.ring.take();
-        self.expansion_permit.take();
-    }
-
-    fn is_empty(&self) -> bool {
-        self.ring.as_ref().map_or(true, RingBuffer::is_empty)
-    }
-
-    fn is_full(&self) -> bool {
-        self.ring.as_ref().is_some_and(RingBuffer::is_full)
-    }
-
-    fn enqueue_slice(&mut self, data: &[u8]) -> usize {
-        self.ring
-            .as_mut()
-            .expect("stream ring storage")
-            .enqueue_slice(data)
-    }
-
-    fn dequeue_slice(&mut self, data: &mut [u8]) -> usize {
-        self.ring
-            .as_mut()
-            .expect("stream ring storage")
-            .dequeue_slice(data)
-    }
-}
-
-struct ExpansionBudget {
-    semaphore: Arc<Semaphore>,
-    waiters: AtomicUsize,
-    reclaim_requested: AtomicBool,
-}
-
-impl ExpansionBudget {
-    fn new() -> Self {
-        let expansion_slots = STREAM_EXPANSION_BUDGET / STREAM_EXPANSION_ACCOUNTED_BYTES;
-        assert!(expansion_slots > 0);
-        Self::with_slots(expansion_slots)
-    }
-
-    fn with_slots(expansion_slots: usize) -> Self {
-        Self {
-            semaphore: Arc::new(Semaphore::new(expansion_slots)),
-            waiters: AtomicUsize::new(0),
-            reclaim_requested: AtomicBool::new(false),
-        }
-    }
-
-    fn waiters(&self) -> usize {
-        self.waiters.load(Ordering::Acquire)
-    }
-
-    fn register_waiter(&self) {
-        self.waiters.fetch_add(1, Ordering::AcqRel);
-        self.reclaim_requested.store(true, Ordering::Release);
-    }
-
-    fn unregister_waiter(&self) {
-        let previous = self.waiters.fetch_sub(1, Ordering::AcqRel);
-        assert!(previous > 0);
-    }
-
-    fn reclaim_requested(&self) -> bool {
-        self.reclaim_requested.load(Ordering::Acquire)
-    }
-
-    fn complete_one_reclaim(&self) {
-        // The waiter receiving this slot has not necessarily been polled yet,
-        // so it remains in the count. More than one live waiter means another
-        // single reclaim should be attempted on the next pressure pass.
-        self.reclaim_requested.swap(false, Ordering::AcqRel);
-        if self.waiters() > 1 {
-            self.reclaim_requested.store(true, Ordering::Release);
-        }
-    }
-}
+// NOTE: Default buffer could contain 20 AEAD packets
+const DEFAULT_TCP_SEND_BUFFER_SIZE: u32 = 0x3FFF * 20;
+const DEFAULT_TCP_RECV_BUFFER_SIZE: u32 = 0x3FFF * 20;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum TcpSocketState {
@@ -202,11 +44,10 @@ enum TcpSocketState {
 }
 
 struct TcpSocketControl {
-    send_buffer: AdaptiveRing,
+    send_buffer: RingBuffer<'static, u8>,
     send_waker: Option<Waker>,
-    recv_buffer: AdaptiveRing,
+    recv_buffer: RingBuffer<'static, u8>,
     recv_waker: Option<Waker>,
-    recv_expansion_waiting: bool,
     recv_state: TcpSocketState,
     send_state: TcpSocketState,
 }
@@ -226,44 +67,6 @@ fn mark_send_closing(control: &mut TcpSocketControl) {
     }
 }
 
-fn set_recv_expansion_waiting(
-    control: &mut TcpSocketControl,
-    budget: &ExpansionBudget,
-    waiting: bool,
-) {
-    if control.recv_expansion_waiting == waiting {
-        return;
-    }
-    control.recv_expansion_waiting = waiting;
-    if waiting {
-        budget.register_waiter();
-    } else {
-        budget.unregister_waiter();
-    }
-}
-
-fn reclaim_expanded_empty_buffers(
-    sockets: &HashMap<SocketHandle, SharedControl>,
-    budget: &ExpansionBudget,
-) -> bool {
-    if budget.waiters() == 0 || !budget.reclaim_requested() {
-        return false;
-    }
-
-    for control in sockets.values() {
-        let mut control = control.lock();
-        if control.send_buffer.release_expansion_if_empty() {
-            budget.complete_one_reclaim();
-            return true;
-        }
-        if control.recv_buffer.release_expansion_if_empty() {
-            budget.complete_one_reclaim();
-            return true;
-        }
-    }
-    false
-}
-
 struct TcpListenerRunner;
 
 impl TcpListenerRunner {
@@ -272,18 +75,15 @@ impl TcpListenerRunner {
         iface: Interface,
         iface_ingress_tx: Sender<Vec<u8>>,
         tcp_rx: Receiver<AnyIpPktFrame>,
-        stream_tx: Sender<TcpStream>,
+        stream_tx: UnboundedSender<TcpStream>,
         sockets: HashMap<SocketHandle, SharedControl>,
-        budget: Arc<ExpansionBudget>,
-        creation_queue_capacity: usize,
     ) -> Runner {
         Runner::new(async move {
             let notify = Arc::new(Notify::new());
-            let (socket_tx, socket_rx) = channel::<TcpSocketCreation>(creation_queue_capacity);
-            let packet_budget = budget.clone();
+            let (socket_tx, socket_rx) = unbounded_channel::<TcpSocketCreation>();
             let res = tokio::select! {
-                v = Self::handle_packet(notify.clone(), iface_ingress_tx, tcp_rx, stream_tx, socket_tx, packet_budget) => v,
-                v = Self::handle_socket(notify, device, iface, sockets, socket_rx, budget) => v,
+                v = Self::handle_packet(notify.clone(), iface_ingress_tx, tcp_rx, stream_tx, socket_tx) => v,
+                v = Self::handle_socket(notify, device, iface, sockets, socket_rx) => v,
             };
             res?;
             trace!("VirtDevice::poll thread exited");
@@ -295,9 +95,8 @@ impl TcpListenerRunner {
         notify: SharedNotify,
         iface_ingress_tx: Sender<Vec<u8>>,
         mut tcp_rx: Receiver<AnyIpPktFrame>,
-        stream_tx: Sender<TcpStream>,
-        socket_tx: Sender<TcpSocketCreation>,
-        budget: Arc<ExpansionBudget>,
+        stream_tx: UnboundedSender<TcpStream>,
+        socket_tx: UnboundedSender<TcpSocketCreation>,
     ) -> std::io::Result<()> {
         while let Some(frame) = tcp_rx.recv().await {
             let packet = match IpPacket::new_checked(frame.as_slice()) {
@@ -340,8 +139,8 @@ impl TcpListenerRunner {
             // TCP first handshake packet, create a new Connection
             if packet.syn() && !packet.ack() {
                 let mut socket = TcpSocket::new(
-                    TcpSocketBuffer::new(vec![0u8; SMOLTCP_TCP_RECV_BUFFER_SIZE]),
-                    TcpSocketBuffer::new(vec![0u8; SMOLTCP_TCP_SEND_BUFFER_SIZE]),
+                    TcpSocketBuffer::new(vec![0u8; DEFAULT_TCP_RECV_BUFFER_SIZE as usize]),
+                    TcpSocketBuffer::new(vec![0u8; DEFAULT_TCP_SEND_BUFFER_SIZE as usize]),
                 );
                 socket.set_keep_alive(Some(Duration::from_secs(28)));
                 // FIXME: It should follow system's setting. 7200 is Linux's default.
@@ -357,11 +156,10 @@ impl TcpListenerRunner {
                 trace!("created TCP connection for {} <-> {}", src_addr, dst_addr);
 
                 let control = Arc::new(SpinMutex::new(TcpSocketControl {
-                    send_buffer: AdaptiveRing::new(),
+                    send_buffer: RingBuffer::new(vec![0u8; DEFAULT_TCP_SEND_BUFFER_SIZE as usize]),
                     send_waker: None,
-                    recv_buffer: AdaptiveRing::new(),
+                    recv_buffer: RingBuffer::new(vec![0u8; DEFAULT_TCP_RECV_BUFFER_SIZE as usize]),
                     recv_waker: None,
-                    recv_expansion_waiting: false,
                     recv_state: TcpSocketState::Normal,
                     send_state: TcpSocketState::Normal,
                 }));
@@ -372,15 +170,10 @@ impl TcpListenerRunner {
                         dst_addr,
                         notify: notify.clone(),
                         control: control.clone(),
-                        expansion_budget: budget.clone(),
-                        send_expansion_permit: PollSemaphore::new(budget.semaphore.clone()),
-                        send_expansion_waiting: false,
                     })
-                    .await
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))?;
                 socket_tx
                     .send(TcpSocketCreation { control, socket })
-                    .await
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))?;
             }
 
@@ -399,8 +192,7 @@ impl TcpListenerRunner {
         mut device: VirtualDevice,
         mut iface: Interface,
         mut sockets: HashMap<SocketHandle, SharedControl>,
-        mut socket_rx: Receiver<TcpSocketCreation>,
-        budget: Arc<ExpansionBudget>,
+        mut socket_rx: UnboundedReceiver<TcpSocketCreation>,
     ) -> std::io::Result<()> {
         let mut socket_set = SocketSet::new(vec![]);
         loop {
@@ -414,13 +206,6 @@ impl TcpListenerRunner {
             while let Ok(TcpSocketCreation { control, socket }) = socket_rx.try_recv() {
                 let handle = socket_set.add(socket);
                 sockets.insert(handle, control);
-            }
-
-            if reclaim_expanded_empty_buffers(&sockets, &budget) {
-                // Reclamation is pressure-only. Let a queued writer claim the
-                // released expansion slot before scanning for another victim.
-                tokio::task::yield_now().await;
-                continue;
             }
 
             let before_poll = Instant::now();
@@ -446,9 +231,6 @@ impl TcpListenerRunner {
                 if socket.state() == TcpState::Closed {
                     sockets_to_remove.push(socket_handle);
 
-                    control.send_buffer.clear_and_release();
-                    control.recv_buffer.clear_and_release();
-                    set_recv_expansion_waiting(&mut control, &budget, false);
                     control.send_state = TcpSocketState::Closed;
                     control.recv_state = TcpSocketState::Closed;
 
@@ -475,52 +257,8 @@ impl TcpListenerRunner {
                     mark_send_closing(&mut control);
                 }
 
-                // Check if readable. Every active direction can allocate the
-                // unbudgeted base ring; an available global slot upgrades it to
-                // the original large steady-state ring.
+                // Check if readable
                 let mut wake_receiver = false;
-                if socket.can_recv() && !control.recv_buffer.has_storage() {
-                    match budget.semaphore.clone().try_acquire_owned() {
-                        Ok(permit) => control
-                            .recv_buffer
-                            .install(vec![0u8; STREAM_MAX_BUFFER_SIZE], Some(permit)),
-                        Err(TryAcquireError::NoPermits) => control
-                            .recv_buffer
-                            .install(vec![0u8; STREAM_BASE_BUFFER_SIZE], None),
-                        Err(TryAcquireError::Closed) => {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::BrokenPipe,
-                                "TCP stream expansion budget is closed",
-                            ));
-                        }
-                    }
-                }
-
-                if socket.can_recv()
-                    && control.recv_buffer.is_full()
-                    && !control.recv_buffer.is_expanded()
-                {
-                    match budget.semaphore.clone().try_acquire_owned() {
-                        Ok(permit) => {
-                            set_recv_expansion_waiting(&mut control, &budget, false);
-                            control
-                                .recv_buffer
-                                .expand(vec![0u8; STREAM_MAX_BUFFER_SIZE], permit);
-                        }
-                        Err(TryAcquireError::NoPermits) => {
-                            set_recv_expansion_waiting(&mut control, &budget, true);
-                        }
-                        Err(TryAcquireError::Closed) => {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::BrokenPipe,
-                                "TCP stream expansion budget is closed",
-                            ));
-                        }
-                    }
-                } else if !control.recv_buffer.is_full() {
-                    set_recv_expansion_waiting(&mut control, &budget, false);
-                }
-
                 while socket.can_recv() && !control.recv_buffer.is_full() {
                     let result = socket.recv(|buffer| {
                         let n = control.recv_buffer.enqueue_slice(buffer);
@@ -538,7 +276,6 @@ impl TcpListenerRunner {
                             if matches!(control.recv_state, TcpSocketState::Normal) {
                                 control.recv_state = TcpSocketState::Closed;
                             }
-                            set_recv_expansion_waiting(&mut control, &budget, false);
                             wake_receiver = true;
 
                             // The socket will be recycled in the next poll.
@@ -564,7 +301,6 @@ impl TcpListenerRunner {
 
                     // Let TcpStream::poll_read returns EOF.
                     control.recv_state = TcpSocketState::Closed;
-                    set_recv_expansion_waiting(&mut control, &budget, false);
                     wake_receiver = true;
                 }
 
@@ -593,7 +329,6 @@ impl TcpListenerRunner {
                             if matches!(control.send_state, TcpSocketState::Normal) {
                                 control.send_state = TcpSocketState::Closed;
                             }
-                            control.send_buffer.clear_and_release();
                             wake_sender = true;
 
                             // The socket will be recycled in the next poll.
@@ -612,11 +347,6 @@ impl TcpListenerRunner {
             for socket_handle in sockets_to_remove {
                 sockets.remove(&socket_handle);
                 socket_set.remove(socket_handle);
-            }
-
-            if reclaim_expanded_empty_buffers(&sockets, &budget) {
-                tokio::task::yield_now().await;
-                continue;
             }
 
             if device.output_closed() {
@@ -680,7 +410,7 @@ impl TcpListenerRunner {
 }
 
 pub struct TcpListener {
-    stream_rx: Receiver<TcpStream>,
+    stream_rx: UnboundedReceiver<TcpStream>,
 }
 
 impl TcpListener {
@@ -695,8 +425,7 @@ impl TcpListener {
         let (mut device, iface_ingress_tx) = VirtualDevice::new(stack_tx, ingress_capacity);
         let iface = Self::create_interface(&mut device)?;
 
-        let (stream_tx, stream_rx) = channel(ingress_capacity);
-        let expansion_budget = Arc::new(ExpansionBudget::new());
+        let (stream_tx, stream_rx) = unbounded_channel();
 
         let runner = TcpListenerRunner::create(
             device,
@@ -705,8 +434,6 @@ impl TcpListener {
             tcp_rx,
             stream_tx,
             HashMap::new(),
-            expansion_budget,
-            ingress_capacity,
         );
 
         Ok((runner, Self { stream_rx }))
@@ -762,18 +489,11 @@ pub struct TcpStream {
     dst_addr: SocketAddr,
     notify: SharedNotify,
     control: SharedControl,
-    expansion_budget: Arc<ExpansionBudget>,
-    send_expansion_permit: PollSemaphore,
-    send_expansion_waiting: bool,
 }
 
 impl Drop for TcpStream {
     fn drop(&mut self) {
-        self.cancel_send_expansion_wait();
         let mut control = self.control.lock();
-
-        control.recv_buffer.clear_and_release();
-        set_recv_expansion_waiting(&mut control, &self.expansion_budget, false);
 
         if matches!(control.recv_state, TcpSocketState::Normal) {
             control.recv_state = TcpSocketState::Close;
@@ -788,15 +508,6 @@ impl Drop for TcpStream {
 }
 
 impl TcpStream {
-    fn cancel_send_expansion_wait(&mut self) {
-        if self.send_expansion_waiting {
-            self.expansion_budget.unregister_waiter();
-            self.send_expansion_waiting = false;
-        }
-        let semaphore = self.send_expansion_permit.clone_inner();
-        self.send_expansion_permit = PollSemaphore::new(semaphore);
-    }
-
     pub fn local_addr(&self) -> &SocketAddr {
         &self.src_addr
     }
@@ -845,118 +556,36 @@ impl AsyncRead for TcpStream {
 
 impl AsyncWrite for TcpStream {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        let this = self.as_mut().get_mut();
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
+        let mut control = self.control.lock();
+
+        // If state == Close | Closing | Closed, the TCP stream WR half is closed.
+        if !matches!(control.send_state, TcpSocketState::Normal) {
+            return Err(std::io::ErrorKind::BrokenPipe.into()).into();
         }
 
-        loop {
-            let mut control = this.control.lock();
-            if !matches!(control.send_state, TcpSocketState::Normal) {
-                drop(control);
-                this.cancel_send_expansion_wait();
-                return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
-            }
+        // Write to buffer
 
-            if !control.send_buffer.has_storage() {
-                drop(control);
-                let permit = match this.expansion_budget.semaphore.clone().try_acquire_owned() {
-                    Ok(permit) => Some(permit),
-                    Err(TryAcquireError::NoPermits) => None,
-                    Err(TryAcquireError::Closed) => {
-                        return Poll::Ready(Err(std::io::Error::new(
-                            std::io::ErrorKind::BrokenPipe,
-                            "TCP stream expansion budget is closed",
-                        )));
-                    }
-                };
-                let capacity = if permit.is_some() {
-                    STREAM_MAX_BUFFER_SIZE
-                } else {
-                    STREAM_BASE_BUFFER_SIZE
-                };
-                let storage = vec![0u8; capacity];
-
-                control = this.control.lock();
-                if !matches!(control.send_state, TcpSocketState::Normal) {
-                    drop(control);
-                    this.cancel_send_expansion_wait();
-                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
-                }
-                if !control.send_buffer.has_storage() {
-                    control.send_buffer.install(storage, permit);
+        if control.send_buffer.is_full() {
+            if let Some(old_waker) = control.send_waker.replace(cx.waker().clone()) {
+                if !old_waker.will_wake(cx.waker()) {
+                    old_waker.wake();
                 }
             }
 
-            if !control.send_buffer.is_full() {
-                if this.send_expansion_waiting {
-                    drop(control);
-                    this.cancel_send_expansion_wait();
-                    continue;
-                }
-                let n = control.send_buffer.enqueue_slice(buf);
-                drop(control);
-                this.notify.notify_one();
-                return Poll::Ready(Ok(n));
-            }
-
-            if control.send_buffer.is_expanded() {
-                if let Some(old_waker) = control.send_waker.replace(cx.waker().clone()) {
-                    if !old_waker.will_wake(cx.waker()) {
-                        old_waker.wake();
-                    }
-                }
-                return Poll::Pending;
-            }
-            drop(control);
-
-            match this.send_expansion_permit.poll_acquire(cx) {
-                Poll::Ready(Some(permit)) => {
-                    this.cancel_send_expansion_wait();
-                    let storage = vec![0u8; STREAM_MAX_BUFFER_SIZE];
-                    let mut control = this.control.lock();
-                    if !matches!(control.send_state, TcpSocketState::Normal) {
-                        drop(control);
-                        drop(permit);
-                        return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
-                    }
-                    if !control.send_buffer.is_expanded() {
-                        control.send_buffer.expand(storage, permit);
-                    }
-                    continue;
-                }
-                Poll::Ready(None) => {
-                    this.cancel_send_expansion_wait();
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "TCP stream expansion budget is closed",
-                    )));
-                }
-                Poll::Pending => {
-                    if !this.send_expansion_waiting {
-                        this.expansion_budget.register_waiter();
-                        this.send_expansion_waiting = true;
-                        this.notify.notify_one();
-                    }
-                    let mut control = this.control.lock();
-                    if !matches!(control.send_state, TcpSocketState::Normal) {
-                        drop(control);
-                        this.cancel_send_expansion_wait();
-                        return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
-                    }
-                    if let Some(old_waker) = control.send_waker.replace(cx.waker().clone()) {
-                        if !old_waker.will_wake(cx.waker()) {
-                            old_waker.wake();
-                        }
-                    }
-                    return Poll::Pending;
-                }
-            }
+            return Poll::Pending;
         }
+
+        let n = control.send_buffer.enqueue_slice(buf);
+
+        if n > 0 {
+            self.notify.notify_one();
+        }
+
+        Ok(n).into()
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -964,9 +593,7 @@ impl AsyncWrite for TcpStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        this.cancel_send_expansion_wait();
-        let mut control = this.control.lock();
+        let mut control = self.control.lock();
 
         if matches!(
             control.send_state,
@@ -986,7 +613,7 @@ impl AsyncWrite for TcpStream {
             }
         }
 
-        this.notify.notify_one();
+        self.notify.notify_one();
 
         Poll::Pending
     }
@@ -995,228 +622,25 @@ impl AsyncWrite for TcpStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::poll;
     use std::time::Duration as StdDuration;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    fn control() -> SharedControl {
-        Arc::new(SpinMutex::new(TcpSocketControl {
-            send_buffer: AdaptiveRing::new(),
-            send_waker: None,
-            recv_buffer: AdaptiveRing::new(),
-            recv_waker: None,
-            recv_expansion_waiting: false,
-            recv_state: TcpSocketState::Normal,
-            send_state: TcpSocketState::Normal,
-        }))
-    }
-
-    fn stream(control: SharedControl, budget: Arc<ExpansionBudget>) -> TcpStream {
-        TcpStream {
-            src_addr: "10.0.0.1:1234".parse().unwrap(),
-            dst_addr: "10.0.0.2:80".parse().unwrap(),
-            notify: Arc::new(Notify::new()),
-            control,
-            send_expansion_permit: PollSemaphore::new(budget.semaphore.clone()),
-            expansion_budget: budget,
-            send_expansion_waiting: false,
-        }
-    }
-
-    #[test]
-    fn expansion_budget_is_hard_bounded_and_idle_streams_have_no_storage() {
-        assert_eq!(SMOLTCP_TCP_SEND_BUFFER_SIZE, 256 * 1024);
-        assert_eq!(SMOLTCP_TCP_RECV_BUFFER_SIZE, 256 * 1024);
-        let budget = ExpansionBudget::new();
-        let slots = budget.semaphore.available_permits();
-        assert!(slots * STREAM_EXPANSION_ACCOUNTED_BYTES <= STREAM_EXPANSION_BUDGET);
-        assert!((slots + 1) * STREAM_EXPANSION_ACCOUNTED_BYTES > STREAM_EXPANSION_BUDGET);
-
-        let control = control();
-        assert!(!control.lock().send_buffer.has_storage());
-        assert!(!control.lock().recv_buffer.has_storage());
-    }
-
-    #[test]
-    fn expanding_a_base_ring_preserves_byte_order() {
-        let budget = Arc::new(ExpansionBudget::with_slots(1));
-        let mut ring = AdaptiveRing::new();
-        ring.install(vec![0u8; STREAM_BASE_BUFFER_SIZE], None);
-        assert_eq!(ring.enqueue_slice(b"ordered payload"), 15);
-
-        let permit = budget.semaphore.clone().try_acquire_owned().unwrap();
-        ring.expand(vec![0u8; STREAM_MAX_BUFFER_SIZE], permit);
-        assert!(ring.is_expanded());
-
-        let mut output = [0u8; 15];
-        assert_eq!(ring.dequeue_slice(&mut output), output.len());
-        assert_eq!(&output, b"ordered payload");
-    }
-
-    #[test]
-    fn one_wait_episode_reclaims_at_most_one_expanded_ring() {
-        let budget = Arc::new(ExpansionBudget::with_slots(2));
-        let mut socket_set = SocketSet::new(Vec::new());
-        let mut sockets = HashMap::new();
-        for _ in 0..2 {
-            let handle = socket_set.add(TcpSocket::new(
-                TcpSocketBuffer::new(vec![0u8; 8]),
-                TcpSocketBuffer::new(vec![0u8; 8]),
-            ));
-            let control = control();
-            control.lock().send_buffer.install(
-                vec![0u8; STREAM_MAX_BUFFER_SIZE],
-                Some(budget.semaphore.clone().try_acquire_owned().unwrap()),
-            );
-            sockets.insert(handle, control);
-        }
-        assert_eq!(budget.semaphore.available_permits(), 0);
-
-        budget.register_waiter();
-        assert!(reclaim_expanded_empty_buffers(&sockets, &budget));
-        assert_eq!(budget.semaphore.available_permits(), 1);
-        assert!(!reclaim_expanded_empty_buffers(&sockets, &budget));
-        assert_eq!(budget.semaphore.available_permits(), 1);
-        budget.unregister_waiter();
-    }
-
-    #[test]
-    fn multiple_live_waiters_reclaim_one_ring_per_pressure_pass() {
-        let budget = Arc::new(ExpansionBudget::with_slots(2));
-        let mut socket_set = SocketSet::new(Vec::new());
-        let mut sockets = HashMap::new();
-        for _ in 0..2 {
-            let handle = socket_set.add(TcpSocket::new(
-                TcpSocketBuffer::new(vec![0u8; 8]),
-                TcpSocketBuffer::new(vec![0u8; 8]),
-            ));
-            let control = control();
-            control.lock().send_buffer.install(
-                vec![0u8; STREAM_MAX_BUFFER_SIZE],
-                Some(budget.semaphore.clone().try_acquire_owned().unwrap()),
-            );
-            sockets.insert(handle, control);
-        }
-
-        budget.register_waiter();
-        budget.register_waiter();
-        assert!(reclaim_expanded_empty_buffers(&sockets, &budget));
-        assert_eq!(budget.semaphore.available_permits(), 1);
-        assert!(reclaim_expanded_empty_buffers(&sockets, &budget));
-        assert_eq!(budget.semaphore.available_permits(), 2);
-        assert!(!reclaim_expanded_empty_buffers(&sockets, &budget));
-        budget.unregister_waiter();
-        budget.unregister_waiter();
-    }
-
-    #[tokio::test]
-    async fn exhausted_expansion_budget_still_allows_base_ring_progress() {
-        let budget = Arc::new(ExpansionBudget::with_slots(0));
-        let control = control();
-        let mut stream = stream(control.clone(), budget.clone());
-        let payload = vec![7u8; STREAM_BASE_BUFFER_SIZE];
-
-        assert_eq!(stream.write(&payload).await.unwrap(), payload.len());
-        assert!(!control.lock().send_buffer.is_expanded());
-
-        let mut blocked = Box::pin(stream.write(b"x"));
-        assert!(poll!(blocked.as_mut()).is_pending());
-        assert_eq!(budget.waiters(), 1);
-
-        let mut drained = [0u8; 1];
-        assert_eq!(control.lock().send_buffer.dequeue_slice(&mut drained), 1);
-        assert!(matches!(poll!(blocked.as_mut()), Poll::Ready(Ok(1))));
-        assert_eq!(budget.waiters(), 0);
-    }
-
-    #[tokio::test]
-    async fn more_active_streams_than_expansion_slots_all_make_initial_progress() {
-        let budget = Arc::new(ExpansionBudget::with_slots(1));
-        let mut expanded = 0;
-        let mut retained = Vec::new();
-        for _ in 0..128 {
-            let control = control();
-            let mut stream = stream(control.clone(), budget.clone());
-            assert_eq!(stream.write(b"x").await.unwrap(), 1);
-            expanded += usize::from(control.lock().send_buffer.is_expanded());
-            retained.push((stream, control));
-        }
-        assert_eq!(expanded, 1);
-        assert_eq!(budget.waiters(), 0);
-    }
-
-    #[tokio::test]
-    async fn released_expansion_slot_wakes_a_waiting_base_ring() {
-        let budget = Arc::new(ExpansionBudget::with_slots(1));
-        let mut blocker = AdaptiveRing::new();
-        blocker.install(
-            vec![0u8; STREAM_MAX_BUFFER_SIZE],
-            Some(budget.semaphore.clone().try_acquire_owned().unwrap()),
-        );
-
-        let control = control();
-        let mut stream = stream(control.clone(), budget.clone());
-        let payload = vec![3u8; STREAM_BASE_BUFFER_SIZE];
-        assert_eq!(stream.write(&payload).await.unwrap(), payload.len());
-
-        let mut blocked = Box::pin(stream.write(b"x"));
-        assert!(poll!(blocked.as_mut()).is_pending());
-        assert_eq!(budget.waiters(), 1);
-        assert!(blocker.release_expansion_if_empty());
-
-        assert_eq!(blocked.await.unwrap(), 1);
-        assert!(control.lock().send_buffer.is_expanded());
-        assert_eq!(budget.waiters(), 0);
-    }
-
-    #[tokio::test]
-    async fn shutdown_cancels_a_pending_send_expansion_wait() {
-        let budget = Arc::new(ExpansionBudget::with_slots(0));
-        let control = control();
-        let mut stream = stream(control, budget.clone());
-        let payload = vec![9u8; STREAM_BASE_BUFFER_SIZE];
-        assert_eq!(stream.write(&payload).await.unwrap(), payload.len());
-
-        let mut blocked = Box::pin(stream.write(b"x"));
-        assert!(poll!(blocked.as_mut()).is_pending());
-        drop(blocked);
-        assert_eq!(budget.waiters(), 1);
-
-        let mut shutdown = Box::pin(stream.shutdown());
-        assert!(poll!(shutdown.as_mut()).is_pending());
-        assert_eq!(budget.waiters(), 0);
-    }
-
-    #[tokio::test]
-    async fn received_bytes_remain_readable_before_half_close_eof() {
-        let budget = Arc::new(ExpansionBudget::with_slots(0));
-        let control = control();
-        {
-            let mut control = control.lock();
-            control
-                .recv_buffer
-                .install(vec![0u8; STREAM_BASE_BUFFER_SIZE], None);
-            assert_eq!(control.recv_buffer.enqueue_slice(b"data"), 4);
-            control.recv_state = TcpSocketState::Closed;
-        }
-        let mut stream = stream(control, budget);
-        let mut output = Vec::new();
-        stream.read_to_end(&mut output).await.unwrap();
-        assert_eq!(output, b"data");
-    }
-
-    #[tokio::test]
-    async fn listener_connection_queue_is_bounded_like_ingress() {
-        let (_tcp_tx, tcp_rx) = tokio::sync::mpsc::channel(3);
-        let (stack_tx, _stack_rx) = tokio::sync::mpsc::channel(1);
-        let (_runner, listener) = TcpListener::new(tcp_rx, stack_tx).unwrap();
-        assert_eq!(listener.stream_rx.max_capacity(), 3);
-    }
+    use tokio::io::AsyncWriteExt as _;
 
     #[tokio::test]
     async fn shutdown_completes_when_fin_is_committed() {
-        let control = control();
-        let mut stream = stream(control.clone(), Arc::new(ExpansionBudget::with_slots(1)));
+        let control = Arc::new(SpinMutex::new(TcpSocketControl {
+            send_buffer: RingBuffer::new(vec![0u8; 16]),
+            send_waker: None,
+            recv_buffer: RingBuffer::new(vec![0u8; 16]),
+            recv_waker: None,
+            recv_state: TcpSocketState::Normal,
+            send_state: TcpSocketState::Normal,
+        }));
+        let mut stream = TcpStream {
+            src_addr: "10.0.0.1:1234".parse().unwrap(),
+            dst_addr: "10.0.0.2:80".parse().unwrap(),
+            notify: Arc::new(Notify::new()),
+            control: control.clone(),
+        };
 
         let shutdown = tokio::spawn(async move { stream.shutdown().await });
         tokio::task::yield_now().await;
