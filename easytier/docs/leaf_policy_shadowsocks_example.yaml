@@ -1,0 +1,47 @@
+# EasyTier Leaf policy: Shadowsocks native UDP and UoT v2 through a mesh hop.
+# Replace every example address, port, password, and virtual IP before use.
+version: 1
+
+proxies:
+  mesh-hop:
+    type: socks5
+    server:
+      virtual-ip: 10.144.144.2
+    via: mesh
+    udp: true
+
+  ss-native:
+    type: shadowsocks
+    server: ss.example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: change-me
+    via: native
+    udp: native
+
+  # In this chain, 127.0.0.1 is resolved from the mesh peer's perspective.
+  peer-ss-uot:
+    type: shadowsocks
+    server: 127.0.0.1
+    port: 8388
+    cipher: chacha20-ietf-poly1305
+    password: change-me
+    via: native
+    udp: uot-v2
+
+groups:
+  mesh-ss-uot:
+    type: chain
+    members: [mesh-hop, peer-ss-uot]
+
+  overseas:
+    type: fallback
+    members: [mesh-ss-uot, ss-native]
+
+rules:
+  - GEOIP,LAN,DIRECT,no-resolve
+  - GEOSITE,CN,DIRECT
+  - GEOIP,CN,DIRECT,no-resolve
+  - GEOSITE,geolocation-!cn,overseas
+  - NETWORK,udp,overseas
+  - MATCH,DIRECT

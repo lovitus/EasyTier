@@ -253,7 +253,7 @@ impl MeshProxyBridgeSet {
             remotes.insert(name.clone(), remote.clone());
             pending.push((
                 name.clone(),
-                proxy.udp,
+                proxy.udp.enabled(),
                 password,
                 PolicyProxyCredentials::from_proxy(proxy),
                 remote,

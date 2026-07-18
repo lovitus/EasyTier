@@ -4,7 +4,11 @@ These items must not silently expand the Leaf v1 release boundary. Promote an it
 
 ## Transports and proxy composition
 
-- Optional UoT with explicit capability negotiation and a compatible remote endpoint.
+- Shadowsocks TCP/UDP plus explicit UoT v2 support, using the existing policy
+  actor compiler and chain composition instead of a new proxy framework. The complete design and validation boundary are
+  recorded in [`leaf_shadowsocks_uot_v2.md`](leaf_shadowsocks_uot_v2.md). UoT is
+  selected explicitly and fails closed when the remote endpoint is incompatible;
+  it is not probed and never silently falls back to native UDP.
 - HEV's proprietary `FWD UDP` request uses SOCKS command `0x05` and HEV-specific UDP-in-TCP framing. Mihomo/sing UoT instead uses magic destinations and a different request/frame protocol; they are not configuration-compatible. Reusing HEV `FWD UDP` would require an explicit Leaf/EasyTier client adapter plus interoperability and fallback tests, not a hidden `uot: true` switch.
 - Optional KCP-based actors where their reliability/latency tradeoffs are justified; never present KCP as a cure for blocked UDP.
 - Full UDP loss, reordering, rebinding, idle-timeout, and association-resource soak matrices.

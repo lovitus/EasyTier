@@ -155,6 +155,16 @@ pub fn compile_leaf_config_with_options(
                 "protocol": "socks",
                 "settings": settings,
             })),
+            ProxyKind::Shadowsocks => outbounds.push(crate::shadowsocks::compile_outbound(
+                name,
+                settings["address"]
+                    .as_str()
+                    .expect("validated Shadowsocks address"),
+                settings["port"]
+                    .as_u64()
+                    .expect("validated Shadowsocks port") as u16,
+                proxy,
+            )),
             ProxyKind::Http => unreachable!("policy validation rejects HTTP outbound in v1"),
         }
     }
@@ -757,6 +767,94 @@ rules:
         );
         assert_eq!(rules[2]["target"], "final");
         assert_eq!(rules[2]["network"], serde_json::json!(["tcp", "udp"]));
+    }
+
+    #[test]
+    fn compiles_shadowsocks_native_udp_and_uot_chain_as_leaf_actors() {
+        let source = r#"
+version: 1
+proxies:
+  mesh-hop:
+    type: socks5
+    server: { virtual-ip: 10.44.0.8 }
+    via: mesh
+    udp: true
+  ss-native:
+    type: shadowsocks
+    server: ss.example
+    port: 8388
+    cipher: aes-128-gcm
+    password: native-secret
+    udp: native
+  ss-uot:
+    type: shadowsocks
+    server: ss.example
+    port: 8389
+    cipher: chacha20-ietf-poly1305
+    password: uot-secret
+    udp: uot-v2
+groups:
+  mesh-ss-uot:
+    type: chain
+    members: [mesh-hop, ss-uot]
+  preferred:
+    type: fallback
+    members: [mesh-ss-uot, ss-native]
+rules:
+  - NETWORK,udp,preferred
+  - MATCH,preferred
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        let resolver = |name: &str,
+                        _instance_id: Option<Uuid>,
+                        _virtual_ip: Option<IpAddr>,
+                        _port: Option<u16>| {
+            (name == "mesh-hop").then(|| ResolvedMeshServer {
+                endpoint: "127.0.0.1:32100".parse().unwrap(),
+                username: "easytier".to_owned(),
+                password: "secret".to_owned(),
+            })
+        };
+        let config = compile_leaf_config(
+            &revision,
+            7,
+            Path::new("."),
+            &resolver,
+            &["1.1.1.1".parse().unwrap()],
+        )
+        .unwrap();
+        #[cfg(feature = "leaf-runtime")]
+        leaf::config::from_string(&config).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        let outbounds = config["outbounds"].as_array().unwrap();
+        let native = outbounds
+            .iter()
+            .find(|outbound| outbound["tag"] == "ss-native")
+            .unwrap();
+        assert_eq!(native["protocol"], "shadowsocks");
+        assert_eq!(native["settings"]["method"], "aes-128-gcm");
+        assert_eq!(native["settings"]["uotV2"], false);
+        let uot = outbounds
+            .iter()
+            .find(|outbound| outbound["tag"] == "ss-uot")
+            .unwrap();
+        assert_eq!(uot["settings"]["uotV2"], true);
+        let chain = outbounds
+            .iter()
+            .find(|outbound| outbound["tag"] == "mesh-ss-uot")
+            .unwrap();
+        assert_eq!(
+            chain["settings"]["actors"],
+            serde_json::json!(["mesh-hop", "ss-uot"])
+        );
+        let fallback = outbounds
+            .iter()
+            .find(|outbound| outbound["tag"] == "preferred")
+            .unwrap();
+        assert_eq!(
+            fallback["settings"]["actors"],
+            serde_json::json!(["mesh-ss-uot", "ss-native"])
+        );
     }
 
     #[test]

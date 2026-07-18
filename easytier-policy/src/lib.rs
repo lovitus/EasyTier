@@ -13,12 +13,13 @@ mod leaf_config;
 mod leaf_process;
 mod packet;
 mod preflight;
+mod shadowsocks;
 mod supervisor;
 
 pub use config::{
     ChainKind, DEFAULT_FAKE_DNS_IPV4_RANGE, DEFAULT_FAKE_DNS_IPV6_RANGE, PolicyDns, PolicyDocument,
-    PolicyError, PolicyMode, PolicyRevision, Proxy, ProxyKind, ProxyServer, ProxyVia, RuleSet,
-    RuleSetKind, reload_policy_file_if_changed,
+    PolicyError, PolicyMode, PolicyRevision, Proxy, ProxyKind, ProxyServer, ProxyUdp, ProxyVia,
+    RuleSet, RuleSetKind, reload_policy_file_if_changed,
     reload_policy_file_if_changed_with_rule_set_provider, validate_policy_file,
     validate_policy_file_with_rule_set_provider,
 };

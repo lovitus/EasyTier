@@ -34,6 +34,10 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
 )
 readonly -a DEFAULT_POLICY_TEST_FILTERS=(
+  config::tests::parses_legacy_and_named_udp_modes_canonically
+  config::tests::validates_shadowsocks_fields_without_expanding_mesh_semantics
+  config::tests::rejects_uot_v2_on_socks5
+  leaf_config::tests::compiles_shadowsocks_native_udp_and_uot_chain_as_leaf_actors
   config::tests::validates_custom_ipv4_fake_dns_range
   config::tests::validates_custom_ipv6_fake_dns_range
   leaf_config::tests::explicit_dns_sets_replace_platform_direct_and_keep_proxy_separate

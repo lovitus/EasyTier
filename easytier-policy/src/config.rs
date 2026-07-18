@@ -19,6 +19,12 @@ const MAX_ACTORS: usize = 1_024;
 const MAX_EXPANDED_CHAIN_ACTORS: usize = 32;
 const MAX_GROUP_REFERENCES: usize = 64;
 const MAX_DNS_SERVERS_PER_SET: usize = 8;
+const SHADOWSOCKS_CIPHERS: [&str; 4] = [
+    "aes-128-gcm",
+    "aes-256-gcm",
+    "chacha20-poly1305",
+    "chacha20-ietf-poly1305",
+];
 // Reference boundary: Mihomo config/config.go::UnmarshalRawConfig keeps bootstrap,
 // direct, and general resolvers as separate sets. EasyTier's narrower Leaf v1 syntax
 // intentionally presets only resolver forms accepted by the pinned Leaf parser.
@@ -125,7 +131,67 @@ fn manual_update() -> String {
 #[serde(rename_all = "kebab-case")]
 pub enum ProxyKind {
     Socks5,
+    Shadowsocks,
     Http,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProxyUdp {
+    #[default]
+    Off,
+    Native,
+    UotV2,
+}
+
+impl ProxyUdp {
+    pub fn enabled(self) -> bool {
+        self != Self::Off
+    }
+
+    pub fn is_uot_v2(self) -> bool {
+        self == Self::UotV2
+    }
+}
+
+impl Serialize for ProxyUdp {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Off => "off",
+            Self::Native => "native",
+            Self::UotV2 => "uot-v2",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ProxyUdp {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "kebab-case")]
+        enum Name {
+            Off,
+            Native,
+            UotV2,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Input {
+            Legacy(bool),
+            Name(Name),
+        }
+
+        Ok(match Input::deserialize(deserializer)? {
+            Input::Legacy(false) | Input::Name(Name::Off) => Self::Off,
+            Input::Legacy(true) | Input::Name(Name::Native) => Self::Native,
+            Input::Name(Name::UotV2) => Self::UotV2,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -159,11 +225,13 @@ pub struct Proxy {
     #[serde(default)]
     pub via: ProxyVia,
     #[serde(default)]
-    pub udp: bool,
+    pub udp: ProxyUdp,
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cipher: Option<String>,
 }
 
 impl Proxy {
@@ -659,25 +727,63 @@ impl PolicyDocument {
                 }
                 _ => {}
             }
-            match (&proxy.username, &proxy.password) {
-                (None, None) => {}
-                (Some(username), Some(password))
-                    if valid_proxy_credential(username) && valid_proxy_credential(password) => {}
-                (Some(_), Some(_)) => {
+            if matches!(proxy.kind, ProxyKind::Socks5 | ProxyKind::Http) {
+                match (&proxy.username, &proxy.password) {
+                    (None, None) => {}
+                    (Some(username), Some(password))
+                        if valid_proxy_credential(username) && valid_proxy_credential(password) => {
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason: "username/password must be 1..=128 safe ASCII characters"
+                                .to_owned(),
+                        });
+                    }
+                    _ => {
+                        return Err(PolicyError::InvalidServer {
+                            name: name.clone(),
+                            reason: "username and password must be configured together".to_owned(),
+                        });
+                    }
+                }
+                if proxy.cipher.is_some() {
                     return Err(PolicyError::InvalidServer {
                         name: name.clone(),
-                        reason: "username/password must be 1..=128 safe ASCII characters"
-                            .to_owned(),
+                        reason: "cipher is only valid for Shadowsocks".to_owned(),
                     });
                 }
-                _ => {
+                if proxy.udp.is_uot_v2() {
                     return Err(PolicyError::InvalidServer {
                         name: name.clone(),
-                        reason: "username and password must be configured together".to_owned(),
+                        reason: "uot-v2 is only valid for Shadowsocks".to_owned(),
                     });
                 }
             }
-            if proxy.kind == ProxyKind::Http && proxy.udp {
+            if proxy.kind == ProxyKind::Shadowsocks {
+                if proxy.username.is_some() {
+                    return Err(PolicyError::InvalidServer {
+                        name: name.clone(),
+                        reason: "Shadowsocks does not use a username".to_owned(),
+                    });
+                }
+                let password = proxy.password.as_deref().unwrap_or_default();
+                if password.is_empty() || password.len() > 1024 || password.contains('\0') {
+                    return Err(PolicyError::InvalidServer {
+                        name: name.clone(),
+                        reason: "Shadowsocks password must be 1..=1024 bytes without NUL"
+                            .to_owned(),
+                    });
+                }
+                let cipher = proxy.cipher.as_deref().unwrap_or_default();
+                if !SHADOWSOCKS_CIPHERS.contains(&cipher) {
+                    return Err(PolicyError::InvalidServer {
+                        name: name.clone(),
+                        reason: format!("unsupported Shadowsocks cipher {cipher}"),
+                    });
+                }
+            }
+            if proxy.kind == ProxyKind::Http && proxy.udp.enabled() {
                 return Err(PolicyError::InvalidServer {
                     name: name.clone(),
                     reason: "HTTP CONNECT is TCP-only".to_owned(),
@@ -694,7 +800,8 @@ impl PolicyDocument {
             if proxy.via == ProxyVia::Mesh && proxy.kind != ProxyKind::Socks5 {
                 return Err(PolicyError::InvalidServer {
                     name: name.clone(),
-                    reason: "v1 mesh transport requires a SOCKS5 actor".to_owned(),
+                    reason: "via: mesh is a SOCKS5 actor; compose it before Shadowsocks in a chain"
+                        .to_owned(),
                 });
             }
         }
@@ -958,7 +1065,8 @@ impl PolicyDocument {
             return Ok(true);
         }
         if let Some(proxy) = self.proxies.get(actor) {
-            return Ok(proxy.udp && proxy.kind == ProxyKind::Socks5);
+            return Ok(proxy.udp.enabled()
+                && matches!(proxy.kind, ProxyKind::Socks5 | ProxyKind::Shadowsocks));
         }
         let Some(group) = self.groups.get(actor) else {
             return Err(PolicyError::UnknownReference {
@@ -1137,6 +1245,86 @@ rules:
   - NETWORK,udp,final-udp
   - MATCH,final-tcp
 "#;
+
+    #[test]
+    fn parses_legacy_and_named_udp_modes_canonically() {
+        for (value, expected) in [
+            ("false", ProxyUdp::Off),
+            ("true", ProxyUdp::Native),
+            ("off", ProxyUdp::Off),
+            ("native", ProxyUdp::Native),
+            ("uot-v2", ProxyUdp::UotV2),
+        ] {
+            let source = format!(
+                "version: 1\nproxies:\n  ss:\n    type: shadowsocks\n    server: 127.0.0.1\n    port: 8388\n    cipher: aes-256-gcm\n    password: secret\n    udp: {value}\nrules: [\"MATCH,ss\"]\n"
+            );
+            let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+            assert_eq!(revision.document.proxies["ss"].udp, expected);
+            assert_eq!(
+                serde_yaml::to_value(revision.document.proxies["ss"].udp).unwrap(),
+                serde_yaml::Value::String(
+                    match expected {
+                        ProxyUdp::Off => "off",
+                        ProxyUdp::Native => "native",
+                        ProxyUdp::UotV2 => "uot-v2",
+                    }
+                    .to_owned()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn validates_shadowsocks_fields_without_expanding_mesh_semantics() {
+        let valid = r#"
+version: 1
+proxies:
+  ss:
+    type: shadowsocks
+    server: ss.example
+    port: 8388
+    cipher: chacha20-ietf-poly1305
+    password: secret
+    udp: uot-v2
+rules: ["MATCH,ss"]
+"#;
+        PolicyRevision::parse(valid, Path::new(".")).unwrap();
+
+        let invalid_cipher = valid.replace("chacha20-ietf-poly1305", "rc4-md5");
+        assert!(matches!(
+            PolicyRevision::parse(invalid_cipher, Path::new(".")),
+            Err(PolicyError::InvalidServer { name, reason })
+                if name == "ss" && reason.contains("unsupported Shadowsocks cipher")
+        ));
+
+        let mesh = valid
+            .replace("server: ss.example", "server: { virtual-ip: 10.44.0.8 }")
+            .replace("    port: 8388\n", "    port: 8388\n    via: mesh\n");
+        assert!(matches!(
+            PolicyRevision::parse(mesh, Path::new(".")),
+            Err(PolicyError::InvalidServer { name, reason })
+                if name == "ss" && reason.contains("compose it before Shadowsocks in a chain")
+        ));
+    }
+
+    #[test]
+    fn rejects_uot_v2_on_socks5() {
+        let source = r#"
+version: 1
+proxies:
+  socks:
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    udp: uot-v2
+rules: ["MATCH,socks"]
+"#;
+        assert!(matches!(
+            PolicyRevision::parse(source, Path::new(".")),
+            Err(PolicyError::InvalidServer { name, reason })
+                if name == "socks" && reason == "uot-v2 is only valid for Shadowsocks"
+        ));
+    }
 
     #[test]
     fn permits_implicit_port_only_for_mesh_egress() {

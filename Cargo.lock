@@ -797,7 +797,7 @@ dependencies = [
  "bitflags 2.8.0",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.11.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -817,7 +817,7 @@ dependencies = [
  "bitflags 2.8.0",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.11.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -4775,15 +4775,6 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
@@ -4956,7 +4947,7 @@ dependencies = [
 [[package]]
 name = "leaf"
 version = "0.1.2"
-source = "git+https://github.com/lovitus/leaf.git?rev=4af133266367bc6ef1d369b4b519a0a56da48760#4af133266367bc6ef1d369b4b519a0a56da48760"
+source = "git+https://github.com/lovitus/leaf.git?rev=742ad65c441f9d60279916b82628b810efbd48fb#742ad65c441f9d60279916b82628b810efbd48fb"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -4970,6 +4961,7 @@ dependencies = [
  "cidr 0.2.3",
  "futures",
  "hickory-proto 0.24.4",
+ "hkdf",
  "ipconfig",
  "jni",
  "lazy_static",
@@ -4977,11 +4969,13 @@ dependencies = [
  "lru",
  "lru_time_cache",
  "maxminddb",
+ "md-5",
  "memchr",
  "memmap2",
  "netstack-lwip",
  "netstack-smoltcp",
  "parking_lot",
+ "percent-encoding",
  "pnet_datalink 0.34.0",
  "protobuf",
  "protobuf-codegen",
@@ -4994,10 +4988,12 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
+ "sha-1",
  "socket2 0.5.10",
  "thiserror 1.0.63",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -7333,7 +7329,7 @@ version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -7446,7 +7442,7 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe500dc80e757a75e1e8fb7290e448d62dfba3105ece1d058579cb00b58151cd"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "prost 0.14.3",
  "prost-build",
  "prost-types 0.14.3",
@@ -9171,6 +9167,17 @@ checksum = "d52aa42f8fdf0fed91e5ce7f23d8138441002fa31dca008acf47e6fd4721f741"
 dependencies = [
  "nodrop",
  "stable_deref_trait",
+]
+
+[[package]]
+name = "sha-1"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5058ada175748e33390e40e872bd0fe59a19f265d0158daa551c5a88a76009c"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.13",
+ "digest",
 ]
 
 [[package]]
