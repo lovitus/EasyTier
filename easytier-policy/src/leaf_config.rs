@@ -853,7 +853,7 @@ rules:
         assert_eq!(
             config["dns"]["servers"],
             serde_json::json!([
-                "direct:system",
+                "direct:1.1.1.1",
                 "direct:doh:dns.alidns.com@223.5.5.5",
                 "direct:223.5.5.5",
                 "direct:119.29.29.29",

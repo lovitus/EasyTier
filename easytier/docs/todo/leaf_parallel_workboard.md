@@ -405,3 +405,4 @@ It is local execution state, not a reason to trigger a workflow by itself.
 - 修复边界：只在 `easytier-policy/src/leaf_config.rs::compile_dns_servers` 把 `system` 展开成宿主在 TUN 接管前传入的底层 DNS IP，去重并输出 `direct:<IP>`。不修改 Leaf、VLESS、TLS/WS、mesh、HEV、路由、FakeDNS 或代理组逻辑；无平台 DNS 时不退回 `direct:system`，保持 fail-closed。
 - `.160` 目标：标准 `scripts/leaf-remote-preflight.sh` 一次 `--locked` no-run 和完整 focused suite；新增精确测试 `expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap`。
 - Artifact 目标：一次自动 Linux/Android workflow 集；Linux 精确 artifact 重跑域名/强制 v4/v6 的 Trojan、VMess、VLESS direct 与 mesh、UDP、fallback、stop/start、资源及性能矩阵。每个失败均以同主机、同节点、同目标的 sing-box 相邻窗口交叉验证。
+- 首次候选 `1059c21d88d06d10c9c965750269484dbc7dcbcf`：Linux workflow `29651804523` 的完整 policy suite 为 87/88，通过的新行为与旧快照断言冲突；唯一失败仍期待 `direct:system`，实际为捕获的 `direct:1.1.1.1`。运行时代码、编译和新增精确测试均通过。修正候选只更新该断言并把稳定配置快照测试加入 `.160` 默认过滤器；Android `29651804525` 独立保留其实际结果，不用它替代 Linux artifact。

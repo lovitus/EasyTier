@@ -40,6 +40,7 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   config::tests::rejects_uot_v2_on_socks5
   leaf_config::tests::compiles_shadowsocks_native_udp_and_uot_chain_as_leaf_actors
   leaf_config::tests::compiles_trojan_vmess_and_vless_as_private_transport_chains
+  leaf_config::tests::compiles_stable_yaml_to_strict_leaf_config
   config::tests::validates_custom_ipv4_fake_dns_range
   config::tests::validates_custom_ipv6_fake_dns_range
   leaf_config::tests::explicit_dns_sets_replace_platform_direct_and_keep_proxy_separate
