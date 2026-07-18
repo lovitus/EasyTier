@@ -1,10 +1,10 @@
 # Leaf Trojan、VMess、VLESS 验证报告
 
-状态：首个候选 `bfbe4de5` 已完成精确 artifact 与部分远端矩阵，但因 VLESS WSS ALPN 互操作失败被否决；最小修复候选待重新预检和构建。未完成的单元格不得解释为通过。
+状态：`bfbe4de5` 与 `a3634330` 已完成精确 artifact 与部分远端矩阵，但均因 VLESS WSS 互操作失败被否决。锁定 Leaf 的 VLESS TCP 无条件启用 Vision 是真实根因；无-flow fork 修复及 EasyTier 替换候选均已通过 `.160` 预检，待精确 artifact 与真实节点矩阵。未完成的单元格不得解释为通过。
 
 ## 实现边界
 
-- 锁定 Leaf：`lovitus/leaf@742ad65c441f9d60279916b82628b810efbd48fb`。
+- 锁定 Leaf：`lovitus/leaf@36ba707f6d107886bf3fe22dbd4f2cd9f9be2afb`。该提交仅把不可配置的 VLESS TCP 默认 Vision 改为标准无-flow请求/响应，UDP及其他协议未改。
 - EasyTier 只增加三个窄协议编译器和一个 crate-private TLS/WebSocket 编译层。
 - EasyTier mesh、HEV、DNS、规则、chain/fallback 选择器和生命周期未修改。
 - direct 使用 native 协议 actor；mesh 前置使用现有 SOCKS actor 加普通 chain。
@@ -42,17 +42,18 @@
 | Trojan TLS through mesh | 待测 | 待测 | 待测 | 待测 | 待完成 |
 | VMess WS direct | HTTPS 3/3、64 MiB 完整 | WS Host 有效，服务端确认代理来源 | 待测 | 一次清理通过 | TCP 通过 |
 | VMess WS through mesh | 待测 | 待测 | 待测 | 待测 | 待完成 |
-| VLESS WSS direct | `bfbe4de5` 超时/空响应 | sing-box 有/无 early-data 均通过 | 待测 | 一次清理通过 | 否决：WSS TLS 缺少 `http/1.1` ALPN |
+| VLESS WSS direct | `bfbe4de5`、`a3634330` 均失败 | sing-box 有/无 early-data 均通过 | 待测 | 一次清理通过 | 否决：锁定 Leaf TCP 强制 Vision；无-flow 修复待 artifact |
 | VLESS WSS through mesh | 待测 | 待测 | 待测 | 待测 | 待完成 |
 
 测试凭据只写远端临时文件，不进入本报告或仓库。
 
-### `bfbe4de5` VLESS WSS 否决原因
+### VLESS WSS 候选否决与真实根因
 
 - sing-box `1.13.14` 在相同 lv1g3、相同节点、相同目标下，有 early-data 与移除 early-data 都返回 HTTPS 204，并完整传输 64 MiB，因此不是节点失效或 early-data 必需。
 - EasyTier 的 VLESS worker、TUN 与 TLS actor 均成功启动，但 WSS 请求超时或被空响应关闭。
-- 锁定 Leaf `742ad65c` 的 WS actor 编译语义和 Mihomo `0a87b948` 的 `adapter/outbound/vless.go::StreamConnContext` 都把 WSS ALPN 限定为 `http/1.1`。原 EasyTier 通用 TLS actor没有设置 ALPN，Cloudflare 可以协商 h2，而后续 Leaf WS actor仍发送 HTTP/1.1 Upgrade。
-- 替换修复仅在 TLS+WebSocket 组合设置 `alpn: [http/1.1]`；普通 Trojan TLS、明文 VMess WS、协议 actor、mesh/HEV/DNS/rules 均不改变。
+- `bfbe4de5` 确有 WSS ALPN 缺口；`a3634330` 已按 Mihomo `0a87b948` 的 `adapter/outbound/vless.go::StreamConnContext` 增加 `http/1.1`，精确生成配置也确认 TLS、WS Host/path、UUID和 actor 顺序正确，但真实节点仍失败，因此 ALPN 不是充分根因。
+- 锁定 Leaf `742ad65c` 的 `proxy/vless/stream.rs::build_vless_tcp_header` 无条件写入 `xtls-rprx-vision` addon，并始终使用 Vision 响应解析器；公共配置却没有 flow 字段。Mihomo `transport/vless/conn.go::{sendRequest,recvResponse,newConn}` 只在显式 flow 时编码 addon/启用 Vision，无 flow 时发送 addon 长度 `0`，校验响应版本并跳过服务端声明的 addon。
+- fork `36ba707f` 只把 TCP 改为上述标准无-flow语义，并在响应头完成后直接读取底层流，避免持续复制。独立 integration test 覆盖精确请求字节、分片响应、响应 addon 和非法版本；`.160` 三项通过。EasyTier 仍明确拒绝 flow，不新增配置表面。
 
 ## 性能矩阵
 
