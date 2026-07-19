@@ -883,19 +883,18 @@ impl PolicyDocument {
                         });
                     }
                 }
-                if let Some(tls) = &proxy.tls {
-                    if tls.server_name.as_deref().is_some_and(|server_name| {
+                if let Some(tls) = &proxy.tls
+                    && tls.server_name.as_deref().is_some_and(|server_name| {
                         server_name.is_empty()
                             || server_name.len() > 253
                             || server_name.contains(['\r', '\n'])
-                    }) {
-                        return Err(PolicyError::InvalidServer {
-                            name: name.clone(),
-                            reason:
-                                "TLS server-name must be a non-empty DNS name of at most 253 bytes"
-                                    .to_owned(),
-                        });
-                    }
+                    })
+                {
+                    return Err(PolicyError::InvalidServer {
+                        name: name.clone(),
+                        reason: "TLS server-name must be a non-empty DNS name of at most 253 bytes"
+                            .to_owned(),
+                    });
                 }
             }
             match proxy.kind {

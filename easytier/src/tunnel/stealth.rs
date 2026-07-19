@@ -19,16 +19,15 @@
 
 use std::{
     collections::HashSet,
-    sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicU32, Ordering},
-    },
+    sync::{Arc, Mutex, RwLock, atomic::AtomicU32},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use atomic_shim::AtomicU64;
 #[cfg(feature = "stealth-aead")]
 use std::sync::atomic::AtomicBool;
+#[cfg(feature = "stealth-aead")]
+use std::sync::atomic::Ordering;
 
 use hmac::{Hmac, Mac as _};
 use rand::RngCore as _;
@@ -671,6 +670,8 @@ impl OuterSessionState {
         handshake_hash: &[u8],
         outer_cipher_suite: Option<&str>,
     ) {
+        #[cfg(not(feature = "stealth-aead"))]
+        let _ = outer_cipher_suite;
         let key = derive_outer_key(handshake_hash);
         let mut phase = self.key_phase.write().unwrap();
         if matches!(*phase, OuterKeyPhase::Outer(current, _) if current == key) {
@@ -715,6 +716,8 @@ impl OuterSessionState {
         handshake_hash: &[u8],
         outer_cipher_suite: Option<&str>,
     ) {
+        #[cfg(not(feature = "stealth-aead"))]
+        let _ = outer_cipher_suite;
         if !self.enabled {
             return;
         }

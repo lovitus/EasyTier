@@ -703,3 +703,85 @@ Contiguous decoder candidate frozen at `39dd4d2f989a459fb44d9cc8c9aab708338e4f83
   Follow-up scope is limited to treating disappearing sampler targets as a skipped sample; product
   binaries, transfer results and policy behavior are unchanged. Re-run `.160`, the workflow pair,
   and the three-Linux exact-artifact matrix before release.
+- Formal OHOS run `29696939456` exposed two pre-existing cross-platform gates after final Linux
+  validation: Rust 1.95 import ordering drift in `third_party/netstack-smoltcp/src/stack.rs`, and
+  `NicCtx::do_forward_peers_and_policy_to_nic` compiling on OHOS even though its
+  `LeafPacketBridge` type and every caller are restricted to `leaf-policy-proxy + unix`. Mihomo's
+  `/Users/fanli/Documents/mihomo-rev/listener/sing_tun/tun_name_other.go::getTunnelName`,
+  `server_android.go::{buildAndroidRules,getPackageManager}` and
+  `server_notandroid.go::buildAndroidRules` establish the same compile-time platform-boundary
+  pattern: platform TUN helpers are selected or stubbed by build constraints rather than leaking
+  unavailable types. EasyTier's compatible fix adds the existing feature/Unix boundary to the
+  helper definition; unsupported OHOS behavior remains the legacy non-policy path. Validation is
+  Rust 1.95 formatting, complete `.160` Linux gates, then exact-SHA OHOS plus the full formal set.
+- Formal Mobile run `29696939617` showed that the four-ABI workflow enabled Android in-process HEV
+  without preparing `HEV_SOCKS5_LIB_DIR`. The already-passing Android candidate workflow establishes
+  the required behavior and pinned dependency: build `lovitus/hev-socks5-server` commit
+  `97e74f1068bd924e740032382cdc94ca83741ae6` with the NDK compiler for the selected ABI, then expose
+  its three static archives to Cargo. The formal workflow now follows that exact integration for
+  aarch64, armv7, i686 and x86_64; each matrix job remains isolated and fails closed on an unknown
+  target. Validation requires all four exact-SHA Mobile jobs in addition to the complete formal set.
+- Formal GUI run `29696939545` confirmed the shared policy-runtime startup path also asks the macOS
+  routing guard to select the candidate capture interface. macOS intentionally never creates a
+  Leaf-owned TUN, so its guard now implements the same boundary method: `None` is a no-op and any
+  unexpected owned interface fails closed as unsupported. This preserves the existing macOS route
+  ownership model while restoring cross-platform compilation; the exact-SHA x86_64 and aarch64
+  macOS GUI jobs are the validation evidence.
+- Test run `29696939510` found four Rust 1.95 `-D warnings` blockers in the new code: two
+  `field_reassign_with_default` test fixtures, a test-only DNS parsing adapter visible in normal
+  builds, one `collapsible_if`, and one `needless_borrow`. The candidate applies only Clippy's
+  semantics-preserving forms and retains the existing assertions. Validation includes full-format,
+  full-feature Clippy, each-feature checks, and the focused `.160` suite before the formal Test run.
+  The scoped `.160` reproduction additionally exposed Clippy's equivalent `int_plus_one` spelling
+  in the owned-TUN name-length assertion; it is normalized without changing the asserted bound.
+
+### Formal-matrix follow-up candidate manifest (working snapshot atop `eeed75cf`)
+
+- Scope: restore the existing feature/Unix boundary on `do_forward_peers_and_policy_to_nic`; give
+  macOS routing a fail-closed no-owned-TUN selector; format the netstack imports; apply the four
+  semantics-neutral Rust 1.95 lint forms; and prepare the pinned HEV static archives in every formal
+  Android ABI job. No Cargo dependency, generated protocol output, runtime configuration, or release
+  version changes are included.
+- `.160` dispatch lock: run `scripts/leaf-remote-preflight.sh` against the complete snapshot, then
+  separately run the exact Test-workflow `cargo clippy --locked --all-targets --features full --all
+  -- -D warnings` and `cargo hack check --locked --package easytier --each-feature --exclude-features
+  macos-ne` gates with the mandated idle check, proxy forwarding, all cores, timeout, and separate
+  log reads. Rust 1.95 `cargo fmt --all -- --check`, Actionlint, Cargo.lock unchanged, platform cfg,
+  workflow pins, generated files, and the complete diff must be inspected before commit.
+- Required workflows: the automatic profiling-beta and Android candidate pair, followed after exact
+  artifact validation by Core, GUI, Mobile, OHOS, and Test at the same SHA. Do not dispatch Release
+  until every formal run succeeds and reports that SHA.
+- Linux evidence: verify checksums/build metadata/symbols, run the complete combined functional,
+  transport, relay, safety, cleanup, and no-host-state-change matrix on `192.168.1.37`,
+  `192.168.1.38`, and `lv1g2`; record exact artifact SHA and Build ID. Android evidence is the
+  four-ABI formal build plus candidate artifact checks while the physical device remains unavailable.
+- During waits: finish lockfile/cfg/workflow-pin/diff review, pre-clean validation hosts, prepare the
+  exact-artifact verification directory and bounded host commands, and inspect failures without
+  mutating the in-flight committed snapshot.
+- `.160` full-workspace Clippy cannot enter code checking because the builder image lacks the GUI
+  system package `gdk-3.0`. This is the recorded builder exception: run the same locked/all-targets/
+  full-feature `-D warnings` gate over every changed Rust package (`easytier`, `easytier-policy`,
+  `easytier-socks-egress`, `netstack-smoltcp`) on `.160`; retain the full workspace Clippy in the
+  formal Test workflow where the prepared runner provides GUI libraries.
+- The initial Test run's `three_node` partition passed 191/192 and timed out only
+  `port_forward_with_inbound_default_drop_acl_test::case_2` after the data plane was not ready.
+  `instance.rs` and this test are unchanged from `f6617c51`, so it is not attributed to this
+  candidate; nevertheless the final exact-SHA Test run must pass rather than waiving the gate.
+- The `.160` scoped Clippy/each-feature reproduction also found baseline-only warning failures in
+  config validation, KCP transport collection, pending-backend access, and stealth AEAD feature
+  boundaries. Their fixes are limited to underscore binding, the suggested let-chain, removing a
+  Copy clone, and feature-gating/consuming conditionally used names; observable behavior is unchanged.
+- The first bounded each-feature run reached 20/26 before its 1800-second timeout and exposed two
+  additional baseline warnings in SOCKS feature subsets: the mesh-selector flag is unused without
+  KCP/QUIC, and the timeout is mutable only with those accelerators. Underscore binding and a
+  feature-gated mutable shadow preserve the same connector behavior. Re-run from the warmed cache
+  with `RUSTFLAGS=-D warnings`; timeout alone is not passing evidence.
+- Strict each-feature checking reached the `hotpath` subset and found one deprecated direct wrapper
+  constructor in `PeerConn`; use the repository's existing `hotpath::mutex!` boundary, which is the
+  supported constructor with hotpath enabled and the established no-op macro otherwise.
+- Final `.160` dispatch evidence for this frozen code snapshot: `scripts/leaf-remote-preflight.sh`
+  passed its locked no-run build and all focused EasyTier/Policy/netstack tests; scoped
+  full-feature/all-targets Clippy passed with `-D warnings`; and Cargo Hack 0.6.45 passed all 26/26
+  EasyTier features with `--locked --exclude-features macos-ne` and `RUSTFLAGS=-D warnings`.
+  Full-workspace Clippy remains delegated to the prepared formal Test runner solely because `.160`
+  lacks `gdk-3.0`; no source warning was waived.

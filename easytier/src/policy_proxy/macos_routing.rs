@@ -64,6 +64,16 @@ impl PolicyRoutingGuard {
         true
     }
 
+    pub(crate) fn select_leaf_tun_interface(
+        &mut self,
+        interface: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if interface.is_some() {
+            anyhow::bail!("Leaf-owned policy TUN is unsupported on macOS");
+        }
+        Ok(())
+    }
+
     fn remove_all(&mut self) {
         for route in self.installed.drain(..).rev() {
             if let Err(error) = delete_route(&self.tun_interface, &route) {
