@@ -4965,7 +4965,7 @@ dependencies = [
 [[package]]
 name = "leaf"
 version = "0.1.2"
-source = "git+https://github.com/lovitus/leaf.git?rev=36ba707f6d107886bf3fe22dbd4f2cd9f9be2afb#36ba707f6d107886bf3fe22dbd4f2cd9f9be2afb"
+source = "git+https://github.com/lovitus/leaf.git?rev=2153f126c4841fc7f74d2da4f9e61d622882795f#2153f126c4841fc7f74d2da4f9e61d622882795f"
 dependencies = [
  "aes",
  "aes-gcm",

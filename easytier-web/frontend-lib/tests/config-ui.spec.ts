@@ -476,6 +476,25 @@ describe('Config.vue network config projection', () => {
     })
   })
 
+  it('round-trips the Leaf packet batch experiment without dropping unknown features', async () => {
+    const config = makeConfig()
+    config.experimental_features = ['future-feature']
+    const { curNetwork, wrapper } = mountConfig(config)
+    await nextTick()
+
+    const checkbox = wrapper.find('#leaf-packet-batch')
+    expect(input(wrapper, '#leaf-packet-batch').checked).toBe(false)
+    await checkbox.setValue(true)
+    await nextTick()
+    expect(curNetwork.experimental_features).toEqual(['future-feature', 'leaf-packet-batch'])
+    expect(toBackendNetworkConfig(curNetwork).experimental_features)
+      .toEqual(['future-feature', 'leaf-packet-batch'])
+
+    await checkbox.setValue(false)
+    await nextTick()
+    expect(curNetwork.experimental_features).toEqual(['future-feature'])
+  })
+
   it('disables and visually clears stealth while the network secret is empty', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     const { curNetwork, wrapper } = mountConfig(config)

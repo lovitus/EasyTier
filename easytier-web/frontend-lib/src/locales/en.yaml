@@ -109,6 +109,9 @@ ipv6_public_addr_auto_help: Auto-obtain a public IPv6 address from a peer that s
 enable_kcp_proxy: Enable KCP Proxy
 enable_kcp_proxy_help: Convert TCP traffic to KCP traffic to reduce latency and boost transmission speed.
 
+leaf_packet_batch: Experimental Leaf Packet Batch
+leaf_packet_batch_help: Default off. Uses a bounded batch endpoint where supported; unsupported or initialization-failed runtimes fall back to the legacy path. Restart the instance after changing it.
+
 disable_kcp_input: Disable KCP Input
 disable_kcp_input_help: Disable inbound KCP proxy capability without changing other underlay listeners.
 

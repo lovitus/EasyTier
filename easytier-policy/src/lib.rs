@@ -37,8 +37,15 @@ pub use leaf_config::{
 #[cfg(unix)]
 pub use leaf_process::{LeafProcessFactory, LeafProcessRuntime, system_dns_servers};
 #[cfg(unix)]
-pub use packet::{LeafPacketBridge, LeafPacketEndpoint};
+pub use packet::LeafPacketStreamEndpoint;
+#[cfg(unix)]
+pub use packet::{
+    LEAF_PACKET_BATCH_EXPERIMENTAL_FEATURE, LeafPacketBridge, LeafPacketEndpoint,
+    PacketBridgeBackend, PacketBridgeMode,
+};
 pub use packet::{MeshRouteSnapshot, PacketClass, PacketClassifier, PacketError};
+#[cfg(unix)]
+pub use packet::{PACKET_BATCH_MAX_BYTES, PACKET_BATCH_MAX_PACKETS};
 pub use preflight::{
     DiagnosticSeverity, PolicyDiagnostic, PolicyPreflight, PolicyPreflightReport,
     preflight_policy_file, preflight_policy_source, report_for_policy_revision,

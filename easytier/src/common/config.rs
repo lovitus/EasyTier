@@ -87,6 +87,7 @@ pub fn gen_default_flags() -> Flags {
         underlay_candidate_guard: true,
         underlay_exclude_cidrs: crate::common::underlay_guard::DEFAULT_UNDERLAY_EXCLUDE_CIDRS
             .to_string(),
+        experimental_features: Vec::new(),
     }
 }
 

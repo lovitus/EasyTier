@@ -555,3 +555,37 @@ actor 与 group 名只能使用 ASCII 字母、数字、`_`、`-`、`.`，最长
 7. 使用 Trojan/VMess/VLESS 时，分别验证 direct 与 mesh 前置 chain 的 TLS HTTP 请求；UDP 与性能必须引用同一精确候选和同一服务端对照。
 
 实现语义参考：Mihomo `rules/parser.go::ParseRule` 的 first-match 规则形状、`adapter/outboundgroup/{parser.go::ParseProxyGroup,fallback.go::{findAliveProxy,DialContext,ListenPacketContext,SupportUDP}}` 的有序组边界；固定 Leaf `proxy/chain/outbound/{stream,datagram}.rs`、`proxy/failover/{stream,datagram}.rs` 和 `proxy/socks/outbound/datagram.rs::Handler::handle`。EasyTier 的有意差异是严格 v1 schema、无主动公共 URL 健康检查、托管 mesh bridge，以及明确不宣称 SOCKS UDP 多跳。
+
+## 12. 实验性 PacketBatch 数据面
+
+`leaf-packet-batch` 默认关闭，只改变 EasyTier 与 Leaf 之间的策略包传递方式，
+不改变规则、DNS/FakeDNS、actor、chain/fallback、HEV、mesh、QUIC/KCP 或 TUN
+ownership。可通过任一入口启用：
+
+```bash
+easytier-core ... --exp-feature leaf-packet-batch
+
+ET_EXP_FEATURES=leaf-packet-batch easytier-core ...
+```
+
+```toml
+[flags]
+experimental_features = ["leaf-packet-batch"]
+```
+
+GUI 的高级设置中可勾选“实验性 Leaf 批量包端点”。命令行参数可重复；环境变量
+使用逗号分隔。未知名称会被保留以支持配置前向兼容，但不会产生运行时效果。
+
+当前实现边界：
+
+- Android in-process Leaf 使用有界内存 batch channel。
+- Linux 和非 NetworkExtension macOS worker 使用继承式 Unix stream batch frame。
+- 未编译对应 backend 的平台会记录 warning 并继续使用原 legacy bridge。
+- batch 在运行时发布前初始化失败时，自动重试一次 legacy bridge。
+- 已发布 generation 的运行期故障保持原 fail-closed/整代重建语义，不在流量中途切换 backend。
+- backend 每个 runtime generation 只选择一次；修改配置后需要重启实例。
+
+启动日志中的 `requested` 与 `effective` 字段用于确认实际 backend。没有该 feature、
+旧配置缺少 `experimental_features`、GUI 未勾选或平台不支持时，均走原 legacy 路径。
+该开关仍处于性能验证阶段；在 Linux/Android 精确制品完成同制品 A/B 前不建议普通
+用户启用，也不得把 Linux 结果外推为 Windows、macOS 或 iOS 的性能结论。

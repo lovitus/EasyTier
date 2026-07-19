@@ -113,6 +113,22 @@ const bool_flags: BoolFlag[] = [
   { field: 'enable_private_mode', help: 'enable_private_mode_help' },
 ]
 
+const LEAF_PACKET_BATCH_FEATURE = 'leaf-packet-batch'
+
+function hasExperimentalFeature(feature: string): boolean {
+  return (curNetwork.value.experimental_features ?? []).includes(feature)
+}
+
+function setExperimentalFeature(feature: string, enabled: boolean): void {
+  const features = new Set(curNetwork.value.experimental_features ?? [])
+  if (enabled) {
+    features.add(feature)
+  } else {
+    features.delete(feature)
+  }
+  curNetwork.value.experimental_features = Array.from(features).sort()
+}
+
 const hasNetworkSecret = computed(() => (curNetwork.value.network_secret ?? '').trim().length > 0)
 
 function boolFlagValue(field: keyof NetworkConfig): boolean {
@@ -296,6 +312,15 @@ const instanceRecvBpsLimitInput = computed<string>({
                         :disabled="flag.field === 'stealth_mode' && !hasNetworkSecret" />
                       <label :for="flag.field" class="ml-2"> {{ t(flag.field) }} </label>
                       <span class="pi pi-question-circle ml-2 self-center" v-tooltip="t(flag.help)"></span>
+                    </div>
+
+                    <div class="basis-[20rem] flex items-center">
+                      <Checkbox :model-value="hasExperimentalFeature(LEAF_PACKET_BATCH_FEATURE)"
+                        @update:model-value="setExperimentalFeature(LEAF_PACKET_BATCH_FEATURE, Boolean($event))"
+                        input-id="leaf-packet-batch" :binary="true" />
+                      <label for="leaf-packet-batch" class="ml-2"> {{ t('leaf_packet_batch') }} </label>
+                      <span class="pi pi-question-circle ml-2 self-center"
+                        v-tooltip="t('leaf_packet_batch_help')"></span>
                     </div>
 
                   </div>

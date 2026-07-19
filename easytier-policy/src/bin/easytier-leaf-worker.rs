@@ -17,6 +17,7 @@ fn run() -> Result<(), String> {
     let mut outbound_interface = None;
     let mut single_thread = false;
     let mut parent_pid = None;
+    let mut packet_batch = false;
     while let Some(arg) = args.next() {
         match arg.to_string_lossy().as_ref() {
             "-c" => {
@@ -31,6 +32,7 @@ fn run() -> Result<(), String> {
                     .map(|value| value.to_string_lossy().into_owned());
             }
             "--single-thread" => single_thread = true,
+            "--packet-batch" => packet_batch = true,
             "--parent-pid" => {
                 parent_pid = Some(
                     args.next()
@@ -71,14 +73,19 @@ fn run() -> Result<(), String> {
             leaf::RuntimeOption::MultiThread(workers, 2 * 1024 * 1024)
         }
     };
-    leaf::start(
-        0,
-        leaf::StartOptions {
-            config: leaf::Config::Str(config),
-            runtime_opt,
-        },
-    )
-    .map_err(|error| error.to_string())
+    let start_options = leaf::StartOptions {
+        config: leaf::Config::Str(config),
+        runtime_opt,
+    };
+    let result = if packet_batch {
+        let endpoint = unsafe { easytier_policy::LeafPacketStreamEndpoint::from_raw_fd(3) }
+            .into_external_packet_endpoint()
+            .map_err(|error| error.to_string())?;
+        leaf::start_with_external_packet_endpoint(0, start_options, endpoint)
+    } else {
+        leaf::start(0, start_options)
+    };
+    result.map_err(|error| error.to_string())
 }
 
 fn take_runtime_config(path: &str) -> Result<String, String> {

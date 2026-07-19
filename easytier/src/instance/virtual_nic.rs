@@ -108,6 +108,29 @@ struct PolicyActiveRuntime {
 }
 
 #[cfg(all(feature = "leaf-policy-proxy", unix))]
+fn requested_policy_packet_bridge_mode(
+    global_ctx: &ArcGlobalCtx,
+) -> easytier_policy::PacketBridgeMode {
+    let requested = global_ctx
+        .get_flags()
+        .experimental_features
+        .iter()
+        .any(|feature| feature == easytier_policy::LEAF_PACKET_BATCH_EXPERIMENTAL_FEATURE);
+    let supported = cfg!(target_os = "linux")
+        || cfg!(all(target_os = "macos", not(feature = "macos-ne")))
+        || cfg!(all(target_os = "android", feature = "leaf-policy-mobile"));
+    let mode = easytier_policy::PacketBridgeMode::for_request(requested, supported);
+    if requested && !supported {
+        tracing::warn!(
+            feature = easytier_policy::LEAF_PACKET_BATCH_EXPERIMENTAL_FEATURE,
+            platform = std::env::consts::OS,
+            "experimental policy packet backend is not supported; using legacy bridge"
+        );
+    }
+    mode
+}
+
+#[cfg(all(feature = "leaf-policy-proxy", unix))]
 struct PolicyLeafPacket {
     bridge: Arc<LeafPacketBridge>,
     packet: ZCPacket,
@@ -1419,7 +1442,15 @@ impl NicCtx {
             let writer_bridge_slot = bridge_slot.clone();
             let writer_dropped_packets = dropped_packets.clone();
             self.tasks.spawn(async move {
-                while let Some(queued) = writer_rx.recv().await {
+                let mut pending = None;
+                loop {
+                    let queued = match pending.take() {
+                        Some(queued) => queued,
+                        None => match writer_rx.recv().await {
+                            Some(queued) => queued,
+                            None => break,
+                        },
+                    };
                     let Some(current_bridge) = writer_bridge_slot.load_full() else {
                         log_policy_drop(&writer_dropped_packets, "Leaf is unavailable");
                         continue;
@@ -1428,7 +1459,39 @@ impl NicCtx {
                         log_policy_drop(&writer_dropped_packets, "Leaf runtime generation changed");
                         continue;
                     }
-                    if queued
+
+                    if queued.bridge.is_batch() {
+                        let mut payload_bytes = queued.packet.payload().len();
+                        let mut packets = vec![queued.packet.payload().to_vec()];
+                        while packets.len() < easytier_policy::PACKET_BATCH_MAX_PACKETS {
+                            let next = match writer_rx.try_recv() {
+                                Ok(next) => next,
+                                Err(_) => break,
+                            };
+                            if !Arc::ptr_eq(&current_bridge, &next.bridge) {
+                                log_policy_drop(
+                                    &writer_dropped_packets,
+                                    "Leaf runtime generation changed",
+                                );
+                                continue;
+                            }
+                            let next_len = next.packet.payload().len();
+                            if payload_bytes.saturating_add(next_len)
+                                > easytier_policy::PACKET_BATCH_MAX_BYTES
+                            {
+                                pending = Some(next);
+                                break;
+                            }
+                            payload_bytes += next_len;
+                            packets.push(next.packet.payload().to_vec());
+                        }
+                        if queued.bridge.send_batch_to_leaf(packets).await.is_err() {
+                            log_policy_drop(
+                                &writer_dropped_packets,
+                                "Leaf batch input queue is unavailable",
+                            );
+                        }
+                    } else if queued
                         .bridge
                         .send_to_leaf(queued.packet.payload())
                         .await
@@ -2136,6 +2199,7 @@ impl NicCtx {
             &routes,
             self.global_ctx.get_flags().enable_ipv6,
             None,
+            requested_policy_packet_bridge_mode(&self.global_ctx),
         )
         .await
         {
@@ -2185,6 +2249,7 @@ impl NicCtx {
         routes: &[crate::proto::api::instance::Route],
         fake_dns_ipv6: bool,
         dns_servers: Option<Arc<[IpAddr]>>,
+        packet_bridge_mode: easytier_policy::PacketBridgeMode,
     ) -> anyhow::Result<PolicyActiveRuntime> {
         let mesh_endpoints = Self::resolve_policy_mesh_endpoints(&revision, self_peer_id, routes)?;
         let mesh_bridges = Arc::new(
@@ -2202,7 +2267,7 @@ impl NicCtx {
                 easytier_policy::system_dns_servers().map_err(anyhow::Error::msg)?,
             ),
         };
-        let runtime = LeafProcessRuntime::start_with_dns_servers_and_options(
+        let runtime = LeafProcessRuntime::start_with_dns_servers_options_and_bridge(
             &config.leaf_executable,
             &config.base_dir,
             Some(&config.outbound_interface),
@@ -2210,10 +2275,16 @@ impl NicCtx {
             dns_servers.as_ref(),
             revision,
             easytier_policy::LeafConfigOptions { fake_dns_ipv6 },
+            packet_bridge_mode,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
         let bridge = runtime.bridge();
+        tracing::info!(
+            requested = ?packet_bridge_mode,
+            effective = ?bridge.backend(),
+            "selected Leaf policy packet bridge backend"
+        );
         Ok(PolicyActiveRuntime {
             runtime: runtime as Arc<dyn PolicyRuntime>,
             bridge,
@@ -2237,6 +2308,7 @@ impl NicCtx {
         policy_data_plane: &Weak<Socks5Server>,
         peer_mgr: &Arc<PeerManager>,
         route_table: &[crate::proto::api::instance::Route],
+        packet_bridge_mode: easytier_policy::PacketBridgeMode,
         active: &Arc<Mutex<Option<PolicyActiveRuntime>>>,
         bridge: &Arc<ArcSwapOption<LeafPacketBridge>>,
         bridge_updates: &tokio::sync::watch::Sender<Option<Arc<LeafPacketBridge>>>,
@@ -2266,6 +2338,7 @@ impl NicCtx {
             route_table,
             global_ctx.get_flags().enable_ipv6,
             dns_servers,
+            packet_bridge_mode,
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -2298,6 +2371,7 @@ impl NicCtx {
         let bridge = policy.bridge.clone();
         let bridge_updates = policy.bridge_updates.clone();
         let global_ctx = self.global_ctx.clone();
+        let packet_bridge_mode = requested_policy_packet_bridge_mode(&global_ctx);
         let peer_mgr = self.peer_mgr.clone();
         let policy_data_plane = self.policy_data_plane.clone();
         let mut events = global_ctx.subscribe();
@@ -2536,6 +2610,7 @@ impl NicCtx {
                         &policy_data_plane,
                         &peer_mgr,
                         &route_table,
+                        packet_bridge_mode,
                         &active,
                         &bridge,
                         &bridge_updates,
@@ -2642,6 +2717,7 @@ impl NicCtx {
                     &route_table,
                     global_ctx.get_flags().enable_ipv6,
                     dns_monitor.current_arc(),
+                    packet_bridge_mode,
                 )
                 .await
                 {
@@ -2724,6 +2800,7 @@ impl NicCtx {
                 peer_mgr.my_peer_id(),
                 &routes,
                 self.global_ctx.get_flags().enable_ipv6,
+                requested_policy_packet_bridge_mode(&self.global_ctx),
             )
             .await
             {
@@ -2775,6 +2852,7 @@ impl NicCtx {
         self_peer_id: u32,
         routes: &[crate::proto::api::instance::Route],
         fake_dns_ipv6: bool,
+        packet_bridge_mode: easytier_policy::PacketBridgeMode,
     ) -> anyhow::Result<PolicyActiveRuntime> {
         let mesh_endpoints =
             Self::resolve_policy_mesh_endpoints(&document.revision, self_peer_id, routes)?;
@@ -2791,12 +2869,13 @@ impl NicCtx {
             .map(usize::from)
             .unwrap_or(1)
             .min(2);
-        let factory = InProcessLeafFactory::new_with_options(
+        let factory = InProcessLeafFactory::new_with_options_and_bridge(
             document.base_dir.clone(),
             mesh_bridges.clone(),
             dns_servers.to_vec(),
             worker_threads,
             easytier_policy::LeafConfigOptions { fake_dns_ipv6 },
+            packet_bridge_mode,
         )
         .map_err(anyhow::Error::msg)?;
         let runtime: Arc<InProcessLeafRuntime> = factory
@@ -2804,6 +2883,11 @@ impl NicCtx {
             .await
             .map_err(anyhow::Error::msg)?;
         let bridge = runtime.bridge();
+        tracing::info!(
+            requested = ?packet_bridge_mode,
+            effective = ?bridge.backend(),
+            "selected Android Leaf policy packet bridge backend"
+        );
         Ok(PolicyActiveRuntime {
             runtime: runtime as Arc<dyn PolicyRuntime>,
             bridge,
@@ -2830,6 +2914,7 @@ impl NicCtx {
         let bridge = policy.bridge.clone();
         let bridge_updates = policy.bridge_updates.clone();
         let global_ctx = self.global_ctx.clone();
+        let packet_bridge_mode = requested_policy_packet_bridge_mode(&global_ctx);
         let peer_mgr = self.peer_mgr.clone();
         let policy_data_plane = self.policy_data_plane.clone();
         self.tasks.spawn(async move {
@@ -2985,8 +3070,9 @@ impl NicCtx {
                     peer_mgr.clone(),
                     peer_mgr.my_peer_id(),
                     &routes,
-                    global_ctx.get_flags().enable_ipv6,
-                )
+                            global_ctx.get_flags().enable_ipv6,
+                            packet_bridge_mode,
+                        )
                 .await
                 {
                     Ok(candidate) => {

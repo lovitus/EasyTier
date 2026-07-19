@@ -685,6 +685,14 @@ struct NetworkOptions {
     enable_kcp_proxy: Option<bool>,
 
     #[arg(
+        long = "exp-feature",
+        env = "ET_EXP_FEATURES",
+        value_delimiter = ',',
+        help = "Enable a default-off experimental feature by name (repeatable)"
+    )]
+    exp_feature: Vec<String>,
+
+    #[arg(
         long,
         env = "ET_DISABLE_KCP_INPUT",
         help = t!("core_clap.disable_kcp_input").to_string(),
@@ -1306,6 +1314,19 @@ impl NetworkOptions {
             f.socket_mark = self.socket_mark.or(f.socket_mark);
         }
         f.enable_kcp_proxy = self.enable_kcp_proxy.unwrap_or(f.enable_kcp_proxy);
+        for feature in &self.exp_feature {
+            let feature = feature.trim();
+            if !feature.is_empty()
+                && !f
+                    .experimental_features
+                    .iter()
+                    .any(|configured| configured == feature)
+            {
+                f.experimental_features.push(feature.to_owned());
+            }
+        }
+        f.experimental_features.sort_unstable();
+        f.experimental_features.dedup();
         f.disable_kcp_input = self.disable_kcp_input.unwrap_or(f.disable_kcp_input);
         f.enable_quic_proxy = self.enable_quic_proxy.unwrap_or(f.enable_quic_proxy);
         f.disable_quic_input = self.disable_quic_input.unwrap_or(f.disable_quic_input);

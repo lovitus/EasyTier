@@ -110,6 +110,7 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     policy_config_inline: '',
     policy_outbound_interface: '',
     policy_leaf_executable: '',
+    experimental_features: [],
     disable_upnp: false,
     enable_udp_broadcast_relay: false,
     disable_sym_hole_punching: false,

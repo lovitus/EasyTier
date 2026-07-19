@@ -981,6 +981,8 @@ impl NetworkConfig {
             flags.enable_kcp_proxy = enable_kcp_proxy;
         }
 
+        flags.experimental_features = self.experimental_features.clone();
+
         if let Some(disable_kcp_input) = self.disable_kcp_input {
             flags.disable_kcp_input = disable_kcp_input;
         }
@@ -1274,6 +1276,7 @@ impl NetworkConfig {
         result.use_smoltcp = Some(flags.use_smoltcp);
         result.disable_ipv6 = Some(!flags.enable_ipv6);
         result.enable_kcp_proxy = Some(flags.enable_kcp_proxy);
+        result.experimental_features = flags.experimental_features.clone();
         result.disable_kcp_input = Some(flags.disable_kcp_input);
         result.enable_quic_proxy = Some(flags.enable_quic_proxy);
         result.disable_quic_input = Some(flags.disable_quic_input);
@@ -1427,6 +1430,30 @@ mod tests {
         assert_eq!(
             roundtrip.policy_leaf_executable.as_deref(),
             Some("easytier-leaf-worker")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn network_config_roundtrips_experimental_features() -> Result<(), anyhow::Error> {
+        let network_config = super::NetworkConfig {
+            instance_id: Some(uuid::Uuid::new_v4().to_string()),
+            network_name: Some("experimental-demo".to_string()),
+            network_secret: Some("secret".to_string()),
+            networking_method: Some(crate::proto::api::manage::NetworkingMethod::Standalone as i32),
+            experimental_features: vec!["leaf-packet-batch".to_string()],
+            ..Default::default()
+        };
+
+        let config = network_config.gen_config()?;
+        assert_eq!(
+            config.get_flags().experimental_features,
+            vec!["leaf-packet-batch".to_string()]
+        );
+        let roundtrip = super::NetworkConfig::new_from_config(&config)?;
+        assert_eq!(
+            roundtrip.experimental_features,
+            vec!["leaf-packet-batch".to_string()]
         );
         Ok(())
     }
