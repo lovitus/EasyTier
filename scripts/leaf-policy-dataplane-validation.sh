@@ -254,14 +254,14 @@ tr '\0' ' ' <"/proc/$worker_pid/cmdline" >"$output/worker-cmdline.txt"
 ip -n "$client_ns" -4 route show table main >"$output/capture-routes.txt"
 if [[ "$mode" == leaf-owned-tun ]]; then
   [[ -n "$leaf_tun_name" ]] || { echo "Leaf-owned TUN was not created" >&2; exit 1; }
-  [[ $(awk -v dev="$leaf_tun_name" 'substr($1, length($1)-1) == "/1" && $0 ~ ("dev " dev " ") && $0 ~ /metric 65535/ {count++} END {print count+0}' "$output/capture-routes.txt") -eq 2 ]] \
+  [[ $(awk -v dev="$leaf_tun_name" '$1 ~ /[/]1$/ && $0 ~ ("dev " dev " ") && $0 ~ /metric 65535/ {count++} END {print count+0}' "$output/capture-routes.txt") -eq 2 ]] \
     || { echo "Leaf-owned primary /1 capture routes are incomplete" >&2; exit 1; }
-  [[ $(awk -v dev="$tun_name" 'substr($1, length($1)-1) == "/1" && $0 ~ ("dev " dev " ") && $0 ~ /metric 65536/ {count++} END {print count+0}' "$output/capture-routes.txt") -eq 2 ]] \
+  [[ $(awk -v dev="$tun_name" '$1 ~ /[/]1$/ && $0 ~ ("dev " dev " ") && $0 ~ /metric 65536/ {count++} END {print count+0}' "$output/capture-routes.txt") -eq 2 ]] \
     || { echo "legacy fail-closed fallback /1 routes are incomplete" >&2; exit 1; }
   capture_tun_name="$leaf_tun_name"
 else
   [[ -z "$leaf_tun_name" ]] || { echo "legacy mode unexpectedly created a Leaf-owned TUN" >&2; exit 1; }
-  [[ $(awk -v dev="$tun_name" 'substr($1, length($1)-1) == "/1" && $0 ~ ("dev " dev " ") && $0 ~ /metric 65535/ {count++} END {print count+0}' "$output/capture-routes.txt") -eq 2 ]] \
+  [[ $(awk -v dev="$tun_name" '$1 ~ /[/]1$/ && $0 ~ ("dev " dev " ") && $0 ~ /metric 65535/ {count++} END {print count+0}' "$output/capture-routes.txt") -eq 2 ]] \
     || { echo "legacy /1 capture routes are incomplete" >&2; exit 1; }
   if grep -q 'metric 65536' "$output/capture-routes.txt"; then
     echo "legacy mode unexpectedly installed fast-path fallback routes" >&2
