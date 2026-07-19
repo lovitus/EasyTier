@@ -50,6 +50,7 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   leaf_config::tests::expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap
   leaf_config::tests::preserves_unresolved_domain_contract_for_direct_socks_and_fallback
   leaf_config::tests::leaf_owned_tun_is_explicit_and_legacy_fd_mode_remains_unchanged
+  leaf_process::tests::linux_owned_tun_readiness_requires_interface_up_flag
   leaf_process::tests::owned_tun_identity_is_bounded_unique_and_outside_default_fake_ip
 )
 readonly -a DEFAULT_NETSTACK_TEST_FILTERS=(

@@ -453,3 +453,10 @@ It is local execution state, not a reason to trigger a workflow by itself.
 | Data-plane self-check recovery | Generalize the reverted PacketBatch harness into legacy versus Leaf-owned-TUN comparison | Validation tooling | Three-run throughput/resource/syscall comparison with bounded aborts | Local syntax and synthetic positive/negative checks passed; artifact run pending |
 | Linux exact-artifact matrix | Validate functionality, fallback, lifecycle, resources, IPv4/IPv6, and performance | No | Linux profiling artifact from corrected SHA | Pending workflow |
 | Android boundary | Preserve unchanged in-process behavior without claiming unavailable device evidence | No | Android workflow plus `.160` in-process compile | `.160` passed; workflow pending |
+
+### Exact-artifact race found on `02f65d0c`
+
+| Workstream | Objective | Build-affecting | Evidence target | Status |
+| --- | --- | --- | --- | --- |
+| Owned-TUN readiness | Do not publish a Leaf-owned runtime until Linux reports `IFF_UP` | Yes | `.160` no-run/focused test, then repeated artifact startup and A/B matrix | `.160` passed; artifact rebuild pending |
+| Validation harness portability | Replace old-awk-incompatible `/[/]1$/` route parsing without changing product logic | Validation tooling | Old-host awk fixture and repeated harness execution | Fixed locally; target fixture passed |

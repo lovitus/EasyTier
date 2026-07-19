@@ -323,12 +323,12 @@ async fn wait_for_leaf_readiness(
                 }
                 Ok(None) => {}
             }
-            if interface_index(&tun.name)?.is_some() {
+            if interface_index(&tun.name)?.is_some() && interface_is_up(&tun.name)? {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(format!(
-                    "Leaf did not create owned TUN {} within three seconds",
+                    "Leaf owned TUN {} did not become ready within three seconds",
                     tun.name
                 ));
             }
@@ -344,6 +344,33 @@ fn interface_index(name: &str) -> Result<Option<u32>, String> {
     let name = CString::new(name).map_err(|_| "TUN name contains a NUL byte".to_owned())?;
     let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
     Ok((index != 0).then_some(index))
+}
+
+#[cfg(target_os = "linux")]
+fn interface_is_up(name: &str) -> Result<bool, String> {
+    let flags_path = Path::new("/sys/class/net").join(name).join("flags");
+    let flags = match std::fs::read_to_string(&flags_path) {
+        Ok(flags) => flags,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "failed to read flags for Leaf owned TUN {name}: {error}"
+            ));
+        }
+    };
+    let flags = parse_linux_interface_flags(&flags)
+        .map_err(|error| format!("invalid flags for Leaf owned TUN {name}: {error}"))?;
+    Ok(flags & libc::IFF_UP as u32 != 0)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_interface_flags(flags: &str) -> Result<u32, String> {
+    let flags = flags.trim();
+    let flags = flags
+        .strip_prefix("0x")
+        .or_else(|| flags.strip_prefix("0X"))
+        .unwrap_or(flags);
+    u32::from_str_radix(flags, 16).map_err(|error| error.to_string())
 }
 
 async fn run_leaf_config_validation(
@@ -568,6 +595,20 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt as _, time::Instant};
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_owned_tun_readiness_requires_interface_up_flag() {
+        assert_ne!(
+            parse_linux_interface_flags("0x1003\n").unwrap() & libc::IFF_UP as u32,
+            0
+        );
+        assert_eq!(
+            parse_linux_interface_flags("0x1002\n").unwrap() & libc::IFF_UP as u32,
+            0
+        );
+        assert!(parse_linux_interface_flags("not-flags").is_err());
+    }
 
     #[test]
     fn owned_tun_identity_is_bounded_unique_and_outside_default_fake_ip() {
