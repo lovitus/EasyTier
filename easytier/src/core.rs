@@ -152,23 +152,6 @@ struct Cli {
     #[arg(long, env = "ET_POLICY_OUTBOUND_INTERFACE")]
     policy_outbound_interface: Option<String>,
 
-    #[cfg(all(
-        feature = "leaf-policy-proxy",
-        any(
-            target_os = "linux",
-            all(target_os = "macos", not(feature = "macos-ne"))
-        )
-    ))]
-    #[arg(
-        long,
-        env = "ET_POLICY_LEAF_TUN_FAST_PATH",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        default_value = "false",
-        help = "experimental Linux fast path where Leaf owns the policy TUN"
-    )]
-    policy_leaf_tun_fast_path: bool,
-
     #[cfg(all(target_os = "linux", not(target_env = "ohos"), feature = "tun"))]
     #[arg(
         long,
@@ -1564,7 +1547,6 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
             policy_file,
             cli.policy_leaf_executable.clone(),
             outbound_interface,
-            cli.policy_leaf_tun_fast_path,
         )?;
     }
 

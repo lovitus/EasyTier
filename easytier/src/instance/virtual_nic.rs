@@ -105,18 +105,6 @@ struct PolicyActiveRuntime {
         all(target_os = "macos", not(feature = "macos-ne"))
     ))]
     dns_servers: Arc<[IpAddr]>,
-    #[cfg(any(
-        target_os = "linux",
-        all(target_os = "macos", not(feature = "macos-ne"))
-    ))]
-    leaf_tun_interface: Option<String>,
-}
-
-#[cfg(all(feature = "leaf-policy-proxy", unix))]
-fn leaf_tun_fast_path_supported(requested: bool, backend: Option<NicBackend>) -> bool {
-    cfg!(all(target_os = "linux", not(target_env = "ohos")))
-        && requested
-        && backend == Some(NicBackend::Tun)
 }
 
 #[cfg(all(feature = "leaf-policy-proxy", unix))]
@@ -1115,10 +1103,6 @@ impl VirtualNic {
         self.ifname.as_ref().unwrap().as_str()
     }
 
-    fn pending_backend(&self) -> Option<NicBackend> {
-        self.pending_backend.clone()
-    }
-
     pub async fn link_up(&self) -> Result<(), Error> {
         let _g = self.runtime_netns_guard();
         self.ifcfg.set_link_status(self.ifname(), true).await?;
@@ -2087,7 +2071,7 @@ impl NicCtx {
         &mut self,
         ipv4_addr: Option<cidr::Ipv4Inet>,
         ipv6_addr: Option<cidr::Ipv6Inet>,
-        mut config: crate::policy_proxy::PolicyProcessConfig,
+        config: crate::policy_proxy::PolicyProcessConfig,
         lease: crate::policy_proxy::PolicyInstanceLease,
     ) -> Result<(), Error> {
         if self.global_ctx.get_flags().accept_dns {
@@ -2112,13 +2096,6 @@ impl NicCtx {
                 "policy outbound interface cannot be the EasyTier virtual NIC"
             )
             .into());
-        }
-        let pending_backend = self.nic.lock().await.pending_backend();
-        if config.leaf_tun_fast_path && !leaf_tun_fast_path_supported(true, pending_backend) {
-            tracing::warn!(
-                "Leaf-owned policy TUN requires a supported Linux TUN backend; using the unchanged legacy packet bridge"
-            );
-            config.leaf_tun_fast_path = false;
         }
         let revision = config.revision.clone();
         ensure_policy_mesh_credentials_confidential(&self.global_ctx, &revision)?;
@@ -2150,7 +2127,7 @@ impl NicCtx {
         let dropped_packets = Arc::new(AtomicU64::new(0));
         let (bridge_updates, _) = tokio::sync::watch::channel(None);
         let active = Arc::new(Mutex::new(None));
-        match Self::build_policy_runtime_with_fallback(
+        match Self::build_policy_runtime(
             &config,
             revision.clone(),
             data_plane,
@@ -2159,7 +2136,6 @@ impl NicCtx {
             &routes,
             self.global_ctx.get_flags().enable_ipv6,
             None,
-            &routing,
         )
         .await
         {
@@ -2226,12 +2202,6 @@ impl NicCtx {
                 easytier_policy::system_dns_servers().map_err(anyhow::Error::msg)?,
             ),
         };
-        #[cfg(target_os = "linux")]
-        let leaf_owned_tun = config
-            .leaf_tun_fast_path
-            .then(easytier_policy::next_leaf_owned_tun_config);
-        #[cfg(not(target_os = "linux"))]
-        let leaf_owned_tun = None;
         let runtime = LeafProcessRuntime::start_with_dns_servers_and_options(
             &config.leaf_executable,
             &config.base_dir,
@@ -2239,90 +2209,17 @@ impl NicCtx {
             mesh_bridges.as_ref(),
             dns_servers.as_ref(),
             revision,
-            easytier_policy::LeafConfigOptions {
-                fake_dns_ipv6,
-                leaf_owned_tun,
-            },
+            easytier_policy::LeafConfigOptions { fake_dns_ipv6 },
         )
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
         let bridge = runtime.bridge();
         Ok(PolicyActiveRuntime {
-            leaf_tun_interface: runtime.owned_tun_interface().map(str::to_owned),
             runtime: runtime as Arc<dyn PolicyRuntime>,
             bridge,
             mesh_bridges,
             dns_servers,
         })
-    }
-
-    #[cfg(all(
-        feature = "leaf-policy-proxy",
-        any(
-            target_os = "linux",
-            all(target_os = "macos", not(feature = "macos-ne"))
-        )
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    async fn build_policy_runtime_with_fallback(
-        config: &crate::policy_proxy::PolicyProcessConfig,
-        revision: Arc<easytier_policy::PolicyRevision>,
-        data_plane: Arc<Socks5Server>,
-        peer_mgr: Arc<PeerManager>,
-        self_peer_id: u32,
-        routes: &[crate::proto::api::instance::Route],
-        fake_dns_ipv6: bool,
-        dns_servers: Option<Arc<[IpAddr]>>,
-        routing: &Arc<Mutex<crate::policy_proxy::PolicyRoutingGuard>>,
-    ) -> anyhow::Result<PolicyActiveRuntime> {
-        let mut attempt_fast_path = config.leaf_tun_fast_path;
-        loop {
-            let mut selected_config = config.clone();
-            selected_config.leaf_tun_fast_path = attempt_fast_path;
-            let candidate = Self::build_policy_runtime(
-                &selected_config,
-                revision.clone(),
-                data_plane.clone(),
-                peer_mgr.clone(),
-                self_peer_id,
-                routes,
-                fake_dns_ipv6,
-                dns_servers.clone(),
-            )
-            .await;
-            let candidate = match candidate {
-                Ok(candidate) => candidate,
-                Err(error) if attempt_fast_path => {
-                    tracing::warn!(
-                        ?error,
-                        "Leaf-owned policy TUN candidate failed; retrying the unchanged legacy packet bridge"
-                    );
-                    attempt_fast_path = false;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            let route_result = routing
-                .lock()
-                .await
-                .select_leaf_tun_interface(candidate.leaf_tun_interface.as_deref());
-            match route_result {
-                Ok(()) => return Ok(candidate),
-                Err(error) => {
-                    candidate.mesh_bridges.disable_all();
-                    candidate.runtime.shutdown().await;
-                    if attempt_fast_path {
-                        tracing::warn!(
-                            ?error,
-                            "Leaf-owned policy TUN route switch failed; retrying the unchanged legacy packet bridge"
-                        );
-                        attempt_fast_path = false;
-                        continue;
-                    }
-                    return Err(error);
-                }
-            }
-        }
     }
 
     #[cfg(all(
@@ -2343,7 +2240,6 @@ impl NicCtx {
         active: &Arc<Mutex<Option<PolicyActiveRuntime>>>,
         bridge: &Arc<ArcSwapOption<LeafPacketBridge>>,
         bridge_updates: &tokio::sync::watch::Sender<Option<Arc<LeafPacketBridge>>>,
-        routing: &Arc<Mutex<crate::policy_proxy::PolicyRoutingGuard>>,
     ) -> Result<Option<Arc<easytier_policy::PolicyRevision>>, String> {
         let Some(candidate_revision) = config
             .reload_revision_if_changed(&current_revision.digest)
@@ -2361,7 +2257,7 @@ impl NicCtx {
             .await
             .as_ref()
             .map(|runtime| runtime.dns_servers.clone());
-        let candidate = Self::build_policy_runtime_with_fallback(
+        let candidate = Self::build_policy_runtime(
             config,
             candidate_revision.clone(),
             data_plane,
@@ -2370,7 +2266,6 @@ impl NicCtx {
             route_table,
             global_ctx.get_flags().enable_ipv6,
             dns_servers,
-            routing,
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -2634,9 +2529,6 @@ impl NicCtx {
                 }
                 let route_table = peer_mgr.list_routes().await;
                 if route_refresh_due && tokio::time::Instant::now() >= next_policy_reload {
-                    let Some(policy_routing) = routing.upgrade() else {
-                        break;
-                    };
                     match Self::reload_policy_runtime_if_changed(
                         &config,
                         &revision,
@@ -2647,7 +2539,6 @@ impl NicCtx {
                         &active,
                         &bridge,
                         &bridge_updates,
-                        &policy_routing,
                     )
                     .await
                     {
@@ -2742,10 +2633,7 @@ impl NicCtx {
                     tracing::warn!("policy data plane disappeared; stopping policy supervisor");
                     break;
                 };
-                let Some(policy_routing) = routing.upgrade() else {
-                    break;
-                };
-                match Self::build_policy_runtime_with_fallback(
+                match Self::build_policy_runtime(
                     &config,
                     revision.clone(),
                     data_plane,
@@ -2754,7 +2642,6 @@ impl NicCtx {
                     &route_table,
                     global_ctx.get_flags().enable_ipv6,
                     dns_monitor.current_arc(),
-                    &policy_routing,
                 )
                 .await
                 {
@@ -2909,10 +2796,7 @@ impl NicCtx {
             mesh_bridges.clone(),
             dns_servers.to_vec(),
             worker_threads,
-            easytier_policy::LeafConfigOptions {
-                fake_dns_ipv6,
-                ..Default::default()
-            },
+            easytier_policy::LeafConfigOptions { fake_dns_ipv6 },
         )
         .map_err(anyhow::Error::msg)?;
         let runtime: Arc<InProcessLeafRuntime> = factory
@@ -3511,23 +3395,6 @@ mod tests {
         )
     ))]
     use std::{net::IpAddr, sync::Arc};
-
-    #[cfg(all(feature = "leaf-policy-proxy", unix))]
-    #[test]
-    fn leaf_owned_tun_selection_is_default_off_and_backend_bounded() {
-        assert!(!super::leaf_tun_fast_path_supported(
-            false,
-            Some(crate::common::config::NicBackend::Tun)
-        ));
-        assert!(!super::leaf_tun_fast_path_supported(
-            true,
-            Some(crate::common::config::NicBackend::Veth)
-        ));
-        assert_eq!(
-            super::leaf_tun_fast_path_supported(true, Some(crate::common::config::NicBackend::Tun)),
-            cfg!(all(target_os = "linux", not(target_env = "ohos")))
-        );
-    }
 
     async fn run_test_helper() -> Result<VirtualNic, Error> {
         let mut dev = VirtualNic::new(get_mock_global_ctx());

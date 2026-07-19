@@ -912,11 +912,9 @@ impl NetworkConfig {
             || self.policy_config_inline.is_some()
             || self.policy_outbound_interface.is_some()
             || self.policy_leaf_executable.is_some()
-            || self.policy_leaf_tun_fast_path.is_some()
         {
             let policy = PolicyProxyConfig {
                 enabled: self.enable_policy_proxy.unwrap_or_default(),
-                leaf_tun_fast_path: self.policy_leaf_tun_fast_path.unwrap_or_default(),
                 config_file: self
                     .policy_config_file
                     .as_ref()
@@ -1260,7 +1258,6 @@ impl NetworkConfig {
             .map(|path| path.to_string_lossy().into_owned());
         if let Some(policy) = config.get_policy_proxy_config() {
             result.enable_policy_proxy = Some(policy.enabled);
-            result.policy_leaf_tun_fast_path = Some(policy.leaf_tun_fast_path);
             result.policy_config_file = policy
                 .config_file
                 .map(|path| path.to_string_lossy().into_owned());
@@ -1416,14 +1413,12 @@ mod tests {
             policy_config_inline: Some("version: 1\nrules: [\"FINAL,DIRECT\"]\n".to_string()),
             policy_outbound_interface: Some("eth0".to_string()),
             policy_leaf_executable: Some("easytier-leaf-worker".to_string()),
-            policy_leaf_tun_fast_path: Some(true),
             ..Default::default()
         };
 
         let config = network_config.gen_config()?;
         let roundtrip = super::NetworkConfig::new_from_config(&config)?;
         assert_eq!(roundtrip.enable_policy_proxy, Some(policy_enabled));
-        assert_eq!(roundtrip.policy_leaf_tun_fast_path, Some(true));
         assert_eq!(
             roundtrip.policy_config_inline,
             network_config.policy_config_inline

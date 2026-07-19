@@ -31,9 +31,6 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   gateway::socks5::dataplane::tests::mesh_only_connect_never_falls_back_to_kernel
   peers::peer_ospf_route::tests::peer_removal_restarts_remaining_generation_and_invalidates_remote_cache
   policy_proxy::mesh_udp_relay::tests
-  policy_proxy::policy_routing::tests::leaf_owned_capture_keeps_the_legacy_tun_as_lower_priority_fallback
-  policy_proxy::tests::resolves_inline_instance_config_without_persisting_generated_state
-  instance::virtual_nic::tests::leaf_owned_tun_selection_is_default_off_and_backend_bounded
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
 )
 readonly -a DEFAULT_POLICY_TEST_FILTERS=(
@@ -49,8 +46,6 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   leaf_config::tests::explicit_dns_sets_replace_platform_direct_and_keep_proxy_separate
   leaf_config::tests::expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap
   leaf_config::tests::preserves_unresolved_domain_contract_for_direct_socks_and_fallback
-  leaf_config::tests::leaf_owned_tun_is_explicit_and_legacy_fd_mode_remains_unchanged
-  leaf_process::tests::owned_tun_identity_is_bounded_unique_and_outside_default_fake_ip
 )
 readonly -a DEFAULT_NETSTACK_TEST_FILTERS=(
   stack::tests::full_ingress_channel_wakes_waiting_stack_sender

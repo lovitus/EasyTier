@@ -106,7 +106,6 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     underlay_candidate_guard: true,
     underlay_exclude_cidrs: DEFAULT_UNDERLAY_EXCLUDE_CIDRS,
     enable_policy_proxy: false,
-    policy_leaf_tun_fast_path: false,
     policy_config_file: '',
     policy_config_inline: '',
     policy_outbound_interface: '',

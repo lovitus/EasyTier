@@ -31,13 +31,11 @@ pub use geodata::{ManagedRuleDataKind, validate_managed_rule_data};
 #[cfg(all(unix, feature = "leaf-inprocess"))]
 pub use inprocess::{InProcessLeafFactory, InProcessLeafRuntime};
 pub use leaf_config::{
-    LeafConfigError, LeafConfigOptions, LeafOwnedTunConfig, MeshServerResolver, ResolvedMeshServer,
+    LeafConfigError, LeafConfigOptions, MeshServerResolver, ResolvedMeshServer,
     compile_leaf_config, compile_leaf_config_with_options,
 };
 #[cfg(unix)]
-pub use leaf_process::{
-    LeafProcessFactory, LeafProcessRuntime, next_leaf_owned_tun_config, system_dns_servers,
-};
+pub use leaf_process::{LeafProcessFactory, LeafProcessRuntime, system_dns_servers};
 #[cfg(unix)]
 pub use packet::{LeafPacketBridge, LeafPacketEndpoint};
 pub use packet::{MeshRouteSnapshot, PacketClass, PacketClassifier, PacketError};

@@ -193,8 +193,6 @@ underlay_exclude_cidrs: Excluded underlay candidate CIDRs
 underlay_exclude_cidrs_help: Comma-separated user CIDRs added to the built-in guard. Editing replaces only the user list; clearing it keeps built-in fake-IP ranges and runtime EasyTier virtual-address filtering enabled.
 enable_policy_proxy: Enable Policy Routing
 enable_policy_proxy_help: Transparently route non-mesh traffic with the optional Leaf policy engine. Mesh routes and peer endpoints always stay on the ordinary EasyTier data path.
-policy_leaf_tun_fast_path: Leaf-owned policy TUN (experimental)
-policy_leaf_tun_fast_path_help: Linux TUN mode only. Removes the EasyTier-to-Leaf packet bridge from policy traffic. It is disabled by default and falls back to the legacy path if unsupported or startup fails.
 policy_config_file: Policy file
 policy_config_file_help: Desktop/Linux path to the EasyTier policy YAML. It is mutually exclusive with inline policy; relative TOML paths are resolved from the network config directory.
 policy_config_file_placeholder: "policy/default.yaml (desktop)"

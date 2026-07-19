@@ -72,19 +72,9 @@ pub enum LeafConfigError {
     RuleSetIntegrity { name: String, reason: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LeafOwnedTunConfig {
-    pub name: String,
-    pub address: String,
-    pub gateway: String,
-    pub netmask: String,
-    pub mtu: u16,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LeafConfigOptions {
     pub fake_dns_ipv6: bool,
-    pub leaf_owned_tun: Option<LeafOwnedTunConfig>,
 }
 
 pub fn compile_leaf_config(
@@ -226,33 +216,6 @@ pub fn compile_leaf_config_with_options(
         }));
     }
 
-    let tun_settings = if let Some(tun) = options.leaf_owned_tun.as_ref() {
-        serde_json::json!({
-            "fd": -1,
-            // EasyTier, not Leaf, remains the routing owner. `auto=false` is
-            // therefore part of the compatibility contract for this fast path.
-            "auto": false,
-            "name": tun.name,
-            "address": tun.address,
-            "gateway": tun.gateway,
-            "netmask": tun.netmask,
-            "mtu": tun.mtu,
-            "fakeDnsInclude": ["*"],
-            "fakeDnsRange": document.dns.fake_ip_range,
-            "fakeDnsIpv6": options.fake_dns_ipv6,
-            "fakeDnsIpv6Range": document.dns.fake_ip_range6,
-            "tun2socks": "smoltcp",
-        })
-    } else {
-        serde_json::json!({
-            "fd": tun_fd,
-            "fakeDnsInclude": ["*"],
-            "fakeDnsRange": document.dns.fake_ip_range,
-            "fakeDnsIpv6": options.fake_dns_ipv6,
-            "fakeDnsIpv6Range": document.dns.fake_ip_range6,
-            "tun2socks": "smoltcp",
-        })
-    };
     let config = serde_json::json!({
         "log": { "level": "warn" },
         "dns": {
@@ -261,7 +224,14 @@ pub fn compile_leaf_config_with_options(
         "inbounds": [{
             "tag": "tun",
             "protocol": "tun",
-            "settings": tun_settings,
+            "settings": {
+                "fd": tun_fd,
+                "fakeDnsInclude": ["*"],
+                "fakeDnsRange": document.dns.fake_ip_range,
+                "fakeDnsIpv6": options.fake_dns_ipv6,
+                "fakeDnsIpv6Range": document.dns.fake_ip_range6,
+                "tun2socks": "smoltcp",
+            },
         }],
         "outbounds": outbounds,
         "router": {
@@ -765,53 +735,6 @@ mod tests {
     }
 
     #[test]
-    fn leaf_owned_tun_is_explicit_and_legacy_fd_mode_remains_unchanged() {
-        let revision =
-            PolicyRevision::parse("version: 1\nrules: [\"FINAL,DIRECT\"]\n", Path::new("."))
-                .unwrap();
-        let legacy = compile_leaf_config(
-            &revision,
-            7,
-            Path::new("."),
-            &Unresolved,
-            &["1.1.1.1".parse().unwrap()],
-        )
-        .unwrap();
-        let legacy: serde_json::Value = serde_json::from_str(&legacy).unwrap();
-        assert_eq!(legacy["inbounds"][0]["settings"]["fd"], 7);
-        assert!(legacy["inbounds"][0]["settings"].get("auto").is_none());
-        assert!(legacy["inbounds"][0]["settings"].get("name").is_none());
-
-        let owned = compile_leaf_config_with_options(
-            &revision,
-            7,
-            Path::new("."),
-            &Unresolved,
-            &["1.1.1.1".parse().unwrap()],
-            LeafConfigOptions {
-                leaf_owned_tun: Some(LeafOwnedTunConfig {
-                    name: "etp00010001".to_owned(),
-                    address: "198.18.0.6".to_owned(),
-                    gateway: "198.18.0.5".to_owned(),
-                    netmask: "255.255.255.252".to_owned(),
-                    mtu: 1_500,
-                }),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let owned: serde_json::Value = serde_json::from_str(&owned).unwrap();
-        let settings = &owned["inbounds"][0]["settings"];
-        assert_eq!(settings["fd"], -1);
-        assert_eq!(settings["auto"], false);
-        assert_eq!(settings["name"], "etp00010001");
-        assert_eq!(settings["address"], "198.18.0.6");
-        assert_eq!(settings["gateway"], "198.18.0.5");
-        assert_eq!(settings["netmask"], "255.255.255.252");
-        assert_eq!(settings["mtu"], 1_500);
-    }
-
-    #[test]
     fn compiles_trojan_vmess_and_vless_as_private_transport_chains() {
         let source = r#"
 version: 1
@@ -1094,7 +1017,6 @@ rules: ["MATCH,DIRECT"]
             &["192.0.2.53".parse().unwrap()],
             LeafConfigOptions {
                 fake_dns_ipv6: true,
-                ..Default::default()
             },
         )
         .unwrap();

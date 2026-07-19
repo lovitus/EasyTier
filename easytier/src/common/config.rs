@@ -564,10 +564,6 @@ pub struct PortForwardConfig {
 pub struct PolicyProxyConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Experimental Linux fast path. Leaf owns only the policy TUN; EasyTier
-    /// continues to own routes, mesh classification, and lifecycle decisions.
-    #[serde(default)]
-    pub leaf_tun_fast_path: bool,
     pub config_file: Option<PathBuf>,
     pub config_inline: Option<String>,
     pub outbound_interface: Option<String>,
