@@ -406,3 +406,13 @@ It is local execution state, not a reason to trigger a workflow by itself.
 - `.160` 目标：标准 `scripts/leaf-remote-preflight.sh` 一次 `--locked` no-run 和完整 focused suite；新增精确测试 `expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap`。
 - Artifact 目标：一次自动 Linux/Android workflow 集；Linux 精确 artifact 重跑域名/强制 v4/v6 的 Trojan、VMess、VLESS direct 与 mesh、UDP、fallback、stop/start、资源及性能矩阵。每个失败均以同主机、同节点、同目标的 sing-box 相邻窗口交叉验证。
 - 首次候选 `1059c21d88d06d10c9c965750269484dbc7dcbcf`：Linux workflow `29651804523` 的完整 policy suite 为 87/88，通过的新行为与旧快照断言冲突；唯一失败仍期待 `direct:system`，实际为捕获的 `direct:1.1.1.1`。运行时代码、编译和新增精确测试均通过。修正候选只更新该断言并把稳定配置快照测试加入 `.160` 默认过滤器；Android `29651804525` 独立保留其实际结果，不用它替代 Linux artifact。
+
+## 2026-07-19 owned-TUN/GSO final disposition
+
+| Workstream | Objective | Build-affecting | Evidence target | Status | Shared candidate |
+|---|---|---:|---|---|---|
+| Linux owned-TUN hard gate | Compare confirmed GSO fast path with same-artifact legacy on `.160` | no | Three untraced runs per mode, dual-TUN ownership, offload flags, RSS and cleanup | **FAILED: download ratio 0.8424 < 0.95; candidate reverted** | `8b48153acc286c70c70faf8a2e4d1cb3c015be05` |
+| Revert preflight | Return runtime/config/UI/proto surface to the pre-experiment boundary | yes | `.160` `--locked` no-run plus focused suite on complete revert snapshot | **PASSED: 4m11s no-run and all configured focused tests** | four auditable revert commits |
+| Revert artifacts | Publish one auditable rolling-beta revert candidate | yes | Exact-SHA Linux/Android workflows only after `.160` gate | **READY: one automatic workflow set after the audit-doc commit** | four auditable revert commits plus audit docs |
+
+Wait-time work for the revert candidate is limited to diff/lockfile/cfg/workflow-pin inspection and host cleanup. No third performance architecture, newer-kernel benchmark, or Android performance run is authorized by this failed candidate.
