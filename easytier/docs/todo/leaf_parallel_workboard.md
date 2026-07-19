@@ -688,3 +688,9 @@ Contiguous decoder candidate frozen at `39dd4d2f989a459fb44d9cc8c9aab708338e4f83
   production build, VPN plugin generated declaration build, and the GUI typecheck/production build
   (603 transformed modules, 4m29s). Remote dependency recovery used `--frozen-lockfile`; no tracked
   lockfile or generated output changed.
+- First workflow result: Linux run `29695034611` stopped before the optimized product build because
+  GNU `file` reports the verified musl probe as `static-pie linked`, while the new packaging guard
+  accepted only the alternate wording `statically linked`. The probe's two unit tests passed and
+  its output included a Build ID, debug info and `not stripped`; no product binary or runtime test
+  failed. Follow-up scope is one workflow-regex correction accepting both valid static-link phrases,
+  followed by the complete `.160` dispatch gate and one replacement automatic workflow pair.
