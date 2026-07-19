@@ -15,7 +15,7 @@ use std::{
 
 use crate::{
     LeafPacketBridge, MeshServerResolver, PolicyRevision, PolicyRuntime, PolicyRuntimeBuildFuture,
-    PolicyRuntimeFactory,
+    PolicyRuntimeFactory, compile_leaf_config,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(3);
@@ -86,7 +86,7 @@ impl InProcessLeafFactory {
             self.resolver.as_ref(),
             &self.dns_servers,
             self.worker_threads,
-            self.options.clone(),
+            self.options,
             revision,
         )
         .await
