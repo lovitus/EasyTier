@@ -53,6 +53,7 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   packet::unix_bridge::tests::unsupported_packet_batch_request_keeps_legacy_backend
   packet::unix_bridge::tests::memory_batch_bridge_preserves_order_and_boundaries
   packet::unix_bridge::tests::stream_batch_bridge_preserves_order_and_detects_close
+  packet::unix_bridge::tests::contiguous_batch_body_rejects_corrupt_lengths
   packet::unix_bridge::tests::stream_endpoint_adapter_preserves_leaf_channel_ownership
 )
 readonly -a DEFAULT_NETSTACK_TEST_FILTERS=(
