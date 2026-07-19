@@ -694,3 +694,12 @@ Contiguous decoder candidate frozen at `39dd4d2f989a459fb44d9cc8c9aab708338e4f83
   its output included a Build ID, debug info and `not stripped`; no product binary or runtime test
   failed. Follow-up scope is one workflow-regex correction accepting both valid static-link phrases,
   followed by the complete `.160` dispatch gate and one replacement automatic workflow pair.
+- Replacement workflows for `9be9c0d28f41a7b70516a0146c2201f3e915f229` passed: Linux
+  `29695179139` and Android `29695179119`. Artifact intake verified outer and inner hashes, exact
+  commit/run/target, HEV pin, static PIE, symbols and Build ID `187acfe7...`. Full isolated 16 MiB
+  Leaf DIRECT plus native/KCP/QUIC/relay matrices passed on `.37` and `.38`. On faster-kernel
+  `lv1g2`, both Leaf transfers succeeded (about 768/592 Mbit/s), but the profiling harness exited
+  after its sampler raced a completed fixture process and `awk` opened a vanished `/proc/PID/stat`.
+  Follow-up scope is limited to treating disappearing sampler targets as a skipped sample; product
+  binaries, transfer results and policy behavior are unchanged. Re-run `.160`, the workflow pair,
+  and the three-Linux exact-artifact matrix before release.
