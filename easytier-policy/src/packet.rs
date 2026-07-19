@@ -673,57 +673,10 @@ mod unix_bridge {
         let mut header = [0u8; FRAME_HEADER_SIZE];
         reader.read_exact(&mut header).await?;
         let (count, expected_payload) = decode_header(&header)?;
-        let body_bytes = count
-            .checked_mul(std::mem::size_of::<u16>())
-            .and_then(|length_bytes| length_bytes.checked_add(expected_payload))
-            .ok_or_else(|| {
-                PacketError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "packet batch frame body length overflow",
-                ))
-            })?;
-        let mut body = vec![0u8; body_bytes];
-        reader.read_exact(&mut body).await?;
-        decode_batch_body(count, expected_payload, &body)
-    }
-
-    fn decode_batch_body(
-        count: usize,
-        expected_payload: usize,
-        body: &[u8],
-    ) -> Result<FramedPacketBatch, PacketError> {
-        let expected_body = count
-            .checked_mul(std::mem::size_of::<u16>())
-            .and_then(|length_bytes| length_bytes.checked_add(expected_payload))
-            .ok_or_else(|| {
-                PacketError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "packet batch frame body length overflow",
-                ))
-            })?;
-        if body.len() != expected_body {
-            return Err(PacketError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "packet batch frame body length mismatch",
-            )));
-        }
         let mut packets = Vec::with_capacity(count);
         let mut payload_bytes = 0usize;
-        let mut offset = 0usize;
         for _ in 0..count {
-            let length_end = offset.checked_add(2).ok_or_else(|| {
-                PacketError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "packet batch length offset overflow",
-                ))
-            })?;
-            let length_bytes = body.get(offset..length_end).ok_or_else(|| {
-                PacketError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "truncated packet length in batch frame",
-                ))
-            })?;
-            let length = usize::from(u16::from_be_bytes([length_bytes[0], length_bytes[1]]));
+            let length = reader.read_u16().await? as usize;
             payload_bytes = payload_bytes.checked_add(length).ok_or_else(|| {
                 PacketError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -736,23 +689,11 @@ mod unix_bridge {
                     "invalid packet length in batch frame",
                 )));
             }
-            offset = length_end;
-            let packet_end = offset.checked_add(length).ok_or_else(|| {
-                PacketError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "packet payload offset overflow",
-                ))
-            })?;
-            let packet = body.get(offset..packet_end).ok_or_else(|| {
-                PacketError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "truncated packet payload in batch frame",
-                ))
-            })?;
-            packets.push(packet.to_vec());
-            offset = packet_end;
+            let mut packet = vec![0u8; length];
+            reader.read_exact(&mut packet).await?;
+            packets.push(packet);
         }
-        if payload_bytes != expected_payload || offset != body.len() {
+        if payload_bytes != expected_payload {
             return Err(PacketError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "packet batch payload length mismatch",
@@ -881,18 +822,6 @@ mod unix_bridge {
             drop(endpoint_reader);
             drop(endpoint_writer);
             assert!(bridge.recv_from_leaf(&mut packet).await.is_err());
-        }
-
-        #[test]
-        fn contiguous_batch_body_rejects_corrupt_lengths() {
-            let body = [0, 1, 7, 0, 2, 8, 9];
-            assert_eq!(
-                decode_batch_body(2, 3, &body).unwrap().into_packets(),
-                vec![vec![7], vec![8, 9]]
-            );
-            assert!(decode_batch_body(2, 4, &body).is_err());
-            assert!(decode_batch_body(2, 3, &[0, 1, 7, 0, 3, 8, 9]).is_err());
-            assert!(decode_batch_body(1, 0, &[0, 0]).is_err());
         }
 
         #[cfg(feature = "leaf-runtime")]
