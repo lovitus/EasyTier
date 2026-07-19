@@ -52,6 +52,11 @@ struct ValidateConfigJsonReq {
     config: NetworkConfig,
 }
 
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct UpdatePolicyRuleDataJsonReq {
+    source_url: Option<String>,
+}
+
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct SaveNetworkJsonReq {
     config: NetworkConfig,
@@ -142,12 +147,14 @@ impl NetworkApi {
         auth_session: AuthSession,
         State(client_mgr): AppState,
         Path((machine_id, inst_id, resource)): Path<(uuid::Uuid, uuid::Uuid, String)>,
+        payload: Option<Json<UpdatePolicyRuleDataJsonReq>>,
     ) -> Result<Json<UpdatePolicyRuleDataResponse>, HttpHandleError> {
         Ok(client_mgr
             .handle_update_policy_rule_data(
                 (Self::get_user_id(&auth_session)?, machine_id),
                 inst_id,
                 resource,
+                payload.and_then(|Json(payload)| payload.source_url),
             )
             .await
             .map_err(convert_error)?
@@ -470,5 +477,23 @@ impl NetworkApi {
                 "/api/v1/machines/:machine-id/networks/metas",
                 post(Self::handle_get_network_metas),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpdatePolicyRuleDataJsonReq;
+
+    #[test]
+    fn policy_rule_data_request_preserves_optional_source_url() {
+        let default_request: UpdatePolicyRuleDataJsonReq = serde_json::from_str("{}").unwrap();
+        assert_eq!(default_request.source_url, None);
+
+        let custom_request: UpdatePolicyRuleDataJsonReq =
+            serde_json::from_str(r#"{"source_url":"https://rules.example/geoip.dat"}"#).unwrap();
+        assert_eq!(
+            custom_request.source_url.as_deref(),
+            Some("https://rules.example/geoip.dat")
+        );
     }
 }
