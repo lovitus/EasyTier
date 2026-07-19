@@ -930,6 +930,11 @@ impl Socks5Server {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) async fn data_plane_net_is_ready(&self) -> bool {
+        self.net.lock().await.is_some()
+    }
+
     async fn run_net_update_task(self: &Arc<Self>) {
         let net = self.net.clone();
         let global_ctx = self.global_ctx.clone();

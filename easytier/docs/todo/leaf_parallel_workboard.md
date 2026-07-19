@@ -843,3 +843,33 @@ Contiguous decoder candidate frozen at `39dd4d2f989a459fb44d9cc8c9aab708338e4f83
   compiler or unlocked dependency path was used. The exact four-ABI formal Mobile workflow, which
   installs NDK 26 and builds the pinned HEV archives, remains the mandatory authority for the
   armv7 field-width correction.
+
+### 2026-07-20 three-node readiness follow-up manifest
+
+- Exact parent: `9daa8442e8c073adcdf9ddee9951da92ea77e685`. Its automatic Linux profiling
+  run `29703503636` and Android candidate run `29703503634` passed, and the exact Linux artifact
+  passed the combined 16 MiB Leaf DIRECT/native/KCP/QUIC/relay matrix on `192.168.1.37`,
+  `192.168.1.38`, and `lv1g2`. Formal GUI, Mobile (all four Android ABIs), and OHOS passed.
+- Formal Test run `29704315531` failed only
+  `port_forward_with_inbound_default_drop_acl_test::case_2` twice, with 191/192 three-node cases
+  passing on both attempts. In both failures the DHCP address and mesh routes were present, but the
+  port-forward connector observed `data plane net is not ready`. The same exact case passed twice
+  on `.160`; repeated GitHub failure means it may no longer be waived as a one-off runner delay.
+- Minimal fix scope: expose the already-existing SOCKS data-plane `net.is_some()` condition only to
+  crate unit tests and wait for that concrete condition before starting the port-forward transfer.
+  Keep the transfer timeout and all product behavior unchanged; do not add a blind sleep or weaken
+  the assertion.
+- Dispatch lock: format the two Rust files, run `scripts/leaf-remote-preflight.sh` with the exact case
+  in its focused list, repeat that exact case enough to cover the startup race, inspect Cargo.lock,
+  platform cfg, workflow pins, generated files, and the complete diff, then commit and push one
+  replacement candidate. The push may start the automatic Linux/Android pair only once.
+- Required evidence: verify the replacement candidate artifacts and repeat the same combined Linux
+  matrix on `.37`, `.38`, and `lv1g2`; then require Core, GUI, Mobile, OHOS, and Test success at the
+  replacement SHA before Release. The physical Android device remains unavailable, so the Android
+  candidate plus formal four-ABI Mobile run are the platform authority.
+- Final `.160` dispatch evidence for the frozen code snapshot: the standard remote preflight passed
+  its locked no-run build and complete focused suite; the target DHCP/no-QUIC case then passed three
+  additional consecutive direct-binary runs. EasyTier full-feature/all-targets Clippy passed with
+  `-D warnings`. Cargo.lock, pnpm lockfiles, workflow pins, generated files, and platform production
+  cfg are unchanged; the only cfg expansion exposes the existing SOCKS server getter to crate tests
+  when the `socks5` feature is present.

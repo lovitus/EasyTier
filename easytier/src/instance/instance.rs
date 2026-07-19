@@ -1404,7 +1404,7 @@ impl Instance {
         self.proxy_failover_selector.clone()
     }
 
-    #[cfg(feature = "ffi-dataplane")]
+    #[cfg(any(feature = "ffi-dataplane", all(test, feature = "socks5")))]
     pub fn get_socks5_server(&self) -> Arc<Socks5Server> {
         self.socks5_server.clone()
     }
