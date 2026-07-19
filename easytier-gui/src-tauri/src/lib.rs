@@ -1277,7 +1277,7 @@ mod manager {
 
     #[cfg(test)]
     mod tests {
-        use super::{GUIClientManager, PersistedConfigSource, StoredGuiConfig};
+        use super::{PersistedConfigSource, StoredGuiConfig};
         use easytier::proto::api::manage::NetworkConfig;
         #[test]
         fn stored_gui_config_defaults_missing_source_to_legacy() {
