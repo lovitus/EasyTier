@@ -194,6 +194,8 @@ underlay_exclude_cidrs: 排除通告/直连候选网段
 underlay_exclude_cidrs_help: 追加到内置 guard 的用户 CIDR 列表，逗号分隔。编辑只替换用户列表；清空后仍保留内置 fake-IP 网段和 EasyTier 运行态虚拟地址过滤。
 enable_policy_proxy: 启用策略路由
 enable_policy_proxy_help: 使用可选 Leaf 策略引擎透明处理非 Mesh 流量；Mesh 路由和 Peer 端点始终保留原 EasyTier 数据路径。
+policy_leaf_tun_fast_path: Leaf 自有策略 TUN（实验性）
+policy_leaf_tun_fast_path_help: 仅用于 Linux TUN 模式，移除策略流量中的 EasyTier 到 Leaf 包桥接。默认关闭，不支持或启动失败时回退原路径。
 policy_config_file: 策略文件
 policy_config_file_help: 桌面/Linux 使用的 EasyTier 策略 YAML 路径，与内联策略互斥；TOML 中的相对路径按网络配置文件目录解析。
 policy_config_file_placeholder: "policy/default.yaml（桌面）"

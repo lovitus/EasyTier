@@ -24,11 +24,14 @@ const POLICY_TABLE: u32 = 52_000;
 const POLICY_RULE_PRIORITY: u32 = 10_900;
 const POLICY_ROUTE_PROTOCOL: RouteProtocol = RouteProtocol::Other(99);
 const POLICY_LOCK_PATH: &str = "/run/easytier-policy-routing.lock";
+const POLICY_PRIMARY_CAPTURE_METRIC: u32 = 65_535;
+const POLICY_LEGACY_FALLBACK_METRIC: u32 = 65_536;
 
 pub(crate) struct PolicyRoutingGuard {
     outbound_interface: String,
     outbound_index: u32,
-    tun_index: u32,
+    legacy_tun_index: u32,
+    leaf_tun_interface: Option<String>,
     enable_ipv6: bool,
     has_v4_bypass: bool,
     has_v6_bypass: bool,
@@ -90,7 +93,8 @@ impl PolicyRoutingGuard {
         let mut guard = Self {
             outbound_interface: outbound_interface.to_owned(),
             outbound_index,
-            tun_index,
+            legacy_tun_index: tun_index,
+            leaf_tun_interface: None,
             enable_ipv6,
             has_v4_bypass: false,
             has_v6_bypass: false,
@@ -151,13 +155,43 @@ impl PolicyRoutingGuard {
         self.has_v4_bypass
     }
 
+    /// Atomically switches only the policy capture endpoint. Leaf never owns
+    /// global routes; the original EasyTier TUN remains installed as a
+    /// lower-priority fail-closed fallback for the whole candidate lifetime.
+    pub(crate) fn select_leaf_tun_interface(
+        &mut self,
+        interface: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if let Some(interface) = interface {
+            NetlinkIfConfiger::get_interface_index(interface).map_err(|error| {
+                anyhow::anyhow!("Leaf-owned policy TUN {interface} is unavailable: {error}")
+            })?;
+        }
+        let previous = self.leaf_tun_interface.clone();
+        self.leaf_tun_interface = interface.map(str::to_owned);
+        if let Err(error) = self.refresh() {
+            self.leaf_tun_interface = previous;
+            let _ = self.refresh();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn policy_boundary_routes(&self) -> Vec<RouteMessage> {
+        let leaf_tun_index = self
+            .leaf_tun_interface
+            .as_deref()
+            .and_then(|interface| NetlinkIfConfiger::get_interface_index(interface).ok());
+        policy_boundary_routes(self.legacy_tun_index, leaf_tun_index, self.enable_ipv6)
+    }
+
     fn fail_closed_refresh<T>(&mut self, error: anyhow::Error) -> anyhow::Result<T> {
         self.reconcile_unavailable()?;
         Err(error)
     }
 
     fn reconcile_unavailable(&mut self) -> anyhow::Result<bool> {
-        let desired_routes = policy_boundary_routes(self.tun_index, self.enable_ipv6);
+        let desired_routes = self.policy_boundary_routes();
         let desired_rules = policy_mark_rules(self.socket_mark, self.enable_ipv6);
         let changed = !same_members(&desired_routes, &self.routes)
             || !same_members(&desired_rules, &self.rules)
@@ -225,7 +259,7 @@ impl PolicyRoutingGuard {
         // enabled family. If the physical default disappears, marked Leaf and
         // EasyTier sockets must fail closed instead of falling through to the
         // main table or bypassing policy during the transition.
-        desired_routes.extend(policy_boundary_routes(self.tun_index, self.enable_ipv6));
+        desired_routes.extend(self.policy_boundary_routes());
 
         let mut desired_rules = addresses
             .iter()
@@ -471,7 +505,7 @@ fn bypass_route(source: &RouteMessage, ifindex: u32) -> RouteMessage {
     route
 }
 
-fn capture_route(destination: IpAddr, ifindex: u32) -> RouteMessage {
+fn capture_route(destination: IpAddr, ifindex: u32, metric: u32) -> RouteMessage {
     let (family, destination) = match destination {
         IpAddr::V4(address) => (AddressFamily::Inet, RouteAddress::Inet(address)),
         IpAddr::V6(address) => (AddressFamily::Inet6, RouteAddress::Inet6(address)),
@@ -483,7 +517,7 @@ fn capture_route(destination: IpAddr, ifindex: u32) -> RouteMessage {
     route.attributes.push(RouteAttribute::Oif(ifindex));
     // The /1 prefix wins over a physical /0. The high metric intentionally
     // loses to any pre-existing route with the same prefix length.
-    route.attributes.push(RouteAttribute::Priority(65_535));
+    route.attributes.push(RouteAttribute::Priority(metric));
     route
 }
 
@@ -503,21 +537,67 @@ fn fail_closed_route(family: AddressFamily) -> RouteMessage {
     route
 }
 
-fn policy_boundary_routes(tun_index: u32, enable_ipv6: bool) -> Vec<RouteMessage> {
+fn policy_boundary_routes(
+    legacy_tun_index: u32,
+    leaf_tun_index: Option<u32>,
+    enable_ipv6: bool,
+) -> Vec<RouteMessage> {
+    let primary_tun_index = leaf_tun_index.unwrap_or(legacy_tun_index);
     let mut routes = vec![
         fail_closed_route(AddressFamily::Inet),
-        capture_route(IpAddr::V4(Ipv4Addr::UNSPECIFIED), tun_index),
-        capture_route(IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), tun_index),
+        capture_route(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            primary_tun_index,
+            POLICY_PRIMARY_CAPTURE_METRIC,
+        ),
+        capture_route(
+            IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)),
+            primary_tun_index,
+            POLICY_PRIMARY_CAPTURE_METRIC,
+        ),
     ];
+    if leaf_tun_index.is_some() {
+        routes.extend([
+            capture_route(
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                legacy_tun_index,
+                POLICY_LEGACY_FALLBACK_METRIC,
+            ),
+            capture_route(
+                IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)),
+                legacy_tun_index,
+                POLICY_LEGACY_FALLBACK_METRIC,
+            ),
+        ]);
+    }
     if enable_ipv6 {
         routes.extend([
             fail_closed_route(AddressFamily::Inet6),
-            capture_route(IpAddr::V6(Ipv6Addr::UNSPECIFIED), tun_index),
+            capture_route(
+                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                primary_tun_index,
+                POLICY_PRIMARY_CAPTURE_METRIC,
+            ),
             capture_route(
                 IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)),
-                tun_index,
+                primary_tun_index,
+                POLICY_PRIMARY_CAPTURE_METRIC,
             ),
         ]);
+        if leaf_tun_index.is_some() {
+            routes.extend([
+                capture_route(
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                    legacy_tun_index,
+                    POLICY_LEGACY_FALLBACK_METRIC,
+                ),
+                capture_route(
+                    IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)),
+                    legacy_tun_index,
+                    POLICY_LEGACY_FALLBACK_METRIC,
+                ),
+            ]);
+        }
     }
     routes
 }
@@ -645,8 +725,16 @@ mod tests {
 
     #[test]
     fn capture_routes_split_each_address_family() {
-        let low = capture_route(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7);
-        let high = capture_route(IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), 7);
+        let low = capture_route(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            7,
+            POLICY_PRIMARY_CAPTURE_METRIC,
+        );
+        let high = capture_route(
+            IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)),
+            7,
+            POLICY_PRIMARY_CAPTURE_METRIC,
+        );
         assert_eq!(low.header.destination_prefix_length, 1);
         assert_eq!(high.header.destination_prefix_length, 1);
         assert_ne!(low.attributes, high.attributes);
@@ -668,7 +756,11 @@ mod tests {
 
     #[test]
     fn route_identity_distinguishes_metrics() {
-        let mut first = capture_route(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7);
+        let mut first = capture_route(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            7,
+            POLICY_PRIMARY_CAPTURE_METRIC,
+        );
         let second = first.clone();
         assert!(same_route_key(&first, &second));
         first
@@ -721,7 +813,7 @@ mod tests {
 
     #[test]
     fn policy_boundary_remains_terminal_for_every_enabled_family() {
-        let ipv4 = policy_boundary_routes(7, false);
+        let ipv4 = policy_boundary_routes(7, None, false);
         assert_eq!(ipv4.len(), 3);
         assert_eq!(
             ipv4.iter()
@@ -729,7 +821,7 @@ mod tests {
                 .count(),
             1
         );
-        let dual_stack = policy_boundary_routes(7, true);
+        let dual_stack = policy_boundary_routes(7, None, true);
         assert_eq!(dual_stack.len(), 6);
         assert_eq!(
             dual_stack
@@ -740,5 +832,25 @@ mod tests {
         );
         assert_eq!(policy_mark_rules(9, false).len(), 1);
         assert_eq!(policy_mark_rules(9, true).len(), 2);
+    }
+
+    #[test]
+    fn leaf_owned_capture_keeps_the_legacy_tun_as_lower_priority_fallback() {
+        let routes = policy_boundary_routes(7, Some(11), true);
+        assert_eq!(routes.len(), 10);
+        assert_eq!(
+            routes
+                .iter()
+                .filter(|route| route_priority(route) == Some(POLICY_PRIMARY_CAPTURE_METRIC))
+                .count(),
+            4
+        );
+        assert_eq!(
+            routes
+                .iter()
+                .filter(|route| route_priority(route) == Some(POLICY_LEGACY_FALLBACK_METRIC))
+                .count(),
+            4
+        );
     }
 }

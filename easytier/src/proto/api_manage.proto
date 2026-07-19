@@ -114,6 +114,7 @@ message NetworkConfig {
   optional string policy_config_inline = 77;
   optional string policy_outbound_interface = 78;
   optional string policy_leaf_executable = 79;
+  optional bool policy_leaf_tun_fast_path = 80;
 }
 
 message PortForwardConfig {

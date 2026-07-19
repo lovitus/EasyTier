@@ -414,6 +414,11 @@ onMounted(() => {
     </div>
 
     <template v-if="config.enable_policy_proxy">
+      <div v-if="outboundInfo?.platform === 'linux'" class="flex items-center gap-3">
+        <Checkbox input-id="policy_leaf_tun_fast_path" v-model="config.policy_leaf_tun_fast_path" binary />
+        <label for="policy_leaf_tun_fast_path" class="font-semibold">{{ t('policy_leaf_tun_fast_path') }}</label>
+        <span class="pi pi-question-circle" v-tooltip="t('policy_leaf_tun_fast_path_help')" />
+      </div>
       <div class="flex flex-wrap items-end gap-4">
         <div class="flex flex-col gap-2">
           <label class="font-semibold">{{ t('policy.editor.source') }}</label>
