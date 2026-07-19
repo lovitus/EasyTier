@@ -278,7 +278,12 @@ mod unix_bridge {
     enum BatchSender {
         #[cfg(feature = "leaf-runtime")]
         Memory(tokio::sync::mpsc::Sender<leaf::PacketBatch>),
-        Stream(Mutex<OwnedWriteHalf>),
+        Stream(Mutex<StreamBatchWriter>),
+    }
+
+    struct StreamBatchWriter {
+        stream: OwnedWriteHalf,
+        frame: Vec<u8>,
     }
 
     struct BatchReceiver {
@@ -289,7 +294,12 @@ mod unix_bridge {
     enum BatchReceiverSource {
         #[cfg(feature = "leaf-runtime")]
         Memory(tokio::sync::mpsc::Receiver<leaf::PacketBatch>),
-        Stream(OwnedReadHalf),
+        Stream(StreamBatchReader),
+    }
+
+    struct StreamBatchReader {
+        stream: OwnedReadHalf,
+        body: Vec<u8>,
     }
 
     enum ReceivedPacketBatch {
@@ -356,9 +366,15 @@ mod unix_bridge {
                 Self {
                     kind: LeafPacketBridgeKind::Batch(LeafPacketBatchBridge {
                         backend: PacketBridgeBackend::StreamBatch,
-                        sender: BatchSender::Stream(Mutex::new(write)),
+                        sender: BatchSender::Stream(Mutex::new(StreamBatchWriter {
+                            stream: write,
+                            frame: Vec::new(),
+                        })),
                         receiver: Mutex::new(BatchReceiver {
-                            source: BatchReceiverSource::Stream(read),
+                            source: BatchReceiverSource::Stream(StreamBatchReader {
+                                stream: read,
+                                body: Vec::new(),
+                            }),
                             pending: VecDeque::new(),
                         }),
                     }),
@@ -422,7 +438,9 @@ mod unix_bridge {
                         ))
                     }),
                 BatchSender::Stream(writer) => {
-                    write_batch_async(&mut *writer.lock().await, &batch).await
+                    let mut writer = writer.lock().await;
+                    let StreamBatchWriter { stream, frame } = &mut *writer;
+                    write_batch_async(stream, frame, &batch).await
                 }
             }
         }
@@ -486,9 +504,9 @@ mod unix_bridge {
                                     ))
                                 })?,
                             ),
-                            BatchReceiverSource::Stream(source) => {
-                                ReceivedPacketBatch::Stream(read_batch_async(source).await?)
-                            }
+                            BatchReceiverSource::Stream(source) => ReceivedPacketBatch::Stream(
+                                read_batch_async(&mut source.stream, &mut source.body).await?,
+                            ),
                         };
                         let packets = match batch {
                             #[cfg(feature = "leaf-runtime")]
@@ -581,8 +599,9 @@ mod unix_bridge {
                     let _ = runtime.block_on(async move {
                         let (mut reader, mut writer) = UnixStream::from_std(socket)?.into_split();
                         let read_loop = async move {
+                            let mut body = Vec::new();
                             loop {
-                                let batch = read_batch_async(&mut reader).await?;
+                                let batch = read_batch_async(&mut reader, &mut body).await?;
                                 let batch = leaf::PacketBatch::try_new(batch.into_packets())?;
                                 if to_leaf_tx.send(batch).await.is_err() {
                                     return Ok::<(), PacketError>(());
@@ -590,9 +609,10 @@ mod unix_bridge {
                             }
                         };
                         let write_loop = async move {
+                            let mut frame = Vec::new();
                             while let Some(batch) = from_leaf_rx.recv().await {
                                 let batch = FramedPacketBatch::try_new(batch.into_packets())?;
-                                write_batch_async(&mut writer, &batch).await?;
+                                write_batch_async(&mut writer, &mut frame, &batch).await?;
                             }
                             Ok::<(), PacketError>(())
                         };
@@ -606,7 +626,10 @@ mod unix_bridge {
         }
     }
 
-    fn encode_batch(batch: &FramedPacketBatch) -> Result<Vec<u8>, PacketError> {
+    fn encode_batch_into(
+        batch: &FramedPacketBatch,
+        frame: &mut Vec<u8>,
+    ) -> Result<(), PacketError> {
         let count = u16::try_from(batch.packets.len()).map_err(|_| {
             PacketError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -619,8 +642,9 @@ mod unix_bridge {
                 "packet batch payload does not fit frame",
             ))
         })?;
-        let mut frame =
-            Vec::with_capacity(FRAME_HEADER_SIZE + usize::from(count) * 2 + batch.payload_bytes);
+        let frame_bytes = FRAME_HEADER_SIZE + usize::from(count) * 2 + batch.payload_bytes;
+        frame.clear();
+        frame.reserve(frame_bytes);
         frame.extend_from_slice(&FRAME_MAGIC);
         frame.push(FRAME_VERSION);
         frame.push(0);
@@ -636,7 +660,7 @@ mod unix_bridge {
             frame.extend_from_slice(&length.to_be_bytes());
             frame.extend_from_slice(packet);
         }
-        Ok(frame)
+        Ok(())
     }
 
     fn decode_header(header: &[u8; FRAME_HEADER_SIZE]) -> Result<(usize, usize), PacketError> {
@@ -661,14 +685,17 @@ mod unix_bridge {
 
     async fn write_batch_async(
         writer: &mut OwnedWriteHalf,
+        frame: &mut Vec<u8>,
         batch: &FramedPacketBatch,
     ) -> Result<(), PacketError> {
-        writer.write_all(&encode_batch(batch)?).await?;
+        encode_batch_into(batch, frame)?;
+        writer.write_all(frame).await?;
         Ok(())
     }
 
     async fn read_batch_async(
         reader: &mut OwnedReadHalf,
+        body: &mut Vec<u8>,
     ) -> Result<FramedPacketBatch, PacketError> {
         let mut header = [0u8; FRAME_HEADER_SIZE];
         reader.read_exact(&mut header).await?;
@@ -682,9 +709,9 @@ mod unix_bridge {
                     "packet batch frame body length overflow",
                 ))
             })?;
-        let mut body = vec![0u8; body_bytes];
-        reader.read_exact(&mut body).await?;
-        decode_batch_body(count, expected_payload, &body)
+        body.resize(body_bytes, 0);
+        reader.read_exact(body).await?;
+        decode_batch_body(count, expected_payload, body)
     }
 
     fn decode_batch_body(
@@ -862,22 +889,47 @@ mod unix_bridge {
                 .send_batch_to_leaf(vec![vec![1], vec![2, 3]])
                 .await
                 .unwrap();
+            let mut read_body = Vec::new();
             assert_eq!(
-                read_batch_async(&mut endpoint_reader)
+                read_batch_async(&mut endpoint_reader, &mut read_body)
                     .await
                     .unwrap()
                     .into_packets(),
                 vec![vec![1], vec![2, 3]]
             );
+            let read_capacity = read_body.capacity();
+            let mut write_frame = Vec::new();
             write_batch_async(
                 &mut endpoint_writer,
+                &mut write_frame,
                 &FramedPacketBatch::try_new(vec![vec![4, 5]]).unwrap(),
             )
             .await
             .unwrap();
+            let write_capacity = write_frame.capacity();
             let mut packet = [0u8; 16];
             assert_eq!(bridge.recv_from_leaf(&mut packet).await.unwrap(), 2);
             assert_eq!(&packet[..2], &[4, 5]);
+
+            bridge.send_batch_to_leaf(vec![vec![6]]).await.unwrap();
+            assert_eq!(
+                read_batch_async(&mut endpoint_reader, &mut read_body)
+                    .await
+                    .unwrap()
+                    .into_packets(),
+                vec![vec![6]]
+            );
+            assert_eq!(read_body.capacity(), read_capacity);
+            write_batch_async(
+                &mut endpoint_writer,
+                &mut write_frame,
+                &FramedPacketBatch::try_new(vec![vec![7]]).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(write_frame.capacity(), write_capacity);
+            assert_eq!(bridge.recv_from_leaf(&mut packet).await.unwrap(), 1);
+            assert_eq!(&packet[..1], &[7]);
             drop(endpoint_reader);
             drop(endpoint_writer);
             assert!(bridge.recv_from_leaf(&mut packet).await.is_err());
