@@ -8,6 +8,8 @@ readonly REMOTE_HOST_WORKSPACE="${REMOTE_HOST_WORKSPACE:-/data/easytier-builder/
 readonly REMOTE_WORKSPACE="${REMOTE_WORKSPACE:-/workspace}"
 readonly BUILD_TIMEOUT="${BUILD_TIMEOUT:-1800}"
 readonly TEST_TIMEOUT="${TEST_TIMEOUT:-300}"
+readonly MINIMAL_BUILD_LOG="/tmp/easytier_leaf_preflight_policy_minimal.log"
+readonly MUSL_MINIMAL_BUILD_LOG="/tmp/easytier_leaf_preflight_policy_musl_minimal.log"
 readonly BUILD_LOG="/tmp/easytier_leaf_preflight_build.log"
 readonly TEST_LOG="/tmp/easytier_leaf_preflight_test.log"
 
@@ -67,10 +69,11 @@ usage() {
   cat <<'EOF'
 Usage: scripts/leaf-remote-preflight.sh [ADDITIONAL_TEST_FILTER ...]
 
-Synchronizes the complete local snapshot to the dedicated builder, performs one
-locked debug no-run build for the EasyTier Leaf/HEV library target, and executes
-the focused tests directly from that exact test binary. Additional filters are
-appended to the default candidate suite.
+Synchronizes the complete local snapshot to the dedicated builder, checks the
+policy crate without default features, performs the locked debug no-run build
+for the EasyTier Leaf/HEV library target, and executes the focused tests directly
+from that exact test binary. Additional filters are appended to the default
+candidate suite.
 
 Environment overrides:
   BUILDER_HOST, BUILDER_CONTAINER, REMOTE_HOST_WORKSPACE, REMOTE_WORKSPACE
@@ -125,6 +128,34 @@ run_no_run_build() {
   fi
 }
 
+run_policy_minimal_no_run_build() {
+  local exit_code=0
+  ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier-policy --lib --no-default-features > $MINIMAL_BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
+    || exit_code=$?
+
+  ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER tail -50 $MINIMAL_BUILD_LOG"
+  if ((exit_code != 0)); then
+    printf 'Remote policy no-default no-run build failed with exit code %d.\n' "$exit_code" >&2
+    exit "$exit_code"
+  fi
+}
+
+run_policy_musl_minimal_no_run_build() {
+  local exit_code=0
+  ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER bash -c 'export BINDGEN_EXTRA_CLANG_ARGS=\"-I/usr/include/x86_64-linux-musl\"; export CC_x86_64_unknown_linux_musl=musl-gcc; export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc; cd $REMOTE_WORKSPACE && CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --target x86_64-unknown-linux-musl --package easytier-policy --lib --no-default-features > $MUSL_MINIMAL_BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
+    || exit_code=$?
+
+  ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER tail -50 $MUSL_MINIMAL_BUILD_LOG"
+  if ((exit_code != 0)); then
+    printf 'Remote policy musl no-default no-run build failed with exit code %d.\n' "$exit_code" >&2
+    exit "$exit_code"
+  fi
+}
+
 resolve_test_binary() {
   local binary_prefix="$1"
   ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
@@ -166,6 +197,8 @@ run_focused_tests() {
 
 sync_snapshot
 check_builder_idle
+run_policy_minimal_no_run_build
+run_policy_musl_minimal_no_run_build
 run_no_run_build
 readonly EASYTIER_TEST_BINARY="$(resolve_test_binary easytier)"
 readonly POLICY_TEST_BINARY="$(resolve_test_binary easytier_policy)"
