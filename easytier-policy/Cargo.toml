@@ -37,7 +37,7 @@ libc = "0.2"
 
 [target.'cfg(unix)'.dependencies.leaf]
 git = "https://github.com/lovitus/leaf.git"
-rev = "2153f126c4841fc7f74d2da4f9e61d622882795f"
+rev = "36ba707f6d107886bf3fe22dbd4f2cd9f9be2afb"
 optional = true
 default-features = false
 features = [

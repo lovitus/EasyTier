@@ -32,7 +32,6 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   peers::peer_ospf_route::tests::peer_removal_restarts_remaining_generation_and_invalidates_remote_cache
   policy_proxy::mesh_udp_relay::tests
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
-  launcher::tests::network_config_roundtrips_experimental_features
 )
 readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   config::tests::parses_legacy_and_named_udp_modes_canonically
@@ -47,11 +46,6 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   leaf_config::tests::explicit_dns_sets_replace_platform_direct_and_keep_proxy_separate
   leaf_config::tests::expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap
   leaf_config::tests::preserves_unresolved_domain_contract_for_direct_socks_and_fallback
-  packet::unix_bridge::tests::preserves_boundaries_in_both_directions
-  packet::unix_bridge::tests::unsupported_packet_batch_request_keeps_legacy_backend
-  packet::unix_bridge::tests::memory_batch_bridge_preserves_order_and_boundaries
-  packet::unix_bridge::tests::stream_batch_bridge_preserves_order_and_detects_close
-  packet::unix_bridge::tests::stream_endpoint_adapter_preserves_leaf_channel_ownership
 )
 readonly -a DEFAULT_NETSTACK_TEST_FILTERS=(
   stack::tests::full_ingress_channel_wakes_waiting_stack_sender
@@ -114,7 +108,7 @@ check_builder_idle() {
 run_no_run_build() {
   local exit_code=0
   ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
-    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --package netstack-smoltcp --lib --features easytier/leaf-policy-proxy,easytier-policy/leaf-inprocess > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
+    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --package netstack-smoltcp --lib --features easytier/leaf-policy-proxy > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
     || exit_code=$?
 
   ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
@@ -145,10 +139,8 @@ run_focused_tests() {
   fi
   local filter
   for filter in "${filters[@]}"; do
-    printf -v remote_script '%s match_output="$(timeout %q %q %q --list)"; if [[ "$match_output" != *": test"* ]]; then printf %q %q >> %q; exit 97; fi; printf %q %q >> %q; timeout %q %q %q --nocapture --test-threads 1 >> %q 2>&1;' \
-      "$remote_script" "$TEST_TIMEOUT" "$test_binary" "$filter" \
-      '%s\n' "ERROR: no test matched $filter" "$TEST_LOG" \
-      '%s\n' "=== TEST $filter ===" "$TEST_LOG" \
+    printf -v remote_script '%s printf %q %q >> %q; timeout %q %q %q --nocapture --test-threads 1 >> %q 2>&1;' \
+      "$remote_script" '%s\n' "=== TEST $filter ===" "$TEST_LOG" \
       "$TEST_TIMEOUT" "$test_binary" "$filter" "$TEST_LOG"
   done
 

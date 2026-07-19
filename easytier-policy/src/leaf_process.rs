@@ -12,9 +12,8 @@ use std::{
 use tokio::process::{Child, Command};
 
 use crate::{
-    LeafPacketBridge, LeafPacketEndpoint, LeafPacketStreamEndpoint, MeshServerResolver,
-    PacketBridgeBackend, PacketBridgeMode, PolicyRevision, PolicyRuntime, PolicyRuntimeBuildFuture,
-    PolicyRuntimeFactory,
+    LeafPacketBridge, MeshServerResolver, PolicyRevision, PolicyRuntime, PolicyRuntimeBuildFuture,
+    PolicyRuntimeFactory, compile_leaf_config,
 };
 
 const LEAF_TUN_FD: RawFd = 3;
@@ -54,10 +53,6 @@ pub struct LeafProcessRuntime {
 impl LeafProcessRuntime {
     pub fn bridge(&self) -> Arc<LeafPacketBridge> {
         self.bridge.clone()
-    }
-
-    pub fn packet_bridge_backend(&self) -> PacketBridgeBackend {
-        self.bridge.backend()
     }
 
     pub async fn start(
@@ -108,88 +103,7 @@ impl LeafProcessRuntime {
         revision: Arc<PolicyRevision>,
         options: crate::LeafConfigOptions,
     ) -> Result<Arc<Self>, String> {
-        Self::start_with_dns_servers_options_and_bridge(
-            executable,
-            base_dir,
-            outbound_interface,
-            resolver,
-            dns_servers,
-            revision,
-            options,
-            PacketBridgeMode::Legacy,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn start_with_dns_servers_options_and_bridge(
-        executable: &Path,
-        base_dir: &Path,
-        outbound_interface: Option<&str>,
-        resolver: &dyn MeshServerResolver,
-        dns_servers: &[std::net::IpAddr],
-        revision: Arc<PolicyRevision>,
-        options: crate::LeafConfigOptions,
-        packet_bridge_mode: PacketBridgeMode,
-    ) -> Result<Arc<Self>, String> {
-        let result = Self::start_once(
-            executable,
-            base_dir,
-            outbound_interface,
-            resolver,
-            dns_servers,
-            revision.clone(),
-            options,
-            packet_bridge_mode,
-        )
-        .await;
-        if result.is_err() && packet_bridge_mode == PacketBridgeMode::PacketBatch {
-            tracing::warn!(
-                error = ?result.as_ref().err(),
-                "Leaf worker packet batch initialization failed; retrying legacy bridge"
-            );
-            return Self::start_once(
-                executable,
-                base_dir,
-                outbound_interface,
-                resolver,
-                dns_servers,
-                revision,
-                options,
-                PacketBridgeMode::Legacy,
-            )
-            .await;
-        }
-        result
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn start_once(
-        executable: &Path,
-        base_dir: &Path,
-        outbound_interface: Option<&str>,
-        resolver: &dyn MeshServerResolver,
-        dns_servers: &[std::net::IpAddr],
-        revision: Arc<PolicyRevision>,
-        options: crate::LeafConfigOptions,
-        packet_bridge_mode: PacketBridgeMode,
-    ) -> Result<Arc<Self>, String> {
-        enum WorkerPacketEndpoint {
-            Legacy(LeafPacketEndpoint),
-            Batch(LeafPacketStreamEndpoint),
-        }
-        let (bridge, endpoint) = match packet_bridge_mode {
-            PacketBridgeMode::Legacy => {
-                let (bridge, endpoint) =
-                    LeafPacketBridge::pair().map_err(|error| error.to_string())?;
-                (bridge, WorkerPacketEndpoint::Legacy(endpoint))
-            }
-            PacketBridgeMode::PacketBatch => {
-                let (bridge, endpoint) =
-                    LeafPacketBridge::stream_batch_pair().map_err(|error| error.to_string())?;
-                (bridge, WorkerPacketEndpoint::Batch(endpoint))
-            }
-        };
+        let (bridge, endpoint) = LeafPacketBridge::pair().map_err(|error| error.to_string())?;
         let config = crate::compile_leaf_config_with_options(
             &revision,
             LEAF_TUN_FD,
@@ -230,10 +144,7 @@ impl LeafProcessRuntime {
             ));
         }
 
-        let (endpoint_fd, packet_batch) = match endpoint {
-            WorkerPacketEndpoint::Legacy(endpoint) => (endpoint.into_raw_fd(), false),
-            WorkerPacketEndpoint::Batch(endpoint) => (endpoint.into_raw_fd(), true),
-        };
+        let endpoint_fd = endpoint.into_raw_fd();
         let mut command = Command::new(executable);
         command
             .arg("-c")
@@ -246,9 +157,6 @@ impl LeafProcessRuntime {
             .kill_on_drop(true);
         if let Some(interface) = outbound_interface {
             command.arg("-b").arg(interface);
-        }
-        if packet_batch {
-            command.arg("--packet-batch");
         }
         let parent_pid = unsafe { libc::getpid() };
         #[cfg(target_os = "macos")]

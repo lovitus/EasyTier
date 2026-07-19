@@ -107,9 +107,6 @@ message FlagsInConfig {
   // Comma-separated user CIDRs added to underlay_candidate_guard. Empty clears
   // only user CIDRs; built-in fake-IP and runtime EasyTier guards still apply.
   string underlay_exclude_cidrs = 50;
-  // Default-off runtime experiments. Unknown names are preserved for forward
-  // compatibility but have no effect until the runtime recognizes them.
-  repeated string experimental_features = 51;
 }
 
 message RpcDescriptor {

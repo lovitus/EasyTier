@@ -14,8 +14,8 @@ use std::{
 };
 
 use crate::{
-    LeafPacketBridge, MeshServerResolver, PacketBridgeBackend, PacketBridgeMode, PolicyRevision,
-    PolicyRuntime, PolicyRuntimeBuildFuture, PolicyRuntimeFactory,
+    LeafPacketBridge, MeshServerResolver, PolicyRevision, PolicyRuntime, PolicyRuntimeBuildFuture,
+    PolicyRuntimeFactory, compile_leaf_config,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(3);
@@ -37,7 +37,6 @@ pub struct InProcessLeafFactory {
     dns_servers: Arc<[std::net::IpAddr]>,
     worker_threads: usize,
     options: crate::LeafConfigOptions,
-    packet_bridge_mode: PacketBridgeMode,
 }
 
 impl InProcessLeafFactory {
@@ -47,13 +46,12 @@ impl InProcessLeafFactory {
         dns_servers: Vec<std::net::IpAddr>,
         worker_threads: usize,
     ) -> Result<Self, String> {
-        Self::new_with_options_and_bridge(
+        Self::new_with_options(
             base_dir,
             resolver,
             dns_servers,
             worker_threads,
             crate::LeafConfigOptions::default(),
-            PacketBridgeMode::Legacy,
         )
     }
 
@@ -63,24 +61,6 @@ impl InProcessLeafFactory {
         dns_servers: Vec<std::net::IpAddr>,
         worker_threads: usize,
         options: crate::LeafConfigOptions,
-    ) -> Result<Self, String> {
-        Self::new_with_options_and_bridge(
-            base_dir,
-            resolver,
-            dns_servers,
-            worker_threads,
-            options,
-            PacketBridgeMode::Legacy,
-        )
-    }
-
-    pub fn new_with_options_and_bridge(
-        base_dir: PathBuf,
-        resolver: Arc<dyn MeshServerResolver + Send + Sync>,
-        dns_servers: Vec<std::net::IpAddr>,
-        worker_threads: usize,
-        options: crate::LeafConfigOptions,
-        packet_bridge_mode: PacketBridgeMode,
     ) -> Result<Self, String> {
         if dns_servers.is_empty() {
             return Err("in-process Leaf requires at least one underlying DNS server".to_owned());
@@ -94,7 +74,6 @@ impl InProcessLeafFactory {
             dns_servers: dns_servers.into(),
             worker_threads,
             options,
-            packet_bridge_mode,
         })
     }
 
@@ -102,33 +81,15 @@ impl InProcessLeafFactory {
         &self,
         revision: Arc<PolicyRevision>,
     ) -> Result<Arc<InProcessLeafRuntime>, String> {
-        let result = InProcessLeafRuntime::start(
+        InProcessLeafRuntime::start(
             &self.base_dir,
             self.resolver.as_ref(),
             &self.dns_servers,
             self.worker_threads,
             self.options,
-            self.packet_bridge_mode,
-            revision.clone(),
+            revision,
         )
-        .await;
-        if result.is_err() && self.packet_bridge_mode == PacketBridgeMode::PacketBatch {
-            tracing::warn!(
-                error = ?result.as_ref().err(),
-                "in-process Leaf packet batch initialization failed; retrying legacy bridge"
-            );
-            return InProcessLeafRuntime::start(
-                &self.base_dir,
-                self.resolver.as_ref(),
-                &self.dns_servers,
-                self.worker_threads,
-                self.options,
-                PacketBridgeMode::Legacy,
-                revision,
-            )
-            .await;
-        }
-        result
+        .await
     }
 }
 
@@ -148,32 +109,17 @@ impl InProcessLeafRuntime {
         self.runtime_id
     }
 
-    pub fn packet_bridge_backend(&self) -> PacketBridgeBackend {
-        self.bridge.backend()
-    }
-
     async fn start(
         base_dir: &std::path::Path,
         resolver: &(dyn MeshServerResolver + Send + Sync),
         dns_servers: &[std::net::IpAddr],
         worker_threads: usize,
         options: crate::LeafConfigOptions,
-        packet_bridge_mode: PacketBridgeMode,
         revision: Arc<PolicyRevision>,
     ) -> Result<Arc<Self>, String> {
-        let (bridge, packet_fd, external_packet_endpoint, endpoint_fd) = match packet_bridge_mode {
-            PacketBridgeMode::Legacy => {
-                let (bridge, endpoint) =
-                    LeafPacketBridge::pair().map_err(|error| error.to_string())?;
-                let packet_fd = LeafPacketFd::new(endpoint.into_raw_fd())?;
-                let endpoint_fd = packet_fd.raw_fd();
-                (bridge, Some(packet_fd), None, endpoint_fd)
-            }
-            PacketBridgeMode::PacketBatch => {
-                let (bridge, endpoint) = LeafPacketBridge::memory_batch_pair();
-                (bridge, None, Some(endpoint), -1)
-            }
-        };
+        let (bridge, endpoint) = LeafPacketBridge::pair().map_err(|error| error.to_string())?;
+        let packet_fd = LeafPacketFd::new(endpoint.into_raw_fd())?;
+        let endpoint_fd = packet_fd.raw_fd();
         let config = match crate::compile_leaf_config_with_options(
             &revision,
             endpoint_fd,
@@ -206,18 +152,13 @@ impl InProcessLeafRuntime {
                 } else {
                     leaf::RuntimeOption::MultiThread(worker_threads, 2 * 1024 * 1024)
                 };
-                let start_options = leaf::StartOptions {
-                    config: leaf::Config::Internal(config),
-                    runtime_opt,
-                };
-                let result = match external_packet_endpoint {
-                    Some(endpoint) => leaf::start_with_external_packet_endpoint(
-                        runtime_id,
-                        start_options,
-                        endpoint,
-                    ),
-                    None => leaf::start(runtime_id, start_options),
-                }
+                let result = leaf::start(
+                    runtime_id,
+                    leaf::StartOptions {
+                        config: leaf::Config::Internal(config),
+                        runtime_opt,
+                    },
+                )
                 .map_err(|error| error.to_string());
                 let _ = result_tx.send(result.clone());
                 result
