@@ -395,8 +395,8 @@ fn allocate_runtime_id() -> Result<RuntimeIdReservation, String> {
 
 #[derive(Clone, Copy)]
 struct FdIdentity {
-    device: libc::dev_t,
-    inode: libc::ino_t,
+    device: u64,
+    inode: u64,
 }
 
 struct LeafPacketFd {

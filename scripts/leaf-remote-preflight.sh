@@ -35,6 +35,7 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   policy_proxy::tests::resolves_inline_instance_config_without_persisting_generated_state
   instance::virtual_nic::tests::leaf_owned_tun_selection_is_default_off_and_backend_bounded
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
+  tests::three_node::port_forward_with_inbound_default_drop_acl_test::case_2
 )
 readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   config::tests::parses_legacy_and_named_udp_modes_canonically
@@ -53,6 +54,7 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   leaf_config::tests::leaf_owned_tun_is_explicit_and_legacy_fd_mode_remains_unchanged
   leaf_process::tests::linux_owned_tun_readiness_requires_interface_up_flag
   leaf_process::tests::owned_tun_identity_is_bounded_unique_and_outside_default_fake_ip
+  inprocess::tests::packet_fd_guard_closes_an_unclaimed_descriptor
 )
 readonly -a DEFAULT_NETSTACK_TEST_FILTERS=(
   stack::tests::full_ingress_channel_wakes_waiting_stack_sender
