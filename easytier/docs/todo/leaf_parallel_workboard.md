@@ -416,3 +416,40 @@ It is local execution state, not a reason to trigger a workflow by itself.
 | Revert artifacts | Publish one auditable rolling-beta revert candidate | yes | Exact-SHA Linux/Android workflows only after `.160` gate | **READY: one automatic workflow set after the audit-doc commit** | four auditable revert commits plus audit docs |
 
 Wait-time work for the revert candidate is limited to diff/lockfile/cfg/workflow-pin inspection and host cleanup. No third performance architecture, newer-kernel benchmark, or Android performance run is authorized by this failed candidate.
+
+## 2026-07-19 cross-kernel correction after the safe revert
+
+| Workstream | Objective | Build-affecting | Evidence target | Status | Candidate |
+|---|---|---:|---|---|---|
+| `.160` CentOS 3.10 A/B | Detect regressions on the oldest supported validation kernel | no | Three untraced runs per mode | **FAILED for fast path: download ratio 0.8424** | `8b48153a` |
+| lv1g2 Debian 4.19 A/B | Repeat on independent 10 Gbps VPS and newer kernel | no | Three untraced runs, GSO flags, dual-TUN counters, cleanup | **PASSED: download +53.2%, upload +35.8%, RSS +2.3%** | `8b48153a` |
+| lv1g3 Ubuntu 5.4 A/B | Confirm newer-kernel result on a second VPS | no | Three untraced runs, TUN flags, dual-TUN counters, cleanup | **PASSED: download +87.9%, upload +76.3%, RSS +1.3%** | `8b48153a` |
+| Safe revert | Keep product branch free of the disputed candidate while evidence is reviewed | yes | `.160` preflight and exact-SHA Linux/Android workflows | **PASSED at `c5051e1f`; temporary state** | `c5051e1f` |
+| Cross-kernel decision | Decide whether to restore the candidate with old-kernel legacy fallback | yes | User decision, then one batched candidate/preflight/workflow set | **USER UNDECIDED** | none |
+
+The cross-host results supersede the earlier full-rejection conclusion. Documentation remains local until it accompanies a build-affecting decision; it must not trigger a documentation-only workflow.
+
+## 2026-07-19 expanded `.37/.38/KR` matrix
+
+| Workstream | Objective | Build-affecting | Evidence target | Status | Candidate |
+|---|---|---:|---|---|---|
+| `.37` exact-artifact A/B | Add an independent CentOS 7 / 3.10 result without touching `etns_scale` | no | Three untraced runs per mode, GSO, dual TUN, RSS, cleanup | **PASSED: download +34.3%, upload +81.3%, RSS -4.8%** | `8b48153a` |
+| `.38` exact-artifact A/B | Add a second independent CentOS 7 / 3.10 result | no | Three untraced runs per mode, GSO, TUN accounting, RSS, cleanup | **PASSED: download +38.0%, upload +30.6%, RSS -4.8%** | `8b48153a` |
+| KR exact-artifact A/B | Validate Debian 5.10 while preserving production EasyTier/TUN/iperf | no | Three untraced runs per mode, GSO, dual TUN, RSS, cleanup | **PASSED: download +80.7%, upload +39.0%, RSS +11.2%** | `8b48153a` |
+| KR false-positive audit | Explain the excluded first run without hiding a product failure | no | Preserve RA `expires` diff and prove production/candidate ownership | **CLOSED: only volatile RA expiry changed; fresh matrix passed** | `8b48153a` |
+| Six-host decision | Separate a host-specific negative result from platform/kernel policy | yes | Five passes, one `.160` failure, no unsupported kernel heuristic | **USER UNDECIDED: recommend restoring explicit opt-in feature without kernel gate** | safe revert remains `c5051e1f` |
+
+All three new hosts verified the exact archive and package metadata before execution. Accepted runs were host-state clean and candidate-owned resources returned to baseline. The raw per-run values, comparator medians, watcher evidence, exclusions, remote evidence roots, and cleanup state are recorded in `UNDECIDED_leaf_linux_owned_policy_tun_cross_kernel.md`. No documentation-only workflow is authorized.
+
+## 2026-07-19 user-approved restoration
+
+| Workstream | Objective | Build-affecting | Evidence target | Status | Candidate |
+|---|---|---:|---|---|---|
+| Exact implementation restore | Restore only the validated `8b48153a` non-document tree | yes | Tree equivalence for runtime/config/UI/proto/scripts; no new heuristics | **COMPLETE: tracked paths and both new script blobs exactly match `8b48153a`** | local restoration snapshot |
+| Corrected evidence | Preserve all six hosts and replace the premature full-rejection conclusion | no | Cross-kernel validation document and workboard | **COMPLETE** | local restoration snapshot |
+| Restoration preflight | Apply the standard `.160` dispatch lock once to the complete batch | yes | `--locked` no-run plus configured focused suite | **PASSED: 33.41s no-run and all configured focused tests** | local restoration snapshot |
+| Restoration artifacts | Produce one exact-SHA Linux/Android workflow set | yes | Automatic profiling-beta workflows after preflight | **READY: one push after this documentation update** | local restoration snapshot |
+
+During the `.160` wait, only tree-equivalence, lockfile, platform `cfg`, generated proto, workflow-pin, and candidate-scope inspection are allowed. Do not mutate the in-flight snapshot or start another build.
+
+Candidate manifest: the build-affecting tree is byte-equivalent to `8b48153acc286c70c70faf8a2e4d1cb3c015be05`, including Leaf revision `a5bb6a31df2c62200be052b61ca01b01ea5e3c25`. The candidate adds only the corrected six-host evidence and restoration decision. Required workflows are the single automatic Linux profiling-beta and Android policy candidate runs. Existing exact-artifact Linux evidence is `.160`, `.37`, `.38`, lv1g2, lv1g3, and KR; Android is a non-Linux build/regression boundary because the restored fast path is Linux-only.

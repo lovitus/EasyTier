@@ -4965,7 +4965,7 @@ dependencies = [
 [[package]]
 name = "leaf"
 version = "0.1.2"
-source = "git+https://github.com/lovitus/leaf.git?rev=36ba707f6d107886bf3fe22dbd4f2cd9f9be2afb#36ba707f6d107886bf3fe22dbd4f2cd9f9be2afb"
+source = "git+https://github.com/lovitus/leaf.git?rev=a5bb6a31df2c62200be052b61ca01b01ea5e3c25#a5bb6a31df2c62200be052b61ca01b01ea5e3c25"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -5029,6 +5029,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "tun",
+ "tun-rs",
  "tungstenite",
  "url",
  "uuid",

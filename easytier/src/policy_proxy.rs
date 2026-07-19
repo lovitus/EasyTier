@@ -198,6 +198,7 @@ pub struct PolicyProcessConfig {
     pub base_dir: PathBuf,
     pub leaf_executable: PathBuf,
     pub outbound_interface: String,
+    pub leaf_tun_fast_path: bool,
     source_file: Option<PathBuf>,
 }
 
@@ -241,6 +242,7 @@ pub fn configure(
     policy_file: PathBuf,
     leaf_executable: PathBuf,
     outbound_interface: String,
+    leaf_tun_fast_path: bool,
 ) -> anyhow::Result<()> {
     let (revision, leaf_executable) =
         resolve_process_inputs(&policy_file, &leaf_executable, outbound_interface.as_str())?;
@@ -256,6 +258,7 @@ pub fn configure(
             base_dir,
             leaf_executable,
             outbound_interface,
+            leaf_tun_fast_path,
             source_file: Some(policy_file),
         })
         .map_err(|_| anyhow::anyhow!("policy process config was initialized more than once"))
@@ -353,6 +356,7 @@ fn resolve_instance_config(config: PolicyProxyConfig) -> anyhow::Result<PolicyPr
         base_dir: document.base_dir,
         leaf_executable,
         outbound_interface,
+        leaf_tun_fast_path: config.leaf_tun_fast_path,
         source_file,
     })
 }
@@ -449,6 +453,7 @@ mod tests {
         std::fs::write(&worker, b"worker").unwrap();
         let config = PolicyProxyConfig {
             enabled: true,
+            leaf_tun_fast_path: true,
             config_inline: Some("version: 1\nrules: [\"FINAL,DIRECT\"]\n".to_owned()),
             outbound_interface: Some("eth0".to_owned()),
             leaf_executable: Some(worker.clone()),
@@ -461,6 +466,7 @@ mod tests {
         assert_eq!(resolved.source_label, "inline policy config");
         assert_eq!(resolved.base_dir, directory.path());
         assert_eq!(resolved.leaf_executable, worker);
+        assert!(resolved.leaf_tun_fast_path);
         assert!(
             resolved
                 .reload_revision_if_changed(&resolved.revision.digest)

@@ -31,6 +31,9 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   gateway::socks5::dataplane::tests::mesh_only_connect_never_falls_back_to_kernel
   peers::peer_ospf_route::tests::peer_removal_restarts_remaining_generation_and_invalidates_remote_cache
   policy_proxy::mesh_udp_relay::tests
+  policy_proxy::policy_routing::tests::leaf_owned_capture_keeps_the_legacy_tun_as_lower_priority_fallback
+  policy_proxy::tests::resolves_inline_instance_config_without_persisting_generated_state
+  instance::virtual_nic::tests::leaf_owned_tun_selection_is_default_off_and_backend_bounded
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
 )
 readonly -a DEFAULT_POLICY_TEST_FILTERS=(
@@ -46,6 +49,9 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   leaf_config::tests::explicit_dns_sets_replace_platform_direct_and_keep_proxy_separate
   leaf_config::tests::expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap
   leaf_config::tests::preserves_unresolved_domain_contract_for_direct_socks_and_fallback
+  leaf_config::tests::leaf_owned_tun_is_explicit_and_legacy_fd_mode_remains_unchanged
+  leaf_process::tests::linux_owned_tun_readiness_requires_interface_up_flag
+  leaf_process::tests::owned_tun_identity_is_bounded_unique_and_outside_default_fake_ip
 )
 readonly -a DEFAULT_NETSTACK_TEST_FILTERS=(
   stack::tests::full_ingress_channel_wakes_waiting_stack_sender
@@ -62,9 +68,9 @@ usage() {
 Usage: scripts/leaf-remote-preflight.sh [ADDITIONAL_TEST_FILTER ...]
 
 Synchronizes the complete local snapshot to the dedicated builder, performs one
-locked debug no-run build for the EasyTier Leaf/HEV library target, and executes
-the focused tests directly from that exact test binary. Additional filters are
-appended to the default candidate suite.
+locked debug no-run build for the EasyTier Leaf/HEV and in-process library
+targets, and executes the focused tests directly from that exact test binary.
+Additional filters are appended to the default candidate suite.
 
 Environment overrides:
   BUILDER_HOST, BUILDER_CONTAINER, REMOTE_HOST_WORKSPACE, REMOTE_WORKSPACE
@@ -108,7 +114,7 @@ check_builder_idle() {
 run_no_run_build() {
   local exit_code=0
   ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
-    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --package netstack-smoltcp --lib --features easytier/leaf-policy-proxy > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
+    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --package netstack-smoltcp --lib --features easytier/leaf-policy-proxy,easytier-policy/leaf-inprocess > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
     || exit_code=$?
 
   ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \

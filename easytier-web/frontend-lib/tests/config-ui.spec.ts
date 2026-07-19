@@ -447,11 +447,13 @@ describe('Config.vue network config projection', () => {
     expect(config.stealth_protocols).toBe(DEFAULT_STEALTH_PROTOCOLS)
     expect(config.transport_priority).toBe(DEFAULT_TRANSPORT_PRIORITY)
     expect(config.enable_policy_proxy).toBe(false)
+    expect(config.policy_leaf_tun_fast_path).toBe(false)
   })
 
   it('round-trips policy settings and keeps file and inline sources exclusive', async () => {
     const config = makeConfig()
     config.enable_policy_proxy = true
+    config.policy_leaf_tun_fast_path = true
     config.policy_config_file = 'policy/default.yaml'
     config.policy_outbound_interface = 'eth0'
     config.policy_leaf_executable = 'easytier-leaf-worker'
@@ -469,6 +471,7 @@ describe('Config.vue network config projection', () => {
     const backend = toBackendNetworkConfig(curNetwork)
     expect(backend).toMatchObject({
       enable_policy_proxy: true,
+      policy_leaf_tun_fast_path: true,
       policy_config_file: '',
       policy_config_inline: 'version: 1\nrules: ["FINAL,DIRECT"]\n',
       policy_outbound_interface: 'eth0',
