@@ -453,26 +453,3 @@ legacy fallback, not batch acceleration.
   Linux/Android workflow artifacts and same-artifact legacy-vs-batch functional,
   syscall, throughput, CPU, RSS, FD, task, restart, and cleanup results remain
   mandatory before the feature can be recommended or enabled by default.
-
-### 2026-07-19 first immutable workflow result and follow-up gate
-
-- First EasyTier candidate: `aae707ca9236565cdcc31adbeccc2814ff0918b4`.
-- Android workflow `29675426117` completed successfully in 20m0s. It built the
-  debug APK and captured-UID policy probe, passed the VPN lifecycle and
-  persisted-selection tests, packaged the exact candidate, and uploaded the
-  artifact. This is Android compile/package evidence only; real-device behavior
-  and performance evidence remain open.
-- Linux workflow `29675426118` failed in job `88161897043` at its exact
-  `x86_64-unknown-linux-musl`, `easytier-policy --no-default-features` no-run
-  build. `packet.rs` uses Tokio `AsyncReadExt`/`AsyncWriteExt`, but the policy
-  crate did not declare Tokio's `io-util` feature. Cargo feature unification in
-  the wider `.160` build had hidden this dependency declaration error.
-- The follow-up adds only Tokio `io-util` and makes both GNU and musl policy
-  `--no-default-features --locked --no-run` builds mandatory in
-  `scripts/leaf-remote-preflight.sh`. It does not change PacketBatch framing,
-  selection, fallback, lifecycle, mesh, HEV, DNS, rules, or proxy behavior.
-- On `.160`, the follow-up passed the exact GNU minimal gate (13.33s from the
-  clean state), exact musl minimal gate (15.25s), the unified no-run build, and
-  all 28 nonzero focused filters. Incremental reruns took 0.45s, 0.44s, and
-  0.73s respectively. `Cargo.lock`, platform cfg, generated files, and workflow
-  pins are unchanged by this follow-up.
