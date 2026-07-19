@@ -423,13 +423,13 @@ It is local execution state, not a reason to trigger a workflow by itself.
 
 | Workstream | Objective | Build-affecting | Evidence target | Status | Shared candidate |
 | --- | --- | --- | --- | --- | --- |
-| Config/support boundary | Default-off TOML/CLI/env/protobuf/GUI; Linux TUN only | yes | default and round-trip tests; Android/non-TUN unchanged | implemented, `.160` pending | parent `0cf368`, SHA pending |
-| Leaf TUN ownership | `fd=-1`, `auto=false`, unique bounded candidate TUN | yes | JSON parity, name/address bounds, worker readiness/cleanup | implemented, `.160` pending | parent `0cf368`, SHA pending |
-| Linux route handoff | Leaf primary `/1`, original TUN fallback, ET owns table/rules | yes | metric/OIF tests, crash/failure/cleanup real-host matrix | implemented, `.160` pending | parent `0cf368`, SHA pending |
-| Transactional fallback | unpublished candidate cleanup; legacy retry; old generation retained on failed reload | yes | focused lifecycle tests and induced conflict validation | implemented, `.160` pending | parent `0cf368`, SHA pending |
-| Performance A/B | prove syscall/system-CPU reduction without regression | no (validation) | exact same-artifact off/on IPv4/IPv6 DIRECT/VLESS on lv1g2/lv1g3 | pending artifact | parent `0cf368`, SHA pending |
-| Old-kernel acceptance | Linux 3.10 route, lifecycle, resource and cleanup correctness | no (validation) | `.37/.38` staged matrix with abort guards | pending artifact | parent `0cf368`, SHA pending |
-| Android boundary | unchanged legacy runtime and config compatibility | yes | workflow compile/tests; no device claim while unavailable | `.160`/workflow pending | parent `0cf368`, SHA pending |
+| Config/support boundary | Default-off TOML/CLI/env/protobuf/GUI; Linux TUN only | yes | default and round-trip tests; Android/non-TUN unchanged | complete | `87301ee0` |
+| Leaf TUN ownership | `fd=-1`, `auto=false`, unique bounded candidate TUN | yes | JSON parity, name/address bounds, worker readiness/cleanup | complete; 3/3 artifact starts | `87301ee0` |
+| Linux route handoff | Leaf primary `/1`, original TUN fallback, ET owns table/rules | yes | metric/OIF tests, crash/failure/cleanup real-host matrix | complete for exercised matrix | `87301ee0` |
+| Transactional fallback | unpublished candidate cleanup; legacy retry; old generation retained on failed reload | yes | focused lifecycle tests and induced conflict validation | complete; `02f65d0c` race failed closed and `87301ee0` corrected readiness | `87301ee0` |
+| Performance A/B | prove syscall/system-CPU reduction without regression | no (validation) | exact same-artifact legacy/fast repeated DIRECT matrix | **failed generalization**: traced lv1g2 passed, untraced `.160` download was -35.4% | `87301ee0` |
+| Old-kernel acceptance | Linux 3.10 route, lifecycle, resource and cleanup correctness | no (validation) | `.37/.38` staged matrix with abort guards | fast and legacy artifact runs passed with clean host state | `87301ee0` |
+| Android boundary | unchanged legacy runtime and config compatibility | yes | workflow compile/tests and WADB real-device captured-UID evidence | passed TLS and stop/start; battery follow-up remains | `87301ee0` |
 
 ### Candidate gate update
 
@@ -460,3 +460,66 @@ It is local execution state, not a reason to trigger a workflow by itself.
 | --- | --- | --- | --- | --- |
 | Owned-TUN readiness | Do not publish a Leaf-owned runtime until Linux reports `IFF_UP` | Yes | `.160` no-run/focused test, then repeated artifact startup and A/B matrix | `.160` passed; artifact rebuild pending |
 | Validation harness portability | Replace old-awk-incompatible `/[/]1$/` route parsing without changing product logic | Validation tooling | Old-host awk fixture and repeated harness execution | Fixed locally; target fixture passed |
+
+## Exact candidate `87301ee0` final workboard update
+
+| Workstream | Exact evidence | Status |
+| --- | --- | --- |
+| `.160` dispatch lock | Feature-unified `--locked` no-run in 47.29s; all focused EasyTier/policy/netstack tests passed | complete |
+| Linux workflow/artifact | Run `29682690040`; exact SHA, hashes, musl target, symbols and Build ID verified | complete |
+| Android workflow/artifact | Run `29682690075`; exact SHA, APK hashes, package metadata and signatures verified | complete |
+| Fast-path startup | 3/3 successful on `lv1g2`, no `ENETDOWN`, no process/TUN/namespace residue | complete |
+| Performance self-check | Traced lv1g2 passed but is diagnostic only; untraced `.160` fast 676.439/909.245 versus legacy 699.225/1407.676 Mbit/s | **failed download gate** |
+| Linux 3.10 | `.37` fast and `.38` legacy passed transfer, idle CPU, shutdown and host-state checks | complete for exercised modes |
+| Android real device | WADB endpoint online; exact upgrade preserved package/config; captured UID TLS passed before and after restart | complete for regression boundary |
+| Android lifecycle | Candidate VPN and Leaf thread removed on each stop; stop baselines 65 tasks and 277/279 FDs | complete for observed cycle |
+| Android battery follow-up | Background total about 9.10% of one core; Leaf 0.45%; SELinux route/interface denials 37/20s | open, independent of Linux-only fast path |
+| Broader acceptance | Full actor dual-stack, failure injection, repeated long-run resources, and non-Linux performance | pending; do not overclaim |
+
+### `.160` correction to candidate status
+
+| Matrix | Fast median | Legacy median | Result |
+| --- | ---: | ---: | --- |
+| Untraced upload | 676.439 Mbit/s | 699.225 Mbit/s | -3.3%, throughput gate passed |
+| Untraced download | 909.245 Mbit/s | 1407.676 Mbit/s | **-35.4%, throughput gate failed** |
+| Combined RSS | 23332 KiB | 26092 KiB | -2760 KiB, -10.6% |
+| FD/tasks | 44 FDs / 15 threads | 44 FDs / 15 threads | no change |
+| Traced syscall/byte | `1.7068e-4` | `2.6457e-4` | -35.5%, required -50%, gate failed |
+
+The candidate is functionally viable and resource-safe in the exercised matrix, but this TODO is not complete as a performance optimization. Keep the feature default-off. Next evidence must be untraced on `lv1g2/lv1g3`; profiling must explain the `.160` download ceiling before any release recommendation.
+
+### Dual-TUN and offload diagnosis
+
+| Workstream | Evidence | Status |
+| --- | --- | --- |
+| Separate TUN accounting | Leaf primary moved about 1.755 GB; EasyTier fallback moved 96 TX bytes and 0 RX bytes | routing/fallback exonerated |
+| TUN flags | Leaf `0x1001`; EasyTier `0x5001` with VNET_HDR | capability mismatch confirmed |
+| Offload | Leaf checksum/TSO off; EasyTier checksum/TSO plus GSO/GRO batch on | primary root cause |
+| Load CPU | Fast about 1.67 product cores at 0.91 Gbit/s; legacy about 3.6 product cores at 1.41 Gbit/s | CPU saving real, ceiling unacceptable |
+| Kernel boundary | Same Linux 3.10 kernel supports offloaded EasyTier TUN | kernel age may amplify but is not primary cause |
+| Recovery spike | Generic Linux Leaf VNET_HDR/GSO/GRO/batch backend with `fast-gso -> fast-generic -> legacy` ladder | pending decision/implementation |
+| Recovery acceptance | `.160` untraced download >=95% legacy, no RSS/idle/lifecycle regression, then newer-kernel v4/v6 repeat | open hard gate |
+
+### Recovery spike implementation snapshot
+
+| Lane | Description | Objective | Build-affecting | Evidence target | Status |
+| --- | --- | --- | --- | --- | --- |
+| Leaf adapter | `lovitus/leaf@a5bb6a31df2c62200be052b61ca01b01ea5e3c25`; isolated Linux `tun-rs` offload adapter with bounded GSO split/GRO | Add `fast-gso` without changing Leaf actor/netstack semantics or EasyTier mesh | Yes | EasyTier `.160 --locked` no-run plus exact focused tests | Passed: 4m37s no-run and full focused suite |
+| Capability ladder | GSO create failure remains in Leaf and selects original generic TUN; generic/route failure remains in EasyTier and selects legacy | Enforce `fast-gso -> fast-generic -> legacy` per unpublished generation | Yes | GSO available/unavailable/generic failure/replacement retention | Pending |
+| Performance gate | Same-artifact untraced legacy versus fast on `.160`, then newer-kernel IPv4/IPv6 only if accepted | Recover download to >=95% without losing RSS/CPU benefit | No | Three-run medians, TUN flags, both TUN byte counters, CPU/RSS/FD/thread | Pending |
+| Platform boundary | Linux-only variant is cfg-isolated; Android and all other platforms remain generic/legacy | Prevent cross-platform behavior drift | Yes | Android workflow compile and unchanged real-device legacy evidence | Pending |
+
+The recovery spike is intentionally the final implementation attempt for this TODO. Failure of the `.160` untraced 95% gate rejects the complete owned-TUN candidate rather than opening another optimization design.
+
+#### Recovery fallback invariant
+
+| Failure point | Required result |
+| --- | --- |
+| GSO unsupported or GSO candidate initialization fails | Retry unpublished generation as current non-offloaded Leaf-owned fast path |
+| Generic Leaf-owned fast candidate fails | Fall back to the original legacy bridge |
+| Active GSO generation fails at runtime | Transactionally restart `fast-gso -> fast-generic -> legacy`; no per-packet mixing |
+| Replacement generation fails before publish | Keep the previously active generation |
+
+The single user request remains `leaf_tun_fast_path=true`; capability selection is internal and must expose the final selected mode for diagnostics.
+
+The earlier statement that the Android device was unavailable was incorrect. WADB forwarding made the device available throughout this validation window; future scheduling must query `adb devices -l` before declaring the Android lane blocked.
