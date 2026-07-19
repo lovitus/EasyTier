@@ -46,6 +46,7 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   leaf_config::tests::compiles_stable_yaml_to_strict_leaf_config
   config::tests::validates_custom_ipv4_fake_dns_range
   config::tests::validates_custom_ipv6_fake_dns_range
+  config::tests::port_range_matches_mihomo_single_and_dash_syntax
   leaf_config::tests::explicit_dns_sets_replace_platform_direct_and_keep_proxy_separate
   leaf_config::tests::expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap
   leaf_config::tests::preserves_unresolved_domain_contract_for_direct_socks_and_fallback
@@ -145,8 +146,10 @@ run_focused_tests() {
   fi
   local filter
   for filter in "${filters[@]}"; do
-    printf -v remote_script '%s printf %q %q >> %q; timeout %q %q %q --nocapture --test-threads 1 >> %q 2>&1;' \
-      "$remote_script" '%s\n' "=== TEST $filter ===" "$TEST_LOG" \
+    printf -v remote_script '%s match_output="$(timeout %q %q %q --list)"; if [[ "$match_output" != *": test"* ]]; then printf %q %q >> %q; exit 97; fi; printf %q %q >> %q; timeout %q %q %q --nocapture --test-threads 1 >> %q 2>&1;' \
+      "$remote_script" "$TEST_TIMEOUT" "$test_binary" "$filter" \
+      '%s\n' "ERROR: no test matched $filter" "$TEST_LOG" \
+      '%s\n' "=== TEST $filter ===" "$TEST_LOG" \
       "$TEST_TIMEOUT" "$test_binary" "$filter" "$TEST_LOG"
   done
 
