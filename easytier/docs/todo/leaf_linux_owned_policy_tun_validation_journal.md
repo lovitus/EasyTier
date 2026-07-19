@@ -277,3 +277,61 @@ Rollback/revert commit if rejected:
 - Lock/workflow audit: no `Cargo.lock` or `.github/workflows` diff. Locked Leaf remains `lovitus/leaf@36ba707f6d107886bf3fe22dbd4f2cd9f9be2afb`.
 - Diff hygiene: `git diff --check` passed. Rust formatting used Rust 1.95 with edition 2024. No local compile or test was run.
 - Dispatch status: `.160` hard lock is satisfied. One commit/push and the automatic Linux/Android profiling pair are now permitted; no manual duplicate dispatch is permitted.
+
+### 2026-07-19 PacketBatch performance harness recovery
+
+The PacketBatch code reverts also removed `scripts/leaf-packet-batch-validation.sh`. The failed implementation must stay reverted, but deleting its reusable validation harness was too broad. The harness is restored in generic form without reintroducing any PacketBatch product code:
+
+- `scripts/leaf-policy-dataplane-validation.sh`: Linux/root exact-artifact runner for `legacy` and `leaf-owned-tun` modes.
+- `scripts/leaf-policy-dataplane-compare.py`: cross-platform, dependency-free repeated-run evaluator; it can aggregate evidence on macOS without building EasyTier or modifying host networking.
+- Preserved checks: BUILD_INFO SHA, isolated namespaces, host state before/after, upload/download iperf, idle CPU, CPU/RSS/FD/thread samples, optional core/worker strace, capture-TUN byte amplification, log growth, child ownership and bounded cleanup.
+- New fast-path checks: `etp*` is present; both primary IPv4 `/1` routes use the Leaf TUN at metric 65535; both fallback `/1` routes use the EasyTier TUN at metric 65536. Legacy mode requires no `etp*`, the original metric-65535 routes, and no metric-65536 fallback.
+- Storm guard: either core or worker exceeding 20% idle CPU over the three-second pre-load sample aborts the run before throughput load. The threshold is configurable but must be recorded.
+- A/B evaluator defaults: at least three complete runs per mode; upload and download median at least 95% of legacy; combined peak RSS growth at most 65536 KiB; when `--require-strace` is used, median syscall-per-byte ratio at most 0.50.
+- Local tooling tests: Bash syntax passed; Python compile passed; a synthetic three-run positive matrix passed; a synthetic 80%-upload regression was rejected. No product binary was built locally.
+
+Planned exact-artifact sequence on a validation host:
+
+```bash
+CANDIDATE_SHA=<corrected-commit-sha>
+CANDIDATE_SHORT=${CANDIDATE_SHA:0:8}
+ARTIFACT_ROOT=/slab2/leaf-owned-policy-tun/$CANDIDATE_SHORT
+
+for mode in legacy leaf-owned-tun; do
+  for run in 1 2 3; do
+    sudo scripts/leaf-policy-dataplane-validation.sh \
+      --bundle "$ARTIFACT_ROOT/bundle" \
+      --output-root "$ARTIFACT_ROOT/evidence" \
+      --candidate-sha "$CANDIDATE_SHA" \
+      --mode "$mode" --run "$run" --trace
+  done
+done
+python3 scripts/leaf-policy-dataplane-compare.py \
+  --output-root "$ARTIFACT_ROOT/evidence" \
+  --candidate-sha "$CANDIDATE_SHA" \
+  --require-strace \
+  --output "$ARTIFACT_ROOT/evidence/comparison.json"
+```
+
+The runner is a full Linux validation harness, not a replacement for old-kernel lifecycle/failure injection, real dual-stack tests, proxy interoperability, or Android workflow evidence.
+
+## `fe9b68bc` workflow failure and corrected preflight
+
+- Linux run `29681107125` and Android run `29681107121` both failed and are not artifact evidence.
+- The Linux compiler error was confined to `InProcessLeafFactory::start`: adding the non-`Copy` owned-TUN option made `LeafConfigOptions` non-`Copy`, while the existing `&self` method still moved it.
+- The correction clones this small startup configuration at the existing runtime-construction boundary. It does not change packet, route, DNS, mesh, HEV, proxy, or lifecycle semantics.
+- The standard `.160` preflight previously compiled `easytier/leaf-policy-proxy` without the separate `easytier-policy/leaf-inprocess` feature combination. It now enables both in the same Cargo feature-unified no-run build.
+- Corrected `.160` preflight: `cargo test --locked --no-run --package easytier --package easytier-policy --package netstack-smoltcp --lib --features easytier/leaf-policy-proxy,easytier-policy/leaf-inprocess` passed in 4m34s.
+- All configured focused EasyTier, policy, and netstack tests passed from the exact generated test binaries.
+- Frontend sources are unchanged from the previously successful `.160` frontend preflight, so no duplicate frontend build was run for this mechanical correction.
+
+## Corrected candidate manifest
+
+- Parent candidate: `fe9b68bcebaf4915a77c3943a3c08942f52b71a6`.
+- Build-affecting correction: clone `LeafConfigOptions` at the in-process runtime start boundary.
+- Validation-tooling changes: require `leaf-inprocess` in `.160` no-run coverage; restore a generalized legacy-versus-Leaf-owned-TUN Linux data-plane runner and offline comparator.
+- Lockfile, dependency pins, generated protocol code, platform routing semantics, Leaf pin, and GitHub workflow files: unchanged.
+- Required workflows after the batched commit: one automatic Linux profiling beta run and one automatic Android policy candidate run.
+- Linux artifact evidence: legacy/feature-on functional routing, DIRECT throughput, idle CPU, RSS/FD/tasks, optional syscall-per-byte, traffic amplification, lifecycle cleanup, fallback, and IPv4/IPv6 real-host checks.
+- Android evidence for this candidate: workflow build and in-process compile boundary only while the dedicated device is unavailable; no real-device claim.
+- Build wait work: prepare isolated Linux hosts, exact-artifact checksum/build-info checks, host-specific `/slab2` names, and bounded abort thresholds.

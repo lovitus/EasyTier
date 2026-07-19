@@ -67,9 +67,9 @@ usage() {
 Usage: scripts/leaf-remote-preflight.sh [ADDITIONAL_TEST_FILTER ...]
 
 Synchronizes the complete local snapshot to the dedicated builder, performs one
-locked debug no-run build for the EasyTier Leaf/HEV library target, and executes
-the focused tests directly from that exact test binary. Additional filters are
-appended to the default candidate suite.
+locked debug no-run build for the EasyTier Leaf/HEV and in-process library
+targets, and executes the focused tests directly from that exact test binary.
+Additional filters are appended to the default candidate suite.
 
 Environment overrides:
   BUILDER_HOST, BUILDER_CONTAINER, REMOTE_HOST_WORKSPACE, REMOTE_WORKSPACE
@@ -113,7 +113,7 @@ check_builder_idle() {
 run_no_run_build() {
   local exit_code=0
   ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
-    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --package netstack-smoltcp --lib --features easytier/leaf-policy-proxy > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
+    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --package netstack-smoltcp --lib --features easytier/leaf-policy-proxy,easytier-policy/leaf-inprocess > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
     || exit_code=$?
 
   ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
