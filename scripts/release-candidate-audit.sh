@@ -8,9 +8,8 @@ case "$phase" in
 esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ledger="$repo_root/easytier/docs/release/v3.0.0_recovery_ledger.md"
-manifest="$repo_root/easytier/docs/release/v3.0.0_candidate_manifest.md"
-matrix="$repo_root/easytier/docs/release/v3.0.0_validation_matrix.md"
+manifest="$repo_root/easytier/docs/release/v3.0.1_candidate_manifest.md"
+matrix="$repo_root/easytier/docs/release/v3.0.1_validation_matrix.md"
 failures=0
 
 fail() {
@@ -87,29 +86,24 @@ versions=(
   "$(jq -r .version easytier-gui/src-tauri/tauri.conf.json)"
 )
 expected_version=2.6.10
-if [[ "$phase" != "--source" ]]; then expected_version=3.0.0; fi
+if [[ "$phase" != "--source" ]]; then expected_version=3.0.1; fi
 for version in "${versions[@]}"; do
   if [[ "$version" != "$expected_version" ]]; then
     fail "version $version differs from expected $expected_version for $phase"
   fi
 done
 
-if [[ "$phase" != "--source" ]] && rg -q '\| NEEDS_REVIEW \|' "$ledger"; then
-  fail "recovery ledger still contains NEEDS_REVIEW"
-fi
-
 if [[ "$phase" != "--source" ]]; then
-  recovery_ref="${RECOVERY_REF:-codex/v3.0.0-recovery}"
+  release_base="${RELEASE_BASE:-v3.0.0}"
   current_sha="$(git rev-parse HEAD)"
   current_tree="$(git rev-parse HEAD^{tree})"
   tracked_files="$(git ls-tree -r --name-only HEAD | wc -l | tr -d ' ')"
-  recovery_tree="$(git rev-parse "$recovery_ref^{tree}" 2>/dev/null || true)"
-  if [[ -z "$recovery_tree" ]]; then
-    fail "recovery reference cannot be resolved: $recovery_ref"
-  elif [[ "$recovery_tree" != "$current_tree" ]]; then
-    fail "current tree $current_tree differs from recovery tree $recovery_tree"
+  if ! git rev-parse "$release_base^{commit}" >/dev/null 2>&1; then
+    fail "release base cannot be resolved: $release_base"
+  elif ! git merge-base --is-ancestor "$release_base" HEAD; then
+    fail "release base $release_base is not an ancestor of $current_sha"
   else
-    pass "candidate $current_sha has recovery-matching tree $current_tree ($tracked_files tracked files)"
+    pass "candidate $current_sha descends from $release_base with tree $current_tree ($tracked_files tracked files)"
   fi
 fi
 
@@ -147,11 +141,11 @@ if [[ "$phase" == "--release" ]]; then
   if rg -q '\| (FAIL|BLOCKED|N/A) \|' "$matrix"; then
     fail "validation matrix still contains an unresolved release gate"
   fi
-  if git show-ref --verify --quiet refs/tags/v3.0.0; then
-    fail "v3.0.0 tag already exists"
+  if git show-ref --verify --quiet refs/tags/v3.0.1; then
+    fail "v3.0.1 tag already exists"
   fi
-  if [[ -n "$(git ls-remote --tags origin refs/tags/v3.0.0 refs/tags/v3.0.0^{} 2>/dev/null)" ]]; then
-    fail "origin already contains v3.0.0"
+  if [[ -n "$(git ls-remote --tags origin refs/tags/v3.0.1 refs/tags/v3.0.1^{} 2>/dev/null)" ]]; then
+    fail "origin already contains v3.0.1"
   fi
 fi
 

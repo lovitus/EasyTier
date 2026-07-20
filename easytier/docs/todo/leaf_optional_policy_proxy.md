@@ -2536,7 +2536,7 @@ HEV UDP 承载语义：
 
 ## Fallback 健康管理与现有故障实现替换方案
 
-状态：已实现并通过远端编译及聚焦自动测试，等待 exact-artifact 多机验证。该项属于 `POLICY-CHAIN` / fallback 候选；实现与验证证据同步记录在 `leaf_parallel_workboard.md`。
+状态：已实现，并通过远端编译、聚焦自动测试、exact-artifact Linux 双机验证及候选 workflow。该项属于 `POLICY-CHAIN` / fallback 候选；实现与验证证据同步记录在 `leaf_parallel_workboard.md`。
 
 ### 1. 对外语义
 

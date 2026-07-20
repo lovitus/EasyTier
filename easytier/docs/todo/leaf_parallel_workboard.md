@@ -520,3 +520,11 @@ The detailed medians, archive hashes, lv1g3 variance, KR excluded sampler attemp
 - Candidate review: EasyTier parent/tree, exact Leaf source/revision in `Cargo.lock`, generated/config files, platform scope, workflow files and complete diff were inspected; no workflow file or platform `cfg` was changed.
 - Linux exact-artifact evidence: use lv1g2/lv1g3 first. Cover first request pinned to member 0, delayed switch after three URL rounds, three-round failback, all-fail hold/backoff, no-traffic zero probes, nested chain/fallback, TCP/UDP, concurrent touch singleflight, stop/start cleanup, FD/task/RSS and bounded probe counts.
 - Workflow set: after all related work and `.160` evidence pass, one EasyTier candidate commit/push and its automatic Linux/Android profiling-beta pair; query exact-SHA runs before any manual dispatch.
+
+### Exact candidate evidence
+
+- Candidate SHA: `c4b198210b9ca7191d004b4e62d85e1a3282dde5`; Linux profiling run `29752831474` and Android policy candidate run `29752831381` both completed successfully for that exact SHA.
+- The Linux release bundle was verified against its outer and inner `SHA256SUMS.txt`, `BUILD_INFO.txt`, run ID, `x86_64-unknown-linux-musl` target and ELF build IDs before deployment.
+- lv1g2 and lv1g3 independently passed `/slab2/easytier-validation/c4b198210b9ca7191d004b4e62d85e1a3282dde5/{lv1g2,lv1g3}/fallback-full-r2/` using the same exact artifact. Evidence covers no-traffic zero probes, concurrent-touch singleflight, no request-level retry, three-round switch, nested chain, real five-minute freshness, all-fail hold, 15-second and 60-second inconclusive suppression, three-round failback, and clean core/worker shutdown.
+- lv1g2 resource snapshot: core RSS 24076 KiB / 29 FDs, worker RSS 8788 KiB / 11 FDs. lv1g3: core RSS 23168 KiB / 29 FDs, worker RSS 8588 KiB / 11 FDs.
+- Earlier `fallback-smoke` and `fallback-smoke-r2` records are retained as harness-failure evidence: the first lacked a namespace default route; the second expected Leaf-owned `198.18.*` routes while running legacy TUN. `fallback-smoke-r3` corrected both the legacy `/1` readiness check and underlay target bypass, and passed on both hosts.
