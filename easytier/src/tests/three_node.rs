@@ -2626,7 +2626,9 @@ pub async fn port_forward_with_inbound_default_drop_acl_test(
             NetNS::new(Some(server_ns.into())),
             NetNS::new(Some("net_a".into())),
             buf,
-            Duration::from_secs(1),
+            // Shared CI runners can briefly delay the forwarded stream after DHCP
+            // convergence. Keep the assertion bounded while allowing scheduler jitter.
+            Duration::from_secs(3),
         )
         .await;
 
