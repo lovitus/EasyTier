@@ -185,3 +185,69 @@ The user approved restoration after reviewing the complete six-host matrix. The 
 - batch the restored code and corrected evidence into one `.160` preflight and one automatic Linux/Android workflow set.
 
 The safe revert `c5051e1fe6fe1bb18800fdd6aacaa7478b9751dc` remains in history as an auditable decision point. Restoration is a new forward commit; no destructive reset or history rewrite is permitted.
+
+## Generic dual-TUN candidate `87301ee0` cross-host audit
+
+This audit is deliberately separate from the `8b48153a` fast-GSO matrix above. Commit `87301ee0831629e5d86c3392b69b126aae9bb6d2` is the earlier generic Leaf-owned dual-TUN implementation, before the Leaf GSO/offload patch. Its owned TUN therefore must report `tun_flags=0x1001`, not `0x5001`.
+
+### Exact artifact and method
+
+- Linux workflow: [run 29682690040](https://github.com/lovitus/EasyTier/actions/runs/29682690040), successful for exact SHA `87301ee0831629e5d86c3392b69b126aae9bb6d2`.
+- Android workflow: [run 29682690075](https://github.com/lovitus/EasyTier/actions/runs/29682690075), successful for the same SHA. Android was not rerun in this Linux performance audit.
+- Target: `x86_64-unknown-linux-musl`; build ID `efd4e765d99335a85ff5473b22f86f5b602fcde0`.
+- Exact archive SHA-256: `32127dfe4b82c0cbff8ac9f8423698051addd218c750d2360526e0b4c2e49860`. The outer archive and all four package binaries passed their recorded SHA-256 checks before deployment.
+- Each accepted host result uses three interleaved untraced `legacy` and three `leaf-owned-tun` runs from the candidate's own harness. The comparator requires at least three runs, download and upload ratios at least `0.95`, bounded RSS, idle CPU at most 20%, unchanged host state, and clean core/worker shutdown.
+- The main medians use only runs 1-3. Later short runs were used only to capture `tun_flags`; they are not mixed into performance medians.
+- Evidence snapshot comparison normalized DHCP `valid_lft/preferred_lft` on all hosts and the volatile IPv6 RA `expires Nsec` field on KR. These changes affect evidence comparison only, not the product or traffic path.
+
+### Raw accepted runs
+
+Values in the upload/download columns are bit/s. Each bracket contains runs 1, 2, and 3 in order. RSS is total core plus Leaf-worker peak KiB.
+
+| Host | Kernel | Mode | Upload runs | Download runs | RSS runs KiB |
+|---|---|---|---|---|---|
+| `.160` | 3.10.0-1160.el7 | legacy | `[694274065, 699224975, 874056459]` | `[1409586000, 1402458000, 1407676000]` | `[26200, 26092, 25932]` |
+| `.160` | 3.10.0-1160.el7 | generic-owned-TUN | `[1181905000, 644165935, 676439286]` | `[909245462, 905313166, 933923401]` | `[23392, 23332, 23272]` |
+| `.37` | 3.10.0-1160.el7 | legacy | `[688699124, 686638043, 732049801]` | `[882818728, 881879236, 889545101]` | `[26208, 26416, 26200]` |
+| `.37` | 3.10.0-1160.el7 | generic-owned-TUN | `[872717092, 1126177000, 1089252000]` | `[1109644000, 1142914000, 1158085000]` | `[23148, 23460, 23280]` |
+| `.38` | 3.10.0-1160.el7 | legacy | `[725027110, 714307096, 714739182]` | `[902077879, 881725578, 844931526]` | `[26208, 26192, 26284]` |
+| `.38` | 3.10.0-1160.el7 | generic-owned-TUN | `[854326447, 1169878000, 840734966]` | `[1348698000, 1128417000, 1152165000]` | `[23092, 23068, 23032]` |
+| lv1g2 | 4.19.0 | legacy | `[740217380, 768960659, 670592249]` | `[540741168, 615938183, 539615716]` | `[33804, 34436, 34716]` |
+| lv1g2 | 4.19.0 | generic-owned-TUN | `[853052102, 944693549, 929932036]` | `[941489081, 967291404, 931255345]` | `[33852, 33284, 32732]` |
+| lv1g3 | 5.4.0 | legacy | `[577875836, 262920318, 548843930]` | `[391108257, 439291654, 402860901]` | `[34924, 35232, 35060]` |
+| lv1g3 | 5.4.0 | generic-owned-TUN | `[683332525, 518483343, 707931540]` | `[695693469, 758538170, 621032344]` | `[34112, 33676, 32944]` |
+| KR | 5.10.0 | legacy | `[596626636, 608443303, 609033341]` | `[428811624, 446281743, 491515549]` | `[36048, 31112, 33644]` |
+| KR | 5.10.0 | generic-owned-TUN | `[702643653, 760350409, 747455632]` | `[789142186, 815483897, 658644594]` | `[31864, 27632, 34788]` |
+
+### Comparator medians
+
+| Host | Legacy up/down bit/s | Generic up/down bit/s | Download ratio | Upload change | RSS change | Gate |
+|---|---:|---:|---:|---:|---:|---|
+| `.160` | `699224975 / 1407676000` | `676439286 / 909245462` | `0.6459` | -3.3% | -10.6% | fail |
+| `.37` | `688699124 / 882818728` | `1089252000 / 1142914000` | `1.2946` | +58.2% | -11.2% | pass |
+| `.38` | `714739182 / 881725578` | `854326447 / 1152165000` | `1.3067` | +19.5% | -12.0% | pass |
+| lv1g2 | `740217380 / 540741168` | `929932036 / 941489081` | `1.7411` | +25.6% | -3.3% | pass |
+| lv1g3 | `548843930 / 402860901` | `683332525 / 695693469` | `1.7269` | +24.5% | -3.9% | pass |
+| KR | `608443303 / 446281743` | `747455632 / 789142186` | `1.7683` | +22.8% | -5.3% | pass |
+
+All 18 accepted generic runs captured traffic on a unique candidate-owned `etp*` interface; all 18 legacy runs captured `tun0`. A separate netns-internal observer run on each of `.37`, `.38`, lv1g2, lv1g3, and KR read `tun_flags=0x1001`, proving that the positive results came from the old generic dual-TUN path and not the later GSO path. Two preliminary flag observers were excluded: the first inspected the host namespace, and the second raced netns removal while traversing sysfs. The final observer uses a read-only helper inside the active test netns; this probe correction did not change candidate code or the three-run performance matrix.
+
+Every accepted run recorded `host_state_unchanged=true`, `core_shutdown_clean=true`, zero idle worker CPU, and no 20% idle-CPU abort. Final cleanup found no candidate process, `etpd-*` namespace, or `etp*` TUN on any host. `.37` retained its pre-existing `etns_scale` namespace. KR retained production EasyTier PID `44990`, production `tun0`, and iperf PID `52372`.
+
+lv1g3 did not see the newly created lv1g2 `/slab2/easytier-87301ee-audit` directory despite its `/slab2` mount reporting the lv1g2 export. To avoid assuming propagation, lv1g3 received the same verified archive into the separately named `/slab2/easytier-87301ee-audit-lv1g3`; its scripts and evidence names were also separate.
+
+Evidence archives under local `.artifacts/87301ee-crosshost/`:
+
+| Host | Main evidence SHA-256 | Flag evidence SHA-256 |
+|---|---|---|
+| `.37` | `fb13186f692a257b77c219c65aac330860178df30a0cc9b1248be2c1441da10e` | `bb5ee68c159f2006cd431ad02460fc070b7347762f492a6a67f96b40ac5da552` |
+| `.38` | `4183aa2a148bb91a6069bd173fc2340a56aa697f0f2848251f00ed515d2f6e38` | `aef3201ec50b2a76ff2c1e973429938e69f11ef845dc3940de6585b4630b0e12` |
+| lv1g2 | `37db2ca731acd134b819830abe1360fc3c5ca92a218f7e2d6a5e07c831e6da3d` | `cf6e7fdfb17c25bba17ad02a00929115384e57025de658efadd874ff86319379` |
+| lv1g3 | `bb3d95c47fec49e5000f90338e7bcb0da39ec13dec4b253eed53af9b7cf701cb` | `d63b294c57ea7fa67cc734b218c5dec52e23d2afaabef030bd56b5b2f4dfed56` |
+| KR | `d924b0e2e87b39e9f33b9bf262b59d4755d143562e642e2087e42e9933598b47` | `07e05ca4d7b5ebec14997a63cbeb263469dad89ab0944cabc59663814ab3c14e` |
+
+### Corrected conclusion
+
+The original `.160` measurement remains valid for that host: generic dual-TUN consistently reduced download throughput there. The mistake was treating that single-host result as evidence that the generic dual-TUN design failed generally. Five additional hosts spanning Linux 3.10, 4.19, 5.4, and 5.10 all pass, improve download by 29.5%-76.8%, improve upload by 19.5%-58.2%, and reduce median RSS by 3.3%-12.0%.
+
+Therefore the previous broad rejection of `87301ee0` was a cross-host false rejection. It does not justify restoring that historical commit separately: the user-approved `f6617c51` candidate already contains the cleaner fast-path hierarchy `fast-GSO -> fast-generic -> legacy`, so the validated generic path remains the capability fallback when GSO is unavailable or initialization fails. `.160` remains a host-specific experimental-feature caveat, not a kernel-version gate.

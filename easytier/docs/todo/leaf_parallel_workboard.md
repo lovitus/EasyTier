@@ -453,3 +453,40 @@ All three new hosts verified the exact archive and package metadata before execu
 During the `.160` wait, only tree-equivalence, lockfile, platform `cfg`, generated proto, workflow-pin, and candidate-scope inspection are allowed. Do not mutate the in-flight snapshot or start another build.
 
 Candidate manifest: the build-affecting tree is byte-equivalent to `8b48153acc286c70c70faf8a2e4d1cb3c015be05`, including Leaf revision `a5bb6a31df2c62200be052b61ca01b01ea5e3c25`. The candidate adds only the corrected six-host evidence and restoration decision. Required workflows are the single automatic Linux profiling-beta and Android policy candidate runs. Existing exact-artifact Linux evidence is `.160`, `.37`, `.38`, lv1g2, lv1g3, and KR; Android is a non-Linux build/regression boundary because the restored fast path is Linux-only.
+
+## 2026-07-19 generic dual-TUN `87301ee0` cross-host audit
+
+This non-build-affecting lane ran while the restored `f6617c51` workflows were building. It did not mutate the in-flight candidate and must not trigger another workflow.
+
+| Workstream | Objective | Build-affecting | Evidence target | Status | Candidate |
+|---|---|---:|---|---|---|
+| Exact historical artifact | Prove that every host uses the same pre-GSO dual-TUN build | no | Workflow metadata, archive/package SHA-256, build ID | **PASSED: run `29682690040`, archive `32127dfe...`, build ID `efd4e765...`** | `87301ee0` |
+| Five-host generic A/B | Determine whether the `.160` regression generalized across machines | no | Three interleaved legacy/generic runs on `.37`, `.38`, lv1g2, lv1g3, and KR | **PASSED on all five: download +29.5% to +76.8%; upload +19.5% to +58.2%** | `87301ee0` |
+| Generic path identity | Exclude accidental use of the later GSO implementation | no | Netns-internal `tun_flags` on all five hosts | **PASSED: all report `0x1001`** | `87301ee0` |
+| Resource and cleanup | Detect idle storms, RSS growth, leaked process/netns/TUN, or production interference | no | 20% idle-CPU abort, RSS medians, host snapshots, final ownership audit | **PASSED: RSS -3.3% to -12.0%; no candidate residue; protected state retained** | `87301ee0` |
+| Historical decision correction | Separate a real host-specific negative from a design-wide failure | no | Six-host aggregate including the original `.160` evidence | **CLOSED: `.160` remains negative; prior general rejection was false** | `87301ee0` |
+| Restored candidate artifacts | Build the already approved GSO/generic/legacy hierarchy | yes | Exact-SHA automatic Linux and Android workflows | **IN PROGRESS: Linux `29688959030`, Android `29688959035`** | `f6617c51` |
+
+The old generic candidate is not a new restoration target. Its audit validates the middle fallback already present in `f6617c51`: `fast-GSO -> fast-generic -> legacy`. Raw runs, comparator medians, observer exclusions, archive hashes, and cleanup evidence are recorded in `leaf_linux_owned_policy_tun_cross_kernel_validation.md`. Documentation remains local until it accompanies a later code/release snapshot or the maintainer explicitly requests a documentation push.
+
+## 2026-07-19 PacketBatch cross-host rejection audit
+
+| Workstream | Objective | Build-affecting | Evidence target | Status | Candidate |
+|---|---|---:|---|---|---|
+| Historical artifact recovery | Reuse the exact continuous-body PacketBatch artifact without rebuilding | no | Workflow metadata, ZIP/bundle/package SHA-256 and `BUILD_INFO` | **PASSED: run `29677226981`, exact `39dd4d2f`** | `39dd4d2f` |
+| Five-host A/B | Test whether `.160` alone caused the PacketBatch rejection | no | Three interleaved legacy/batch runs on `.37`, `.38`, lv1g2, lv1g3, KR | **FAILED on all five download gates: ratios `0.946/0.922/0.714/0.693/0.829`** | `39dd4d2f` |
+| Interference audit | Separate host noise, sampler failure and product behavior | no | Stable adjacent legacy runs, isolated retry for KR sampler `SIGPIPE`, host cleanup | **CLOSED: KR probe retried cleanly; cross-host regression remains** | `39dd4d2f` |
+| Resource safety | Detect idle storm, leaked process/netns/TUN, or production interference | no | Idle CPU <=20%, TUN bounds, shutdown, final host audit | **PASSED: no candidate residue; protected state retained** | `39dd4d2f` |
+| Historical conclusion | Decide whether the PacketBatch rollback was another dual-TUN false rejection | no | Original `.160` plus five independent hosts and Android panic | **CONFIRMED FAILURE: rollback remains correct; original single-host evidence was incomplete but not directionally false** | `39dd4d2f` |
+
+The detailed medians, archive hashes, lv1g3 variance, KR excluded sampler attempt, cleanup evidence, and corrected scope are appended to `FAILED_leaf_external_packet_endpoint_performance.md`. This audit is documentation-only and must not trigger a workflow.
+
+## 2026-07-19 policy editor accuracy and compactness lane
+
+- Description: reconcile visual policy menus with the validated EasyTier policy schema and current locked Leaf outbound support.
+- Objective: remove the invalid HTTP outbound, show protocol-correct UDP controls, expose FakeIP ranges, add examples to free-form fields, and keep node/group/rule lists compact until explicitly edited.
+- Build-affecting status: local implementation and focused tests added; not yet preflighted or pushed.
+- Evidence target: `.160` focused `policy-editor.spec.ts`, `policy-document.spec.ts`, policy parser tests covering defaults/HTTP rejection, and one frontend production build from the complete snapshot.
+- Current status: implementation complete locally; validation intentionally not started while the candidate remains unfrozen.
+- Shared candidate SHA: none; the last immutable runtime candidate remains `f6617c5136672016951adb0f79ab0daec7ba7112`.
+- Follow-up correction: do not compile the temporary bundled GeoSite/GeoIP category list into the frontend. The core now generates a versioned sidecar from the active rule-data file, keys it by file size and the configured/index SHA-256 identity, refreshes it after managed updates, and exposes it through the management API. The frontend reloads only when the instance/path/SHA identity changes and keeps searchable editable selectors with virtual scrolling; a missing index degrades only the suggestion list, not typed rules or policy startup.
