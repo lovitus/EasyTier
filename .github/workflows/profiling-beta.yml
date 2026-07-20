@@ -98,7 +98,7 @@ jobs:
             tools/easytier-perf-probe.rs \
             -o "$probe_bin"
           file "$probe_bin" | tee profiling-selftest-file-info.txt
-          grep -Eq 'statically linked|static-pie linked' profiling-selftest-file-info.txt
+          grep -q 'statically linked' profiling-selftest-file-info.txt
           echo "SELFTEST_PROBE=$probe_bin" >> "$GITHUB_ENV"
           echo "SELFTEST_PROBE_SOURCE_SHA256=$(sha256sum tools/easytier-perf-probe.rs | cut -d' ' -f1)" \
             >> "$GITHUB_ENV"
