@@ -936,9 +936,9 @@ rules:
             config["dns"]["servers"],
             serde_json::json!([
                 "direct:1.1.1.1",
-                "direct:doh:dns.alidns.com@223.5.5.5",
                 "direct:223.5.5.5",
                 "direct:119.29.29.29",
+                "direct:114.114.114.114",
                 "doh:cloudflare-dns.com@1.1.1.1",
                 "doh:dns.google@8.8.8.8",
                 "doh:dns.quad9.net@9.9.9.9"
