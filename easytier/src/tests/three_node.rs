@@ -2611,16 +2611,6 @@ pub async fn port_forward_with_inbound_default_drop_acl_test(
         .await;
     }
 
-    let socks5_server = insts[0].get_socks5_server();
-    wait_for_condition(
-        || {
-            let socks5_server = socks5_server.clone();
-            async move { socks5_server.data_plane_net_is_ready().await }
-        },
-        Duration::from_secs(5),
-    )
-    .await;
-
     for (bind_port, server_ns) in [(23456, "net_c"), (23457, "net_d")] {
         let tcp_listener =
             TcpTunnelListener::new(format!("tcp://0.0.0.0:{bind_port}").parse().unwrap());
