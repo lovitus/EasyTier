@@ -3,6 +3,16 @@
 This is the live execution board for batching independent Leaf/policy work into one exact candidate.
 It is local execution state, not a reason to trigger a workflow by itself.
 
+## 2026-07-20 v3.0.0 lossless recovery
+
+- Recovery base: exact validated `f6617c5136672016951adb0f79ab0daec7ba7112`.
+- Invalid candidate: `defaa44290c73726b9ab4775f1405ac01de0f84e`; Core and Test failed and the candidate omitted the accepted GUI/Geo work. It is diagnostic evidence only.
+- Archives: invalid candidate, GUI/Geo WIP, PollSender WIP, rejected AGENTS edit and all three stash parents plus an ordinary combined stash snapshot are pushed and independently fetched with matching commit/tree IDs.
+- Reconstruction: PORT-RANGE, platform/32-bit/API fixes, profiling history, Geo backend, compact GUI and WIP documentation are split into logical commits on `codex/v3.0.0-recovery`.
+- PollSender: archived intermediate runner is superseded by the bounded event-driven implementation already present in `f6617c51`; evidence is recorded in `docs/release/v3.0.0_recovery_ledger.md`.
+- Open release blocker: reproduce the exact three-node readiness case without the `defaa442` test hunk, then close its `NEEDS_REVIEW` ledger row.
+- Dispatch lock: no candidate push until the recovery tree, version metadata, release notes, `.160` Rust/frontend gates and the six-revert public bridge all match one immutable tree.
+
 ## 2026-07-17 protocol status ordering
 
 - Workstream: stabilize the status-page protocol list without adding RPC fields or duplicating transport-priority parsing in the frontend.
