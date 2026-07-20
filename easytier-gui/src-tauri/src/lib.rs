@@ -508,11 +508,10 @@ async fn init_rpc_connection(
         } else {
             let instance_manager = NetworkInstanceManager::new();
             #[cfg(target_os = "android")]
-            let instance_manager = instance_manager.with_config_path(Some(
-                _app.path()
-                    .app_data_dir()
-                    .context("failed to resolve the Android app data directory")?,
-            ));
+            let instance_manager =
+                instance_manager.with_config_path(Some(_app.path().app_data_dir().map_err(
+                    |err| format!("failed to resolve the Android app data directory: {err}"),
+                )?));
 
             // Android hosts the manager in-process. Keep a stable writable config
             // directory so GeoSite/GeoIP metadata remains available while no VPN
