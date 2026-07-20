@@ -300,14 +300,10 @@ touch "$sample_marker"
     for pid in $(ip netns pids "$client_ns" 2>/dev/null); do
       [[ -r /proc/$pid/stat && -r /proc/$pid/status ]] || continue
       executable=$(basename "$(readlink -f "/proc/$pid/exe" 2>/dev/null || echo unknown)")
-      stat_fields=$(awk '{ print $14, $15 }' "/proc/$pid/stat" 2>/dev/null) || continue
-      read -r user_ticks system_ticks <<<"$stat_fields"
-      rss_kib=$(awk '$1 == "VmRSS:" { print $2; exit }' "/proc/$pid/status" 2>/dev/null) \
-        || continue
-      fd_count=$(find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) \
-        || continue
-      thread_count=$(find "/proc/$pid/task" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) \
-        || continue
+      read -r user_ticks system_ticks < <(awk '{ print $14, $15 }' "/proc/$pid/stat")
+      rss_kib=$(awk '$1 == "VmRSS:" { print $2; exit }' "/proc/$pid/status")
+      fd_count=$(find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
+      thread_count=$(find "/proc/$pid/task" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$now" "$pid" "$executable" "$user_ticks" "$system_ticks" \
         "${rss_kib:-0}" "$fd_count" "$thread_count" >>"$resource_samples"
