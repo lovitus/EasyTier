@@ -270,7 +270,9 @@ capture_host_state() {
         printf '%s\n' '===== links ====='
         ip -o link show
         printf '%s\n' '===== addresses ====='
-        ip -o address show
+        ip -o address show | sed -E \
+            -e 's/valid_lft [0-9]+sec/valid_lft <dynamic>/g' \
+            -e 's/preferred_lft [0-9]+sec/preferred_lft <dynamic>/g'
         printf '%s\n' '===== ipv4 routes ====='
         ip route show table all
         printf '%s\n' '===== ipv6 routes ====='

@@ -152,7 +152,9 @@ trap 'exit 130' INT TERM
 capture_host_state() {
   {
     echo '===== address ====='
-      ip -o address show
+    ip -o address show | sed -E \
+      -e 's/valid_lft [0-9]+sec/valid_lft <dynamic>/g' \
+      -e 's/preferred_lft [0-9]+sec/preferred_lft <dynamic>/g'
     echo '===== ipv4 rules ====='
     ip -4 rule show
     echo '===== ipv6 rules ====='
