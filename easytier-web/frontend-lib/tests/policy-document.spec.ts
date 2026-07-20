@@ -106,6 +106,7 @@ groups:
   preferred:
     type: fallback
     members: [mesh-exit, firewall, DIRECT]
+    url: https://probe.example/ready
 rules:
   - GEOSITE,CN,DIRECT
   - GEOIP,CN,DIRECT,no-resolve
@@ -121,6 +122,7 @@ rules:
       udp: true,
     })
     expect(document.groups[0].members).toEqual(['mesh-exit', 'firewall', 'DIRECT'])
+    expect(document.groups[0].url).toBe('https://probe.example/ready')
     expect(document.dns).toEqual({
       direct: ['223.5.5.5'],
       proxy: ['doh:cloudflare-dns.com@1.1.1.1'],

@@ -238,6 +238,7 @@ export interface PolicyGroupRow {
   name: string
   type: PolicyGroupKind
   members: string[]
+  url?: string
 }
 
 export interface PolicyRuleRow {
@@ -527,6 +528,7 @@ export function parsePolicyDocument(source: string): PolicyEditorDocument {
       type: kind as PolicyGroupKind,
       members: value.members.map((member, index) =>
         requiredString(member, `groups.${name}.members[${index}]`)),
+      url: optionalString(value.url, `groups.${name}.url`) || undefined,
     }
   })
   if (!Array.isArray(root.rules)) throw new Error('rules must be a sequence')
@@ -606,7 +608,11 @@ export function serializePolicyDocument(document: PolicyEditorDocument): string 
   const groups: UnknownMap = {}
   for (const row of document.groups) {
     const name = reserveName(groups, row.name, 'group')
-    groups[name] = { type: row.type, members: row.members.filter(Boolean) }
+    groups[name] = {
+      type: row.type,
+      members: row.members.filter(Boolean),
+      url: row.type === 'fallback' ? row.url?.trim() || undefined : undefined,
+    }
   }
 
   const rules = document.rules.map(row => {

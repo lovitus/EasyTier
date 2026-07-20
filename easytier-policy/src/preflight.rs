@@ -100,6 +100,7 @@ fn diagnostic_for_error(error: &PolicyError) -> PolicyDiagnostic {
         PolicyError::UnknownReference { owner, .. } => ("actor.reference_unknown", owner.clone()),
         PolicyError::Cycle(name) => ("group.cycle", format!("groups.{name}")),
         PolicyError::ChainTooDeep(name) => ("group.expansion_limit", format!("groups.{name}")),
+        PolicyError::InvalidGroup { name, .. } => ("group.invalid", format!("groups.{name}")),
         PolicyError::InvalidServer { name, .. } => ("proxy.invalid", format!("proxies.{name}")),
         PolicyError::InvalidRule { index, .. } => ("rule.invalid", format!("rules[{index}]")),
         PolicyError::InvalidRuleSet { name, .. } => {

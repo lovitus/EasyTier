@@ -63,6 +63,8 @@ pub enum PolicyError {
     UnknownReference { owner: String, reference: String },
     #[error("proxy group cycle: {0}")]
     Cycle(String),
+    #[error("proxy group {name} is invalid: {reason}")]
+    InvalidGroup { name: String, reason: String },
     #[error("chain {0} expands beyond the actor limit")]
     ChainTooDeep(String),
     #[error("proxy {name} has invalid server selector: {reason}")]
@@ -294,6 +296,7 @@ pub struct Group {
     #[serde(rename = "type")]
     pub kind: ChainKind,
     pub members: Vec<String>,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -627,6 +630,7 @@ impl PolicyDocument {
         self.validate_rule_sets(base_dir)?;
         self.validate_names()?;
         self.validate_proxies()?;
+        self.validate_groups()?;
         let order = self.topological_group_order()?;
         self.validate_rules()?;
         Ok(order)
@@ -986,6 +990,37 @@ impl PolicyDocument {
                     name: name.clone(),
                     reason: "via: mesh is a SOCKS5 actor; compose it before the native protocol actor in a chain"
                         .to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_groups(&self) -> Result<(), PolicyError> {
+        for (name, group) in &self.groups {
+            let Some(raw_url) = group.url.as_deref() else {
+                continue;
+            };
+            if group.kind != ChainKind::Fallback {
+                return Err(PolicyError::InvalidGroup {
+                    name: name.clone(),
+                    reason: "url is only valid for fallback groups".to_owned(),
+                });
+            }
+            let url = url::Url::parse(raw_url).map_err(|error| PolicyError::InvalidGroup {
+                name: name.clone(),
+                reason: format!("invalid health-check URL: {error}"),
+            })?;
+            if !matches!(url.scheme(), "http" | "https") {
+                return Err(PolicyError::InvalidGroup {
+                    name: name.clone(),
+                    reason: "health-check URL must use http or https".to_owned(),
+                });
+            }
+            if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
+                return Err(PolicyError::InvalidGroup {
+                    name: name.clone(),
+                    reason: "health-check URL must contain a host and no credentials".to_owned(),
                 });
             }
         }
@@ -1880,6 +1915,36 @@ rules:
 
         fs::write(&path, "version: 1\nrules: []\n").unwrap();
         assert!(reload_policy_file_if_changed(&path, &updated.digest).is_err());
+    }
+
+    #[test]
+    fn validates_fallback_health_check_url_without_expanding_chain_semantics() {
+        let valid = r#"
+version: 1
+groups:
+  preferred:
+    type: fallback
+    members: [DIRECT]
+    url: https://probe.example/ready
+rules: ["MATCH,preferred"]
+"#;
+        let revision = PolicyRevision::parse(valid, Path::new(".")).unwrap();
+        assert_eq!(
+            revision.document.groups["preferred"].url.as_deref(),
+            Some("https://probe.example/ready")
+        );
+
+        for invalid in [
+            "groups:\n  bad: { type: fallback, members: [DIRECT], url: ftp://probe.example/ready }",
+            "groups:\n  bad: { type: fallback, members: [DIRECT], url: 'https://user:pass@probe.example/ready' }",
+            "groups:\n  bad: { type: chain, members: [DIRECT], url: https://probe.example/ready }",
+        ] {
+            let source = format!("version: 1\n{invalid}\nrules: [\"MATCH,bad\"]\n");
+            assert!(matches!(
+                PolicyRevision::parse(source, Path::new(".")),
+                Err(PolicyError::InvalidGroup { name, .. }) if name == "bad"
+            ));
+        }
     }
 
     #[test]

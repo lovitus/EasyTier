@@ -823,6 +823,11 @@ onMounted(() => {
                         :placeholder="t('policy.editor.members_hint')"
                         @update:model-value="updateMembers(data, String($event))" />
                   </div>
+                  <div v-if="data.type === 'fallback'" class="flex flex-col gap-2 sm:col-span-2 lg:col-span-3">
+                    <label class="font-semibold">Health-check URL</label>
+                    <InputText v-model="data.url" class="w-full"
+                        placeholder="https://www.gstatic.com/generate_204" />
+                  </div>
                 </div>
               </article>
               <Button icon="pi pi-plus" :label="t('policy.editor.add_group')" class="self-start" @click="addGroup" />

@@ -2533,3 +2533,102 @@ HEV UDP 承载语义：
 - The single proactive portless TCP connect is also removed. It had no regression that reproduced route-not-ready after successful remote prepare, could serialize existing connect timeouts across multiple actors, and conflated remote listener ownership with source data-path readiness.
 - The retained correctness fix is the vendored netstack `PollSender` wake registration for a full ingress channel. The retained tooling/UI work includes the captured-UID HTTP byte probe, policy editor behavior, platform notices, and focused lost-waker test.
 - Any future portless readiness change must first reproduce the route-generation race deterministically and model readiness in the policy adapter without modifying EasyTier mesh routing, transport selection, overlay framing, or HEV ownership.
+
+## Fallback 健康管理与现有故障实现替换方案
+
+状态：已实现并通过远端编译及聚焦自动测试，等待 exact-artifact 多机验证。该项属于 `POLICY-CHAIN` / fallback 候选；实现与验证证据同步记录在 `leaf_parallel_workboard.md`。
+
+### 1. 对外语义
+
+- Fallback 是一个有状态选择器，不是单请求重试器。每个用户请求只交给当前 `selected` 成员；连接失败时该请求直接失败，不得在同一请求中依次尝试后续成员。
+- 禁止用用户流量的连接成功、连接失败或目标可达性判断成员健康。用户目标可能是仅某个出口可见的内网地址；按请求试探其他成员会造成错误路由和潜在流量泄漏。
+- `selected` 初始为配置顺序中的第一个成员。组创建和服务启动本身不发起健康检查，也不因旧状态或启动探测直接切换成员。
+- 健康状态只来自独立的 HTTP(S) 检查 URL。代理路径、TLS 和 HTTP 解析成功，且最终收到的状态码小于 `400`，即认为该轮成功；`1xx`、`2xx`、`3xx` 均成功，`4xx`、`5xx` 及网络、TLS、HTTP 解析错误均失败。收到 `3xx` 即可，不需要跟随重定向，也不写死某个 `expected-status`。
+- 默认检查 URL 与 Mihomo 保持一致：`https://www.gstatic.com/generate_204`。fallback 组允许通过可选的 `url` 字段覆盖；不提供 `expected-status` 配置，统一按 `100..=399` 成功、`400..=599` 失败处理。覆盖 URL 必须是合法的 `http://` 或 `https://` URL，推荐 HTTPS，且不得包含用户名或密码。
+- 探测请求参考 Mihomo `adapter/adapter.go::Proxy.URLTest` 使用 `HEAD`，不读取响应体、不跟随重定向。自定义 URL 必须支持无副作用的 `HEAD`；默认单成员超时参考 Mihomo 为 5 秒。
+- 直接成员可以是普通 proxy、chain 或嵌套 group。检查必须把该直接成员当成不透明 actor，通过它端到端访问检查 URL，不从内部节点推导或传播健康状态。
+- checker 必须直接调用被测 actor 建立到检查 URL 的连接，域名解析、TLS 和 HTTP 均属于该 actor 的端到端路径；不得把探测重新送入全局 rule 匹配，否则可能再次命中当前 fallback 并形成回环或测到错误出口。
+- 未被 rule 或其他 group 使用的组永远不检查；未被使用的独立 proxy 也不创建健康任务。
+
+### 2. 检查触发与抑制
+
+- 只有真实用户流量进入该 fallback 组时，才判断是否需要健康检查。健康探测流量必须携带内部 probe context，不得递归触发当前组或嵌套组的“真实流量到达”逻辑。
+- 若最近一次有效检查距今不足 5 分钟，不检查，当前请求仍直接交给 `selected`。
+- 若检查新鲜度已超过 5 分钟，原子地启动一个异步、有界、singleflight 的检查会话；触发检查的当前请求不等待检查结果，仍只交给 `selected`。
+- 配置变化、网络 epoch 变化或运行时重建只使检查新鲜度失效，不直接改变 `selected`。下一次真实流量负责触发重新收敛。
+- 组内长期状态保持最小化：`selected`、`next_check_at`（或等价的 `last_test_at`）和 `checking`。候选成员及连续确认次数只存在于当前有界检查会话中，避免形成长期振荡状态机。
+- 一次有结论的检查会话结束后，将下一次允许检查时间设为约 5 分钟后。全组失败属于无结论结果，保持 `selected` 不动。为避免检查站自身故障时在持续业务流量下每 15 秒探测，连续无结论会话依次设置 `15 秒 -> 60 秒 -> 5 分钟` 的 `next_check_at`，之后保持 5 分钟上限；任一有结论会话将退避复位。退避期间没有后台 timer，只有下一次真实流量到达时比较时间。
+- 多成员检查使用有界并发，参考 Mihomo health check 的最大并发数 10。结果仍严格按配置顺序解释：只有当索引 `i` 健康且所有更小索引均已确认失败时，才能确定 `desired = i`；一旦确定即可取消或忽略更后成员，不必机械等待全组。并发只缩短探测耗时，绝不能改变顺序优先语义。
+
+### 3. 首次收敛、前切与回切
+
+- 服务刚启动时令 `selected = 0`，不预检。第一个真实请求只走成员 0，同时异步触发首次检查会话。
+- 每轮以有界并发检查直接成员，并按配置顺序计算 `desired = first healthy member`。允许提前结束更后成员，但不能在更前成员仍未返回时先认定后续健康成员。
+- 若 `desired == selected`，保持当前选择并结束本次会话，清除候选确认状态。
+- 若 `desired != selected`，只有连续 3 轮都得到完全相同的 `desired` 才切换。三轮属于同一个短暂、有界的确认会话，可采用“立即、约 5 秒后、约 15 秒后”的稀疏间隔；这不是永久周期检查。
+- 上述规则同时适用于向后故障切换和向前恢复：例如 `0 -> 1` 需要连续三轮确认成员 0 不健康且成员 1 是第一个健康成员；`1 -> 0` 需要连续三轮确认成员 0 已恢复并重新成为第一个健康成员。
+- 任一确认轮出现不同的 `desired`、`desired == selected` 或全组失败，都中断当前切换证据。全组失败时绝不移动 `selected`。
+- 首次检查若成员 0 健康，立即完成首次收敛而不切换；若后续成员是第一个健康成员，也必须经过相同的连续三轮确认。首次全组失败不算有效结论，保持成员 0，并按 `15 秒 -> 60 秒 -> 5 分钟` 的无结论退避等待后续真实流量重新触发。
+- 配置热更新时按成员稳定标识保留 `selected`；仅当当前成员已被删除时，原子回到新配置的第一个成员并使检查新鲜度失效。成员重排本身不能让正在处理的请求跨成员重试；空成员组应在配置解析阶段拒绝。
+
+### 4. 替换当前故障实现
+
+当前 EasyTier 配置生成位于 `easytier-policy/src/leaf_config.rs`，会生成 Leaf `protocol: failover`，并设置 `healthCheck: false`、`failover: true`、`stableFailover: true`。当前锁定依赖来自 `Cargo.lock`：
+
+```text
+https://github.com/lovitus/leaf.git#013a1497dd29355a00cd776628ff2de72e02e861
+```
+
+已按该精确 SHA 检查以下实现：
+
+- `leaf/src/proxy/failover/stream.rs`：`Handler::attempt_actor_until`、`compare_after_failure`、`handle_stable`、`handle`
+- `leaf/src/proxy/failover/datagram.rs`：对应的 datagram 选择与稳定故障处理
+- `leaf/src/proxy/failover/stable.rs`：`StableFailover`、`RequestDecision`、`decide`、`record_differential_success`、`start_comparison`、`record_comparison_failure`、`enter_outage`、`record_outage_probe_*`
+- `leaf/src/app/outbound/manager.rs`：stream/datagram handler 的构造和共享 stable gate 接线
+
+现有实现的问题不是缺少一次探测，而是状态机语义错误：一次用户请求失败可以推进组级 `retry_after`，使 `RequestDecision::Reject`、`WouldBlock` 或 `Outage` 影响之后访问其他目的地址的全部请求；全 actor 失败后还会按 1/2/5/10/30/60 秒探测并进入 dormant。这样，一个不可达目标或单个坏节点会污染整个 fallback 组，正是需要替换的故障实现。
+
+替换应按以下顺序完成，避免在旧状态机上继续叠加条件：
+
+1. 在 EasyTier 使用的锁定 Leaf fork 中新增 selector 型 fallback 运行时，明确拆分用户数据路径和健康检查控制路径；不要继续扩展 `StableFailover` 的请求失败/outage 状态机。
+2. stream 和 datagram 的用户路径只读取当前 `selected` 并调用该 actor 一次。删除或绕过 `attempt_actor_until` 式逐成员尝试、请求失败触发的 `compare_after_failure`、组级 `Reject`/`WouldBlock`、outage probe 和 dormant 逻辑。
+3. 为 fallback group 增加共享但最小的 selector 状态：原子 `selected`、检查新鲜度和 singleflight gate。stream/datagram 共享选择结果，但任何一条用户流都不能写入健康状态。
+4. 增加显式 probe context 和独立 HTTP(S) checker。默认 URL 为 `https://www.gstatic.com/generate_204`，允许组级 `url` 覆盖。checker 直接通过每个 actor 发送不跟随重定向的 `HEAD`，按 `100..=399` 判定成功，并给连接、TLS、响应头读取、成员任务及组生命周期设置超时或取消边界；不得重新进入全局 rule 路由。
+5. 实现“流量到达且已过期才触发”的入口钩子。钩子必须在选择 actor 前以非阻塞方式尝试启动检查；失败获取 singleflight gate 时直接跳过，不得让用户请求等待。
+6. 用局部有界会话实现连续 3 轮相同 `desired` 后切换；切换使用原子发布。成员检查最大并发 10，但结果严格按成员顺序收敛，确定第一个健康成员后取消更后任务。全失败、候选变化或会话取消均保持原选择。
+7. 修改 `easytier-policy/src/leaf_config.rs` 及配置模型，停止生成会启用旧 `stableFailover` 语义的组合。对用户只新增可选 `url`；默认 URL、5 分钟新鲜期、`15 秒 -> 60 秒 -> 5 分钟` 无结论退避、并发上限 10 和连续 3 次确认作为简单稳定的内部默认值，不暴露一组难以理解的调参项。旧字段若仍需解析，必须明确兼容边界，不能静默映射成不同语义。
+8. 对 stream、datagram、嵌套 chain 和嵌套 fallback 使用同一选择/检查语义；probe context 必须跨嵌套 actor 传播，防止探测递归制造新的探测会话。
+9. 删除或改写当前把 `Reject`、outage 和全局 attempt gate 当作正确行为的测试；保留与新语义无冲突的 actor 构造和协议测试。
+10. 更新 Leaf git revision 和 `Cargo.lock` 后，必须重新以新锁定 SHA 审计依赖，并记录 fork commit、上游差异、失败边界及验证证据。
+
+### 5. 参考语义与有意差异
+
+Mihomo 参考实现：
+
+- `/Users/fanli/Documents/mihomo-rev/adapter/outboundgroup/fallback.go`：`findAliveProxy`、`DialContext`、`ListenPacketContext`、`SupportUDP`。其对外关键语义是先选择一个健康 proxy，再把用户请求交给该 proxy；用户请求本身不在组成员间逐个重试。
+- `/Users/fanli/Documents/mihomo-rev/constant/adapters.go`：`DefaultTestURL = "https://www.gstatic.com/generate_204"`。
+- `/Users/fanli/Documents/mihomo-rev/adapter/outboundgroup/parser.go`：`GroupCommonOption.URL` 允许组级覆盖；未配置时使用 provider health-check URL 或 `DefaultTestURL`，默认 interval 为 300 秒且 `Lazy` 默认为 true。
+- `/Users/fanli/Documents/mihomo-rev/adapter/provider/healthcheck.go`：`HealthCheck::check/execute` 使用 singleflight、最大并发 10 和默认 5000ms 超时。
+- `/Users/fanli/Documents/mihomo-rev/adapter/adapter.go`：`Proxy::URLTest` 通过被测 proxy 建连并发送 `HEAD`。
+- `/Users/fanli/Documents/mihomo-rev/component/loopback/detector.go`：回环检测边界。
+- `/Users/fanli/Documents/mihomo-rev/config/utils.go`：`validateDialerProxies` 的 dialer/链引用校验。
+
+EasyTier 有意不照搬 Mihomo 的常驻周期健康检查，而采用“存在真实组流量且检查已过期时才启动有界会话”。原因是移动端成本、未使用组不应产生流量，以及 mesh/嵌套 chain 的探测可能更昂贵。兼容边界仅限触发策略；对外仍保持 fallback 选择一个成员、用户请求不逐成员重试、按顺序优先恢复的语义。
+
+### 6. 必须补齐的测试与验证
+
+- 用户请求失败只返回该请求的错误，不尝试第二成员，也不改变 `selected`、健康计数或检查新鲜度。
+- 不同目的地址之间互不污染：访问一个坏内网地址不能让同组随后访问公网的请求被 `Reject`、`WouldBlock` 或切换出口。
+- 服务启动且无组流量时，健康 URL 请求数始终为 0；首次真实流量只走成员 0，并异步启动一次检查。
+- 5 分钟内持续有流量也不会重复检查；过期后的并发流量只启动一个检查会话。
+- `1xx/2xx/3xx` 成功，`4xx/5xx` 失败；`3xx` 不跟随；网络、TLS、响应头超时和解析错误失败。
+- 未配置 `url` 时实际请求 Mihomo 默认的 `https://www.gstatic.com/generate_204`；用户配置 `url` 后只请求覆盖地址；非法 scheme、带凭据 URL 和空覆盖值在配置边界有明确结果。
+- 探测直接进入被测 actor，不经过全局 rules；检查 fallback 自身或与 fallback 相互引用的 URL 路由不能递归或回流。
+- 连续三轮同一后续成员健康后才向后切换；连续三轮更靠前成员恢复后才向前切回；候选抖动和全组失败不切换。
+- 全组失败保持当前成员，并只按 `15 秒 -> 60 秒 -> 5 分钟` 退避由下一次真实流量重试；有结论后退避复位，不存在后台 outage 探测。
+- 大量成员检查的同时执行数不超过 10；更前成员未决时不能选中后续成员，首个健康成员确定后更后任务可取消且不能晚到覆盖结果。
+- 热更新保留仍存在的当前成员；删除当前成员时安全回到新首项并延迟检查，不发生请求级重试或越界选择。
+- stream 与 datagram 共享一致选择；UDP 不因单个目标无响应改变组选择。
+- 多成员、proxy/chain/fallback 嵌套时，直接成员按端到端结果排序选择，probe context 不递归触发检查。
+- 未使用 fallback 和未使用独立 proxy 不产生任务、定时器或网络流量，生命周期关闭后无遗留任务。
+- Android 验证必须覆盖当前故障场景：一个成员端点不可用时，用户流量仍只使用当前选择；独立 URL 检查连续确认后才切换；恢复后连续确认并稳定切回，期间不出现整机断网或组级拒绝。

@@ -208,14 +208,16 @@ pub fn compile_leaf_config_with_options(
             ChainKind::Chain => ("chain", serde_json::json!({ "actors": group.members })),
             ChainKind::Fallback => (
                 "failover",
-                // EasyTier uses Leaf's preference-first, bounded passive state machine. It avoids
-                // hard-coded public probes and changes the pinned actor only after differential
-                // evidence across multiple observation windows.
+                // Mihomo adapter/outboundgroup/fallback.go selects one actor before dialing;
+                // user traffic never retries group members. EasyTier intentionally differs from
+                // Mihomo's periodic scheduler by enabling Leaf's traffic-triggered URL checker.
                 serde_json::json!({
                     "actors": group.members,
                     "healthCheck": false,
                     "failover": true,
                     "stableFailover": true,
+                    "healthCheckUrl": group.url.as_deref().unwrap_or("https://www.gstatic.com/generate_204"),
+                    "healthCheckTimeout": 5,
                 }),
             ),
         };
@@ -913,6 +915,7 @@ groups:
   final:
     type: fallback
     members: [native, DIRECT]
+    url: https://probe.example/ready
 rules:
   - GEOSITE,cn,DIRECT
   - COUNTRY,US,final,no-resolve
@@ -950,6 +953,11 @@ rules:
         assert_eq!(config["outbounds"][3]["protocol"], "failover");
         assert_eq!(config["outbounds"][3]["settings"]["stableFailover"], true);
         assert_eq!(config["outbounds"][3]["settings"]["healthCheck"], false);
+        assert_eq!(
+            config["outbounds"][3]["settings"]["healthCheckUrl"],
+            "https://probe.example/ready"
+        );
+        assert_eq!(config["outbounds"][3]["settings"]["healthCheckTimeout"], 5);
         let rules = config["router"]["rules"].as_array().unwrap();
         assert_eq!(rules.len(), 3);
         assert_eq!(rules[0]["target"], "DIRECT");
@@ -1234,6 +1242,10 @@ rules:
         assert_eq!(
             route["settings"]["actors"],
             serde_json::json!(["native", "DIRECT"])
+        );
+        assert_eq!(
+            route["settings"]["healthCheckUrl"],
+            "https://www.gstatic.com/generate_204"
         );
 
         let rules = config["router"]["rules"].as_array().unwrap();

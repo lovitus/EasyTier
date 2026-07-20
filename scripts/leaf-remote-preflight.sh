@@ -42,6 +42,7 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   config::tests::parses_legacy_and_named_udp_modes_canonically
   config::tests::validates_shadowsocks_fields_without_expanding_mesh_semantics
   config::tests::validates_layered_protocol_fields_without_expanding_mesh_semantics
+  config::tests::validates_fallback_health_check_url_without_expanding_chain_semantics
   config::tests::rejects_uot_v2_on_socks5
   leaf_config::tests::compiles_shadowsocks_native_udp_and_uot_chain_as_leaf_actors
   leaf_config::tests::compiles_trojan_vmess_and_vless_as_private_transport_chains

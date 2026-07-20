@@ -2580,6 +2580,7 @@ dependencies = [
  "thiserror 1.0.63",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -4965,7 +4966,7 @@ dependencies = [
 [[package]]
 name = "leaf"
 version = "0.1.2"
-source = "git+https://github.com/lovitus/leaf.git?rev=7f4dc745a2d325e672fff2553c57f9f560d87dd5#7f4dc745a2d325e672fff2553c57f9f560d87dd5"
+source = "git+https://github.com/lovitus/leaf.git?rev=013a1497dd29355a00cd776628ff2de72e02e861#013a1497dd29355a00cd776628ff2de72e02e861"
 dependencies = [
  "aes",
  "aes-gcm",

@@ -31,13 +31,14 @@ thiserror = "1"
 tokio = { version = "1", features = ["sync", "time", "rt", "net", "macros", "process"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["serde"] }
+url = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(unix)'.dependencies.leaf]
 git = "https://github.com/lovitus/leaf.git"
-rev = "7f4dc745a2d325e672fff2553c57f9f560d87dd5"
+rev = "013a1497dd29355a00cd776628ff2de72e02e861"
 optional = true
 default-features = false
 features = [
