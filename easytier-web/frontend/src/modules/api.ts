@@ -211,10 +211,9 @@ class WebRemoteClient implements Api.RemoteClient {
         });
         return response;
     }
-    async update_policy_rule_data(instanceId: string, resource: Api.PolicyRuleDataResource, sourceUrl?: string): Promise<Api.UpdatePolicyRuleDataResponse> {
+    async update_policy_rule_data(instanceId: string, resource: Api.PolicyRuleDataResource): Promise<Api.UpdatePolicyRuleDataResponse> {
         return await this.client.post<any, Api.UpdatePolicyRuleDataResponse>(
             `/machines/${this.machine_id}/networks/${instanceId}/policy-rule-data/${resource}`,
-            { source_url: sourceUrl },
         );
     }
     async run_network(config: NetworkTypes.NetworkConfig, save: boolean): Promise<undefined> {

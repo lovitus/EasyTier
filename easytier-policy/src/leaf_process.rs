@@ -336,10 +336,7 @@ async fn wait_for_leaf_readiness(
         }
     }
     #[cfg(not(target_os = "linux"))]
-    {
-        let _ = tun;
-        unreachable!()
-    }
+    unreachable!()
 }
 
 #[cfg(target_os = "linux")]
