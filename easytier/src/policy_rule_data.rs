@@ -7,7 +7,10 @@ use std::{
 };
 
 use anyhow::{Context, ensure};
-use easytier_policy::{ManagedRuleDataKind, RuleSet, RuleSetKind, validate_managed_rule_data};
+use easytier_policy::{
+    ManagedRuleDataKind, RuleSet, RuleSetKind, list_managed_rule_data_categories,
+    validate_managed_rule_data,
+};
 use reqwest::{
     Url,
     blocking::Client,
@@ -112,7 +115,26 @@ pub(crate) struct PolicyRuleDataUpdate {
     pub sha256: String,
     pub size: u64,
     pub source_url: String,
+    pub categories: Vec<String>,
 }
+
+#[derive(Debug)]
+pub(crate) struct PolicyRuleDataCategories {
+    pub resource: String,
+    pub sha256: String,
+    pub size: u64,
+    pub categories: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct PolicyRuleDataCategoryIndex {
+    version: u32,
+    size: u64,
+    sha256: String,
+    categories: Vec<String>,
+}
+
+const POLICY_RULE_DATA_CATEGORY_INDEX_VERSION: u32 = 1;
 
 pub(crate) fn builtin_rule_set_default(
     base_dir: &Path,
@@ -233,6 +255,82 @@ pub(crate) async fn update_policy_rule_data(
     .context("policy rule data update task failed")?
 }
 
+pub(crate) async fn list_policy_rule_data_categories(
+    config_dir: PathBuf,
+    instance_id: Uuid,
+    resource: PolicyRuleDataResource,
+    expected_sha256: Option<String>,
+    configured_path: Option<String>,
+) -> anyhow::Result<PolicyRuleDataCategories> {
+    tokio::task::spawn_blocking(move || {
+        list_policy_rule_data_categories_sync(
+            &config_dir,
+            instance_id,
+            resource,
+            expected_sha256.as_deref(),
+            configured_path.as_deref(),
+        )
+    })
+    .await
+    .context("policy rule data category task failed")?
+}
+
+fn list_policy_rule_data_categories_sync(
+    config_dir: &Path,
+    instance_id: Uuid,
+    resource: PolicyRuleDataResource,
+    expected_sha256: Option<&str>,
+    configured_path: Option<&str>,
+) -> anyhow::Result<PolicyRuleDataCategories> {
+    ensure!(
+        resource != PolicyRuleDataResource::CountryMmdb,
+        "Country MMDB does not provide GeoSite or GeoIP categories"
+    );
+    let configured_path = configured_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                config_dir.join(path)
+            }
+        });
+    let managed_path = config_dir
+        .join("policy-rule-data")
+        .join(instance_id.to_string())
+        .join(resource.file_name());
+    let (path, builtin_sha256) = if let Some(path) = configured_path {
+        ensure!(
+            path.is_file(),
+            "configured rule data file does not exist: {}",
+            path.display()
+        );
+        (path, None)
+    } else if managed_path.is_file() {
+        (managed_path, None)
+    } else {
+        let cache_dir = config_dir
+            .join(".easytier-policy-rule-data")
+            .join(BUILTIN_SNAPSHOT);
+        let path = materialize_builtin_rule_data(&cache_dir, resource)?;
+        let sha256 = resource.builtin().map(|(_, sha256)| sha256);
+        (path, sha256)
+    };
+    let expected_sha256 = expected_sha256
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(builtin_sha256);
+    let index = load_or_rebuild_category_index(&path, resource, expected_sha256)?;
+    Ok(PolicyRuleDataCategories {
+        resource: resource.name().to_owned(),
+        sha256: index.sha256,
+        size: index.size,
+        categories: index.categories,
+    })
+}
+
 fn update_policy_rule_data_sync(
     config_dir: &Path,
     instance_id: Uuid,
@@ -286,17 +384,111 @@ fn update_policy_rule_data_sync(
     drop(file);
 
     resource.validate(&temporary_path)?;
+    let categories = resource.categories(&temporary_path)?;
     let sha256 = sha256_file(&temporary_path)?;
     replace_file(&temporary_path, &target_path)?;
     pending.commit();
     sync_parent_dir(&target_dir);
+
+    let index = PolicyRuleDataCategoryIndex {
+        version: POLICY_RULE_DATA_CATEGORY_INDEX_VERSION,
+        size,
+        sha256: sha256.clone(),
+        categories: categories.clone(),
+    };
+    let _ = write_category_index(&target_path, &index);
 
     Ok(PolicyRuleDataUpdate {
         path: target_path,
         sha256,
         size,
         source_url,
+        categories,
     })
+}
+
+impl PolicyRuleDataResource {
+    fn categories(self, path: &Path) -> anyhow::Result<Vec<String>> {
+        let kind = match self {
+            Self::Geosite => ManagedRuleDataKind::Geosite,
+            Self::Geoip => ManagedRuleDataKind::Geoip,
+            Self::CountryMmdb => return Ok(Vec::new()),
+        };
+        list_managed_rule_data_categories(kind, path)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+}
+
+fn load_or_rebuild_category_index(
+    data_path: &Path,
+    resource: PolicyRuleDataResource,
+    expected_sha256: Option<&str>,
+) -> anyhow::Result<PolicyRuleDataCategoryIndex> {
+    let size = data_path
+        .metadata()
+        .with_context(|| format!("reading rule data metadata {}", data_path.display()))?
+        .len();
+    let index_path = category_index_path(data_path);
+    if let Ok(file) = File::open(&index_path)
+        && let Ok(index) = serde_json::from_reader::<_, PolicyRuleDataCategoryIndex>(file)
+        && index.version == POLICY_RULE_DATA_CATEGORY_INDEX_VERSION
+        && index.size == size
+    {
+        if expected_sha256.is_some_and(|expected| expected == index.sha256) {
+            return Ok(index);
+        }
+        if expected_sha256.is_none()
+            && sha256_file(data_path).is_ok_and(|sha256| sha256 == index.sha256)
+        {
+            return Ok(index);
+        }
+    }
+
+    let sha256 = sha256_file(data_path)?;
+    if let Some(expected_sha256) = expected_sha256 {
+        ensure!(
+            sha256 == expected_sha256,
+            "rule data digest mismatch for {}",
+            data_path.display()
+        );
+    }
+    let index = PolicyRuleDataCategoryIndex {
+        version: POLICY_RULE_DATA_CATEGORY_INDEX_VERSION,
+        size,
+        sha256,
+        categories: resource.categories(data_path)?,
+    };
+    let _ = write_category_index(data_path, &index);
+    Ok(index)
+}
+
+fn category_index_path(data_path: &Path) -> PathBuf {
+    let mut path = data_path.as_os_str().to_owned();
+    path.push(".categories.json");
+    PathBuf::from(path)
+}
+
+fn write_category_index(
+    data_path: &Path,
+    index: &PolicyRuleDataCategoryIndex,
+) -> anyhow::Result<()> {
+    let index_path = category_index_path(data_path);
+    let parent = index_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = index_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("categories.json");
+    let temporary_path = parent.join(format!(".{file_name}.{}.pending", Uuid::new_v4()));
+    let mut pending = PendingFile::new(temporary_path.clone());
+    let mut file = create_private_file(&temporary_path)?;
+    serde_json::to_writer(&mut file, index).context("writing policy category index")?;
+    file.flush().context("flushing policy category index")?;
+    file.sync_all().context("syncing policy category index")?;
+    drop(file);
+    replace_file(&temporary_path, &index_path)?;
+    pending.commit();
+    sync_parent_dir(parent);
+    Ok(())
 }
 
 // Reference semantics:

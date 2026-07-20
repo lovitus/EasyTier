@@ -15,6 +15,7 @@ use crate::{
                 ListNetworkInstanceMetaRequest, ListNetworkInstanceMetaResponse,
                 ListNetworkInstanceRequest, ListNetworkInstanceResponse,
                 ListPolicyOutboundInterfacesRequest, ListPolicyOutboundInterfacesResponse,
+                ListPolicyRuleDataCategoriesRequest, ListPolicyRuleDataCategoriesResponse,
                 NetworkInstanceRunningInfoMap, NetworkMeta, PolicyConfigDiagnostic,
                 PolicyOutboundInterface, RetainNetworkInstanceRequest,
                 RetainNetworkInstanceResponse, RunNetworkInstanceRequest,
@@ -288,11 +289,61 @@ impl WebClientService for InstanceManageRpcService {
                 sha256: update.sha256,
                 size: update.size,
                 source_url: update.source_url,
+                categories: update.categories,
             })
         }
         #[cfg(not(feature = "leaf-policy-proxy"))]
         {
             let _ = (config_dir, req.resource, req.source_url);
+            Err(anyhow::anyhow!("policy rule data support is not compiled for this target").into())
+        }
+    }
+
+    async fn list_policy_rule_data_categories(
+        &self,
+        _: BaseController,
+        req: ListPolicyRuleDataCategoriesRequest,
+    ) -> Result<ListPolicyRuleDataCategoriesResponse, rpc_types::error::Error> {
+        let _mutation_guard = self.remote_mutation_lock.lock().await;
+        let instance_id: uuid::Uuid = req
+            .inst_id
+            .ok_or_else(|| anyhow::anyhow!("instance id is required"))?
+            .into();
+        let config_dir = self
+            .manager
+            .get_config_dir()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("managed config directory is unavailable"))?;
+
+        #[cfg(feature = "leaf-policy-proxy")]
+        {
+            let resource = req
+                .resource
+                .parse::<crate::policy_rule_data::PolicyRuleDataResource>()?;
+            let listing = crate::policy_rule_data::list_policy_rule_data_categories(
+                config_dir,
+                instance_id,
+                resource,
+                req.expected_sha256,
+                req.path,
+            )
+            .await?;
+            Ok(ListPolicyRuleDataCategoriesResponse {
+                resource: listing.resource,
+                sha256: listing.sha256,
+                size: listing.size,
+                categories: listing.categories,
+            })
+        }
+        #[cfg(not(feature = "leaf-policy-proxy"))]
+        {
+            let _ = (
+                config_dir,
+                instance_id,
+                req.resource,
+                req.expected_sha256,
+                req.path,
+            );
             Err(anyhow::anyhow!("policy rule data support is not compiled for this target").into())
         }
     }
