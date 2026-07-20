@@ -52,7 +52,9 @@ const updatingRuleData = ref<PolicyRuleSetKind | ''>('')
 const outboundInfo = ref<Api.ListPolicyOutboundInterfacesResponse>()
 const outboundLoading = ref(false)
 const outboundError = ref('')
+const expandedRowKeys = ref<Set<number>>(new Set())
 let lastSerialized = ''
+let ruleDataCategoryGeneration = 0
 const rowKeys = new WeakMap<object, number>()
 let nextRowKey = 1
 
@@ -61,9 +63,16 @@ const sourceOptions = computed(() => [
   { label: t('policy.editor.file'), value: 'file' },
 ])
 const proxyViaOptions = ['mesh', 'native']
-const proxyTypeOptions: PolicyProxyKind[] = ['socks5', 'shadowsocks', 'trojan', 'vmess', 'vless', 'http']
-const shadowsocksUdpOptions = ['off', 'native', 'uot-v2']
+const proxyTypeOptions: PolicyProxyKind[] = ['socks5', 'shadowsocks', 'trojan', 'vmess', 'vless']
+const shadowsocksUdpOptions = computed(() => [
+  { label: t('policy.editor.udp_off'), value: 'off' },
+  { label: t('policy.editor.udp_native'), value: 'native' },
+  { label: t('policy.editor.udp_uot_v2'), value: 'uot-v2' },
+])
 const groupTypeOptions = ['fallback', 'chain']
+const geositeCategoryOptions = ref<string[]>([])
+const geoipCategoryOptions = ref<string[]>(['LAN'])
+const geoipDataCategoryCount = computed(() => Math.max(0, geoipCategoryOptions.value.length - 1))
 const outboundOptions = computed(() => (outboundInfo.value?.interfaces ?? []).map(item => ({
   label: item.addresses.length
     ? `${item.name} (${item.addresses.join(', ')})${item.recommended ? ` · ${t('policy.editor.recommended')}` : ''}`
@@ -72,7 +81,7 @@ const outboundOptions = computed(() => (outboundInfo.value?.interfaces ?? []).ma
 })))
 const ruleTypeOptions = [
   'GEOSITE', 'GEOIP', 'COUNTRY', 'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD', 'IP-CIDR',
-  'NETWORK', 'PORT-RANGE', 'INBOUND-TAG', 'EXTERNAL', 'MATCH',
+  'NETWORK', 'PORT-RANGE', 'INBOUND-TAG', 'EXTERNAL', 'MATCH', 'FINAL',
 ]
 const actorOptions = computed(() => [
   'DIRECT',
@@ -125,6 +134,7 @@ watch(
       const parsed = parsePolicyDocument(source)
       document.value = parsed
       ruleDataRows.value = managedRuleDataRows(parsed)
+      expandedRowKeys.value = new Set()
       lastSerialized = serializePolicyDocument(parsed)
       parseError.value = ''
       editError.value = ''
@@ -158,6 +168,7 @@ async function updateRuleData(row: PolicyRuleSetRow) {
   ruleDataError.value = ''
   try {
     const result = await updateManagedRuleData(api, config.value.instance_id, row)
+    setRuleDataCategories(row.type, result.categories)
     if (!document.value.ruleSets.includes(row)) document.value.ruleSets.push(row)
     const size = Number(result.size)
     ruleDataMessage.value = t('policy.editor.rule_data_updated', {
@@ -205,6 +216,7 @@ function addProxy() {
     tlsInsecure: false,
   }
   document.value.proxies.push(row)
+  expandRow(row)
 }
 
 function updateProxyType(row: PolicyProxyRow, value: PolicyProxyKind) {
@@ -216,6 +228,14 @@ function updateProxyType(row: PolicyProxyRow, value: PolicyProxyKind) {
     row.username = ''
     row.cipher ||= 'aes-256-gcm'
     row.udp = typeof row.udp === 'boolean' ? (row.udp ? 'native' : 'off') : row.udp
+    row.uuid = ''
+    row.alterId = 0
+    row.transport = 'tcp'
+    row.wsPath = '/'
+    row.wsHeaders = {}
+    row.tlsEnabled = false
+    row.tlsServerName = ''
+    row.tlsInsecure = false
     return
   }
   if (['trojan', 'vmess', 'vless'].includes(value)) {
@@ -230,6 +250,7 @@ function updateProxyType(row: PolicyProxyRow, value: PolicyProxyKind) {
     row.tlsEnabled = value === 'trojan' || Boolean(row.tlsEnabled)
     row.alterId = 0
     row.cipher = value === 'vmess' ? (row.cipher || 'auto') : ''
+    if (value === 'trojan') row.uuid = ''
     if (value !== 'trojan') row.password = ''
     return
   }
@@ -242,7 +263,6 @@ function updateProxyType(row: PolicyProxyRow, value: PolicyProxyKind) {
   row.tlsServerName = ''
   row.tlsInsecure = false
   row.udp = typeof row.udp === 'string' ? row.udp === 'native' : row.udp
-  if (value === 'http') row.udp = false
 }
 
 function proxyViaOptionsFor(row: PolicyProxyRow) {
@@ -266,6 +286,7 @@ function addGroup() {
     members: [],
   }
   document.value.groups.push(row)
+  expandRow(row)
 }
 
 function addRule() {
@@ -273,6 +294,7 @@ function addRule() {
   const finalIndex = document.value.rules.findIndex(rule => ['MATCH', 'FINAL'].includes(rule.type))
   if (finalIndex < 0) document.value.rules.push(row)
   else document.value.rules.splice(finalIndex, 0, row)
+  expandRow(row)
 }
 
 function preferredTarget() {
@@ -294,10 +316,15 @@ function applyPreset(preset: 'china-direct' | 'global' | 'direct') {
   else {
     document.value.rules = [{ type: 'MATCH', operand: '', target: 'DIRECT', noResolve: false }]
   }
+  expandedRowKeys.value = new Set()
 }
 
-function removeAt<T>(rows: T[], index: number) {
-  rows.splice(index, 1)
+function removeAt<T extends object>(rows: T[], index: number) {
+  const [removed] = rows.splice(index, 1)
+  if (!removed) return
+  const next = new Set(expandedRowKeys.value)
+  next.delete(rowKey(removed))
+  expandedRowKeys.value = next
 }
 
 function rowKey(row: object) {
@@ -306,6 +333,24 @@ function rowKey(row: object) {
   const key = nextRowKey++
   rowKeys.set(row, key)
   return key
+}
+
+function isRowExpanded(row: object) {
+  return expandedRowKeys.value.has(rowKey(row))
+}
+
+function expandRow(row: object) {
+  const next = new Set(expandedRowKeys.value)
+  next.add(rowKey(row))
+  expandedRowKeys.value = next
+}
+
+function toggleRow(row: object) {
+  const key = rowKey(row)
+  const next = new Set(expandedRowKeys.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedRowKeys.value = next
 }
 
 function moveRule(index: number, offset: number) {
@@ -331,11 +376,112 @@ function ruleNeedsOperand(type: string) {
 }
 
 function updateRuleType(row: PolicyRuleRow, value: string) {
-  const previouslySupported = policyRuleSupportsNoResolve(row.type)
+  const previouslySupported = policyRuleSupportsNoResolve(row.type, row.operand)
   row.type = value
-  const supported = policyRuleSupportsNoResolve(value)
+  const supported = policyRuleSupportsNoResolve(value, row.operand)
   if (!supported) row.noResolve = false
   else if (!previouslySupported) row.noResolve = true
+}
+
+function updateRuleOperand(row: PolicyRuleRow, value: string) {
+  row.operand = value
+  if (!policyRuleSupportsNoResolve(row.type, value)) row.noResolve = false
+}
+
+function fieldLabel(key: string, value: string) {
+  return `${t(key)} · ${t('policy.editor.example', { value })}`
+}
+
+function proxyProtocolLabel(row: PolicyProxyRow) {
+  const names: Record<PolicyProxyKind, string> = {
+    socks5: 'SOCKS5',
+    shadowsocks: 'Shadowsocks',
+    trojan: 'Trojan',
+    vmess: 'VMess',
+    vless: 'VLESS',
+  }
+  return names[row.type]
+}
+
+function proxyEndpointSummary(row: PolicyProxyRow) {
+  const server = row.via === 'mesh'
+    ? row.virtualIp || row.instanceId || t('policy.editor.not_configured')
+    : row.address || t('policy.editor.not_configured')
+  const port = row.port ?? (row.via === 'mesh' ? t('policy.editor.automatic') : t('policy.editor.not_configured'))
+  return `${server} · ${port}`
+}
+
+function proxyUdpSummary(row: PolicyProxyRow) {
+  if (row.type === 'shadowsocks') {
+    const mode = typeof row.udp === 'boolean' ? (row.udp ? 'native' : 'off') : row.udp
+    return t(`policy.editor.udp_${mode.replace('-', '_')}`)
+  }
+  const enabled = typeof row.udp === 'boolean' ? row.udp : row.udp === 'native'
+  return enabled ? t('policy.editor.enabled') : t('policy.editor.disabled')
+}
+
+function ruleOperandExample(type: string) {
+  const examples: Record<string, string> = {
+    GEOSITE: 'GITHUB',
+    GEOIP: 'CN',
+    COUNTRY: 'US',
+    DOMAIN: 'www.example.com',
+    'DOMAIN-SUFFIX': 'example.com',
+    'DOMAIN-KEYWORD': 'google',
+    'IP-CIDR': '192.0.2.0/24',
+    NETWORK: 'udp',
+    'PORT-RANGE': '443 / 10000-20000',
+    'INBOUND-TAG': 'tun',
+    EXTERNAL: 'geoip:google',
+  }
+  return examples[type.trim().toUpperCase()] ?? 'value'
+}
+
+function ruleCategoryOptions(type: string) {
+  const normalized = type.trim().toUpperCase()
+  if (normalized === 'GEOSITE') return geositeCategoryOptions.value
+  if (normalized === 'GEOIP') return geoipCategoryOptions.value
+  return []
+}
+
+function setRuleDataCategories(resource: string, categories: string[]) {
+  const normalized = [...new Set(categories.map(category => category.trim().toUpperCase()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right))
+  if (resource === 'geosite') geositeCategoryOptions.value = normalized
+  if (resource === 'geoip') geoipCategoryOptions.value = ['LAN', ...normalized.filter(category => category !== 'LAN')]
+}
+
+async function loadRuleDataCategories() {
+  const generation = ++ruleDataCategoryGeneration
+  geositeCategoryOptions.value = []
+  geoipCategoryOptions.value = ['LAN']
+  const api = props.api
+  const instanceId = config.value.instance_id
+  if (!api?.list_policy_rule_data_categories || !instanceId) return
+  const rows = managedRuleDataRows(document.value)
+  await Promise.all(['geosite', 'geoip'].map(async resource => {
+    const row = rows.find(candidate => candidate.type === resource)
+    try {
+      const result = await api.list_policy_rule_data_categories(
+        instanceId,
+        resource as Api.PolicyRuleDataResource,
+        row?.sha256.trim() || undefined,
+        row?.path.trim() || undefined,
+      )
+      if (generation !== ruleDataCategoryGeneration) return
+      setRuleDataCategories(resource, result.categories)
+    }
+    catch {
+      // Category discovery is an editor convenience. Typed rules remain usable
+      // when an older core or an unreadable custom index cannot provide it.
+    }
+  }))
+}
+
+function ruleSummary(row: PolicyRuleRow) {
+  const operand = row.operand.trim() ? ` · ${row.operand.trim()}` : ''
+  const modifier = row.noResolve ? ' · no-resolve' : ''
+  return `${row.type}${operand} -> ${row.target}${modifier}`
 }
 
 function managedRuleDataSource(type: PolicyRuleSetKind) {
@@ -391,6 +537,18 @@ watch(() => config.value.enable_policy_proxy, enabled => {
   if (enabled) void loadOutboundInterfaces()
 })
 
+const ruleDataCategoryIdentity = computed(() => {
+  const rows = managedRuleDataRows(document.value)
+  return ['geosite', 'geoip'].map(resource => {
+    const row = rows.find(candidate => candidate.type === resource)
+    return [resource, row?.path.trim() ?? '', row?.sha256.trim() ?? ''].join('\0')
+  }).join('\1') + `\1${config.value.instance_id ?? ''}`
+})
+
+watch(ruleDataCategoryIdentity, () => {
+  void loadRuleDataCategories()
+}, { immediate: true })
+
 onMounted(() => {
   void loadOutboundInterfaces()
 })
@@ -443,7 +601,7 @@ onMounted(() => {
           {{ t('policy.editor.outbound_unavailable', { platform: outboundInfo.platform }) }}
         </Message>
         <div v-if="outboundInfo?.required" class="flex flex-col gap-2 grow min-w-64">
-          <label for="policy_leaf_executable">{{ t('policy_leaf_executable') }}</label>
+          <label for="policy_leaf_executable">{{ fieldLabel('policy_leaf_executable', 'easytier-leaf-worker') }}</label>
           <InputText id="policy_leaf_executable" v-model="config.policy_leaf_executable"
             placeholder="easytier-leaf-worker" />
         </div>
@@ -451,7 +609,7 @@ onMounted(() => {
 
       <template v-if="sourceMode === 'file'">
         <div class="flex items-center">
-          <label for="policy_config_file">{{ t('policy_config_file') }}</label>
+          <label for="policy_config_file">{{ fieldLabel('policy_config_file', '/etc/easytier/policy.yaml') }}</label>
           <span class="pi pi-question-circle ml-2" v-tooltip="t('policy_config_file_help')" />
         </div>
         <InputText id="policy_config_file" v-model="config.policy_config_file"
@@ -474,7 +632,7 @@ onMounted(() => {
               <div class="grid gap-4 lg:grid-cols-2">
                 <div class="flex flex-col gap-2 rounded-xl border border-surface-200 bg-surface-50 p-4 dark:border-surface-700 dark:bg-surface-900">
                   <span class="text-xs font-semibold uppercase tracking-wide text-surface-500">DIRECT</span>
-                <label for="policy_dns_direct" class="font-semibold">{{ t('policy.editor.dns_direct') }}</label>
+                <label for="policy_dns_direct" class="font-semibold">{{ fieldLabel('policy.editor.dns_direct', 'system / 223.5.5.5') }}</label>
                 <Textarea id="policy_dns_direct" :model-value="document.dns.direct.join('\n')" rows="4"
                   auto-resize class="w-full" :placeholder="t('policy.editor.dns_direct_placeholder')"
                   @update:model-value="updateDnsServers('direct', String($event))" />
@@ -482,11 +640,21 @@ onMounted(() => {
               </div>
                 <div class="flex flex-col gap-2 rounded-xl border border-surface-200 bg-surface-50 p-4 dark:border-surface-700 dark:bg-surface-900">
                   <span class="text-xs font-semibold uppercase tracking-wide text-surface-500">PROXY</span>
-                <label for="policy_dns_proxy" class="font-semibold">{{ t('policy.editor.dns_proxy') }}</label>
+                <label for="policy_dns_proxy" class="font-semibold">{{ fieldLabel('policy.editor.dns_proxy', 'doh:cloudflare-dns.com@1.1.1.1') }}</label>
                 <Textarea id="policy_dns_proxy" :model-value="document.dns.proxy.join('\n')" rows="4"
                   auto-resize class="w-full" placeholder="doh:cloudflare-dns.com@1.1.1.1"
                   @update:model-value="updateDnsServers('proxy', String($event))" />
                 <small class="text-surface-500">{{ t('policy.editor.dns_proxy_help') }}</small>
+                </div>
+              </div>
+              <div class="grid gap-4 lg:grid-cols-2">
+                <div class="flex flex-col gap-2">
+                  <label for="policy_fake_ip_range" class="font-semibold">{{ fieldLabel('policy.editor.fake_ip_range', '198.19.0.0/16') }}</label>
+                  <InputText id="policy_fake_ip_range" v-model="document.dns.fakeIpRange" class="w-full" />
+                </div>
+                <div class="flex flex-col gap-2">
+                  <label for="policy_fake_ip_range6" class="font-semibold">{{ fieldLabel('policy.editor.fake_ip_range6', 'fd65:6173:7974::/64') }}</label>
+                  <InputText id="policy_fake_ip_range6" v-model="document.dns.fakeIpRange6" class="w-full" />
                 </div>
               </div>
             </div>
@@ -500,16 +668,30 @@ onMounted(() => {
               <article v-for="(data, index) in document.proxies" :key="rowKey(data)"
                 class="flex flex-col gap-4 rounded-xl border border-surface-200 p-4 dark:border-surface-700">
                 <div class="flex items-center justify-between gap-3">
-                  <div class="flex items-center gap-2">
-                    <span class="rounded-full bg-primary-100 px-2 py-1 text-xs font-semibold text-primary-700 dark:bg-primary-900 dark:text-primary-200">#{{ index + 1 }}</span>
-                    <strong>{{ data.name || t('policy.editor.unnamed_node') }}</strong>
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-2">
+                      <span class="rounded-full bg-primary-100 px-2 py-1 text-xs font-semibold text-primary-700 dark:bg-primary-900 dark:text-primary-200">#{{ index + 1 }}</span>
+                      <strong class="truncate">{{ data.name || t('policy.editor.unnamed_node') }}</strong>
+                    </div>
+                    <div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-surface-500">
+                      <span>{{ proxyProtocolLabel(data) }}</span>
+                      <span>{{ data.via }}</span>
+                      <span class="break-all">{{ proxyEndpointSummary(data) }}</span>
+                      <span>UDP: {{ proxyUdpSummary(data) }}</span>
+                    </div>
                   </div>
-                  <Button icon="pi pi-trash" severity="danger" text :aria-label="t('policy.editor.remove_node')"
-                    @click="removeAt(document.proxies, index)" />
+                  <div class="flex shrink-0 gap-1">
+                    <Button :icon="isRowExpanded(data) ? 'pi pi-check' : 'pi pi-pencil'" severity="secondary" text
+                      :label="isRowExpanded(data) ? t('policy.editor.finish_edit') : t('policy.editor.edit')"
+                      :aria-expanded="isRowExpanded(data)" :data-testid="`policy-proxy-edit-${index}`"
+                      @click="toggleRow(data)" />
+                    <Button icon="pi pi-trash" severity="danger" text :aria-label="t('policy.editor.remove_node')"
+                      @click="removeAt(document.proxies, index)" />
+                  </div>
                 </div>
-                <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <div v-if="isRowExpanded(data)" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
                   <div class="flex flex-col gap-2">
-                    <label :for="`policy_proxy_name_${index}`" class="font-semibold">{{ t('policy.editor.name') }}</label>
+                    <label :for="`policy_proxy_name_${index}`" class="font-semibold">{{ fieldLabel('policy.editor.name', 'kr-exit') }}</label>
                     <InputText :id="`policy_proxy_name_${index}`" v-model="data.name" class="w-full"
                       :data-testid="`policy-proxy-name-${index}`" />
                   </div>
@@ -524,7 +706,7 @@ onMounted(() => {
                     <Select v-model="data.via" :options="proxyViaOptionsFor(data)" class="w-full" />
                   </div>
                   <div class="flex flex-col gap-2 sm:col-span-2">
-                    <label class="font-semibold">{{ t('policy.editor.server') }}</label>
+                    <label class="font-semibold">{{ fieldLabel('policy.editor.server', data.via === 'mesh' ? '10.44.0.8 / UUID' : 'proxy.example.com') }}</label>
                     <div v-if="data.via === 'mesh'" class="grid gap-2 sm:grid-cols-2">
                       <InputText v-model="data.instanceId" class="w-full" :placeholder="t('policy.editor.instance_id')" />
                       <InputText v-model="data.virtualIp" class="w-full" :placeholder="t('policy.editor.virtual_ip')" />
@@ -532,7 +714,7 @@ onMounted(() => {
                     <InputText v-else v-model="data.address" placeholder="host / IP" class="w-full" />
                   </div>
                   <div class="flex flex-col gap-2">
-                    <label class="font-semibold">{{ t('policy.editor.port') }}</label>
+                    <label class="font-semibold">{{ fieldLabel('policy.editor.port', data.via === 'mesh' ? 'auto / 1080' : '443') }}</label>
                     <InputNumber
                       v-model="data.port"
                       :min="1"
@@ -543,58 +725,58 @@ onMounted(() => {
                     />
                   </div>
                   <div class="flex flex-col gap-2">
-                    <span class="font-semibold">UDP</span>
+                    <span class="font-semibold">{{ t('policy.editor.udp') }}</span>
                     <Select v-if="data.type === 'shadowsocks'" v-model="data.udp"
-                      :options="shadowsocksUdpOptions" class="w-full"
+                      :options="shadowsocksUdpOptions" option-label="label" option-value="value" class="w-full"
                       :data-testid="`policy-proxy-udp-mode-${index}`" />
                     <div v-else class="flex min-h-10 items-center gap-2">
                       <Checkbox :input-id="`policy_proxy_udp_${index}`" v-model="data.udp" binary />
-                      <label :for="`policy_proxy_udp_${index}`">{{ t('policy.editor.udp_capable') }}</label>
+                      <label :for="`policy_proxy_udp_${index}`">{{ t('policy.editor.udp_capable', { protocol: proxyProtocolLabel(data) }) }}</label>
                     </div>
                   </div>
                   <div v-if="['shadowsocks', 'vmess'].includes(data.type)" class="flex flex-col gap-2">
                     <label class="font-semibold">{{ t('policy.editor.cipher') }}</label>
                     <Select v-model="data.cipher" :options="proxyCipherOptions(data)" class="w-full" />
                   </div>
-                  <div v-if="['socks5', 'http', 'shadowsocks', 'trojan'].includes(data.type)"
+                  <div v-if="['socks5', 'shadowsocks', 'trojan'].includes(data.type)"
                     class="flex flex-col gap-2" :class="['shadowsocks', 'trojan'].includes(data.type) ? '' : 'sm:col-span-2'">
-                    <label class="font-semibold">{{ t('policy.editor.credentials') }}</label>
-                    <div v-if="['socks5', 'http'].includes(data.type)" class="grid gap-2 sm:grid-cols-2">
+                    <label class="font-semibold">{{ fieldLabel('policy.editor.credentials', data.type === 'socks5' ? 'alice / secret' : 'secret') }}</label>
+                    <div v-if="data.type === 'socks5'" class="grid gap-2 sm:grid-cols-2">
                       <InputText v-model="data.username" class="w-full" :placeholder="t('username')" />
                       <Password v-model="data.password" class="w-full" :placeholder="t('password')" :feedback="false" toggle-mask />
                     </div>
                     <Password v-else v-model="data.password" class="w-full" :placeholder="t('password')" :feedback="false" toggle-mask />
                   </div>
                   <div v-if="['vmess', 'vless'].includes(data.type)" class="flex flex-col gap-2 sm:col-span-2">
-                    <label class="font-semibold">UUID</label>
+                    <label class="font-semibold">{{ fieldLabel('policy.editor.uuid', '00000000-0000-0000-0000-000000000000') }}</label>
                     <InputText v-model="data.uuid" class="w-full" placeholder="00000000-0000-0000-0000-000000000000" />
                   </div>
                   <template v-if="['trojan', 'vmess', 'vless'].includes(data.type)">
                     <div class="flex flex-col gap-2">
-                      <label class="font-semibold">Transport</label>
+                      <label class="font-semibold">{{ t('policy.editor.transport') }}</label>
                       <Select v-model="data.transport" :options="['tcp', 'websocket']" class="w-full" />
                     </div>
                     <div v-if="data.transport === 'websocket'" class="flex flex-col gap-2">
-                      <label class="font-semibold">WebSocket path</label>
+                      <label class="font-semibold">{{ fieldLabel('policy.editor.websocket_path', '/vless') }}</label>
                       <InputText v-model="data.wsPath" class="w-full" placeholder="/" />
                     </div>
                     <div v-if="data.transport === 'websocket'" class="flex flex-col gap-2 sm:col-span-2">
-                      <label class="font-semibold">WebSocket Host</label>
+                      <label class="font-semibold">{{ fieldLabel('policy.editor.websocket_host', 'cdn.example.com') }}</label>
                       <InputText :model-value="data.wsHeaders?.Host ?? ''" class="w-full"
                         @update:model-value="updateWebSocketHost(data, String($event))" />
                     </div>
                     <div class="flex min-h-10 items-center gap-2">
                       <Checkbox :input-id="`policy_proxy_tls_${index}`" v-model="data.tlsEnabled"
                         :disabled="data.type === 'trojan'" binary />
-                      <label :for="`policy_proxy_tls_${index}`">TLS</label>
+                      <label :for="`policy_proxy_tls_${index}`">{{ t('policy.editor.tls') }}</label>
                     </div>
                     <div v-if="data.tlsEnabled" class="flex flex-col gap-2">
-                      <label class="font-semibold">TLS server name (SNI)</label>
+                      <label class="font-semibold">{{ fieldLabel('policy.editor.tls_server_name', 'cdn.example.com') }}</label>
                       <InputText v-model="data.tlsServerName" class="w-full" placeholder="cdn.example.com" />
                     </div>
                     <div v-if="data.tlsEnabled" class="flex min-h-10 items-center gap-2">
                       <Checkbox :input-id="`policy_proxy_tls_insecure_${index}`" v-model="data.tlsInsecure" binary />
-                      <label :for="`policy_proxy_tls_insecure_${index}`">Allow insecure TLS</label>
+                      <label :for="`policy_proxy_tls_insecure_${index}`">{{ t('policy.editor.tls_insecure') }}</label>
                     </div>
                   </template>
                 </div>
@@ -603,26 +785,44 @@ onMounted(() => {
             </div>
           </Panel>
 
-          <Panel :header="t('policy.editor.groups')" toggleable collapsed>
+          <Panel :header="t('policy.editor.groups')" toggleable>
             <div class="flex flex-col gap-3">
               <article v-for="(data, index) in document.groups" :key="rowKey(data)"
-                class="grid gap-4 rounded-xl border border-surface-200 p-4 sm:grid-cols-2 lg:grid-cols-[minmax(10rem,1fr)_12rem_minmax(16rem,2fr)_auto] dark:border-surface-700">
-                <div class="flex flex-col gap-2">
-                  <label class="font-semibold">{{ t('policy.editor.name') }}</label>
-                  <InputText v-model="data.name" class="w-full" />
+                class="flex flex-col gap-4 rounded-xl border border-surface-200 p-4 dark:border-surface-700">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <strong class="truncate">{{ data.name || t('policy.editor.unnamed_group') }}</strong>
+                    <div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-surface-500">
+                      <span>{{ data.type }}</span>
+                      <span class="break-all">{{ data.members.join(' -> ') || t('policy.editor.no_members') }}</span>
+                    </div>
+                  </div>
+                  <div class="flex shrink-0 gap-1">
+                    <Button :icon="isRowExpanded(data) ? 'pi pi-check' : 'pi pi-pencil'" severity="secondary" text
+                      :label="isRowExpanded(data) ? t('policy.editor.finish_edit') : t('policy.editor.edit')"
+                      :aria-expanded="isRowExpanded(data)" :data-testid="`policy-group-edit-${index}`"
+                      @click="toggleRow(data)" />
+                    <Button icon="pi pi-trash" severity="danger" text
+                      :aria-label="t('policy.editor.remove_group')" @click="removeAt(document.groups, index)" />
+                  </div>
                 </div>
-                <div class="flex flex-col gap-2">
-                  <label class="font-semibold">{{ t('policy.editor.group_type') }}</label>
-                  <Select v-model="data.type" :options="groupTypeOptions" class="w-full" />
+                <div v-if="isRowExpanded(data)"
+                  class="grid gap-4 sm:grid-cols-2 lg:grid-cols-[minmax(10rem,1fr)_12rem_minmax(16rem,2fr)]">
+                  <div class="flex flex-col gap-2">
+                    <label class="font-semibold">{{ fieldLabel('policy.editor.name', 'overseas-exit') }}</label>
+                    <InputText v-model="data.name" class="w-full" :data-testid="`policy-group-name-${index}`" />
+                  </div>
+                  <div class="flex flex-col gap-2">
+                    <label class="font-semibold">{{ t('policy.editor.group_type') }}</label>
+                    <Select v-model="data.type" :options="groupTypeOptions" class="w-full" />
+                  </div>
+                  <div class="flex flex-col gap-2 sm:col-span-2 lg:col-span-1">
+                    <label class="font-semibold">{{ fieldLabel('policy.editor.members', 'mesh-hop,native-vless,DIRECT') }}</label>
+                    <InputText :model-value="data.members.join(',')" class="w-full"
+                        :placeholder="t('policy.editor.members_hint')"
+                        @update:model-value="updateMembers(data, String($event))" />
+                  </div>
                 </div>
-                <div class="flex flex-col gap-2 sm:col-span-2 lg:col-span-1">
-                  <label class="font-semibold">{{ t('policy.editor.members') }}</label>
-                  <InputText :model-value="data.members.join(',')" class="w-full"
-                      :placeholder="t('policy.editor.members_hint')"
-                      @update:model-value="updateMembers(data, String($event))" />
-                </div>
-                <Button icon="pi pi-trash" severity="danger" text class="self-end justify-self-end"
-                  :aria-label="t('policy.editor.remove_group')" @click="removeAt(document.groups, index)" />
               </article>
               <Button icon="pi pi-plus" :label="t('policy.editor.add_group')" class="self-start" @click="addGroup" />
             </div>
@@ -631,6 +831,10 @@ onMounted(() => {
           <Panel :header="t('policy.editor.rules')" toggleable>
             <div class="flex flex-col gap-3">
               <Message severity="info" :closable="false">{{ t('policy.editor.order_help') }}</Message>
+              <small class="text-surface-500">{{ t('policy.editor.geo_category_help', {
+                geositeCount: geositeCategoryOptions.length,
+                geoipCount: geoipDataCategoryCount,
+              }) }}</small>
               <div class="flex flex-wrap items-center gap-2">
                 <span class="font-semibold">{{ t('policy.editor.presets') }}</span>
                 <Button :label="t('policy.editor.preset_china_direct')" severity="secondary" outlined
@@ -643,8 +847,15 @@ onMounted(() => {
               <article v-for="(data, index) in document.rules" :key="rowKey(data)"
                 class="flex flex-col gap-4 rounded-xl border border-surface-200 p-4 dark:border-surface-700">
                 <div class="flex items-center justify-between gap-3">
-                  <span class="text-sm font-semibold text-surface-500">{{ t('policy.editor.rule_priority', { index: index + 1 }) }}</span>
+                  <div class="min-w-0">
+                    <span class="text-sm font-semibold text-surface-500">{{ t('policy.editor.rule_priority', { index: index + 1 }) }}</span>
+                    <div class="mt-1 break-all text-xs text-surface-500">{{ ruleSummary(data) }}</div>
+                  </div>
                   <div class="flex gap-1">
+                    <Button :icon="isRowExpanded(data) ? 'pi pi-check' : 'pi pi-pencil'" severity="secondary" text
+                      :label="isRowExpanded(data) ? t('policy.editor.finish_edit') : t('policy.editor.edit')"
+                      :aria-expanded="isRowExpanded(data)" :data-testid="`policy-rule-edit-${index}`"
+                      @click="toggleRow(data)" />
                     <Button icon="pi pi-arrow-up" severity="secondary" text :disabled="index === 0"
                       :aria-label="t('policy.editor.move_up')" @click="moveRule(index, -1)" />
                     <Button icon="pi pi-arrow-down" severity="secondary" text :disabled="index === document.rules.length - 1"
@@ -653,7 +864,8 @@ onMounted(() => {
                       @click="removeAt(document.rules, index)" />
                   </div>
                 </div>
-                <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-[minmax(10rem,1fr)_minmax(12rem,2fr)_minmax(10rem,1fr)_9rem]">
+                <div v-if="isRowExpanded(data)"
+                  class="grid gap-4 sm:grid-cols-2 xl:grid-cols-[minmax(10rem,1fr)_minmax(12rem,2fr)_minmax(10rem,1fr)_9rem]">
                   <div class="flex flex-col gap-2">
                     <label class="font-semibold">{{ t('policy.editor.rule_type') }}</label>
                     <Select :model-value="data.type" :options="ruleTypeOptions" editable class="w-full"
@@ -661,18 +873,27 @@ onMounted(() => {
                       @update:model-value="updateRuleType(data, String($event))" />
                   </div>
                   <div class="flex flex-col gap-2">
-                    <label class="font-semibold">{{ t('policy.editor.rule_value') }}</label>
-                    <InputText v-if="ruleNeedsOperand(data.type)" v-model="data.operand" class="w-full" />
+                    <label class="font-semibold">{{ fieldLabel('policy.editor.rule_value', ruleOperandExample(data.type)) }}</label>
+                    <Select v-if="ruleCategoryOptions(data.type).length" :model-value="data.operand"
+                      :options="ruleCategoryOptions(data.type)" filter editable
+                      :virtual-scroller-options="{ itemSize: 38 }" class="w-full"
+                      :data-testid="`policy-rule-category-${index}`"
+                      @update:model-value="updateRuleOperand(data, String($event))" />
+                    <Select v-else-if="data.type.toUpperCase() === 'NETWORK'" :model-value="data.operand"
+                      :options="['tcp', 'udp']" class="w-full"
+                      @update:model-value="updateRuleOperand(data, String($event))" />
+                    <InputText v-else-if="ruleNeedsOperand(data.type)" :model-value="data.operand" class="w-full"
+                      @update:model-value="updateRuleOperand(data, String($event))" />
                     <div v-else class="flex min-h-10 items-center text-surface-500">{{ t('policy.editor.any') }}</div>
                   </div>
                   <div class="flex flex-col gap-2">
-                    <label class="font-semibold">{{ t('policy.editor.target') }}</label>
+                    <label class="font-semibold">{{ fieldLabel('policy.editor.target', 'DIRECT / overseas-exit') }}</label>
                     <Select v-model="data.target" :options="actorOptions" editable class="w-full" />
                   </div>
                   <div class="flex flex-col gap-2">
                     <span class="font-semibold">{{ t('policy.editor.no_resolve') }}</span>
                     <div class="flex min-h-10 items-center">
-                      <Checkbox v-if="policyRuleSupportsNoResolve(data.type)" v-model="data.noResolve" binary />
+                      <Checkbox v-if="policyRuleSupportsNoResolve(data.type, data.operand)" v-model="data.noResolve" binary />
                       <span v-else class="text-surface-400">-</span>
                     </div>
                   </div>
@@ -699,6 +920,7 @@ onMounted(() => {
                     <small class="text-surface-500">{{ t('policy.editor.builtin_help') }}</small>
                   </template>
                   <template v-else>
+                    <label class="font-semibold">{{ fieldLabel('policy.editor.rule_data_source', managedRuleDataSource(data.type)) }}</label>
                     <InputText :model-value="ruleDataSource(data)" class="w-full"
                       :aria-label="t('policy.editor.rule_data_source')"
                       @update:model-value="setRuleDataSource(data, String($event))" />
@@ -724,6 +946,7 @@ onMounted(() => {
         </template>
 
         <Panel :header="t('policy.editor.advanced_yaml')" toggleable collapsed>
+          <label for="policy_config_inline" class="mb-2 block font-semibold">{{ fieldLabel('policy.editor.advanced_yaml', 'version: 1') }}</label>
           <Textarea id="policy_config_inline" v-model="config.policy_config_inline" rows="16" auto-resize
             class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')" />
         </Panel>

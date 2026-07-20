@@ -51,6 +51,20 @@ describe('policy visual document codec', () => {
     expect(policyRuleSupportsNoResolve('COUNTRY')).toBe(true)
     expect(policyRuleSupportsNoResolve('IP-CIDR')).toBe(true)
     expect(policyRuleSupportsNoResolve('DOMAIN-SUFFIX')).toBe(false)
+    expect(policyRuleSupportsNoResolve('EXTERNAL', 'geoip:google')).toBe(true)
+    expect(policyRuleSupportsNoResolve('EXTERNAL', 'site:google')).toBe(false)
+  })
+
+  it('rejects HTTP nodes because pinned Leaf has no HTTP CONNECT outbound', () => {
+    expect(() => parsePolicyDocument(`
+version: 1
+proxies:
+  http-exit:
+    type: http
+    server: 192.0.2.10
+    port: 8080
+rules: ["MATCH,http-exit"]
+`)).toThrow('proxies.http-exit.type is unsupported')
   })
 
   it('round-trips mesh/native nodes, ordered groups, geo data and ordered rules', () => {

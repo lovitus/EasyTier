@@ -110,6 +110,15 @@ export async function updatePolicyRuleData(instanceId: string, resource: string,
   })
 }
 
+export async function listPolicyRuleDataCategories(instanceId: string, resource: string, expectedSha256?: string, path?: string) {
+  return await invoke<Api.ListPolicyRuleDataCategoriesResponse>('list_policy_rule_data_categories', {
+    instanceId,
+    resource,
+    expectedSha256,
+    path,
+  })
+}
+
 export async function listPolicyOutboundInterfaces() {
   return await invoke<Api.ListPolicyOutboundInterfacesResponse>('list_policy_outbound_interfaces')
 }

@@ -24,10 +24,12 @@ const CheckboxStub = defineComponent({
 
 const ButtonStub = defineComponent({
   name: 'Button',
+  inheritAttrs: false,
   props: { label: String, disabled: Boolean },
   emits: ['click'],
-  setup(props, { emit }) {
+  setup(props, { attrs, emit }) {
     return () => h('button', {
+      ...attrs,
       disabled: props.disabled,
       onClick: () => emit('click'),
     }, props.label)
@@ -119,6 +121,11 @@ function mountEditor(config: NetworkConfig, api?: import('../src/modules/api').R
   return { model, wrapper }
 }
 
+async function expandRow(wrapper: ReturnType<typeof mountEditor>['wrapper'], testId: string) {
+  await wrapper.get(`[data-testid="${testId}"]`).trigger('click')
+  await nextTick()
+}
+
 describe('PolicyEditor', () => {
   it('keeps policy mode plugin-like and initializes a safe inline document only when enabled', async () => {
     const { model, wrapper } = mountEditor(DEFAULT_NETWORK_CONFIG())
@@ -180,6 +187,7 @@ rules: ["MATCH,ss"]
 `
     const { model, wrapper } = mountEditor(config)
 
+    await expandRow(wrapper, 'policy-proxy-edit-0')
     expect(wrapper.find<HTMLSelectElement>('[data-testid="policy-proxy-type-0"]').element.value).toBe('shadowsocks')
     await wrapper.find<HTMLSelectElement>('[data-testid="policy-proxy-udp-mode-0"]').setValue('uot-v2')
     await nextTick()
@@ -211,8 +219,9 @@ rules: ["MATCH,through-mesh"]
 `
     const { model, wrapper } = mountEditor(config)
 
+    await expandRow(wrapper, 'policy-proxy-edit-0')
     expect(wrapper.find<HTMLSelectElement>('[data-testid="policy-proxy-type-0"]').element.value).toBe('vmess')
-    expect(wrapper.text()).toContain('WebSocket path')
+    expect(wrapper.text()).toContain('policy.editor.websocket_path')
     await nextTick()
 
     expect(model.policy_config_inline).toContain('type: vmess')
@@ -296,6 +305,7 @@ proxies:
 rules: ["MATCH,exit"]
 `
     const { model, wrapper } = mountEditor(config)
+    await expandRow(wrapper, 'policy-proxy-edit-0')
     const input = wrapper.find<HTMLInputElement>('[data-testid="policy-proxy-name-0"]')
     const originalElement = input.element
 
@@ -312,6 +322,7 @@ rules: ["MATCH,exit"]
     config.policy_config_inline = 'version: 1\nrules: ["DOMAIN,example.com,DIRECT"]\n'
     const { model, wrapper } = mountEditor(config)
 
+    await expandRow(wrapper, 'policy-rule-edit-0')
     await wrapper.find<HTMLSelectElement>('[data-testid="policy-rule-type-0"]').setValue('GEOIP')
     await nextTick()
 
@@ -415,5 +426,49 @@ rules: ["MATCH,exit"]
     expect(model.policy_config_inline).toContain('GEOIP,CN,DIRECT,no-resolve')
     expect(model.policy_config_inline).not.toContain('rule-sets:')
     expect(model.policy_config_inline).not.toContain('sha256:')
+  })
+
+  it('keeps existing node, group, and rule cards compact until Edit is selected', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = `version: 1
+proxies:
+  exit:
+    type: socks5
+    server: 192.0.2.10
+    port: 1080
+    udp: true
+groups:
+  preferred: { type: fallback, members: [exit, DIRECT] }
+rules: ["MATCH,preferred"]
+`
+    const { wrapper } = mountEditor(config)
+
+    expect(wrapper.find('[data-testid="policy-proxy-name-0"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="policy-group-name-0"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="policy-rule-type-0"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('192.0.2.10')
+    expect(wrapper.text()).toContain('exit -> DIRECT')
+    expect(wrapper.text()).toContain('MATCH -> preferred')
+
+    await expandRow(wrapper, 'policy-proxy-edit-0')
+    const typeOptions = wrapper.find<HTMLSelectElement>('[data-testid="policy-proxy-type-0"]')
+      .findAll('option').map(option => option.attributes('value'))
+    expect(typeOptions).toEqual(['socks5', 'shadowsocks', 'trojan', 'vmess', 'vless'])
+    expect(typeOptions).not.toContain('http')
+  })
+
+  it('edits both FakeIP pools in the visual DNS menu', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
+    const { model, wrapper } = mountEditor(config)
+
+    await wrapper.get<HTMLInputElement>('#policy_fake_ip_range').setValue('198.19.64.0/22')
+    await wrapper.get<HTMLInputElement>('#policy_fake_ip_range6').setValue('fd12:3456:789a::/112')
+    await nextTick()
+
+    expect(model.policy_config_inline).toContain('fake-ip-range: 198.19.64.0/22')
+    expect(model.policy_config_inline).toContain('fake-ip-range6: fd12:3456:789a::/112')
   })
 })
