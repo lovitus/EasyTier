@@ -30,6 +30,15 @@ It is local execution state, not a reason to trigger a workflow by itself.
 - Build-affecting status: local cleanup prepared. No build, test, commit, push, or workflow has been run for this snapshot.
 - Next gate, only after explicit validation request: format locally, run the complete standard `.160` preflight once, inspect the full cleanup diff/lockfile/cfg/workflow pins, then create one candidate and one workflow pair if runtime validation is still required.
 
+## 2026-07-19 current workstream: profiling-bundle isolated performance self-test
+
+- Description: add a profiling-only local performance harness without changing production EasyTier/Leaf code, Cargo manifests, Cargo.lock or formal release packaging.
+- Objective: one command creates a private client/router/fixture namespace topology, proves policy TUN capture, runs byte-exact upload/download, samples CPU/RSS/FD/threads and emits reusable JSON/TSV evidence.
+- Isolation: no host route, firewall, forwarding or production process changes; fixture has no external route; cleanup targets exact namespace PIDs and compares host state before/after.
+- Build-affecting status: profiling workflow packaging plus standalone std-only Rust probe and shell harness prepared locally. Production binary inputs are unchanged.
+- Exact evidence target: `.160` shell/probe/preflight gate; one exact profiling artifact self-test with all JSON gates true; three-run cleanup/resource repeatability; formal release archive/APK exclusion audit.
+- Current status: implementation prepared; local formatting, `.160` preflight and exact artifact validation pending. No workflow has been started for this workstream.
+
 ## 2026-07-17 current candidate: high-BDP mesh actor fallback
 
 - Base artifact: exact `c7a8d8aff17e7121847782b84a4fb11c93c8d849`; Linux run `29553340531` and Android run `29553340566` passed and their checksums/build metadata matched.
@@ -406,3 +415,173 @@ It is local execution state, not a reason to trigger a workflow by itself.
 - `.160` 目标：标准 `scripts/leaf-remote-preflight.sh` 一次 `--locked` no-run 和完整 focused suite；新增精确测试 `expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap`。
 - Artifact 目标：一次自动 Linux/Android workflow 集；Linux 精确 artifact 重跑域名/强制 v4/v6 的 Trojan、VMess、VLESS direct 与 mesh、UDP、fallback、stop/start、资源及性能矩阵。每个失败均以同主机、同节点、同目标的 sing-box 相邻窗口交叉验证。
 - 首次候选 `1059c21d88d06d10c9c965750269484dbc7dcbcf`：Linux workflow `29651804523` 的完整 policy suite 为 87/88，通过的新行为与旧快照断言冲突；唯一失败仍期待 `direct:system`，实际为捕获的 `direct:1.1.1.1`。运行时代码、编译和新增精确测试均通过。修正候选只更新该断言并把稳定配置快照测试加入 `.160` 默认过滤器；Android `29651804525` 独立保留其实际结果，不用它替代 Linux artifact。
+## 2026-07-19 Trojan / VMess / VLESS exact candidate closure
+
+Shared candidate: `0cf368072aad4882309e6f6d450e45f5f4e1a9ac`
+
+| Workstream | Build-affecting | Evidence target | Status |
+| --- | --- | --- | --- |
+| Proxy bootstrap DNS | yes | Domain endpoint must not resolve to IPv4/IPv6 FakeIP after TUN ownership | complete: 3x64 MiB, UDP 3/3, FakeIP sockets 0 |
+| Linux exact artifact | no | SHA, build metadata, symbols, deployable musl binaries | complete: run `29651991456` verified and deployed |
+| Android exact artifact | no | aarch64 APK SHA/signing/build metadata | build complete: run `29651991435`; real-device traffic pending |
+| Native protocols | no | Original/CDN Trojan, VMess, VLESS TCP/UDP | complete |
+| Mesh chain | no | Portless mesh SOCKS hop followed by protocol actor | complete |
+| Address families | no | Dual, forced proxy endpoint IPv4/IPv6, controlled IPv6 literal target | complete on Linux |
+| Fallback | no | Failed first member switches to mesh VLESS chain | complete |
+| Lifecycle | no | 10 stop/start cycles, process/TUN/temp cleanup, peer resource return | complete |
+| Performance | no | 3-run medians against sing-box and raw controls | complete; policy path ceiling about 285-290 Mbit/s remains follow-up |
+
+No additional source candidate was created during real-host validation. Documentation remains local and must not trigger a workflow by itself. Full evidence and compatibility boundaries are in `docs/leaf_trojan_vmess_vless_validation_report_cn.md`.
+### 2026-07-19 original-node comparator supplement
+
+- Private sing-box configs for original Trojan, VMess and VLESS were rebuilt on lv1g2 with mode `0600`; no endpoint or credential entered the repository.
+- Trojan certificate DER fingerprint matched the user-provided pin before the private certificate was trusted; `insecure` was not used.
+- Three-run medians: Trojan `233 Mbit/s`, VMess `154 Mbit/s`; VLESS immediate retry `5/5`, median `188 Mbit/s`.
+- EasyTier immediate VLESS cross-check: `3/3`, median `176 Mbit/s`, UDP `3/3`, FakeIP sockets `0`.
+- Original and CDN nodes now both have direct EasyTier, mesh EasyTier and sing-box direct evidence for all three newly added protocols.
+
+## 2026-07-19 Leaf policy 数据面性能根因
+
+- 描述：分层复测 Linux policy DIRECT、CDN VLESS、sing-box SOCKS/TUN 与 Leaf auto-TUN。
+- 目标：区分协议 actor、smoltcp、TUN、EasyTier core 与 Unix-datagram bridge 的吞吐/CPU 损失。
+- 构建影响：无；本轮只使用 workflow `29651991456` 的精确候选 `0cf368072aad4882309e6f6d450e45f5f4e1a9ac`。
+- 状态：根因确认；实现候选未开始，不触发 workflow。
+- 可信证据：Leaf auto-TUN DIRECT/VLESS 中位约 652.8/540.0 Mbit/s；完整 EasyTier 路径约 285/277.4 Mbit/s；完整路径每 192 MiB 约 107-128 万 syscall，sing-box SOCKS 约 15.3 万。
+- 结论：第一瓶颈是 EasyTier TUN/classifier 与 Leaf worker 之间的逐包 bridge，不是 DIRECT/VLESS actor。
+- 详细报告：`docs/leaf_policy_dataplane_performance_investigation_cn.md`。
+- 下一候选：优先评估 Linux Leaf-owned policy TUN；Android 保留单 VpnService TUN，后续单独优化同进程 packet adapter。
+
+## 2026-07-19 profiling self-test mesh matrix
+
+| Workstream | Objective | Build-affecting | Evidence target | Status | Candidate |
+| --- | --- | --- | --- | --- | --- |
+| Leaf DIRECT baseline | Preserve isolated policy-TUN DIRECT measurement | No product code; profiling package only | Byte exactness, throughput, CPU/RSS/FD/thread, host-state and cleanup gates | Implemented; previous `.160` run passed | local snapshot |
+| Native mesh | Measure direct two-peer TUN overlay without KCP/QUIC proxy | No product code; profiling package only | Direct one-hop route, TUN counters, upload/download and watchdog | Prototype passed; integrated run pending | local snapshot |
+| KCP mesh | Measure and prove KCP proxy selection | No product code; profiling package only | Live RPC `transport_type: Kcp`, throughput and resources | Prototype passed; integrated run pending | local snapshot |
+| QUIC mesh | Measure and prove QUIC proxy selection | No product code; profiling package only | Live RPC `transport_type: Quic`, throughput and resources | Prototype passed; integrated run pending | local snapshot |
+| Forced relay | Measure a physically non-direct two-hop route | No product code; profiling package only | No endpoint underlay route; `path_len: 2` via `perf-r` | Prototype passed; integrated run pending | local snapshot |
+| Safety watchdog | Abort before a storm can impair the host | No product code; profiling package only | Inject resource, log, byte-amplification and no-progress failures; exact PID/netns cleanup and `abort.json` | Implemented; fault injection pending | local snapshot |
+
+### 2026-07-19 mesh self-test evidence closure
+
+| Workstream | Final local-harness evidence | Status |
+| --- | --- | --- |
+| Leaf DIRECT baseline | Combined 8 MiB run passed at about `1.037/1.387 Gbit/s` upload/download | Complete for harness |
+| Native mesh | Integrated 16 MiB run passed at about `1.295/1.201 Gbit/s` | Complete for harness |
+| KCP mesh | Integrated 16 MiB run passed at about `0.882/0.884 Gbit/s`; live RPC proved `Kcp` | Complete for harness |
+| QUIC mesh | Integrated 16 MiB run passed at about `0.463/0.860 Gbit/s`; live RPC proved `Quic` | Complete for harness |
+| Forced relay | Integrated 16 MiB run passed at about `1.122/1.021 Gbit/s`; two-hop route proved | Complete for harness |
+| Safety watchdog | Forced `1 KiB` RSS limit produced `reason: rss_limit`, exact termination and zero residual | Complete for implemented abort path |
+| Clean package | Checksums, clean extraction, combined 4 MiB run and cleanup passed; archive SHA `d001b682...66e3` | Complete for workflow-equivalent package |
+| Exact workflow artifact | Await next legitimate build-affecting profiling candidate; do not dispatch for docs/harness only | Pending provenance |
+
+- Leaf DIRECT outer guard fault injection: `ET_PERF_MAX_TOTAL_RSS_KIB=1` produced `reason: total_rss_limit` at `1,576 KiB`, terminated the child process group, and left no process or namespace residual.
+## 2026-07-19 experimental Leaf PacketBatch endpoint candidate
+
+- Shared candidate: `aae707ca9236565cdcc31adbeccc2814ff0918b4`, frozen after
+  the clean `.160` Rust and frontend preflight.
+- Workstream A, configuration: add canonical `experimental_features` storage,
+  CLI `--exp-feature`, `ET_EXP_FEATURES`, TOML/protobuf/RPC round-trip, and GUI
+  `leaf-packet-batch` switch. Build-affecting: yes. Status: complete; Rust
+  round-trip and GUI persistence tests passed.
+- Workstream B, Leaf API: add bounded external `PacketBatch` endpoint to locked
+  Leaf fork `2153f126c4841fc7f74d2da4f9e61d622882795f` without changing legacy raw-FD
+  construction. Build-affecting: yes. Status: complete and pushed; exact Leaf
+  endpoint integration tests passed 3/3.
+- Workstream C, EasyTier backends: Android in-memory batch channel and Unix
+  worker framed stream, selected before runtime publication. Build-affecting:
+  yes. Status: implementation and focused tests complete; exact artifacts pending.
+- Workstream D, fallback/lifecycle: unsupported backend uses legacy with a
+  visible reason; pre-publication initialization failure retries legacy once;
+  post-publication failure remains fail-closed and restarts a whole generation.
+  Build-affecting: yes. Status: implementation and selector tests complete;
+  old-worker fallback and repeated lifecycle remain artifact gates.
+- Workstream E, validation: exact codec bounds/order/close tests, feature
+  parsing and config round-trip, legacy-disabled identity, unsupported fallback,
+  runtime restart, Linux stream and Android memory functional matrix, then
+  same-artifact A/B throughput/syscalls/CPU/RSS/FD/tasks. Status: unit/UI gate
+  complete; Linux/Android artifact matrix pending.
+- Reference contract: Mihomo `listener/sing_tun/server.go::{New,Listener.Close}`;
+  sing-box `protocol/tun/inbound.go::{Start,Close}`; Clash Meta Android
+  `TunService.kt::run`, `native/tun.go::startTun`, and JNI `main.c`. All retain a
+  single TUN/stack lifecycle and avoid runtime packet-path backend switching.
+- `.160` gate: complete. A clean empty-target `--locked` no-run finished in
+  5m43s and regenerated exact EasyTier, policy and netstack test binaries. All
+  28 configured filters matched and passed; zero-match filters now fail the
+  script. Frontend codegen, 82 Vitest tests, `vue-tsc` and production build also
+  passed on Node 22/pnpm 9.12.1.
+- Workflow gate: one automatic exact-SHA Linux/Android set after `.160`; do not
+  duplicate. During builds prepare isolated hosts and bounded A/B commands.
+- Safety stop: terminate profiling immediately on CPU/RSS/FD/task growth,
+  packet storm, route leakage, host-wide network change, or validation-host
+  availability impact; record the partial evidence and failure cause.
+- Builder cleanup: removed 37 GiB historical target plus 18 GiB downloaded and
+  extracted artifacts, retained registries/stores, then performed the clean
+  build. Final target is 2.8 GiB and the filesystem has 61 GiB free.
+
+## 2026-07-19 PacketBatch workflow follow-up
+
+| Workstream | Objective | Build-affecting | Evidence target | Status | Shared candidate |
+|---|---|---:|---|---|---|
+| Android first artifact | Prove the complete Android candidate still builds, tests, packages, and uploads | no | workflow `29675426117` | passed in 20m0s | `aae707ca9236565cdcc31adbeccc2814ff0918b4` |
+| Linux minimal-feature repair | Declare Tokio I/O extension support used by the framed stream and prevent Cargo feature-unification masking | yes | GNU + musl `easytier-policy --no-default-features --locked --no-run`; all 28 focused tests | `.160` passed; awaiting one batched follow-up workflow set | next commit |
+| Linux/Android artifact validation | Build immutable optimized Linux and Android artifacts, then collect functional/performance/resource evidence | no | exact-SHA workflow pair and same-artifact A/B matrix | pending follow-up artifact | next commit |
+
+The Linux first run `29675426118` failed mechanically in job `88161897043` because `easytier-policy` used Tokio I/O extension traits without declaring `io-util`. No PacketBatch data-plane behavior ran. The follow-up is limited to the dependency declaration, two minimal-feature preflight gates, and audit documentation.
+
+Follow-up candidate frozen and pushed from commit `61e9852fd18b83bb96cd5c8c8af69e79dd2e43c4`; all pending artifact and A/B evidence must use this exact SHA.
+
+## 2026-07-19 PacketBatch contiguous decoder follow-up
+
+| Workstream | Objective | Build-affecting | Evidence target | Status | Shared candidate |
+|---|---|---:|---|---|---|
+| Framed decoder syscall fix | Preserve ETPB v1 bytes while replacing per-packet stream reads with one bounded body read and in-memory validation | yes | `.160` GNU/musl minimal builds, focused codec tests, exact optimized Linux artifact | local implementation ready | pending SHA |
+| Linux A/B rerun | Prove both upload and download medians and syscall counts improve without resource/lifecycle regression | no | three untraced runs per mode plus separate strace run on `.37` | blocked on new artifact | pending SHA |
+| Android MemoryBatch regression | Preserve in-process functionality and resource behavior; stream decoder change must not alter MemoryBatch | no | exact workflow artifact and real-device captured-UID/lifecycle evidence | pending | pending SHA |
+
+Candidate scope is limited to `read_batch_async`, a corrupt-body test, the focused preflight filter, the bounded validation harness, and evidence documentation. References remain Mihomo `listener/sing_tun/server.go::{New,Listener.Close}` and sing-box `protocol/tun/inbound.go::{Start,Close}`; neither has worker framing, so EasyTier keeps isolation but must amortize the internal stream correctly.
+
+Contiguous decoder candidate frozen at `39dd4d2f989a459fb44d9cc8c9aab708338e4f83`. `.160` GNU/musl minimal gates, unified no-run build, and the complete default focused suite passed before dispatch. Linux and Android workflow artifacts and all subsequent evidence must use this exact SHA.
+
+### 2026-07-19 PacketBatch reusable-buffer follow-up
+
+- Description: remove per-frame stream body/encode allocations exposed by exact `39dd4d2f` syscall and symbolized profiling.
+- Objective: retain PacketBatch upload gain while bringing download median to at least 95% of same-artifact legacy, with no legacy/wire/API/route/HEV/DNS change.
+- Build-affecting files: `easytier-policy/src/packet.rs`; evidence update: `easytier/docs/failed_attempts/FAILED_leaf_external_packet_endpoint_performance.md`.
+- `.160` evidence: standard preflight passed; GNU minimal 2.04 s, musl minimal 2.38 s, unified no-run 58.60 s; configured focused suite passed.
+- Required workflow set: one automatic Linux profiling beta plus one Android policy candidate for the exact commit; no comparator workflow because same artifact contains runtime-disabled legacy.
+- Linux evidence target: 3x legacy and 3x PacketBatch untraced medians, old-worker fallback, resource/cleanup/host-state checks, then one trace/profile pair only if needed.
+- Android evidence target: retained-data upgrade, default-off and persisted-on GUI/config semantics, supported MemoryBatch runtime, TLS policy probe, disabled-mode comparison, stop/start cleanup and bounded idle CPU.
+- Status: preflight passed; local commit SHA pending; do not push until complete diff/lockfile/cfg/workflow-pin audit passes.
+- Exact shared candidate SHA: `ca5751fb7f78dc549624fc855ad611d4ccbb42e8`.
+- Dispatch lock: `.160` preflight passed before commit; candidate diff contains only reusable stream buffers/tests plus the evidence report; push starts the automatic Linux/Android pair once.
+- Build wait tasks: keep Android stopped until RTCP/ADB recovery, prepare retained-data runtime continuation, and preserve `.37` isolated harness state for exact-artifact A/B/fallback/profile reuse.
+
+### 2026-07-19 Android PacketBatch startup crash follow-up
+
+- Failure: exact `39dd4d2f` Android artifact panicked in `tun-0.7.22::Configuration::address` because the MemoryBatch external endpoint intentionally supplied `fd = -1` and no OS-TUN address fields.
+- Root cause boundary: locked Leaf `2153f126c4841fc7f74d2da4f9e61d622882795f`, `proxy/tun/inbound.rs::new`, configured OS-TUN fields before selecting `ExternalPacketEndpoint`; EasyTier legacy FD mode is unaffected.
+- Fix scope: external endpoints skip OS-TUN-only configuration; add a real start/shutdown regression with empty OS-TUN fields. No packet, DNS, routing, HEV, QUIC, KCP, or first-match semantics change.
+- Rule compatibility follow-up: Mihomo `rules/parser.go::ParseRule`, `rules/common/port.go::NewPort`, and `common/utils/ranges.go::NewUnsignedRanges` accept one port or a dash range. EasyTier now validates that subset and normalizes one port to Leaf's explicit `start-end`; colon syntax is rejected before Leaf compilation.
+- Validation gate: push the Leaf fix only after its focused external-endpoint test passes on `.160`; then pin the new Leaf SHA, run the complete EasyTier `.160` batch, and use one Linux/Android workflow pair for startup, DIRECT rule, lifecycle, fallback, and PacketBatch performance evidence.
+
+### 2026-07-19 PacketBatch final disposition
+
+- Status: **FAILED**. The active TODO was summarized and archived as `docs/failed_attempts/FAILED_leaf_external_packet_endpoint_performance.md`.
+- Evidence: StreamBatch/PacketBatch failed the bidirectional 95% throughput floor, increased scheduling/allocation costs, and the exact Android artifact panicked before legacy fallback could run.
+- Rollback boundary: `0cf368072aad4882309e6f6d450e45f5f4e1a9ac`; features already present at that commit, including Trojan/VMess/VLESS and the existing Leaf policy stack, are outside this failed experiment.
+- Dispatch: documentation-only disposition; no workflow is authorized or required by this update.
+
+### 2026-07-19 Linux Leaf-owned policy TUN lane initialization
+
+| Workstream | Objective | Build-affecting | Evidence target | Status | Shared candidate |
+| --- | --- | --- | --- | --- | --- |
+| Phase 0 source/route audit | Prove existing locked Leaf auto-TUN and EasyTier Linux primitives can express an owner-scoped fast path without mesh changes | no | exact functions, route ownership, reference semantics, Go/No-Go | pending | none |
+| Internal Linux spike | Remove the per-packet EasyTier/Leaf bridge only for supported Linux TUN policy mode | yes | `.160` no-run/focused tests plus isolated namespace correctness/fallback | not started | none |
+| Exact artifact A/B | Measure same-SHA feature off/on on old-kernel and 10Gbps dual-stack hosts | yes | DIRECT/VLESS, IPv4/IPv6, functional, failure, resource and cleanup gates | blocked by spike | none |
+| Public experiment surface | Add CLI/config/RPC/GUI only after performance candidate passes | yes | migration, round-trip and unsupported-platform legacy evidence | not approved | none |
+
+- Main TODO: `docs/todo/leaf_linux_owned_policy_tun_performance.md`.
+- Append-only evidence: `docs/todo/leaf_linux_owned_policy_tun_validation_journal.md`.
+- Baseline: exact `0cf368072aad4882309e6f6d450e45f5f4e1a9ac` artifacts and existing profile; no duplicate baseline workflow.
+- Current dispatch lock: CLOSED. Phase 0 is documentation/source audit only; no code candidate, `.160` build, commit, push or workflow is authorized yet.
