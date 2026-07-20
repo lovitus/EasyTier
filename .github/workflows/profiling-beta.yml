@@ -80,6 +80,29 @@ jobs:
           echo "HEV_EGRESS_BINARY=$hev_bin/easytier-hev-socks-egress" >> "$GITHUB_ENV"
           echo "HEV_SERVER_COMMIT=$HEV_SERVER_COMMIT" >> "$GITHUB_ENV"
 
+      - name: Build profiling-only isolated performance probe
+        run: |
+          set -euo pipefail
+          bash -n scripts/leaf-perf-selftest.sh
+          bash -n scripts/mesh-perf-selftest.sh
+          bash -n scripts/profiling-perf-selftest.sh
+          probe_test="$RUNNER_TEMP/easytier-perf-probe-test"
+          probe_bin="$RUNNER_TEMP/easytier-perf-probe"
+          rustc --edition 2024 --test tools/easytier-perf-probe.rs -o "$probe_test"
+          timeout 120 "$probe_test"
+          rustc \
+            --edition 2024 \
+            --target "$TARGET" \
+            -C opt-level=3 \
+            -C target-feature=+crt-static \
+            tools/easytier-perf-probe.rs \
+            -o "$probe_bin"
+          file "$probe_bin" | tee profiling-selftest-file-info.txt
+          grep -Eq 'statically linked|static-pie linked' profiling-selftest-file-info.txt
+          echo "SELFTEST_PROBE=$probe_bin" >> "$GITHUB_ENV"
+          echo "SELFTEST_PROBE_SOURCE_SHA256=$(sha256sum tools/easytier-perf-probe.rs | cut -d' ' -f1)" \
+            >> "$GITHUB_ENV"
+
       - name: Build optimized binaries with symbols
         run: |
           set -euo pipefail
@@ -183,8 +206,15 @@ jobs:
           cp "target/$TARGET/release/easytier-cli" "staging/$bundle/"
           cp "target/$TARGET/release/easytier-leaf-worker" "staging/$bundle/"
           cp "$HEV_EGRESS_BINARY" "staging/$bundle/"
+          install -m 0755 "$SELFTEST_PROBE" "staging/$bundle/easytier-perf-probe"
+          install -m 0755 scripts/leaf-perf-selftest.sh \
+            "staging/$bundle/leaf-perf-selftest.sh"
+          install -m 0755 scripts/mesh-perf-selftest.sh \
+            "staging/$bundle/mesh-perf-selftest.sh"
+          install -m 0755 scripts/profiling-perf-selftest.sh \
+            "staging/$bundle/profiling-perf-selftest.sh"
           cp profiling-file-info.txt profiling-build-id.txt profiling-sections.txt \
-            "staging/$bundle/"
+            profiling-selftest-file-info.txt "staging/$bundle/"
 
           {
             echo "commit=$GITHUB_SHA"
@@ -193,6 +223,8 @@ jobs:
             echo "run_number=$GITHUB_RUN_NUMBER"
             echo "target=$TARGET"
             echo "hev_server_commit=$HEV_SERVER_COMMIT"
+            echo "selftest_probe_source_sha256=$SELFTEST_PROBE_SOURCE_SHA256"
+            echo "selftest_scope=profiling_bundle_only"
             echo "audit_comparator=false"
             rustc -Vv
             cargo -V
@@ -205,6 +237,10 @@ jobs:
               easytier-cli
               easytier-leaf-worker
               easytier-hev-socks-egress
+              easytier-perf-probe
+              leaf-perf-selftest.sh
+              mesh-perf-selftest.sh
+              profiling-perf-selftest.sh
             )
             sha256sum "${checksum_files[@]}" > SHA256SUMS.txt
           )
@@ -223,6 +259,7 @@ jobs:
             echo "Target: $TARGET"
             echo
             echo "This is an optimized, unstripped profiling build with DWARF and frame pointers."
+            echo "It includes an isolated Linux performance self-test that is excluded from production packages."
             echo "It is not a production release."
           } > artifacts/RELEASE_NOTES.txt
 

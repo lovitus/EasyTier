@@ -253,6 +253,8 @@ disable_kcp_input = false
 2. 再看 [udp_stealth_compatibility.md](udp_stealth_compatibility.md)，了解 stealth、
    proxy、回退和优先级细节。
 3. 调查 SOCKS5、`no_tun` 或 QUIC/KCP Proxy 吞吐时，看
+   [流量、代理协议与封装层级](traffic_protocol_layers_cn.md)，先确定观察到的是内层
+   Proxy 还是外层 overlay；再看
    [SOCKS5 性能调查与维护边界](socks5_performance_investigation_cn.md)，避免把目标端
    `no_tun` TCP 入站代理误判成 SOCKS5 source 瓶颈。
 4. 最后回到 README 里的 `Fork-Specific Changes`，它是首页摘要，不替代详细设计文档。

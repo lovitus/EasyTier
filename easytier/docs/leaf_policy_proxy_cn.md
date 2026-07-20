@@ -6,6 +6,11 @@
 
 ## 1. 组件与流量关系
 
+如果不确定 overlay QUIC、QUIC/KCP TCP Proxy、用户 SOCKS portal、Leaf managed
+mesh SOCKS 和 smoltcp 分别处于哪一层，先阅读
+[`traffic_protocol_layers_cn.md`](traffic_protocol_layers_cn.md)。该文按入口、内层代理、
+EasyTier packet、外层 overlay 和物理网络拆解完整封装路径。
+
 Linux 发布包中的四个文件应放在同一目录：
 
 | 文件 | 用途 |
