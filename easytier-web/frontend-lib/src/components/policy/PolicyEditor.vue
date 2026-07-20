@@ -457,12 +457,13 @@ async function loadRuleDataCategories() {
   geoipCategoryOptions.value = ['LAN']
   const api = props.api
   const instanceId = config.value.instance_id
-  if (!api?.list_policy_rule_data_categories || !instanceId) return
+  const listRuleDataCategories = api?.list_policy_rule_data_categories?.bind(api)
+  if (!listRuleDataCategories || !instanceId) return
   const rows = managedRuleDataRows(document.value)
   await Promise.all(['geosite', 'geoip'].map(async resource => {
     const row = rows.find(candidate => candidate.type === resource)
     try {
-      const result = await api.list_policy_rule_data_categories(
+      const result = await listRuleDataCategories(
         instanceId,
         resource as Api.PolicyRuleDataResource,
         row?.sha256.trim() || undefined,
