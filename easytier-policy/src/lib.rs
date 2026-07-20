@@ -27,7 +27,9 @@ pub use config::{
     reload_policy_file_if_changed_with_rule_set_provider, validate_policy_file,
     validate_policy_file_with_rule_set_provider,
 };
-pub use geodata::{ManagedRuleDataKind, validate_managed_rule_data};
+pub use geodata::{
+    ManagedRuleDataKind, list_managed_rule_data_categories, validate_managed_rule_data,
+};
 #[cfg(all(unix, feature = "leaf-inprocess"))]
 pub use inprocess::{InProcessLeafFactory, InProcessLeafRuntime};
 pub use leaf_config::{
