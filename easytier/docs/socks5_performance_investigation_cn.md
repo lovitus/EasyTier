@@ -1,5 +1,10 @@
 # SOCKS5 性能调查与维护边界
 
+用户使用方式、Leaf managed mesh SOCKS、QUIC/KCP TCP Proxy、smoltcp 与外层
+overlay 的完整层级关系见
+[`traffic_protocol_layers_cn.md`](traffic_protocol_layers_cn.md)。本文只保留 SOCKS5
+性能归因和历史验证证据。
+
 本文记录 2026-07-03 针对 EasyTier 内置 SOCKS5 的隔离测试。目的不是发布一组
 通用性能指标，而是保留已经验证过的瓶颈归因，避免以后再次把目标端 `no_tun`
 TCP 入站代理的性能问题误判成 SOCKS5 服务本身的问题。
@@ -18,6 +23,10 @@ release `2.6.4-8428a89d`。
    仍会经过 NIC pipeline，因此启用 QUIC Proxy 时可能被现有 proxy selector 接管。
 4. 目标节点有 TUN 时，最终目标连接可走目标内核 TCP；目标节点 `no_tun` 时，连接
    需要经过目标端用户态 TCP 入站代理。
+
+代码上的分界是：direct KCP 把 KCP output 标记为 `KcpSrc/KcpDst`，调用
+`send_msg_for_proxy`，不再进 NIC pipeline；smoltcp 输出的仍是完整 IP/TCP packet，
+调用 `send_msg_by_ip`，所以会先经过 NIC pipeline 和统一 proxy selector。
 
 因此，SOCKS5 性能会同时受到 source connector、QUIC/KCP Proxy 和目标端是否
 `no_tun` 的影响，不能只通过 SOCKS5 listener 的实现判断。
