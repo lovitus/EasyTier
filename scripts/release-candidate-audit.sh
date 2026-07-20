@@ -48,7 +48,7 @@ archive_refs=(
 )
 for archive_ref in "${archive_refs[@]}"; do
   local_sha="$(git rev-parse "$archive_ref" 2>/dev/null || true)"
-  remote_sha="$(git rev-parse "refs/remotes/origin/$archive_ref" 2>/dev/null || true)"
+  remote_sha="$(git ls-remote --heads origin "refs/heads/$archive_ref" | awk '{print $1}')"
   if [[ -z "$local_sha" || "$local_sha" != "$remote_sha" ]]; then
     fail "archive ref is absent or differs from origin: $archive_ref"
   fi
@@ -123,6 +123,19 @@ workflow_success() {
   [[ "$conclusion" == success ]]
 }
 
+if [[ "$phase" != "--source" ]]; then
+  candidate_sha="$(git rev-parse HEAD)"
+  published_sha="$(git ls-remote --heads origin refs/heads/codex/profiling-beta | awk '{print $1}')"
+  if [[ "$published_sha" != "$candidate_sha" ]]; then
+    fail "origin/codex/profiling-beta $published_sha differs from candidate $candidate_sha"
+  else
+    pass "candidate SHA is the published profiling-beta SHA"
+  fi
+  for workflow_name in "EasyTier Linux Profiling Beta" "EasyTier Android Policy Candidate"; do
+    workflow_success "$workflow_name" "$candidate_sha" || fail "$workflow_name is not successful for $candidate_sha"
+  done
+fi
+
 if [[ "$phase" == "--release" ]]; then
   candidate_sha="$(git rev-parse HEAD)"
   for workflow_name in "EasyTier Core" "EasyTier GUI" "EasyTier Mobile" "EasyTier OHOS" "EasyTier Test"; do
@@ -131,8 +144,14 @@ if [[ "$phase" == "--release" ]]; then
   if ! rg -q '\| Android physical device \| (PASS|WAIVED_BY_MAINTAINER) \|' "$matrix"; then
     fail "Android physical gate is neither PASS nor explicitly waived"
   fi
+  if rg -q '\| (FAIL|BLOCKED|N/A) \|' "$matrix"; then
+    fail "validation matrix still contains an unresolved release gate"
+  fi
   if git show-ref --verify --quiet refs/tags/v3.0.0; then
     fail "v3.0.0 tag already exists"
+  fi
+  if [[ -n "$(git ls-remote --tags origin refs/tags/v3.0.0 refs/tags/v3.0.0^{} 2>/dev/null)" ]]; then
+    fail "origin already contains v3.0.0"
   fi
 fi
 
