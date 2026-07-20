@@ -6,7 +6,7 @@ use std::{
 
 use futures::{Sink, Stream};
 use smoltcp::wire::IpProtocol;
-use tokio::sync::mpsc::{Receiver, channel};
+use tokio::sync::mpsc::{channel, Receiver};
 use tokio_util::sync::PollSender;
 use tracing::{debug, trace};
 
@@ -273,7 +273,7 @@ where
 mod tests {
     use std::{future::Future, time::Duration};
 
-    use futures::{SinkExt, future::poll_fn};
+    use futures::{future::poll_fn, SinkExt};
     use tokio::sync::{mpsc::channel, oneshot};
     use tokio_util::sync::PollSender;
 

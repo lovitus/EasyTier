@@ -503,6 +503,7 @@ fn classify_system_dns_servers(contents: &str) -> SystemDnsSource {
     }
 }
 
+#[cfg(test)]
 fn parse_system_dns_servers(contents: &str) -> Result<Vec<std::net::IpAddr>, String> {
     match classify_system_dns_servers(contents) {
         SystemDnsSource::Servers(servers) => Ok(servers),
@@ -615,7 +616,7 @@ mod tests {
         let first = leaf_owned_tun_config(0x12345, 1);
         let second = leaf_owned_tun_config(0x12345, 2);
         assert_ne!(first.name, second.name);
-        assert!(first.name.len() <= libc::IFNAMSIZ - 1);
+        assert!(first.name.len() < libc::IFNAMSIZ);
         assert!(first.address.starts_with("198.18."));
         assert!(first.gateway.starts_with("198.18."));
         assert!(!first.address.starts_with("198.19."));
