@@ -394,10 +394,8 @@ impl AsyncTcpConnector for Socks5AutoConnector {
     async fn tcp_connect(
         &self,
         mut addr: SocketAddr,
-        timeout_s: u64,
+        mut timeout_s: u64,
     ) -> crate::gateway::fast_socks5::Result<SocksTcpStream> {
-        #[cfg(any(feature = "kcp", feature = "quic"))]
-        let mut timeout_s = timeout_s;
         if self.inner_connector.lock().is_some() {
             return Err(anyhow::anyhow!("inner connector is already set").into());
         }

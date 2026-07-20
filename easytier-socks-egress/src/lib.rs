@@ -363,10 +363,8 @@ mod tests {
 
     #[test]
     fn rejects_ambiguous_port_candidates() {
-        let mut config = SocksEgressConfig {
-            port_candidates: vec![11080, 11080],
-            ..Default::default()
-        };
+        let mut config = SocksEgressConfig::default();
+        config.port_candidates = vec![11080, 11080];
         assert!(config.validate().is_err());
         config.port_candidates = vec![0];
         assert!(config.validate().is_err());
@@ -374,11 +372,9 @@ mod tests {
 
     #[test]
     fn renders_bounded_direct_egress_config() {
-        let config = SocksEgressConfig {
-            bind_interface: Some("eth0".to_owned()),
-            socket_mark: Some(0x2333),
-            ..Default::default()
-        };
+        let mut config = SocksEgressConfig::default();
+        config.bind_interface = Some("eth0".to_owned());
+        config.socket_mark = Some(0x2333);
         let rendered = render_hev_config(&config, 11080);
         assert!(rendered.contains("port: 11080"));
         assert!(rendered.contains("udp-port: 0"));

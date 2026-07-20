@@ -99,37 +99,6 @@ jobs:
           shared-key: "gui-registry"
           cache-targets: "false"
 
-      - name: Build pinned HEV static libraries
-        env:
-          HEV_SERVER_COMMIT: 97e74f1068bd924e740032382cdc94ca83741ae6
-        run: |
-          set -euo pipefail
-          hev_src="$RUNNER_TEMP/hev-socks5-server"
-          hev_lib="$RUNNER_TEMP/hev-libs/$TARGET"
-          toolchain="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          case "$TARGET" in
-            aarch64-linux-android) cc="$toolchain/aarch64-linux-android24-clang" ;;
-            armv7-linux-androideabi) cc="$toolchain/armv7a-linux-androideabi24-clang" ;;
-            i686-linux-android) cc="$toolchain/i686-linux-android24-clang" ;;
-            x86_64-linux-android) cc="$toolchain/x86_64-linux-android24-clang" ;;
-            *) echo "unsupported Android target: $TARGET" >&2; exit 1 ;;
-          esac
-          git init "$hev_src"
-          git -C "$hev_src" remote add origin https://github.com/lovitus/hev-socks5-server.git
-          git -C "$hev_src" fetch --depth=1 origin "$HEV_SERVER_COMMIT"
-          git -C "$hev_src" checkout --detach FETCH_HEAD
-          git -C "$hev_src" submodule update --init --recursive --depth=1
-          make -C "$hev_src" -j"$(nproc)" static \
-            CC="$cc" \
-            PP="$cc -E" \
-            AR="$toolchain/llvm-ar" \
-            STRIP="$toolchain/llvm-strip"
-          mkdir -p "$hev_lib"
-          cp "$hev_src/bin/libhev-socks5-server.a" "$hev_lib/"
-          cp "$hev_src/third-part/yaml/bin/libyaml.a" "$hev_lib/"
-          cp "$hev_src/third-part/hev-task-system/bin/libhev-task-system.a" "$hev_lib/"
-          echo "HEV_SOCKS5_LIB_DIR=$hev_lib" >> "$GITHUB_ENV"
-
       - name: Build
         run: |
           cd easytier-gui

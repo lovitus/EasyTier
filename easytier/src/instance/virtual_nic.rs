@@ -1116,7 +1116,7 @@ impl VirtualNic {
     }
 
     fn pending_backend(&self) -> Option<NicBackend> {
-        self.pending_backend
+        self.pending_backend.clone()
     }
 
     pub async fn link_up(&self) -> Result<(), Error> {
@@ -1549,7 +1549,6 @@ impl NicCtx {
         });
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", unix))]
     fn do_forward_peers_and_policy_to_nic(
         &mut self,
         mut sink: Pin<Box<dyn ZCPacketSink>>,

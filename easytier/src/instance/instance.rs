@@ -1282,10 +1282,10 @@ impl Instance {
                 transports.push(Arc::new(connector));
             }
             #[cfg(feature = "kcp")]
-            if self.global_ctx.get_flags().enable_kcp_proxy
-                && let Some(src) = self.kcp_proxy_src.as_ref()
-            {
-                transports.push(Arc::new(src.get_connector()));
+            if self.global_ctx.get_flags().enable_kcp_proxy {
+                if let Some(src) = self.kcp_proxy_src.as_ref() {
+                    transports.push(Arc::new(src.get_connector()));
+                }
             }
             if !transports.is_empty() {
                 let selector = DeferredProxySelector::new(

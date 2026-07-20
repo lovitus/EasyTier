@@ -1862,7 +1862,7 @@ async fn validate_config(cli: &Cli) -> anyhow::Result<()> {
     if let Some(config_files) = cli.config_file.as_ref() {
         has_config = true;
         for config_file in config_files {
-            let _config = if config_file == &PathBuf::from("-") {
+            let config = if config_file == &PathBuf::from("-") {
                 let mut stdin = String::new();
                 _ = tokio::io::stdin()
                     .read_to_string(&mut stdin)
@@ -1880,7 +1880,7 @@ async fn validate_config(cli: &Cli) -> anyhow::Result<()> {
                     all(target_os = "macos", not(feature = "macos-ne"))
                 )
             ))]
-            crate::policy_proxy::configured_for(&_config)?;
+            crate::policy_proxy::configured_for(&config)?;
         }
     }
 

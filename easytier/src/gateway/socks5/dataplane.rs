@@ -347,7 +347,7 @@ impl Socks5Server {
         timeout: Duration,
         allow_kernel_fallback: bool,
         _use_kcp_endpoint: bool,
-        _use_mesh_stream_selector: bool,
+        use_mesh_stream_selector: bool,
     ) -> Result<DataPlaneTcpStream, Error> {
         let data_plane_ref = self.acquire_data_plane_ref();
         let deadline = Instant::now() + timeout;
@@ -365,7 +365,7 @@ impl Socks5Server {
             None
         };
         #[cfg(any(feature = "kcp", feature = "quic"))]
-        let mesh_stream_selector = if _use_mesh_stream_selector {
+        let mesh_stream_selector = if use_mesh_stream_selector {
             self.mesh_stream_selector.lock().await.clone()
         } else {
             None

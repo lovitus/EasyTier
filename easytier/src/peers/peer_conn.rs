@@ -408,7 +408,7 @@ impl PeerConn {
             session_filter,
             noise_handshake_result: None,
             outer_session_state,
-            negotiated_outer_cipher_suite: hotpath::mutex!(std::sync::Mutex::new(None)),
+            negotiated_outer_cipher_suite: StdMutex::new(None),
 
             tunnel: Arc::new(hotpath::mutex!(tokio::sync::Mutex::new(Box::new(
                 guard!([mut mpsc_tunnel] mpsc_tunnel.close()),
