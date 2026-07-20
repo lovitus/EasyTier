@@ -177,7 +177,7 @@ fn warnings(revision: &PolicyRevision) -> Vec<PolicyDiagnostic> {
             // Mihomo tunnel/tunnel.go::match returns at the first matched actor that supports
             // the session network. Only an unconditional, UDP-capable rule makes later UDP
             // diagnostics unreachable; a TCP-only match must fall through.
-            if unconditionally_matches_udp(&parts[0], network.as_deref()) {
+            if unconditionally_matches_udp(parts[0], network.as_deref()) {
                 udp_reachable = false;
             }
             continue;
