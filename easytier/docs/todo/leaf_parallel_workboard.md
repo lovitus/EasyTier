@@ -6,12 +6,18 @@ It is local execution state, not a reason to trigger a workflow by itself.
 ## 2026-07-20 v3.0.0 lossless recovery
 
 - Recovery base: exact validated `f6617c5136672016951adb0f79ab0daec7ba7112`.
+- Recovery tree: `c74c5af9` and bridge `f76ff6ff` share tree `bd870f5f0162d6df84ff920dbae9a3b566ef2f7b`; six local reverts plus 16 accepted commits were pushed once.
 - Invalid candidate: `defaa44290c73726b9ab4775f1405ac01de0f84e`; Core and Test failed and the candidate omitted the accepted GUI/Geo work. It is diagnostic evidence only.
 - Archives: invalid candidate, GUI/Geo WIP, PollSender WIP, rejected AGENTS edit and all three stash parents plus an ordinary combined stash snapshot are pushed and independently fetched with matching commit/tree IDs.
 - Reconstruction: PORT-RANGE, platform/32-bit/API fixes, profiling history, Geo backend, compact GUI and WIP documentation are split into logical commits on `codex/v3.0.0-recovery`.
 - PollSender: archived intermediate runner is superseded by the bounded event-driven implementation already present in `f6617c51`; evidence is recorded in `docs/release/v3.0.0_recovery_ledger.md`.
 - Readiness result: the exact `.160` three-node case passed without the `defaa442` test hunk; the hunk is rejected rather than carried into the recovery candidate.
-- Dispatch lock: no candidate push until the recovery tree, version metadata, release notes, `.160` Rust/frontend gates and the six-revert public bridge all match one immutable tree.
+- Precursor candidate: Linux `29711421397`, Android `29711421398` and comparator `29711437998` succeeded for exact `f76ff6ff`; checksums, metadata, pins, target and Build ID passed.
+- Runtime evidence: `.37`, `.38`, lv1g2 and lv1g3 passed exact-artifact DIRECT/native/KCP/QUIC/relay, dual-stack, resource and cleanup gates. Three feature-on and three no-Leaf native runs found no disabled-mode regression.
+- Validation finding: lv1g3 exposed a harness-only false failure because DHCP `valid_lft` decreased during the test. Product traffic and every other gate passed; unchanged product binaries passed after normalizing only numeric lease countdowns.
+- Current build-affecting lane: profiling-harness lease normalization is committed locally on `codex/v3.0.0-post-validation`; product code is unchanged. Status is `READY_FOR_FINAL_PREFLIGHT`, not release-ready.
+- Dispatch lock: batch this harness correction and evidence, run one complete `.160` gate, then make one final candidate push/workflow set. Prior artifact evidence must not be relabeled as final-SHA evidence.
+- Blockers after final Linux rerun: exact GUI artifact semantics, Android physical `PASS` or explicit maintainer waiver, and all five formal workflows on one SHA.
 
 ## 2026-07-17 protocol status ordering
 
