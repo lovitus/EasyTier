@@ -1158,6 +1158,13 @@ impl PolicyDocument {
                     });
                 }
             }
+            if rule_type == "PORT-RANGE" && normalize_port_range(parts[1]).is_none() {
+                return Err(PolicyError::InvalidRule {
+                    index,
+                    reason: "PORT-RANGE requires one port or an ascending start-end range"
+                        .to_owned(),
+                });
+            }
             match rule_type.as_str() {
                 "GEOIP" => self.require_geoip_source(index, parts[1])?,
                 "COUNTRY" => {
@@ -1293,6 +1300,20 @@ impl PolicyDocument {
         visited.remove(actor);
         Ok(support)
     }
+}
+
+// Mihomo rules/common/port.go::NewPort accepts a single destination port or a dash-separated
+// range. Leaf's pinned PORT-RANGE matcher requires the explicit start-end representation, so
+// normalize the compatible single-port spelling without broadening Leaf's matcher grammar.
+pub(crate) fn normalize_port_range(value: &str) -> Option<String> {
+    let (start, end) = match value.split_once('-') {
+        Some((start, end)) if !end.contains('-') => (start, end),
+        Some(_) => return None,
+        None => (value, value),
+    };
+    let start = start.parse::<u16>().ok()?;
+    let end = end.parse::<u16>().ok()?;
+    (start <= end).then(|| format!("{start}-{end}"))
 }
 
 fn validate_fake_dns_ipv6_range(range: &str) -> Result<(), PolicyError> {
@@ -1936,6 +1957,29 @@ rules:
             PolicyRevision::parse(source, Path::new(".")),
             Err(PolicyError::InvalidRule { .. })
         ));
+    }
+
+    #[test]
+    fn port_range_matches_mihomo_single_and_dash_syntax() {
+        for (value, normalized) in [
+            ("12211", "12211-12211"),
+            ("12211-12211", "12211-12211"),
+            ("1-65535", "1-65535"),
+        ] {
+            let source =
+                format!("version: 1\nrules: [\"PORT-RANGE,{value},DIRECT\", \"MATCH,DIRECT\"]\n");
+            PolicyRevision::parse(source.as_str(), Path::new(".")).unwrap();
+            assert_eq!(normalize_port_range(value).as_deref(), Some(normalized));
+        }
+
+        for value in ["12211:12211", "12212-12211", "65536", "1-2-3"] {
+            let source =
+                format!("version: 1\nrules: [\"PORT-RANGE,{value},DIRECT\", \"MATCH,DIRECT\"]\n");
+            assert!(matches!(
+                PolicyRevision::parse(source.as_str(), Path::new(".")),
+                Err(PolicyError::InvalidRule { .. })
+            ));
+        }
     }
 
     #[test]
