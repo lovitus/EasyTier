@@ -26,9 +26,12 @@ declare global {
   const getConfig: typeof import('./composables/backend')['getConfig']
   const getCurrentInstance: typeof import('vue')['getCurrentInstance']
   const getCurrentScope: typeof import('vue')['getCurrentScope']
+  const getDnsForVpn: typeof import('./composables/vpn_routes')['getDnsForVpn']
   const getEasytierVersion: typeof import('./composables/backend')['getEasytierVersion']
   const getNetworkMetas: typeof import('./composables/backend')['getNetworkMetas']
+  const getRoutesForVpn: typeof import('./composables/vpn_routes')['getRoutesForVpn']
   const getServiceStatus: typeof import('./composables/backend')['getServiceStatus']
+  const getStaticVpnBootstrap: typeof import('./composables/vpn_routes')['getStaticVpnBootstrap']
   const h: typeof import('vue')['h']
   const initMobileVpnService: typeof import('./composables/mobile_vpn')['initMobileVpnService']
   const initRpcConnection: typeof import('./composables/backend')['initRpcConnection']
@@ -42,7 +45,10 @@ declare global {
   const isRef: typeof import('vue')['isRef']
   const isWebClientConnected: typeof import('./composables/backend')['isWebClientConnected']
   const listNetworkInstanceIds: typeof import('./composables/backend')['listNetworkInstanceIds']
+  const listPolicyOutboundInterfaces: typeof import('./composables/backend')['listPolicyOutboundInterfaces']
+  const listPolicyRuleDataCategories: typeof import('./composables/backend')['listPolicyRuleDataCategories']
   const listenGlobalEvents: typeof import('./composables/event')['listenGlobalEvents']
+  const loadInitialNetworkInstanceId: typeof import('./composables/config')['loadInitialNetworkInstanceId']
   const loadLastNetworkInstanceId: typeof import('./composables/config')['loadLastNetworkInstanceId']
   const loadMode: typeof import('./composables/mode')['loadMode']
   const mapActions: typeof import('pinia')['mapActions']
@@ -52,6 +58,7 @@ declare global {
   const mapWritableState: typeof import('pinia')['mapWritableState']
   const markRaw: typeof import('vue')['markRaw']
   const nextTick: typeof import('vue')['nextTick']
+  const normalizeConfigSource: typeof import('./composables/config_source')['normalizeConfigSource']
   const onActivated: typeof import('vue')['onActivated']
   const onBeforeMount: typeof import('vue')['onBeforeMount']
   const onBeforeRouteLeave: typeof import('vue-router')['onBeforeRouteLeave']
@@ -100,7 +107,9 @@ declare global {
   const toValue: typeof import('vue')['toValue']
   const triggerRef: typeof import('vue')['triggerRef']
   const unref: typeof import('vue')['unref']
+  const updateMobileNetwork: typeof import('./composables/backend')['updateMobileNetwork']
   const updateNetworkConfigState: typeof import('./composables/backend')['updateNetworkConfigState']
+  const updatePolicyRuleData: typeof import('./composables/backend')['updatePolicyRuleData']
   const useAttrs: typeof import('vue')['useAttrs']
   const useCssModule: typeof import('vue')['useCssModule']
   const useCssVars: typeof import('vue')['useCssVars']
@@ -151,9 +160,12 @@ declare module 'vue' {
     readonly getConfig: UnwrapRef<typeof import('./composables/backend')['getConfig']>
     readonly getCurrentInstance: UnwrapRef<typeof import('vue')['getCurrentInstance']>
     readonly getCurrentScope: UnwrapRef<typeof import('vue')['getCurrentScope']>
+    readonly getDnsForVpn: UnwrapRef<typeof import('./composables/vpn_routes')['getDnsForVpn']>
     readonly getEasytierVersion: UnwrapRef<typeof import('./composables/backend')['getEasytierVersion']>
     readonly getNetworkMetas: UnwrapRef<typeof import('./composables/backend')['getNetworkMetas']>
+    readonly getRoutesForVpn: UnwrapRef<typeof import('./composables/vpn_routes')['getRoutesForVpn']>
     readonly getServiceStatus: UnwrapRef<typeof import('./composables/backend')['getServiceStatus']>
+    readonly getStaticVpnBootstrap: UnwrapRef<typeof import('./composables/vpn_routes')['getStaticVpnBootstrap']>
     readonly h: UnwrapRef<typeof import('vue')['h']>
     readonly initMobileVpnService: UnwrapRef<typeof import('./composables/mobile_vpn')['initMobileVpnService']>
     readonly initRpcConnection: UnwrapRef<typeof import('./composables/backend')['initRpcConnection']>
@@ -167,7 +179,10 @@ declare module 'vue' {
     readonly isRef: UnwrapRef<typeof import('vue')['isRef']>
     readonly isWebClientConnected: UnwrapRef<typeof import('./composables/backend')['isWebClientConnected']>
     readonly listNetworkInstanceIds: UnwrapRef<typeof import('./composables/backend')['listNetworkInstanceIds']>
+    readonly listPolicyOutboundInterfaces: UnwrapRef<typeof import('./composables/backend')['listPolicyOutboundInterfaces']>
+    readonly listPolicyRuleDataCategories: UnwrapRef<typeof import('./composables/backend')['listPolicyRuleDataCategories']>
     readonly listenGlobalEvents: UnwrapRef<typeof import('./composables/event')['listenGlobalEvents']>
+    readonly loadInitialNetworkInstanceId: UnwrapRef<typeof import('./composables/config')['loadInitialNetworkInstanceId']>
     readonly loadLastNetworkInstanceId: UnwrapRef<typeof import('./composables/config')['loadLastNetworkInstanceId']>
     readonly loadMode: UnwrapRef<typeof import('./composables/mode')['loadMode']>
     readonly mapActions: UnwrapRef<typeof import('pinia')['mapActions']>
@@ -177,6 +192,7 @@ declare module 'vue' {
     readonly mapWritableState: UnwrapRef<typeof import('pinia')['mapWritableState']>
     readonly markRaw: UnwrapRef<typeof import('vue')['markRaw']>
     readonly nextTick: UnwrapRef<typeof import('vue')['nextTick']>
+    readonly normalizeConfigSource: UnwrapRef<typeof import('./composables/config_source')['normalizeConfigSource']>
     readonly onActivated: UnwrapRef<typeof import('vue')['onActivated']>
     readonly onBeforeMount: UnwrapRef<typeof import('vue')['onBeforeMount']>
     readonly onBeforeRouteLeave: UnwrapRef<typeof import('vue-router')['onBeforeRouteLeave']>
@@ -225,7 +241,9 @@ declare module 'vue' {
     readonly toValue: UnwrapRef<typeof import('vue')['toValue']>
     readonly triggerRef: UnwrapRef<typeof import('vue')['triggerRef']>
     readonly unref: UnwrapRef<typeof import('vue')['unref']>
+    readonly updateMobileNetwork: UnwrapRef<typeof import('./composables/backend')['updateMobileNetwork']>
     readonly updateNetworkConfigState: UnwrapRef<typeof import('./composables/backend')['updateNetworkConfigState']>
+    readonly updatePolicyRuleData: UnwrapRef<typeof import('./composables/backend')['updatePolicyRuleData']>
     readonly useAttrs: UnwrapRef<typeof import('vue')['useAttrs']>
     readonly useCssModule: UnwrapRef<typeof import('vue')['useCssModule']>
     readonly useCssVars: UnwrapRef<typeof import('vue')['useCssVars']>
