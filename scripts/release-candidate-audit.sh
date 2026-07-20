@@ -102,13 +102,14 @@ if [[ "$phase" != "--source" ]]; then
   recovery_ref="${RECOVERY_REF:-codex/v3.0.0-recovery}"
   current_sha="$(git rev-parse HEAD)"
   current_tree="$(git rev-parse HEAD^{tree})"
+  tracked_files="$(git ls-tree -r --name-only HEAD | wc -l | tr -d ' ')"
   recovery_tree="$(git rev-parse "$recovery_ref^{tree}" 2>/dev/null || true)"
   if [[ -z "$recovery_tree" ]]; then
     fail "recovery reference cannot be resolved: $recovery_ref"
   elif [[ "$recovery_tree" != "$current_tree" ]]; then
     fail "current tree $current_tree differs from recovery tree $recovery_tree"
   else
-    pass "candidate $current_sha has recovery-matching tree $current_tree"
+    pass "candidate $current_sha has recovery-matching tree $current_tree ($tracked_files tracked files)"
   fi
 fi
 
