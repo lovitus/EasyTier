@@ -506,7 +506,18 @@ async fn init_rpc_connection(
         let instance_manager = if let Some(im) = instance_manager_guard.take() {
             im
         } else {
-            Arc::new(NetworkInstanceManager::new())
+            let instance_manager = NetworkInstanceManager::new();
+            #[cfg(target_os = "android")]
+            let instance_manager = instance_manager.with_config_path(Some(
+                _app.path()
+                    .app_data_dir()
+                    .context("failed to resolve the Android app data directory")?,
+            ));
+
+            // Android hosts the manager in-process. Keep a stable writable config
+            // directory so GeoSite/GeoIP metadata remains available while no VPN
+            // instance is running. Desktop managers receive their path elsewhere.
+            Arc::new(instance_manager)
         };
 
         let portal = url.and_then(|s| {
