@@ -2611,6 +2611,50 @@ pub async fn port_forward_with_inbound_default_drop_acl_test(
         .await;
     }
 
+    // A local DHCP lease can become visible before the updated route replaces
+    // inst1's earlier address-less advertisement on the relay and destination.
+    // Wait for the exact leased address and the complete three-peer topology;
+    // otherwise the first forwarded SYN can race route-session replacement and
+    // its reply is dropped with RouteError.
+    let peer_ids = [insts[0].peer_id(), insts[1].peer_id(), insts[2].peer_id()];
+    let inst1_ipv4 = insts[0].get_global_ctx().get_ipv4().unwrap().to_string();
+    let peer_managers = insts
+        .iter()
+        .map(|inst| inst.get_peer_manager())
+        .collect::<Vec<_>>();
+    wait_for_condition(
+        || {
+            let peer_managers = peer_managers.clone();
+            let inst1_ipv4 = inst1_ipv4.clone();
+            async move {
+                for (index, peer_manager) in peer_managers.iter().enumerate() {
+                    let routes = peer_manager.list_routes().await;
+                    for expected_peer_id in peer_ids
+                        .iter()
+                        .copied()
+                        .filter(|peer_id| *peer_id != peer_ids[index])
+                    {
+                        let Some(route) = routes
+                            .iter()
+                            .find(|route| route.peer_id == expected_peer_id)
+                        else {
+                            return false;
+                        };
+                        if expected_peer_id == peer_ids[0]
+                            && route.ipv4_addr.as_ref().map(ToString::to_string)
+                                != Some(inst1_ipv4.clone())
+                        {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+
     for (bind_port, server_ns) in [(23456, "net_c"), (23457, "net_d")] {
         let tcp_listener =
             TcpTunnelListener::new(format!("tcp://0.0.0.0:{bind_port}").parse().unwrap());
@@ -2626,9 +2670,7 @@ pub async fn port_forward_with_inbound_default_drop_acl_test(
             NetNS::new(Some(server_ns.into())),
             NetNS::new(Some("net_a".into())),
             buf,
-            // Shared CI runners can briefly delay the forwarded stream after DHCP
-            // convergence. Keep the assertion bounded while allowing scheduler jitter.
-            Duration::from_secs(3),
+            Duration::from_secs(1),
         )
         .await;
 
