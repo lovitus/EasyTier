@@ -33,6 +33,7 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   policy_proxy::mesh_udp_relay::tests
   policy_proxy::policy_routing::tests::leaf_owned_capture_keeps_the_legacy_tun_as_lower_priority_fallback
   policy_proxy::tests::resolves_inline_instance_config_without_persisting_generated_state
+  policy_rule_data::tests
   instance::virtual_nic::tests::leaf_owned_tun_selection_is_default_off_and_backend_bounded
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
   tests::three_node::port_forward_with_inbound_default_drop_acl_test::case_2
@@ -54,6 +55,7 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   leaf_config::tests::leaf_owned_tun_is_explicit_and_legacy_fd_mode_remains_unchanged
   leaf_process::tests::linux_owned_tun_readiness_requires_interface_up_flag
   leaf_process::tests::owned_tun_identity_is_bounded_unique_and_outside_default_fake_ip
+  geodata::tests
   inprocess::tests::packet_fd_guard_closes_an_unclaimed_descriptor
 )
 readonly -a DEFAULT_NETSTACK_TEST_FILTERS=(

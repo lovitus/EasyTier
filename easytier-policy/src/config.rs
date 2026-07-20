@@ -28,12 +28,7 @@ const SHADOWSOCKS_CIPHERS: [&str; 4] = [
 // Reference boundary: Mihomo config/config.go::UnmarshalRawConfig keeps bootstrap,
 // direct, and general resolvers as separate sets. EasyTier's narrower Leaf v1 syntax
 // intentionally presets only resolver forms accepted by the pinned Leaf parser.
-const DEFAULT_DIRECT_DNS: [&str; 4] = [
-    "system",
-    "223.5.5.5",
-    "119.29.29.29",
-    "114.114.114.114",
-];
+const DEFAULT_DIRECT_DNS: [&str; 4] = ["system", "223.5.5.5", "119.29.29.29", "114.114.114.114"];
 const DEFAULT_PROXY_DNS: [&str; 3] = [
     "doh:cloudflare-dns.com@1.1.1.1",
     "doh:dns.google@8.8.8.8",
