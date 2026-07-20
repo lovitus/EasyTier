@@ -10,6 +10,9 @@ export class GUIRemoteClient implements Api.RemoteClient {
     async update_policy_rule_data(instanceId: string, resource: Api.PolicyRuleDataResource, sourceUrl?: string): Promise<Api.UpdatePolicyRuleDataResponse> {
         return backend.updatePolicyRuleData(instanceId, resource, sourceUrl);
     }
+    async list_policy_rule_data_categories(instanceId: string, resource: Api.PolicyRuleDataResource, expectedSha256?: string, path?: string): Promise<Api.ListPolicyRuleDataCategoriesResponse> {
+        return backend.listPolicyRuleDataCategories(instanceId, resource, expectedSha256, path);
+    }
     async list_policy_outbound_interfaces(): Promise<Api.ListPolicyOutboundInterfacesResponse> {
         return backend.listPolicyOutboundInterfaces();
     }

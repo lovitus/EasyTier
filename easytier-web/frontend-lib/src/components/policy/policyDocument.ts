@@ -1,7 +1,7 @@
 import { parse, stringify } from 'yaml'
 
 export type PolicyRuleSetKind = 'geosite' | 'geoip' | 'mmdb'
-export type PolicyProxyKind = 'socks5' | 'shadowsocks' | 'trojan' | 'vmess' | 'vless' | 'http'
+export type PolicyProxyKind = 'socks5' | 'shadowsocks' | 'trojan' | 'vmess' | 'vless'
 export type PolicyProxyVia = 'mesh' | 'native'
 export type PolicyProxyUdp = boolean | 'off' | 'native' | 'uot-v2'
 export type PolicyGroupKind = 'chain' | 'fallback'
@@ -27,8 +27,12 @@ const DEFAULT_POLICY_PROXY_DNS_SERVERS = [
   'doh:dns.quad9.net@9.9.9.9',
 ]
 
-export function policyRuleSupportsNoResolve(type: string): boolean {
-  return ['IP-CIDR', 'GEOIP', 'COUNTRY'].includes(type.trim().toUpperCase())
+export function policyRuleSupportsNoResolve(type: string, operand = ''): boolean {
+  const normalizedType = type.trim().toUpperCase()
+  if (['IP-CIDR', 'GEOIP', 'COUNTRY'].includes(normalizedType)) return true
+  if (normalizedType !== 'EXTERNAL') return false
+  const source = operand.split(':', 1)[0]?.trim().toLowerCase()
+  return ['mmdb', 'geoip', 'geoip-dat'].includes(source)
 }
 
 // Reference semantics:
@@ -439,7 +443,7 @@ export function parsePolicyDocument(source: string): PolicyEditorDocument {
     }
     const selector = typeof server === 'string' ? {} : requireMap(server, `proxies.${name}.server`)
     const kind = requiredString(value.type, `proxies.${name}.type`)
-    if (!['socks5', 'shadowsocks', 'trojan', 'vmess', 'vless', 'http'].includes(kind)) throw new Error(`proxies.${name}.type is unsupported`)
+    if (!['socks5', 'shadowsocks', 'trojan', 'vmess', 'vless'].includes(kind)) throw new Error(`proxies.${name}.type is unsupported`)
     const via = optionalString(value.via, `proxies.${name}.via`) || 'native'
     if (!['mesh', 'native'].includes(via)) throw new Error(`proxies.${name}.via is unsupported`)
     if (kind !== 'socks5' && via !== 'native') {

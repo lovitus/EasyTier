@@ -118,6 +118,23 @@ pub fn validate_managed_rule_data(
     Ok(())
 }
 
+pub fn list_managed_rule_data_categories(
+    kind: ManagedRuleDataKind,
+    path: &Path,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let categories = match kind {
+        ManagedRuleDataKind::Geosite => load_geosite_categories(path)?.into_iter().collect(),
+        ManagedRuleDataKind::Geoip => load_geoip_categories(path, &BTreeSet::new())?
+            .into_keys()
+            .collect(),
+        ManagedRuleDataKind::CountryMmdb => {
+            validate_country_mmdb(path)?;
+            Vec::new()
+        }
+    };
+    Ok(categories)
+}
+
 fn validate_country_mmdb(path: &Path) -> Result<(), GeoDataError> {
     let reader = maxminddb::Reader::open_readfile(path)
         .map_err(|error| GeoDataError::Invalid(format!("failed to open Country MMDB: {error}")))?;
@@ -141,6 +158,10 @@ fn validate_country_mmdb(path: &Path) -> Result<(), GeoDataError> {
 }
 
 fn validate_geosite(path: &Path) -> Result<(), GeoDataError> {
+    load_geosite_categories(path).map(drop)
+}
+
+fn load_geosite_categories(path: &Path) -> Result<BTreeSet<String>, GeoDataError> {
     let mut reader = open(path)?;
     let mut entries = 0usize;
     let mut has_cn = false;
@@ -190,7 +211,7 @@ fn validate_geosite(path: &Path) -> Result<(), GeoDataError> {
             "Geosite data does not contain a non-empty CN category".to_owned(),
         ));
     }
-    Ok(())
+    Ok(categories)
 }
 
 pub(crate) fn load_geoip_categories(

@@ -236,13 +236,36 @@ policy:
     advanced_features_required: Unlock experimental advanced features to configure custom online data sources.
     name: Name
     proxy_type: Proxy type
-    path: Path
+    path: Via
     server: Server
     port: Port
     credentials: Credentials
     cipher: Cipher
     instance_id: Mesh instance ID (optional)
     virtual_ip: Mesh virtual IP (optional)
+    fake_ip_range: IPv4 FakeIP pool
+    fake_ip_range6: IPv6 FakeIP pool
+    example: "Example: {value}"
+    automatic: Automatic
+    not_configured: Not configured
+    enabled: Enabled
+    disabled: Disabled
+    edit: Edit
+    finish_edit: Collapse
+    unnamed_group: Unnamed group
+    no_members: No members
+    udp: UDP mode
+    udp_capable: "Enable {protocol} UDP"
+    udp_off: Disable UDP
+    udp_native: Native UDP
+    udp_uot_v2: UDP over TCP v2
+    uuid: UUID
+    transport: Transport
+    websocket_path: WebSocket path
+    websocket_host: WebSocket Host header
+    tls: Enable TLS
+    tls_server_name: TLS server name (SNI)
+    tls_insecure: Skip TLS certificate verification
     group_type: Group type
     members: Ordered members
     members_hint: proxy-a,proxy-b,DIRECT
@@ -253,13 +276,13 @@ policy:
     rule_set_type: Data type
     no_resolve: No DNS resolve
     order_help: Rules are evaluated from top to bottom. GEOIP uses geoip-lite.dat categories, while COUNTRY uses Country MMDB. A matching UDP rule whose target is TCP-only is skipped and evaluation continues.
+    geo_category_help: "The bundled GeoSite snapshot provides {geositeCount} categories. GeoIP provides {geoipCount} data categories plus the built-in LAN category. Matching is case-insensitive; search the canonical uppercase names or enter a category from custom data."
     add_node: Add proxy node
     add_group: Add group
     add_rule: Add rule
     add_rule_set: Add standard geo data
     nodes_empty: No proxy node is configured. Keep the default DIRECT groups or add a Mesh / Native SOCKS node.
     unnamed_node: Unnamed node
-    udp_capable: This SOCKS node supports UDP
     rule_priority: "Rule #{index}"
     move_up: Move rule up
     move_down: Move rule down

@@ -6,8 +6,9 @@ mod vpn_stop_dispatch;
 
 use anyhow::Context;
 use easytier::proto::api::manage::{
-    CollectNetworkInfoResponse, ListPolicyOutboundInterfacesResponse, UpdatePolicyRuleDataResponse,
-    ValidateConfigResponse, WebClientService, WebClientServiceClientFactory,
+    CollectNetworkInfoResponse, ListPolicyOutboundInterfacesResponse,
+    ListPolicyRuleDataCategoriesResponse, UpdatePolicyRuleDataResponse, ValidateConfigResponse,
+    WebClientService, WebClientServiceClientFactory,
 };
 use easytier::rpc_service::remote_client::{
     GetNetworkMetasResponse, ListNetworkInstanceIdsJsonResp, ListNetworkProps, RemoteClientManager,
@@ -353,6 +354,23 @@ async fn list_policy_outbound_interfaces(
 ) -> Result<ListPolicyOutboundInterfacesResponse, String> {
     get_client_manager!()?
         .handle_list_policy_outbound_interfaces(app)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_policy_rule_data_categories(
+    app: AppHandle,
+    instance_id: String,
+    resource: String,
+    expected_sha256: Option<String>,
+    path: Option<String>,
+) -> Result<ListPolicyRuleDataCategoriesResponse, String> {
+    let instance_id = instance_id
+        .parse()
+        .map_err(|e: uuid::Error| e.to_string())?;
+    get_client_manager!()?
+        .handle_list_policy_rule_data_categories(app, instance_id, resource, expected_sha256, path)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1501,6 +1519,7 @@ pub fn run_gui() -> std::process::ExitCode {
             save_network_config,
             validate_config,
             update_policy_rule_data,
+            list_policy_rule_data_categories,
             list_policy_outbound_interfaces,
             get_config,
             load_configs,

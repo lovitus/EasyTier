@@ -216,6 +216,12 @@ class WebRemoteClient implements Api.RemoteClient {
             `/machines/${this.machine_id}/networks/${instanceId}/policy-rule-data/${resource}`,
         );
     }
+    async list_policy_rule_data_categories(instanceId: string, resource: Api.PolicyRuleDataResource, expectedSha256?: string, path?: string): Promise<Api.ListPolicyRuleDataCategoriesResponse> {
+        return await this.client.get<any, Api.ListPolicyRuleDataCategoriesResponse>(
+            `/machines/${this.machine_id}/networks/${instanceId}/policy-rule-data/${resource}`,
+            { params: { expected_sha256: expectedSha256, path } },
+        );
+    }
     async run_network(config: NetworkTypes.NetworkConfig, save: boolean): Promise<undefined> {
         await this.client.post<string>(`/machines/${this.machine_id}/networks`, {
             config: NetworkTypes.toBackendNetworkConfig(config),

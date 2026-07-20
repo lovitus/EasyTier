@@ -179,3 +179,48 @@ called Result::unwrap() on Err InvalidAddress
   `leaf-auto-tun-plain-0cf36807-20260719`。
 - PacketBatch exact artifact A/B、strace、perf 与 Android panic 证据记录在原工作板和验证日志。
 - 私有代理域名、UUID、密码和节点配置不进入仓库。
+
+## 11. 2026-07-19 跨主机复核
+
+dual-TUN 的单机否决被后续跨主机证据推翻后，重新审计 PacketBatch 是否也被 `.160` 的主机特异行为误判。复核没有重新构建：直接使用 `39dd4d2f989a459fb44d9cc8c9aab708338e4f83` 的未过期精确 Linux workflow artifact。
+
+- workflow：[run 29677226981](https://github.com/lovitus/EasyTier/actions/runs/29677226981)；artifact ID `8439501207`；
+- workflow ZIP SHA-256：`32f8f7d7fd3007258ab75aec1091a2a02668855701c546aa68cbdf647967b818`；
+- 内部 musl bundle SHA-256：`fafab7ab2c41a4b199147b8800c7a60df55ca91cfd1b62e57dfc294b06fd0c25`；
+- `BUILD_INFO`、内部四个二进制 SHA-256、commit、target 和 symbols 均通过核对；
+- 每台主机使用候选自带的 `leaf-packet-batch-validation.sh`，交错运行三次 legacy 和三次 batch；
+- 每轮使用独立 netns、专用端口、同一 artifact、同一 DIRECT policy，并检查 TUN 字节、流量放大、日志、空闲 CPU、进程关闭和 host-state 回基线；
+- 只对证据快照中的 DHCP lifetime 做归一化；KR 另归一化易变的 IPv6 RA `expires`，不修改产品路径。
+
+### 跨主机中位数
+
+| Host | Kernel | Legacy up/down Mbit/s | Batch up/down Mbit/s | Upload ratio | Download ratio | RSS ratio | Download gate |
+|---|---|---:|---:|---:|---:|---:|---|
+| `.160`（原记录） | 3.10 | `733.1 / 905.1` | `786.1 / 825.7` | `1.072` | `0.912` | not recorded here | fail |
+| `.37` | 3.10 | `726.5 / 841.6` | `678.9 / 796.2` | `0.934` | `0.946` | `1.035` | fail |
+| `.38` | 3.10 | `721.7 / 886.7` | `697.5 / 817.4` | `0.966` | `0.922` | `1.028` | fail |
+| lv1g2 | 4.19 | `765.3 / 600.0` | `817.9 / 428.5` | `1.069` | `0.714` | `1.007` | fail |
+| lv1g3 | 5.4 | `516.1 / 415.0` | `72.1 / 287.4` | `0.140` | `0.693` | `1.016` | fail |
+| KR | 5.10 | `584.6 / 389.4` | `653.7 / 322.9` | `1.118` | `0.829` | `0.880` | fail |
+
+五台新增主机的下载都低于 95% 门槛，加上原 `.160` 后为六台全部失败。`.37` 的 `0.946` 接近门槛，但 `.38`、lv1g2、lv1g3 和 KR 分别回退约 7.8%、28.6%、30.7% 和 17.1%，不能由单一主机、单一内核或一次网络波动解释。
+
+lv1g3 的 batch 上传还出现明显不稳定：三次约为 `72.1 / 515.5 / 71.7 Mbit/s`，相邻 legacy 三次稳定在约 `507-529 Mbit/s`。这不是接受依据，而是 framed StreamBatch 在该主机上的额外风险信号。早期 perf 中 batch worker 的 context switch、CPU migration、page fault 和 syscall 同时增加，与跨主机下载回退方向一致。
+
+KR 原第三轮在历史采样脚本中命中一次 `SIGPIPE`，前四轮已有完整 summary 且 host state clean。清理后在独立证据目录只重跑第三组 legacy/batch并通过；未把失败的半成品目录计入中位数。生产 EasyTier PID `44990`、生产 `tun0` 和 iperf PID `52372` 全程保留。
+
+最终清理确认五台均无 `etpb-*` namespace、测试进程或测试 TUN；`.37` 原有 `etns_scale` 保留。证据归档 SHA-256：
+
+| Host | Evidence archive SHA-256 |
+|---|---|
+| `.37` | `ffb79f3d4513c0f9a3a536d90ae5f20153726f25453b704b058512f77171002c` |
+| `.38` | `88f4e51d773fecc902427cfad714b85e7db308bdb40b54e8094a0ba9d916171b` |
+| lv1g2 | `cd447d6ae0f3208ef71eacdbbf183cb740d685b6cebf1f3514fe10e8144cd293` |
+| lv1g3 | `e27dd0cb632c2d9b4a229ae6596368ccabbb2764831227888c1a213df3d6cf4b` |
+| KR | `3738d366f40656c309a1ae4db493599db323b962a57dc392de0d5ce6e57b3862` |
+
+### 修正后的判断
+
+原始 `.160` 单机性能证据不足以单独证明跨平台或跨主机失败，这一点确实是验证设计缺口；但新增五主机证据重复了同一下载回退，因此 PacketBatch 的回退结论不是 dual-TUN 那样的误报。Android panic 仍是独立、确定性的首版阻塞，即使修复初始化顺序也不能改变 Linux StreamBatch 未达到性能门槛的事实。
+
+本结论只否决 `39dd4d2f` 的 framed StreamBatch/MemoryBatch external endpoint 实现及其公共配置扩张，不否决 GSO/GRO、Leaf-owned TUN或未来以不同机制减少逐包开销的方案。

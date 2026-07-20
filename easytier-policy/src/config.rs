@@ -30,9 +30,9 @@ const SHADOWSOCKS_CIPHERS: [&str; 4] = [
 // intentionally presets only resolver forms accepted by the pinned Leaf parser.
 const DEFAULT_DIRECT_DNS: [&str; 4] = [
     "system",
-    "doh:dns.alidns.com@223.5.5.5",
     "223.5.5.5",
     "119.29.29.29",
+    "114.114.114.114",
 ];
 const DEFAULT_PROXY_DNS: [&str; 3] = [
     "doh:cloudflare-dns.com@1.1.1.1",
@@ -1633,6 +1633,10 @@ rules: ["MATCH,DIRECT"]
 "#;
         let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
         assert_eq!(revision.document.dns.direct, default_direct_dns());
+        assert_eq!(
+            revision.document.dns.direct,
+            ["system", "223.5.5.5", "119.29.29.29", "114.114.114.114"]
+        );
         assert_eq!(
             revision.document.dns.fake_ip_range6,
             DEFAULT_FAKE_DNS_IPV6_RANGE

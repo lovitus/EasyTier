@@ -237,13 +237,36 @@ policy:
     advanced_features_required: 解锁实验性高级能力后才能配置自定义在线数据源。
     name: 名称
     proxy_type: 代理类型
-    path: 路径
+    path: 连接方式
     server: 服务器
     port: 端口
     credentials: 认证信息
     cipher: 加密方法
     instance_id: Mesh 实例 ID（可选）
     virtual_ip: Mesh 虚拟 IP（可选）
+    fake_ip_range: IPv4 FakeIP 地址池
+    fake_ip_range6: IPv6 FakeIP 地址池
+    example: "示例：{value}"
+    automatic: 自动
+    not_configured: 未配置
+    enabled: 已启用
+    disabled: 已关闭
+    edit: 编辑
+    finish_edit: 收起
+    unnamed_group: 未命名分组
+    no_members: 无成员
+    udp: UDP 模式
+    udp_capable: "启用 {protocol} UDP"
+    udp_off: 关闭 UDP
+    udp_native: 原生 UDP
+    udp_uot_v2: UDP over TCP v2
+    uuid: UUID
+    transport: 传输层
+    websocket_path: WebSocket 路径
+    websocket_host: WebSocket Host 请求头
+    tls: 启用 TLS
+    tls_server_name: TLS 服务器名称（SNI）
+    tls_insecure: 跳过 TLS 证书校验
     group_type: 分组类型
     members: 顺序成员
     members_hint: proxy-a,proxy-b,DIRECT
@@ -254,13 +277,13 @@ policy:
     rule_set_type: 数据类型
     no_resolve: 不解析域名
     order_help: 规则严格从上到下匹配；GEOIP 使用 geoip-lite.dat 分类，COUNTRY 使用 Country MMDB；UDP 命中仅支持 TCP 的目标时会跳过，并继续检查下一条规则。
+    geo_category_help: "内置 GeoSite 提供 {geositeCount} 个分类，GeoIP 提供 {geoipCount} 个数据分类并额外支持 LAN。分类匹配不区分大小写；可搜索规范大写名称，也可输入自定义数据中的分类。"
     add_node: 添加代理节点
     add_group: 添加分组
     add_rule: 添加规则
     add_rule_set: 添加标准 Geo 数据
     nodes_empty: 尚未配置代理节点。可以先使用默认 DIRECT 分组，或添加 Mesh / Native SOCKS 节点。
     unnamed_node: 未命名节点
-    udp_capable: 此 SOCKS 节点支持 UDP
     rule_priority: "规则 #{index}"
     move_up: 上移规则
     move_down: 下移规则
