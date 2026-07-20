@@ -85,3 +85,46 @@ The change is not accepted merely because it compiles. The exact workflow artifa
 6. The target Android app, without uninstalling the separate baseline app, passes direct SOCKS versus Leaf explicit `10.44.0.8:24443` A/B after wireless ADB is available.
 
 If the yield removes starvation but leaves unacceptable throughput, the next comparison is Leaf lwIP versus smoltcp or a corrected event-driven smoltcp wake protocol. Increasing queue sizes is not an acceptable substitute because it only delays fail-closed loss.
+## 2026-07-17 USB Android / cellular independent baseline (`089d7e0a`)
+
+This evidence is from a new USB-connected Android 13 device on a cellular dual-stack
+network. It is not the earlier Android device or LAN, and no earlier Android result is
+reused as its baseline.
+
+- Exact candidate: `089d7e0a61132f8cb59e02919f9f23d6a66e496d`.
+- The candidate used virtual IPv4 `10.44.0.90`; the live peer table was checked first.
+  `10.44.0.88` and `10.44.0.89` were occupied, while `.90` was absent before startup.
+- The production mesh peer at `10.44.0.8` observed `.90` joining over IPv6-capable
+  transports (`ws6`, `tcp6`, and `wg6` in the first stable sample).
+- Captured application probe UID `10020` was inside the active Tauri VPN UID ranges;
+  candidate owner UID `10019` was excluded.
+- `MATCH,DIRECT` control: trusted TLS to `www.cloudflare.com:443` completed in 552 ms.
+- Explicit actor under test retained an actual port and was never portless:
+  `virtual-ip: 10.44.0.8`, `port: 24443`, `via: mesh`, `udp: true`.
+- Explicit actor trusted-TLS results: Cloudflare 1286 ms and 1385 ms; GitHub 1862 ms.
+  Every valid run reported TCP connected, TLS handshake true, connected true, and
+  `probe_valid=true`.
+- A bounded capture on `10.20.0.65` observed the same probe as SOCKS5 negotiation,
+  CONNECT, and TLS data on `tun0` from `10.44.0.90` to `10.44.0.8:24443`. This rules
+  out an accidental DIRECT result for the explicit-actor probe.
+- One GitHub probe launch crashed only because two instrumentation invocations were
+  mistakenly started concurrently against the same runner package. Its serialized
+  rerun passed and the concurrent launch is not product-failure evidence.
+
+Controlled throughput used a temporary file server on the peer to remove CDN and
+public-egress variance. Android shell curl is diagnostic throughput evidence only;
+it is not accepted as policy correctness evidence.
+
+| Path | Object | Time | Throughput |
+| --- | ---: | ---: | ---: |
+| policy disabled, direct SOCKS `10.44.0.8:24443` | 64 MiB | 25.25 s | 21.3 Mbit/s |
+| explicit Leaf actor | 64 MiB | 23.85 s | 22.5 Mbit/s |
+| policy disabled, direct SOCKS | 16 MiB | 10.48 s | 12.8 Mbit/s |
+| policy disabled, direct SOCKS repeat | 16 MiB | 18.44 s | 7.3 Mbit/s |
+| explicit Leaf actor | 16 MiB | 5.64 s | 23.8 Mbit/s |
+| explicit Leaf actor repeat | 16 MiB | 10.46 s | 12.8 Mbit/s |
+
+The cellular/mesh path is highly variable, but this candidate did not show a general
+explicit-actor slowdown relative to direct SOCKS on this device. This does not explain
+or invalidate the earlier device-specific severe slowdown. The old device must be
+retested separately if it becomes available.

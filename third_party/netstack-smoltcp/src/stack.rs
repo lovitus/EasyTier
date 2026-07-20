@@ -6,7 +6,8 @@ use std::{
 
 use futures::{Sink, Stream};
 use smoltcp::wire::IpProtocol;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, channel};
+use tokio_util::sync::PollSender;
 use tracing::{debug, trace};
 
 use crate::{
@@ -141,9 +142,9 @@ impl StackBuilder {
             ip_filters: self.ip_filters,
             stack_rx,
             sink_buf: None,
-            udp_tx,
-            tcp_tx,
-            icmp_tx,
+            udp_tx: udp_tx.map(PollSender::new),
+            tcp_tx: tcp_tx.map(PollSender::new),
+            icmp_tx: icmp_tx.map(PollSender::new),
         };
 
         Ok((stack, tcp_runner, udp_socket, tcp_listener))
@@ -153,45 +154,46 @@ impl StackBuilder {
 pub struct Stack {
     ip_filters: IpFilters<'static>,
     sink_buf: Option<(AnyIpPktFrame, IpProtocol)>,
-    udp_tx: Option<Sender<AnyIpPktFrame>>,
-    tcp_tx: Option<Sender<AnyIpPktFrame>>,
-    icmp_tx: Option<Sender<AnyIpPktFrame>>,
+    udp_tx: Option<PollSender<AnyIpPktFrame>>,
+    tcp_tx: Option<PollSender<AnyIpPktFrame>>,
+    icmp_tx: Option<PollSender<AnyIpPktFrame>>,
     stack_rx: Receiver<AnyIpPktFrame>,
 }
 
 impl Stack {
-    fn poll_send(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+    fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
         let (item, proto) = match self.sink_buf.take() {
             Some(val) => val,
             None => return Poll::Ready(Ok(())),
         };
 
-        let ready_res = match proto {
-            IpProtocol::Tcp => self.tcp_tx.as_mut().map(|tx| tx.try_reserve()),
-            IpProtocol::Udp => self.udp_tx.as_mut().map(|tx| tx.try_reserve()),
-            IpProtocol::Icmp | IpProtocol::Icmpv6 => {
-                self.icmp_tx.as_mut().map(|tx| tx.try_reserve())
-            }
+        let sender = match proto {
+            IpProtocol::Tcp => self.tcp_tx.as_mut(),
+            IpProtocol::Udp => self.udp_tx.as_mut(),
+            IpProtocol::Icmp | IpProtocol::Icmpv6 => self.icmp_tx.as_mut(),
             _ => unreachable!(),
         };
 
-        let Some(ready_res) = ready_res else {
+        let Some(sender) = sender else {
             return Poll::Ready(Ok(()));
         };
 
-        let permit = match ready_res {
-            Ok(permit) => permit,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+        // PollSender retains the channel reserve future and registers this task's
+        // waker. Returning Pending after try_reserve(Full) loses that wakeup and can
+        // permanently stop Leaf's TUN-to-stack sibling future once this queue fills.
+        match sender.poll_reserve(cx) {
+            Poll::Pending => {
                 self.sink_buf.replace((item, proto));
-                return Poll::Pending;
+                Poll::Pending
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                return Poll::Ready(Err(channel_closed_err("channel is closed")));
+            Poll::Ready(Ok(())) => {
+                let result = sender
+                    .send_item(item)
+                    .map_err(|_| channel_closed_err("channel is closed"));
+                Poll::Ready(result)
             }
-        };
-
-        permit.send(item);
-        Poll::Ready(Ok(()))
+            Poll::Ready(Err(_)) => Poll::Ready(Err(channel_closed_err("channel is closed"))),
+        }
     }
 }
 
@@ -212,12 +214,8 @@ impl Stream for Stack {
 impl Sink<AnyIpPktFrame> for Stack {
     type Error = std::io::Error;
 
-    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.sink_buf.is_none() {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
-        }
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.poll_send(cx)
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: AnyIpPktFrame) -> Result<(), Self::Error> {
@@ -269,4 +267,71 @@ where
     E: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     std::io::Error::new(std::io::ErrorKind::BrokenPipe, err)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future::Future, time::Duration};
+
+    use futures::{SinkExt, future::poll_fn};
+    use tokio::sync::{mpsc::channel, oneshot};
+    use tokio_util::sync::PollSender;
+
+    use super::Stack;
+    use crate::filter::IpFilters;
+
+    fn tcp_packet() -> Vec<u8> {
+        let mut packet = vec![0_u8; 40];
+        let packet_len = packet.len() as u16;
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[10, 0, 0, 1]);
+        packet[16..20].copy_from_slice(&[10, 0, 0, 2]);
+        packet[20..22].copy_from_slice(&12345_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&80_u16.to_be_bytes());
+        packet[32] = 0x50;
+        packet
+    }
+
+    #[tokio::test]
+    async fn full_ingress_channel_wakes_waiting_stack_sender() {
+        let (tcp_tx, mut tcp_rx) = channel(1);
+        let (_stack_tx, stack_rx) = channel(1);
+        let mut stack = Stack {
+            ip_filters: IpFilters::with_non_broadcast(),
+            sink_buf: None,
+            udp_tx: None,
+            tcp_tx: Some(PollSender::new(tcp_tx)),
+            icmp_tx: None,
+            stack_rx,
+        };
+
+        stack.send(tcp_packet()).await.unwrap();
+
+        let (polled_tx, polled_rx) = oneshot::channel();
+        let sender = tokio::spawn(async move {
+            let mut send = Box::pin(stack.send(tcp_packet()));
+            let mut polled_tx = Some(polled_tx);
+            poll_fn(move |cx| {
+                let result = send.as_mut().poll(cx);
+                if let Some(polled_tx) = polled_tx.take() {
+                    let _ = polled_tx.send(());
+                }
+                result
+            })
+            .await
+        });
+
+        polled_rx.await.unwrap();
+        assert!(!sender.is_finished());
+        assert!(tcp_rx.recv().await.is_some());
+
+        tokio::time::timeout(Duration::from_millis(250), sender)
+            .await
+            .expect("sender was not woken after channel capacity returned")
+            .expect("sender task panicked")
+            .expect("stack send failed");
+    }
 }

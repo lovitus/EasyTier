@@ -3,8 +3,8 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll, Waker},
 };
@@ -22,16 +22,16 @@ use spin::Mutex as SpinMutex;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     sync::{
-        mpsc::{unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender},
         Notify,
+        mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, unbounded_channel},
     },
 };
 use tracing::{error, trace};
 
 use crate::{
+    Runner,
     device::VirtualDevice,
     packet::{AnyIpPktFrame, IpPacket},
-    Runner,
 };
 
 // NOTE: Default buffer could contain 20 AEAD packets
@@ -129,7 +129,9 @@ impl TcpListenerRunner {
             let packet = match TcpPacket::new_checked(payload) {
                 Ok(p) => p,
                 Err(err) => {
-                    error!("invalid TCP err: {err}, src_ip: {src_ip}, dst_ip: {dst_ip}, payload: {payload:?}");
+                    error!(
+                        "invalid TCP err: {err}, src_ip: {src_ip}, dst_ip: {dst_ip}, payload: {payload:?}"
+                    );
                     continue;
                 }
             };
@@ -344,12 +346,7 @@ impl TcpListenerRunner {
                 socket_set.remove(socket_handle);
             }
 
-            if iface_ingress_tx_avail.load(Ordering::Acquire) {
-                // handle_packet and handle_socket are sibling futures in the same select.
-                // Keep this branch cooperative: without an await, a stale/persistent ingress
-                // flag lets this loop monopolize a Leaf runtime worker and starve packet input.
-                tokio::task::yield_now().await;
-            } else {
+            if !iface_ingress_tx_avail.load(Ordering::Acquire) {
                 let next_duration = iface
                     .poll_delay(before_poll, &socket_set)
                     .unwrap_or(Duration::from_millis(5));
