@@ -488,12 +488,7 @@ fn compile_leaf_rules(
                     }
                 }
             }
-            "PORT-RANGE" => {
-                rule.port_range =
-                    Some(vec![crate::config::normalize_port_range(parts[1]).expect(
-                        "validated PORT-RANGE has a Leaf-compatible representation",
-                    )])
-            }
+            "PORT-RANGE" => rule.port_range = Some(vec![parts[1].to_owned()]),
             "NETWORK" => rule.network = Some(vec![parts[1].to_ascii_lowercase()]),
             "INBOUND-TAG" => rule.inbound_tag = Some(vec![parts[1].to_owned()]),
             // A network matcher over both supported session kinds is Leaf's non-special-cased,

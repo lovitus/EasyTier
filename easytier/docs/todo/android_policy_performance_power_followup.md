@@ -2,18 +2,6 @@
 
 状态：**需要进一步研究，当前仅完成源码走读和只读验证，尚未进入修改阶段。**
 
-Android 状态通知、后台 UI 刷新和 WebView 销毁的独立可行性结论记录在
-[`android_status_notification_webview_lifecycle.md`](android_status_notification_webview_lifecycle.md)。
-当前只建议无按钮、事件驱动的状态通知；单进程 WebView 销毁会破坏 Tauri/Wry 和网络
-生命周期，禁止作为耗电优化直接实施。
-
-2026-07-18 对 Android 空闲耗电、direct connector 与 UDP hole punch 的实机归因、误判
-修正和下次最短诊断路径记录在
-[`android_idle_power_mesh_p2p_diagnosis_2026_07_18.md`](../known_bugs/android_idle_power_mesh_p2p_diagnosis_2026_07_18.md)。
-其中确认一次约 `3,669` 包的样本是 Symmetric NAT 收敛窗口而非长期稳态 UDP 风暴；在补齐
-task lifecycle、分阶段 outcome 和 batch 计数前，不修改 200 ms、三连发、84-socket、
-`transport_priority` 或 `lazy_p2p` 语义。
-
 记录日期：2026-07-17  
 基准快照：`5d71abed66a1ad1957834a40bc67b0d0092a95af`  
 Android 候选包：`com.kkrainbow.easytier.policycandidate`  
