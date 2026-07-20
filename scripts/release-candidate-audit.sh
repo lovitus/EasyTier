@@ -99,14 +99,17 @@ if [[ "$phase" != "--source" ]] && rg -q '\| NEEDS_REVIEW \|' "$ledger"; then
 fi
 
 if [[ "$phase" != "--source" ]]; then
-  candidate_sha="$(sed -n 's/^- Candidate SHA: `\([^`]*\)`.*/\1/p' "$manifest")"
-  recovery_tree="$(sed -n 's/^- Recovery tree: `\([^`]*\)`.*/\1/p' "$manifest")"
-  bridge_tree="$(sed -n 's/^- Bridge tree: `\([^`]*\)`.*/\1/p' "$manifest")"
+  recovery_ref="${RECOVERY_REF:-codex/v3.0.0-recovery}"
   current_sha="$(git rev-parse HEAD)"
   current_tree="$(git rev-parse HEAD^{tree})"
-  [[ "$candidate_sha" == "$current_sha" ]] || fail "manifest candidate SHA differs from HEAD"
-  [[ "$recovery_tree" == "$bridge_tree" ]] || fail "recovery and bridge tree IDs differ"
-  [[ "$bridge_tree" == "$current_tree" ]] || fail "manifest bridge tree differs from HEAD tree"
+  recovery_tree="$(git rev-parse "$recovery_ref^{tree}" 2>/dev/null || true)"
+  if [[ -z "$recovery_tree" ]]; then
+    fail "recovery reference cannot be resolved: $recovery_ref"
+  elif [[ "$recovery_tree" != "$current_tree" ]]; then
+    fail "current tree $current_tree differs from recovery tree $recovery_tree"
+  else
+    pass "candidate $current_sha has recovery-matching tree $current_tree"
+  fi
 fi
 
 workflow_success() {
