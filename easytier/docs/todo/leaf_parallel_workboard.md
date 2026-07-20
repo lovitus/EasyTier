@@ -10,7 +10,7 @@ It is local execution state, not a reason to trigger a workflow by itself.
 - Archives: invalid candidate, GUI/Geo WIP, PollSender WIP, rejected AGENTS edit and all three stash parents plus an ordinary combined stash snapshot are pushed and independently fetched with matching commit/tree IDs.
 - Reconstruction: PORT-RANGE, platform/32-bit/API fixes, profiling history, Geo backend, compact GUI and WIP documentation are split into logical commits on `codex/v3.0.0-recovery`.
 - PollSender: archived intermediate runner is superseded by the bounded event-driven implementation already present in `f6617c51`; evidence is recorded in `docs/release/v3.0.0_recovery_ledger.md`.
-- Open release blocker: reproduce the exact three-node readiness case without the `defaa442` test hunk, then close its `NEEDS_REVIEW` ledger row.
+- Readiness result: the exact `.160` three-node case passed without the `defaa442` test hunk; the hunk is rejected rather than carried into the recovery candidate.
 - Dispatch lock: no candidate push until the recovery tree, version metadata, release notes, `.160` Rust/frontend gates and the six-revert public bridge all match one immutable tree.
 
 ## 2026-07-17 protocol status ordering
