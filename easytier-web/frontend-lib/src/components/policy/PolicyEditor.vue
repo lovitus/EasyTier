@@ -539,11 +539,11 @@ watch(() => config.value.enable_policy_proxy, enabled => {
 
 const ruleDataCategoryIdentity = computed(() => {
   const rows = managedRuleDataRows(document.value)
-  return ['geosite', 'geoip'].map(resource => {
-    const row = rows.find(candidate => candidate.type === resource)
-    return [resource, row?.path.trim() ?? '', row?.sha256.trim() ?? ''].join('\0')
-  }).join('\1') + `\1${config.value.instance_id ?? ''}`
-})
+    return ['geosite', 'geoip'].map(resource => {
+      const row = rows.find(candidate => candidate.type === resource)
+      return [resource, row?.path.trim() ?? '', row?.sha256.trim() ?? ''].join('\u0000')
+    }).join('\u0001') + `\u0001${config.value.instance_id ?? ''}`
+  })
 
 watch(ruleDataCategoryIdentity, () => {
   void loadRuleDataCategories()
