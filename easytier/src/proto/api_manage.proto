@@ -186,6 +186,21 @@ message UpdatePolicyRuleDataResponse {
   string sha256 = 2;
   uint64 size = 3;
   string source_url = 4;
+  repeated string categories = 5;
+}
+
+message ListPolicyRuleDataCategoriesRequest {
+  common.UUID inst_id = 1;
+  string resource = 2;
+  optional string expected_sha256 = 3;
+  optional string path = 4;
+}
+
+message ListPolicyRuleDataCategoriesResponse {
+  string resource = 1;
+  string sha256 = 2;
+  uint64 size = 3;
+  repeated string categories = 4;
 }
 
 message PolicyOutboundInterface {
@@ -247,6 +262,8 @@ service WebClientService {
   rpc ValidateConfig(ValidateConfigRequest) returns (ValidateConfigResponse) {}
   rpc UpdatePolicyRuleData(UpdatePolicyRuleDataRequest)
       returns (UpdatePolicyRuleDataResponse) {}
+  rpc ListPolicyRuleDataCategories(ListPolicyRuleDataCategoriesRequest)
+      returns (ListPolicyRuleDataCategoriesResponse) {}
   rpc ListPolicyOutboundInterfaces(ListPolicyOutboundInterfacesRequest)
       returns (ListPolicyOutboundInterfacesResponse) {}
   rpc RunNetworkInstance(RunNetworkInstanceRequest)

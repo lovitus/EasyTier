@@ -8,7 +8,8 @@ use crate::{
             CollectNetworkInfoRequest, CollectNetworkInfoResponse, DeleteNetworkInstanceRequest,
             GetNetworkInstanceConfigRequest, ListNetworkInstanceMetaRequest,
             ListNetworkInstanceRequest, ListPolicyOutboundInterfacesRequest,
-            ListPolicyOutboundInterfacesResponse, NetworkConfig, NetworkMeta,
+            ListPolicyOutboundInterfacesResponse, ListPolicyRuleDataCategoriesRequest,
+            ListPolicyRuleDataCategoriesResponse, NetworkConfig, NetworkMeta,
             RunNetworkInstanceRequest, UpdatePolicyRuleDataRequest, UpdatePolicyRuleDataResponse,
             ValidateConfigRequest, ValidateConfigResponse, WebClientService,
         },
@@ -83,6 +84,31 @@ where
             .list_policy_outbound_interfaces(
                 BaseController::default(),
                 ListPolicyOutboundInterfacesRequest {},
+            )
+            .await
+            .map_err(RemoteClientError::RpcError)
+    }
+
+    async fn handle_list_policy_rule_data_categories(
+        &self,
+        identify: T,
+        inst_id: Uuid,
+        resource: String,
+        expected_sha256: Option<String>,
+        path: Option<String>,
+    ) -> Result<ListPolicyRuleDataCategoriesResponse, RemoteClientError<E>> {
+        let client = self
+            .get_rpc_client(identify)
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        client
+            .list_policy_rule_data_categories(
+                BaseController::default(),
+                ListPolicyRuleDataCategoriesRequest {
+                    inst_id: Some(inst_id.into()),
+                    resource,
+                    expected_sha256,
+                    path,
+                },
             )
             .await
             .map_err(RemoteClientError::RpcError)

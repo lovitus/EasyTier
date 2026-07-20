@@ -1,4 +1,4 @@
-use axum::extract::Path;
+use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Json, Router, extract::State, routing::get};
@@ -79,6 +79,12 @@ struct UpdateNetworkStateJsonReq {
     disabled: bool,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct ListPolicyRuleDataCategoriesQuery {
+    expected_sha256: Option<String>,
+    path: Option<String>,
+}
+
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct GetNetworkMetasJsonReq {
     instance_ids: Vec<uuid::Uuid>,
@@ -155,6 +161,25 @@ impl NetworkApi {
                 inst_id,
                 resource,
                 payload.and_then(|Json(payload)| payload.source_url),
+            )
+            .await
+            .map_err(convert_error)?
+            .into())
+    }
+
+    async fn handle_list_policy_rule_data_categories(
+        auth_session: AuthSession,
+        State(client_mgr): AppState,
+        Path((machine_id, inst_id, resource)): Path<(uuid::Uuid, uuid::Uuid, String)>,
+        Query(query): Query<ListPolicyRuleDataCategoriesQuery>,
+    ) -> Result<Json<ListPolicyRuleDataCategoriesResponse>, HttpHandleError> {
+        Ok(client_mgr
+            .handle_list_policy_rule_data_categories(
+                (Self::get_user_id(&auth_session)?, machine_id),
+                inst_id,
+                resource,
+                query.expected_sha256,
+                query.path,
             )
             .await
             .map_err(convert_error)?
@@ -451,7 +476,8 @@ impl NetworkApi {
             )
             .route(
                 "/api/v1/machines/:machine-id/networks/:inst-id/policy-rule-data/:resource",
-                post(Self::handle_update_policy_rule_data),
+                post(Self::handle_update_policy_rule_data)
+                    .get(Self::handle_list_policy_rule_data_categories),
             )
             .route(
                 "/api/v1/machines/:machine-id/networks",
