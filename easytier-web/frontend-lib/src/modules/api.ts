@@ -18,6 +18,14 @@ export interface UpdatePolicyRuleDataResponse {
     sha256: string;
     size: number | string;
     source_url: string;
+    categories: string[];
+}
+
+export interface ListPolicyRuleDataCategoriesResponse {
+    resource: PolicyRuleDataResource;
+    sha256: string;
+    size: number | string;
+    categories: string[];
 }
 
 export interface PolicyOutboundInterface {
@@ -84,6 +92,7 @@ export interface GetNetworkMetasResponse {
 export interface RemoteClient {
     validate_config(config: NetworkConfig): Promise<ValidateConfigResponse>;
     update_policy_rule_data?(inst_id: string, resource: PolicyRuleDataResource, source_url?: string): Promise<UpdatePolicyRuleDataResponse>;
+    list_policy_rule_data_categories?(inst_id: string, resource: PolicyRuleDataResource, expected_sha256?: string, path?: string): Promise<ListPolicyRuleDataCategoriesResponse>;
     list_policy_outbound_interfaces?(): Promise<ListPolicyOutboundInterfacesResponse>;
     run_network(config: NetworkConfig, save: boolean): Promise<undefined>;
     get_network_info(inst_id: string): Promise<NetworkInstanceRunningInfo | undefined>;
