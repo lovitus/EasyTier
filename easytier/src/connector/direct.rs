@@ -856,6 +856,13 @@ impl DirectConnectorManagerData {
 
     fn listener_url_for_addr(listener: &url::Url, addr: SocketAddr) -> Option<url::Url> {
         let mut url = listener.clone();
+        // quic-brutal's tx_bps is local sender state. Advertising a listener's
+        // value to the peer would make an asymmetric receiver reuse the wrong
+        // direction's rate. A discovered connector therefore uses the safe BBR
+        // fallback unless that node has an explicit manual peer URL.
+        if url.scheme() == "quic-brutal" {
+            url.set_query(None);
+        }
         let host = match addr.ip() {
             IpAddr::V4(ip) => ip.to_string(),
             IpAddr::V6(ip) => format!("[{ip}]"),
@@ -1929,7 +1936,7 @@ mod tests {
 
     #[cfg(feature = "quic")]
     #[test]
-    fn direct_candidate_preserves_quic_brutal_send_rate() {
+    fn direct_candidate_does_not_copy_remote_quic_brutal_send_rate() {
         let listener: url::Url = "quic-brutal://0.0.0.0:21013?tx_bps=500000000"
             .parse()
             .unwrap();
@@ -1939,9 +1946,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            candidate.as_str(),
-            "quic-brutal://192.0.2.10:21013?tx_bps=500000000"
-        );
+        assert_eq!(candidate.as_str(), "quic-brutal://192.0.2.10:21013");
     }
 }

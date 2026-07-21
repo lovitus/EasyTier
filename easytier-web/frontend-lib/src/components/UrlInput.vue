@@ -15,7 +15,18 @@ const url = defineModel<string>({ required: true })
 const editing = ref(false)
 const hostFocused = ref(false)
 
-const parseUrl = (val: string | null | undefined): { proto: string; host: string; port: number | null } => {
+const QUIC_BRUTAL_PROTO = 'quic-brutal'
+const MIN_QUIC_BRUTAL_TX_BPS = 1_000_000
+const MAX_QUIC_BRUTAL_TX_BPS = 100_000_000_000
+
+interface ParsedUrl {
+    proto: string
+    host: string
+    port: number | null
+    txBps: number | null
+}
+
+const parseUrl = (val: string | null | undefined): ParsedUrl => {
     const getValidPort = (portStr: string, proto: string) => {
         const p = parseInt(portStr)
         return isNaN(p) ? (props.protos[proto] ?? 11010) : p
@@ -25,7 +36,7 @@ const parseUrl = (val: string | null | undefined): { proto: string; host: string
         if (!trimmed) {
             return null
         }
-        const match = trimmed.match(/^(\w+):\/\/(.*)$/)
+        const match = trimmed.match(/^([A-Za-z][A-Za-z0-9+.-]*):\/\/(.*)$/)
         const proto = match ? match[1] : 'tcp'
         const rest = match ? match[2] : trimmed
         const authority = rest.split(/[/?#]/)[0]
@@ -40,7 +51,7 @@ const parseUrl = (val: string | null | undefined): { proto: string; host: string
                 const remain = hostAndMaybePort.slice(ipv6End + 1)
                 // null = no explicit port in URL; do not fabricate a default
                 const port: number | null = remain.startsWith(':') ? getValidPort(remain.slice(1), proto) : null
-                return { proto, host, port }
+                return { proto, host, port, txBps: parseTxBps(rest, proto) }
             }
         }
         const portMatch = hostAndMaybePort.match(/^(.*):(\d+)$/)
@@ -48,23 +59,36 @@ const parseUrl = (val: string | null | undefined): { proto: string; host: string
         // null = no explicit port in URL; buildUrlValue will omit the port entirely,
         // preserving the protocol's implied standard port (e.g. 443 for wss://).
         const port: number | null = portMatch ? parseInt(portMatch[2]) : null
-        return { proto, host, port }
+        return { proto, host, port, txBps: parseTxBps(rest, proto) }
     }
 
     if (!val) {
-        return { proto: 'tcp', host: '', port: props.protos['tcp'] ?? 11010 }
+        return { proto: 'tcp', host: '', port: props.protos['tcp'] ?? 11010, txBps: null }
     }
     const parsedByPattern = parseByPattern(val)
     if (parsedByPattern) {
         return parsedByPattern
     }
-    return { proto: 'tcp', host: '', port: null }
+    return { proto: 'tcp', host: '', port: null, txBps: null }
+}
+
+const parseTxBps = (rest: string, proto: string): number | null => {
+    if (proto !== QUIC_BRUTAL_PROTO) {
+        return null
+    }
+    const query = rest.split('?')[1]?.split('#')[0]
+    const rawValue = query ? new URLSearchParams(query).get('tx_bps') : null
+    if (!rawValue || !/^\d+$/.test(rawValue)) {
+        return null
+    }
+    const value = Number(rawValue)
+    return Number.isSafeInteger(value) ? value : null
 }
 
 const internalValue = ref(parseUrl(url.value))
 const defaultHost = '0.0.0.0'
 
-const buildUrlValue = (value: { proto: string, host: string, port: number | null }, forceDefaultHost = false) => {
+const buildUrlValue = (value: ParsedUrl, forceDefaultHost = false) => {
     const proto = value.proto || 'tcp'
     const rawHost = (value.host ?? '').trim()
     const host = rawHost || (forceDefaultHost ? defaultHost : '')
@@ -74,10 +98,13 @@ const buildUrlValue = (value: { proto: string, host: string, port: number | null
     // Omit port when the protocol uses no port (protos value = 0), or when the
     // original URL had no explicit port (port === null) – avoids overwriting an
     // implicit standard port (e.g. 443 for wss) with an EasyTier default (11012).
-    if (props.protos[proto] === 0 || value.port === null) {
-        return `${proto}://${host}`
+    const authority = props.protos[proto] === 0 || value.port === null
+        ? `${proto}://${host}`
+        : `${proto}://${host}:${value.port}`
+    if (proto !== QUIC_BRUTAL_PROTO) {
+        return authority
     }
-    return `${proto}://${host}:${value.port}`
+    return value.txBps === null ? authority : `${authority}?tx_bps=${value.txBps}`
 }
 
 const syncUrlFromInternal = (forceDefaultHost = false) => {
@@ -106,6 +133,8 @@ const isNoPortProto = computed(() => {
     return props.protos[internalValue.value.proto] === 0
 })
 
+const isQuicBrutal = computed(() => internalValue.value.proto === QUIC_BRUTAL_PROTO)
+
 // Sync from external
 watch(() => url.value, (newVal) => {
     if (hostFocused.value) {
@@ -116,7 +145,8 @@ watch(() => url.value, (newVal) => {
     const sameHost = parsed.host === internalHost || (!internalHost.trim() && parsed.host === defaultHost)
     if (parsed.proto !== internalValue.value.proto ||
         !sameHost ||
-        parsed.port !== internalValue.value.port) {
+        parsed.port !== internalValue.value.port ||
+        parsed.txBps !== internalValue.value.txBps) {
         internalValue.value = parsed
     }
 })
@@ -147,6 +177,11 @@ const onProtoChange = (newProto: string) => {
     if (oldDefault !== undefined && internalValue.value.port === oldDefault && newDefault !== undefined) {
         internalValue.value.port = newDefault
     }
+    if (newProto === QUIC_BRUTAL_PROTO && oldProto !== QUIC_BRUTAL_PROTO) {
+        internalValue.value.txBps = null
+    } else if (newProto !== QUIC_BRUTAL_PROTO) {
+        internalValue.value.txBps = null
+    }
     internalValue.value.proto = newProto
 }
 </script>
@@ -165,6 +200,14 @@ const onProtoChange = (newProto: string) => {
                 </InputGroupAddon>
                 <InputNumber v-model="internalValue.port" :format="false" :min="1" :max="65535" class="max-w-24"
                     :placeholder="String(protos[internalValue.proto] ?? 11010)" fluid />
+            </template>
+            <template v-if="isQuicBrutal">
+                <InputGroupAddon>
+                    <span>bit/s</span>
+                </InputGroupAddon>
+                <InputNumber v-model="internalValue.txBps" :format="false"
+                    :min="MIN_QUIC_BRUTAL_TX_BPS" :max="MAX_QUIC_BRUTAL_TX_BPS" class="max-w-40"
+                    :placeholder="t('quic_brutal_tx_bps_placeholder')" fluid />
             </template>
             <!-- Rendered in both responsive branches; keep action slot content free of side effects and duplicate IDs. -->
             <slot name="actions"></slot>
@@ -196,6 +239,12 @@ const onProtoChange = (newProto: string) => {
                     <label>{{ t('port') }}</label>
                     <InputNumber v-model="internalValue.port" :format="false" :min="1" :max="65535" class="w-full"
                         :placeholder="String(protos[internalValue.proto] ?? 11010)" />
+                </div>
+                <div v-if="isQuicBrutal" class="flex flex-col gap-2">
+                    <label>{{ t('quic_brutal_tx_bps') }}</label>
+                    <InputNumber v-model="internalValue.txBps" :format="false"
+                        :min="MIN_QUIC_BRUTAL_TX_BPS" :max="MAX_QUIC_BRUTAL_TX_BPS"
+                        :placeholder="t('quic_brutal_tx_bps_placeholder')" class="w-full" />
                 </div>
             </div>
             <template #footer>

@@ -40,7 +40,7 @@ const QUIC_BRUTAL_MAX_TX_BPS: u64 = 100_000_000_000;
 #[derive(Clone, Debug)]
 enum QuicTransport {
     Standard,
-    Brutal(Arc<BrutalConfig>),
+    Brutal(Option<Arc<BrutalConfig>>),
 }
 
 impl QuicTransport {
@@ -61,8 +61,12 @@ impl QuicTransport {
                 TunnelError::InvalidAddr("quic-brutal tx_bps must be an integer".to_owned())
             })?);
         }
-        let tx_bps = tx_bps
-            .ok_or_else(|| TunnelError::InvalidAddr("quic-brutal requires tx_bps".to_owned()))?;
+        let Some(tx_bps) = tx_bps else {
+            // A missing rate is deliberately safe: keep the independent
+            // quic-brutal scheme, but use the ordinary BBR transport for this
+            // sender. Brutal pacing is opt-in per direction.
+            return Ok(Self::Brutal(None));
+        };
         if !(QUIC_BRUTAL_MIN_TX_BPS..=QUIC_BRUTAL_MAX_TX_BPS).contains(&tx_bps) {
             return Err(TunnelError::InvalidAddr(format!(
                 "quic-brutal tx_bps must be in {QUIC_BRUTAL_MIN_TX_BPS}..={QUIC_BRUTAL_MAX_TX_BPS}"
@@ -70,7 +74,7 @@ impl QuicTransport {
         }
         let config = BrutalConfig::new(tx_bps)
             .ok_or_else(|| TunnelError::InvalidAddr("invalid quic-brutal tx_bps".to_owned()))?;
-        Ok(Self::Brutal(Arc::new(config)))
+        Ok(Self::Brutal(Some(Arc::new(config))))
     }
 
     fn scheme(&self) -> &'static str {
@@ -1218,7 +1222,8 @@ impl QuicEndpointManager {
         Self::validate_server_bind(&endpoint, addr, bind_mode)?;
         endpoint.set_server_config(Some(match transport {
             QuicTransport::Standard => server_config(),
-            QuicTransport::Brutal(config) => brutal_server_config(config.clone()),
+            QuicTransport::Brutal(Some(config)) => brutal_server_config(config.clone()),
+            QuicTransport::Brutal(None) => server_config(),
         }));
         let pool = match bind_mode {
             QuicBindMode::V4Only => &mgr.ipv4,
@@ -1678,10 +1683,15 @@ impl TunnelConnector for QuicTunnelConnector {
             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
         };
         let (endpoint, connection, connection_stealth) = match &self.transport {
-            QuicTransport::Brutal(config) => {
+            QuicTransport::Brutal(Some(config)) => {
                 let (endpoint, connection) =
                     QuicEndpointManager::connect_brutal(&self.global_ctx, addr, config.clone())
                         .await?;
+                (endpoint, connection, None)
+            }
+            QuicTransport::Brutal(None) => {
+                let (endpoint, connection) =
+                    QuicEndpointManager::connect(&self.global_ctx, addr).await?;
                 (endpoint, connection, None)
             }
             QuicTransport::Standard => match self.stealth_mode {
@@ -1924,10 +1934,66 @@ mod tests {
     }
 
     #[test]
+    fn quic_brutal_without_tx_bps_uses_safe_bbr_fallback() {
+        RUNTIME.block_on(async {
+            let listener = QuicTunnelListener::new_brutal(
+                "quic-brutal://127.0.0.1:21021".parse().unwrap(),
+                global_ctx(),
+            )
+            .unwrap();
+            let connector = QuicTunnelConnector::new_brutal(
+                "quic-brutal://127.0.0.1:21021".parse().unwrap(),
+                global_ctx(),
+            )
+            .unwrap();
+            assert!(matches!(listener.transport, QuicTransport::Brutal(None)));
+            assert!(matches!(connector.transport, QuicTransport::Brutal(None)));
+            assert_eq!(listener.transport.scheme(), "quic-brutal");
+            assert_eq!(connector.transport.scheme(), "quic-brutal");
+            _tunnel_pingpong(listener, connector).await;
+        })
+    }
+
+    #[test]
+    fn quic_brutal_allows_independent_sender_modes() {
+        RUNTIME.block_on(async {
+            _tunnel_pingpong(
+                QuicTunnelListener::new_brutal(
+                    "quic-brutal://127.0.0.1:21022?tx_bps=100000000"
+                        .parse()
+                        .unwrap(),
+                    global_ctx(),
+                )
+                .unwrap(),
+                QuicTunnelConnector::new_brutal(
+                    "quic-brutal://127.0.0.1:21022".parse().unwrap(),
+                    global_ctx(),
+                )
+                .unwrap(),
+            )
+            .await;
+            _tunnel_pingpong(
+                QuicTunnelListener::new_brutal(
+                    "quic-brutal://127.0.0.1:21023".parse().unwrap(),
+                    global_ctx(),
+                )
+                .unwrap(),
+                QuicTunnelConnector::new_brutal(
+                    "quic-brutal://127.0.0.1:21023?tx_bps=100000000"
+                        .parse()
+                        .unwrap(),
+                    global_ctx(),
+                )
+                .unwrap(),
+            )
+            .await;
+        })
+    }
+
+    #[test]
     fn quic_brutal_rejects_invalid_parameters() {
         RUNTIME.block_on(async {
             for url in [
-                "quic-brutal://127.0.0.1:11013",
                 "quic-brutal://127.0.0.1:11013?tx_bps=0",
                 "quic-brutal://127.0.0.1:11013?tx_bps=auto",
                 "quic-brutal://127.0.0.1:11013?tx_bps=999999",

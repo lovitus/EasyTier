@@ -561,7 +561,7 @@ mod tests {
 
     #[cfg(feature = "quic")]
     #[tokio::test]
-    async fn connector_factory_accepts_only_valid_quic_brutal_urls() {
+    async fn connector_factory_accepts_explicit_and_bbr_fallback_quic_brutal_urls() {
         let global_ctx = get_mock_global_ctx();
         assert!(
             create_connector_by_url(
@@ -575,7 +575,7 @@ mod tests {
         assert!(
             create_connector_by_url("quic-brutal://127.0.0.1:11013", &global_ctx, IpVersion::V4,)
                 .await
-                .is_err()
+                .is_ok()
         );
     }
 

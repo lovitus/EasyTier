@@ -40,6 +40,7 @@ const protos: { [proto: string]: number } = {
   wss: 11012,
   quic: 11012,
   faketcp: 11013,
+  'quic-brutal': 11013,
   http: 80,
   https: 443,
   txt: 0,

@@ -598,7 +598,7 @@ mod tests {
 
     #[cfg(feature = "quic")]
     #[tokio::test]
-    async fn listener_factory_accepts_only_valid_quic_brutal_urls() {
+    async fn listener_factory_accepts_explicit_and_bbr_fallback_quic_brutal_urls() {
         let global_ctx = get_mock_global_ctx();
         assert!(
             create_listener_by_url(
@@ -611,7 +611,7 @@ mod tests {
         );
         assert!(
             create_listener_by_url(&"quic-brutal://127.0.0.1:0".parse().unwrap(), global_ctx,)
-                .is_err()
+                .is_ok()
         );
     }
 

@@ -117,6 +117,8 @@ enable_quic_proxy_help: Convert TCP traffic to QUIC traffic to reduce latency an
 
 disable_quic_input: Disable QUIC Input
 disable_quic_input_help: Disable inbound QUIC proxy capability without closing quic:// underlay listeners.
+quic_brutal_tx_bps: quic-brutal transmit bandwidth (bit/s)
+quic_brutal_tx_bps_placeholder: Optional; leave blank to use BBR
 
 disable_p2p: Disable P2P
 disable_p2p_help: Disable ordinary automatic P2P. Nodes with need-p2p enabled can still establish P2P with this node.

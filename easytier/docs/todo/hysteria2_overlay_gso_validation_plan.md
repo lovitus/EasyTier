@@ -1,10 +1,10 @@
 # quinn-udp 0.5.15 与 quic-brutal Overlay 验证 TODO
 
-> 状态：实现与 `.160` pre-build 门禁已完成；immutable artifact、真机与性能验证待完成
+> 状态：首个 immutable artifact 与 Linux 早期 A/B 已完成；GUI/可选速率修订、Q 回归、Android 与资源验证进行中
 >
 > 修订日期：2026-07-21
 >
-> 范围：Linux、Android；Android 设备恢复后补齐真机门槛
+> 范围：Linux、Android；Android 使用修订后的同 SHA artifact 补齐真机门槛
 
 > 代码基线：维护者 fork 的 `fc03500806986acfd566060b91d6a33a07120ce3`；本候选不合并或追踪 upstream 的后续提交。
 
@@ -204,22 +204,24 @@ H0 明确不会实现：
 - 不使用 mesh handshake 后的动态 controller 切换或共享原子状态间接修改 controller。
 - 不为 H0 fork/patch/升级 Quinn；当前公开接口不可行时直接停止 H，另开独立依赖计划。
 - 不为 H0 单独触发 profiling-beta workflow。
-- 不因已经投入开发时间而降低收益门槛；效果有限时保留 Q0/Q，终止并删除未进入候选的 H 原型。
+- 不因已经投入开发时间而降低收益门槛；效果有限时不得声称 H 有普遍性能优势或把它加入默认 listener/priority。若实现已保持隔离且维护者明确要求，可保留为显式 opt-in transport，继续以普通 QUIC 零回归作为硬门槛。
 
 ## 7. H：quic-brutal Overlay
 
 ### 7.1 最小实现
 
-- [ ] 新增独立的 `quic-brutal://` scheme、`IpScheme` 和 `TunnelInfo.tunnel_type`，接入现有 listener/connector factory、协议发布和 transport priority 解析；不引入 overlay 专用选择或降级逻辑。
-- [ ] 复用现有 QUIC endpoint、Tunnel framing、mesh 鉴权、连接管理和错误传播路径，不复制一套 QUIC transport 实现。
-- [ ] 只新增已经通过 H0 的 Brutal-inspired controller；每端在建连前独立配置本端静态 `tx_bps`。
-- [ ] `tx_bps` 单位为 bit/s，允许范围为 `1_000_000..=100_000_000_000`；使用 checked arithmetic 转换，缺失、0、`auto`、畸形或越界值均在启动/建连前明确报错，不静默 clamp。
-- [ ] 完成端口索引、IPv4/IPv6 companion、socket bind/mark、生命周期和 endpoint 清理，行为遵循其他现有 IP transport 的统一约定。
-- [ ] 复用现有 endpoint pool；客户端必须使用 `Endpoint::connect_with` 传入专用 Brutal client config，普通 QUIC 继续使用 BBR 默认 config。
-- [ ] 增加普通 QUIC config 快照测试，以及同一 endpoint 上 BBR/Brutal 连接配置不串用的测试；不为此建立第二套 endpoint pool。
+- [x] 新增独立的 `quic-brutal://` scheme、`IpScheme` 和 `TunnelInfo.tunnel_type`，接入现有 listener/connector factory、协议发布和 transport priority 解析；不引入 overlay 专用选择或降级逻辑。
+- [x] 复用现有 QUIC endpoint、Tunnel framing、mesh 鉴权、连接管理和错误传播路径，不复制一套 QUIC transport 实现。
+- [x] 只新增已经通过 H0 的 Brutal-inspired controller；每端在建连前独立配置本端静态 `tx_bps`。
+- [x] `tx_bps` 单位为 bit/s，显式值允许范围为 `1_000_000..=100_000_000_000`；使用 checked arithmetic 转换，0、`auto`、畸形、重复、未知或越界值均在启动/建连前明确报错，不静默 clamp。省略时该发送方向复用普通 BBR，不创建 Brutal controller，也不声称已自动估速。
+- [x] 完成端口索引、IPv4/IPv6 companion、socket bind/mark、生命周期和 endpoint 清理，行为遵循其他现有 IP transport 的统一约定。
+- [x] 复用现有 endpoint pool；客户端必须使用 `Endpoint::connect_with` 传入专用 Brutal client config，普通 QUIC 继续使用 BBR 默认 config。
+- [x] 增加普通 QUIC config 快照测试，以及同一 endpoint 上 BBR/Brutal 连接配置不串用的测试；不为此建立第二套 endpoint pool。
 - [ ] 复用现有 mesh 鉴权；错误 secret、错误握手和畸形 overlay frame 必须被拒绝且资源有界。
 - [ ] listener、connector 或握手失败时返回现有调用方可识别的普通 transport 错误，并完整释放本次连接资源；后续选择由现有 connector 和用户配置决定。
 - [ ] 增加聚焦测试，证明未配置 `quic-brutal` 时普通 QUIC 行为不变、失败连接不污染共享 endpoint、关闭后无 Brutal 专属资源残留。
+- [ ] `tx_bps` 是本地发送参数：listener 与 initial peer 分别只控制其所在节点的发送方向；listener 发布为 direct candidate 时必须剥离该 query，不能把远端发送速率复制成本地速率。
+- [ ] GUI 选择 `quic-brutal` 时使用现有 `+3` 预配置端口 `11013`；带宽字段可留空并明确显示“使用 BBR”，不得用 100 Mbps 等统一静态默认值限制 10 Gbps 节点。
 
 实现边界：本候选只负责让 `quic-brutal` 成为安全、准确、高效且可独立启用的 overlay transport。用户是否配置该协议、放在什么优先级以及后续候选协议是什么，不属于本候选的协议实现范围。
 
@@ -285,7 +287,7 @@ H0 明确不会实现：
 
 ## 8. Android 后续门槛
 
-Android 设备已重新接入；只有 H 通过早期性能门槛并形成 workflow artifact 后才开始真机验证：
+Android 设备已重新接入；H 已按“隔离良好的显式 opt-in experimental transport”保留。只使用包含 GUI、可选速率和 direct-candidate 参数隔离修订的同 SHA workflow artifact 开始真机验证：
 
 - [ ] 使用同 SHA workflow artifact 保留数据升级安装。
 - [ ] 验证 Android 内核 GSO/GRO 实际能力及不支持时的单 segment 回退。
@@ -322,8 +324,10 @@ Android 设备已重新接入；只有 H 通过早期性能门槛并形成 workf
 - 依赖：只把 lockfile 中 `quinn-udp 0.5.4`（checksum `8bffec3605b73c6f1754535084a85229fa8a30f86014e6c81aeec4abb68b0285`）更新为 `0.5.15`（checksum `35a133f956daabe89a61a685c2649f13d82d5aa4bd5d12d1277e1072a21c0694`）；其直接 lockfile 依赖改为既有的 `cfg_aliases`、`socket2 0.6.3` 和 `windows-sys 0.59.0`，没有更新 `quinn 0.11.8` 或 `quinn-proto 0.11.12`。
 - Q0：`QuicStealthSocket::seal_gso_segments` 正确处理最后短 segment 和零 segment size。
 - H：新增独立 `quic_brutal.rs` controller；`quic.rs` 只抽取共享 transport 参数，标准 client/server config 仍显式使用 BBR，Brutal client 使用同一 endpoint 的 `connect_with`。
-- 入口：独立 `quic-brutal://` scheme、listener/connector factory、CLI 显式参数、协议发布、direct candidate 参数保留和现有 transport priority 解析；不增加协议专用调度、后台 task、timer、socket pool或自动 listener。
-- 隔离修正：QUIC/Brutal 的双栈冲突按物理 UDP port 而不是 scheme 判断；需要 `tx_bps` 的 Brutal 不参加无法携带参数的 SRV 自动发现。
+- 入口：独立 `quic-brutal://` scheme、listener/connector factory、CLI 显式 URL、协议发布和现有 transport priority 解析；不增加协议专用调度、后台 task、timer、socket pool 或自动 listener。
+- 速率语义：显式 `tx_bps` 只控制本地发送方向；省略时该方向使用 BBR。listener 发布为 direct candidate 时剥离本地 `tx_bps`，避免非对称链路把远端速率复制成本地速率；无法携带本地参数的 SRV 自动发现仍不发布 Brutal。
+- GUI：选择 `quic-brutal` 使用与后端 offset 一致的 `11013`；`tx_bps` 可留空并显示 BBR fallback，不使用会限制 10 Gbps 网络的统一静态默认值。
+- 隔离修正：QUIC/Brutal 的双栈冲突按物理 UDP port 而不是 scheme 判断。
 
 ### 10.2 Locked source audit
 
@@ -336,11 +340,12 @@ Android 设备已重新接入；只有 H 通过早期性能门槛并形成 workf
 
 - 完整工作快照经 Rust 1.95、edition 2024 `rustfmt` 后同步到 builder；所有 Cargo 调用前均确认无其他 cargo/rustc，使用全核、`--locked`、timeout、独立日志和反向代理。
 - `cargo test --locked --no-run --package easytier --lib --no-default-features --features quic,stealth-aead`：PASS。
-- 上述精确测试二进制的 `tunnel::quic::tests::`：21/21 PASS，串行覆盖普通 QUIC、Stealth QUIC、IPv4/IPv6、bind 校验、endpoint retry/cleanup、Q0 GSO 尾段、Brutal ping-pong，以及同一客户端上下文的 `QUIC -> Brutal -> QUIC` 配置隔离。
-- `tunnel::quic_brutal::tests::`：5/5 PASS；所有名称包含 `quic_brutal` 的入口/controller 测试：13/13 PASS。
+- 上述精确测试二进制的 `tunnel::quic::tests::`：23/23 PASS，串行覆盖普通 QUIC、Stealth QUIC、IPv4/IPv6、bind 校验、endpoint retry/cleanup、Q0 GSO 尾段、显式 Brutal、省略速率的 BBR fallback、两端发送模式独立，以及同一客户端上下文的 `QUIC -> Brutal -> QUIC` 配置隔离。
+- 所有名称包含 `quic_brutal` 的入口/controller/direct-candidate 测试：15/15 PASS；确认 direct candidate 不携带 listener 的本地 `tx_bps`。
 - QUIC listener port index、CLI listener parser、transport priority 聚焦测试分别 2/2、1/1、2/2 PASS。
-- `cargo test --locked --no-run --package easytier --lib` 和其 `tunnel::quic::tests::`：PASS，后者 21/21。
+- `cargo test --locked --no-run --package easytier --lib` 和其 `tunnel::quic::tests::`：PASS，后者 23/23。
 - `cargo check --locked --package easytier --lib --no-default-features`：PASS，证明生产库在不编译 QUIC 时没有候选 `cfg` 泄漏。
+- GUI 聚焦 Vitest：3/3 PASS；精确覆盖 `11013`、留空不添加 query、IPv6 URL 解析/编辑和切回普通 QUIC 时清除 `tx_bps`。完整 frontend-lib Vitest：87/87 PASS。`frontend-lib` build、frontend build、`tauri-plugin-vpnservice` build 和 `easytier-gui` build 均 PASS。
 - `cargo test --no-run --no-default-features` 仍会命中基线 `peer_conn.rs::quic_secure_mode_bench` 未加 QUIC feature gate 的 ignored benchmark import；该文件相对 `fc035008` 无差异，不把它归因于候选，也不在本候选顺手修改。
 - 现有 `quic_stealth_three_node_carries_phase2_tcp` 与 `tests::three_node::quic_proxy` 曾在候选和精确 `fc035008` 基线二进制上以相同方式失败；它们保留为基线缺口，不作为候选 PASS，也不触发候选回退。其余候选判断只使用可重复的有效证据。
 
@@ -352,3 +357,14 @@ Android 设备已重新接入；只有 H 通过早期性能门槛并形成 workf
 - 国内到云按 `.37/.38` 四条出向路径做配对 A/B；如跨境路径明显受扰，只把它标为环境受扰，分别保留内网功能/资源证据和云端受控性能证据，不把噪声误判为协议回归或收益。
 - Android：设备当前 USB ADB 在线；使用同 SHA workflow artifact 保留数据升级安装，验证普通 QUIC 不回归、Brutal、GSO capability/fallback、Wi-Fi/蜂窝/断网恢复、VPN lifecycle 和资源回落。
 - Workflow 等待期间：完成 candidate diff、Cargo.lock、platform `cfg`、workflow pin 和生成文件复核；预清理验证主机、分配显式端口、准备 exact artifact 校验和失败注入矩阵，不修改正在构建的 snapshot。
+
+## 11. 首个 immutable candidate 的早期证据
+
+首个 artifact 只用于验证显式静态 `tx_bps` 实现；后续 GUI/可选速率修订必须形成新的 build-affecting candidate，不能把下列结果冒充为修订后 artifact 的证据。
+
+- SHA：`0e38a79da501a3468fc6a904fb6e190665884817`。
+- Linux profiling workflow：run `29799908659`，SUCCESS；Android candidate workflow：run `29799908653`，SUCCESS。两个 `headSha` 均为上述 SHA，Linux/Android 外层与内层校验和、`BUILD_INFO`、target 和 run ID 均匹配。
+- `.37/.38` 普通 QUIC 双向 1 GiB 冒烟约为 648/669 Mbps；Brutal 为 814/783 Mbps。随后 3 GiB、30 秒级样本中，普通 QUIC 为 721/697 Mbps，Brutal 为 817/800 Mbps，即约 +13%/+15%。连接明确报告 `tunnel_type=quic-brutal`，没有被其他协议接管。
+- 两条国内到云路径的普通 QUIC RTT 约为 170/183 ms。相同 128 MiB 的 A-B-A 中，Brutal 相对前后普通 QUIC 均值：上传约 +26%/+25%，下载约 -3%/+3.5%。这证明某些出向上传可获益，但不证明双向或普遍容量提升。
+- 早期运行中旧内核节点 task 均稳定为 9，云节点 task 均稳定为 6；FD 分别约 21-22，日志无 panic/fatal/error。每轮均按精确测试 PID 清理并确认进程/TUN 释放；该短时证据不替代后续资源恢复和长稳态门槛。
+- 早期容量没有满足“LAN 与跨境双向均稳定显著提升”的 accept 门槛。维护者决定因实现隔离而保留为显式 opt-in transport，因此当前决策为 `H=experimental`，不得把上述结果写成普遍性能声明或改变现有默认协议顺序。
