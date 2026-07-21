@@ -95,6 +95,8 @@ pub fn create_listener_by_url(
             }
             #[cfg(feature = "quic")]
             IpScheme::Quic => create_quic_listener(l, global_ctx, None),
+            #[cfg(feature = "quic")]
+            IpScheme::QuicBrutal => create_quic_brutal_listener(l, global_ctx, None)?,
             #[cfg(feature = "websocket")]
             IpScheme::Ws | IpScheme::Wss => {
                 let mut l = tunnel::websocket::WsTunnelListener::new(l.clone());
@@ -167,6 +169,25 @@ fn create_quic_listener(
     listener.boxed()
 }
 
+#[cfg(feature = "quic")]
+fn create_quic_brutal_listener(
+    l: &url::Url,
+    global_ctx: ArcGlobalCtx,
+    bind_mode: Option<QuicBindMode>,
+) -> Result<Box<dyn TunnelListener>, Error> {
+    // QUIC reads socket_mark from global_ctx in QuicEndpointManager.
+    let listener = if let Some(bind_mode) = bind_mode {
+        tunnel::quic::QuicTunnelListener::new_brutal_with_bind_mode(
+            l.clone(),
+            global_ctx,
+            bind_mode,
+        )?
+    } else {
+        tunnel::quic::QuicTunnelListener::new_brutal(l.clone(), global_ctx)?
+    };
+    Ok(listener.boxed())
+}
+
 pub fn is_url_host_ipv6(l: &url::Url) -> bool {
     l.host_str().is_some_and(|h| h.contains(':'))
 }
@@ -197,7 +218,7 @@ impl QuicListenerIndex {
         let mut index = Self::default();
         for listener in listeners
             .iter()
-            .filter(|listener| listener.scheme() == "quic")
+            .filter(|listener| matches!(listener.scheme(), "quic" | "quic-brutal"))
         {
             let Some(port) = listener.port() else {
                 continue;
@@ -233,7 +254,7 @@ impl QuicListenerIndex {
     }
 
     fn needs_ipv6_companion(&self, listener: &url::Url, enable_ipv6: bool) -> bool {
-        if !enable_ipv6 || listener.scheme() != "quic" {
+        if !enable_ipv6 || !matches!(listener.scheme(), "quic" | "quic-brutal") {
             return false;
         }
         let Some(port) = listener.port() else {
@@ -322,6 +343,11 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
                     if listener.scheme() == "quic" {
                         return create_quic_listener(&listener, ctx.clone(), quic_bind_mode);
                     }
+                    #[cfg(feature = "quic")]
+                    if listener.scheme() == "quic-brutal" {
+                        return create_quic_brutal_listener(&listener, ctx.clone(), quic_bind_mode)
+                            .unwrap();
+                    }
                     create_listener_by_url(&listener, ctx.clone()).unwrap()
                 },
                 true,
@@ -333,7 +359,10 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
             #[cfg(not(feature = "quic"))]
             let add_quic_ipv6_companion = false;
 
-            if l.scheme() == "quic" && enable_ipv6 && is_url_host_unspecified(&l) {
+            if matches!(l.scheme(), "quic" | "quic-brutal")
+                && enable_ipv6
+                && is_url_host_unspecified(&l)
+            {
                 if l.port() == Some(0) {
                     tracing::warn!(
                         listener = %l,
@@ -349,11 +378,20 @@ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManage
                         move || {
                             #[cfg(feature = "quic")]
                             {
-                                return create_quic_listener(
-                                    &ipv6_listener,
-                                    ctx.clone(),
-                                    Some(QuicBindMode::V6Only),
-                                );
+                                return if ipv6_listener.scheme() == "quic" {
+                                    create_quic_listener(
+                                        &ipv6_listener,
+                                        ctx.clone(),
+                                        Some(QuicBindMode::V6Only),
+                                    )
+                                } else {
+                                    create_quic_brutal_listener(
+                                        &ipv6_listener,
+                                        ctx.clone(),
+                                        Some(QuicBindMode::V6Only),
+                                    )
+                                    .unwrap()
+                                };
                             }
                             #[allow(unreachable_code)]
                             create_listener_by_url(&ipv6_listener, ctx.clone()).unwrap()
@@ -538,6 +576,43 @@ mod tests {
         let index = QuicListenerIndex::from_listeners(std::slice::from_ref(&listener));
 
         assert_eq!(index.bind_mode(&listener), Some(QuicBindMode::DualStack));
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn quic_listener_index_accounts_for_cross_scheme_socket_conflicts() {
+        let listeners = vec![
+            "quic://0.0.0.0:21021".parse().unwrap(),
+            "quic-brutal://[::]:21021?tx_bps=100000000".parse().unwrap(),
+            "quic-brutal://0.0.0.0:21022?tx_bps=100000000"
+                .parse()
+                .unwrap(),
+            "quic-brutal://[::]:21022?tx_bps=100000000".parse().unwrap(),
+        ];
+        let index = QuicListenerIndex::from_listeners(&listeners);
+
+        assert_eq!(index.bind_mode(&listeners[1]), Some(QuicBindMode::V6Only));
+        assert_eq!(index.bind_mode(&listeners[3]), Some(QuicBindMode::V6Only));
+        assert!(!index.needs_ipv6_companion(&listeners[0], true));
+    }
+
+    #[cfg(feature = "quic")]
+    #[tokio::test]
+    async fn listener_factory_accepts_only_valid_quic_brutal_urls() {
+        let global_ctx = get_mock_global_ctx();
+        assert!(
+            create_listener_by_url(
+                &"quic-brutal://127.0.0.1:0?tx_bps=100000000"
+                    .parse()
+                    .unwrap(),
+                global_ctx.clone(),
+            )
+            .is_ok()
+        );
+        assert!(
+            create_listener_by_url(&"quic-brutal://127.0.0.1:0".parse().unwrap(), global_ctx,)
+                .is_err()
+        );
     }
 
     #[derive(Debug)]

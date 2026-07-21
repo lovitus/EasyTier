@@ -2,7 +2,16 @@ use std::{collections::HashMap, net::IpAddr, str::FromStr};
 
 use anyhow::{Context, bail};
 
-pub const BUILTIN_TRANSPORT_ORDER: [&str; 7] = ["tcp", "udp", "wg", "quic", "ws", "wss", "faketcp"];
+pub const BUILTIN_TRANSPORT_ORDER: [&str; 8] = [
+    "tcp",
+    "udp",
+    "wg",
+    "quic",
+    "ws",
+    "wss",
+    "faketcp",
+    "quic-brutal",
+];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransportPathClass {
@@ -188,6 +197,7 @@ pub fn protocol_is_compiled(protocol: &str) -> bool {
     matches!(protocol, "tcp" | "udp")
         || (protocol == "wg" && cfg!(feature = "wireguard"))
         || (protocol == "quic" && cfg!(feature = "quic"))
+        || (protocol == "quic-brutal" && cfg!(feature = "quic"))
         || (matches!(protocol, "ws" | "wss") && cfg!(feature = "websocket"))
         || (protocol == "faketcp" && cfg!(feature = "faketcp"))
 }
@@ -205,16 +215,46 @@ mod tests {
 
         assert_eq!(
             parsed.order_for(false, Some("10.44.0.3".parse().unwrap())),
-            ["tcp", "quic", "wss", "udp", "wg", "ws", "faketcp"]
+            [
+                "tcp",
+                "quic",
+                "wss",
+                "udp",
+                "wg",
+                "ws",
+                "faketcp",
+                "quic-brutal"
+            ]
         );
         assert_eq!(
             parsed.order_for(true, None),
-            ["faketcp", "udp", "tcp", "wg", "quic", "ws", "wss"]
+            [
+                "faketcp",
+                "udp",
+                "tcp",
+                "wg",
+                "quic",
+                "ws",
+                "wss",
+                "quic-brutal"
+            ]
         );
         assert_eq!(
             parsed.order_for(false, Some("fd00::3".parse().unwrap())),
-            ["quic", "tcp", "wss", "udp", "wg", "ws", "faketcp"]
+            [
+                "quic",
+                "tcp",
+                "wss",
+                "udp",
+                "wg",
+                "ws",
+                "faketcp",
+                "quic-brutal"
+            ]
         );
+
+        let brutal = TransportPriority::parse("wan:quic-brutal,quic").unwrap();
+        assert_eq!(brutal.order_for(false, None)[..2], ["quic-brutal", "quic"]);
     }
 
     #[test]

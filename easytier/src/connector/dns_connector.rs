@@ -33,6 +33,12 @@ fn weighted_choice<T>(options: &[(T, u64)]) -> Option<&T> {
     None
 }
 
+fn srv_schemes() -> impl Iterator<Item = &'static IpScheme> {
+    IpScheme::VARIANTS
+        .iter()
+        .filter(|scheme| !scheme.is_explicit_only())
+}
+
 #[derive(Debug)]
 pub struct DnsTunnelConnector {
     scheme: TunnelScheme,
@@ -113,8 +119,7 @@ impl DnsTunnelConnector {
     ) -> Result<Box<dyn TunnelConnector>, Error> {
         tracing::info!("handle_srv_record: {}", domain_name);
 
-        let srv_domains = IpScheme::VARIANTS
-            .iter()
+        let srv_domains = srv_schemes()
             .map(|s| (s, format!("_easytier._{}.{}", s, domain_name)))
             .collect::<Vec<_>>();
         tracing::info!("build srv_domains: {:?}", srv_domains);
@@ -219,6 +224,12 @@ impl super::TunnelConnector for DnsTunnelConnector {
 mod tests {
     use super::*;
     use crate::common::global_ctx::tests::get_mock_global_ctx;
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn srv_discovery_excludes_parameterized_quic_brutal() {
+        assert!(!srv_schemes().any(|scheme| *scheme == IpScheme::QuicBrutal));
+    }
 
     #[tokio::test]
     async fn test_txt() {

@@ -8,6 +8,7 @@ use crate::tunnel::common::bind;
 use crate::tunnel::{
     TunnelInfo,
     common::{FramedReader, FramedWriter, TunnelWrapper},
+    quic_brutal::BrutalConfig,
 };
 use anyhow::Context;
 use derivative::Derivative;
@@ -33,6 +34,52 @@ const QUIC_STEALTH_OUTER_SEND_DELAY: Duration = Duration::from_secs(1);
 const QUIC_STEALTH_GATE_RECV_GRACE: Duration = Duration::from_secs(5);
 const QUIC_STEALTH_SESSION_TTL: Duration = Duration::from_secs(600);
 const QUIC_STEALTH_MAX_SESSIONS: usize = 4096;
+const QUIC_BRUTAL_MIN_TX_BPS: u64 = 1_000_000;
+const QUIC_BRUTAL_MAX_TX_BPS: u64 = 100_000_000_000;
+
+#[derive(Clone, Debug)]
+enum QuicTransport {
+    Standard,
+    Brutal(Arc<BrutalConfig>),
+}
+
+impl QuicTransport {
+    fn brutal_from_url(url: &url::Url) -> Result<Self, TunnelError> {
+        let mut tx_bps = None;
+        for (key, value) in url.query_pairs() {
+            if key != "tx_bps" {
+                return Err(TunnelError::InvalidAddr(format!(
+                    "unsupported quic-brutal parameter: {key}"
+                )));
+            }
+            if tx_bps.is_some() {
+                return Err(TunnelError::InvalidAddr(
+                    "duplicate quic-brutal tx_bps parameter".to_owned(),
+                ));
+            }
+            tx_bps = Some(value.parse::<u64>().map_err(|_| {
+                TunnelError::InvalidAddr("quic-brutal tx_bps must be an integer".to_owned())
+            })?);
+        }
+        let tx_bps = tx_bps
+            .ok_or_else(|| TunnelError::InvalidAddr("quic-brutal requires tx_bps".to_owned()))?;
+        if !(QUIC_BRUTAL_MIN_TX_BPS..=QUIC_BRUTAL_MAX_TX_BPS).contains(&tx_bps) {
+            return Err(TunnelError::InvalidAddr(format!(
+                "quic-brutal tx_bps must be in {QUIC_BRUTAL_MIN_TX_BPS}..={QUIC_BRUTAL_MAX_TX_BPS}"
+            )));
+        }
+        let config = BrutalConfig::new(tx_bps)
+            .ok_or_else(|| TunnelError::InvalidAddr("invalid quic-brutal tx_bps".to_owned()))?;
+        Ok(Self::Brutal(Arc::new(config)))
+    }
+
+    fn scheme(&self) -> &'static str {
+        match self {
+            Self::Standard => "quic",
+            Self::Brutal(_) => "quic-brutal",
+        }
+    }
+}
 
 // region config
 mod crypto {
@@ -279,9 +326,7 @@ mod crypto {
     }
 }
 
-pub fn transport_config() -> Arc<TransportConfig> {
-    let mut config = TransportConfig::default();
-
+fn configure_transport(config: &mut TransportConfig) {
     config
         .max_concurrent_bidi_streams(u8::MAX.into())
         .max_concurrent_uni_streams(0u8.into())
@@ -289,15 +334,32 @@ pub fn transport_config() -> Arc<TransportConfig> {
         .initial_mtu(1200)
         .min_mtu(1200)
         .enable_segmentation_offload(true)
-        .stream_receive_window(quinn::VarInt::from_u32(8_388_608))
-        .congestion_controller_factory(Arc::new(BbrConfig::default()));
+        .stream_receive_window(quinn::VarInt::from_u32(8_388_608));
+}
 
+pub fn transport_config() -> Arc<TransportConfig> {
+    let mut config = TransportConfig::default();
+    configure_transport(&mut config);
+    config.congestion_controller_factory(Arc::new(BbrConfig::default()));
+    Arc::new(config)
+}
+
+fn brutal_transport_config(brutal: Arc<BrutalConfig>) -> Arc<TransportConfig> {
+    let mut config = TransportConfig::default();
+    configure_transport(&mut config);
+    config.congestion_controller_factory(brutal);
     Arc::new(config)
 }
 
 pub fn server_config() -> ServerConfig {
     let mut config = ServerConfig::with_crypto(Arc::new(crypto::CryptoConfig));
     config.transport_config(transport_config());
+    config
+}
+
+fn brutal_server_config(brutal: Arc<BrutalConfig>) -> ServerConfig {
+    let mut config = ServerConfig::with_crypto(Arc::new(crypto::CryptoConfig));
+    config.transport_config(brutal_transport_config(brutal));
     config
 }
 
@@ -313,6 +375,12 @@ fn stealth_server_config() -> ServerConfig {
 pub fn client_config() -> ClientConfig {
     let mut config = ClientConfig::new(Arc::new(crypto::CryptoConfig));
     config.transport_config(transport_config());
+    config
+}
+
+fn brutal_client_config(brutal: Arc<BrutalConfig>) -> ClientConfig {
+    let mut config = ClientConfig::new(Arc::new(crypto::CryptoConfig));
+    config.transport_config(brutal_transport_config(brutal));
     config
 }
 
@@ -605,6 +673,30 @@ impl QuicStealthSocket {
         entry.last_seen = now;
         Some((plaintext.len(), entry.session.clone()))
     }
+
+    fn seal_gso_segments(
+        session: &QuicStealthSession,
+        contents: &[u8],
+        segment_size: usize,
+    ) -> io::Result<Vec<u8>> {
+        if segment_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "QUIC stealth GSO segment size must be non-zero",
+            ));
+        }
+
+        let segment_count = contents.len().div_ceil(segment_size);
+        let sealed_segment_size = segment_size + crate::tunnel::stealth::OUTER_OVERHEAD;
+        let mut sealed = Vec::with_capacity(segment_count * sealed_segment_size);
+        for segment in contents.chunks(segment_size) {
+            let sealed_segment = session.seal(segment).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "QUIC stealth sealing failed")
+            })?;
+            sealed.extend_from_slice(&sealed_segment);
+        }
+        Ok(sealed)
+    }
 }
 
 impl AsyncUdpSocket for QuicStealthSocket {
@@ -622,17 +714,8 @@ impl AsyncUdpSocket for QuicStealthSocket {
 
         if let Some(seg_size) = transmit.segment_size {
             // GSO: seal each segment independently, then batch via inner with adjusted segment size.
-            let contents = transmit.contents;
             let sealed_seg_size = seg_size + crate::tunnel::stealth::OUTER_OVERHEAD;
-            let num_segments = contents.len() / seg_size;
-            let mut sealed = Vec::with_capacity(num_segments * sealed_seg_size);
-            for i in 0..num_segments {
-                let segment = &contents[i * seg_size..(i + 1) * seg_size];
-                let sealed_segment = session.seal(segment).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "QUIC stealth sealing failed")
-                })?;
-                sealed.extend_from_slice(&sealed_segment);
-            }
+            let sealed = Self::seal_gso_segments(&session, transmit.contents, seg_size)?;
             self.inner.try_send(&Transmit {
                 destination: transmit.destination,
                 ecn: transmit.ecn,
@@ -1112,6 +1195,7 @@ impl QuicEndpointManager {
         addr: SocketAddr,
         bind_mode: QuicBindMode,
         stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+        transport: &QuicTransport,
     ) -> Result<(Endpoint, Option<Arc<QuicStealthSocket>>), TunnelError> {
         let mgr = Self::load(global_ctx);
         let socket_mark = global_ctx.config.get_flags().socket_mark;
@@ -1132,7 +1216,10 @@ impl QuicEndpointManager {
 
         let endpoint = Self::try_create(addr, dual_stack, socket_mark)?;
         Self::validate_server_bind(&endpoint, addr, bind_mode)?;
-        endpoint.set_server_config(Some(server_config()));
+        endpoint.set_server_config(Some(match transport {
+            QuicTransport::Standard => server_config(),
+            QuicTransport::Brutal(config) => brutal_server_config(config.clone()),
+        }));
         let pool = match bind_mode {
             QuicBindMode::V4Only => &mgr.ipv4,
             QuicBindMode::V6Only => &mgr.ipv6,
@@ -1202,7 +1289,28 @@ impl QuicEndpointManager {
         };
         let socket_mark = global_ctx.config.get_flags().socket_mark;
         Self::load(global_ctx)
-            .connect_with_ip_version(addr, ip_version, socket_mark)
+            .connect_with_ip_version(addr, ip_version, socket_mark, None)
+            .await
+    }
+
+    async fn connect_brutal(
+        global_ctx: &ArcGlobalCtx,
+        addr: SocketAddr,
+        config: Arc<BrutalConfig>,
+    ) -> Result<(Endpoint, Connection), TunnelError> {
+        let ip_version = if addr.ip().is_ipv4() {
+            IpVersion::V4
+        } else {
+            IpVersion::V6
+        };
+        let socket_mark = global_ctx.config.get_flags().socket_mark;
+        Self::load(global_ctx)
+            .connect_with_ip_version(
+                addr,
+                ip_version,
+                socket_mark,
+                Some(brutal_client_config(config)),
+            )
             .await
     }
 
@@ -1242,13 +1350,18 @@ impl QuicEndpointManager {
         addr: SocketAddr,
         ip_version: IpVersion,
         socket_mark: Option<u32>,
+        client_config: Option<ClientConfig>,
     ) -> Result<(Endpoint, Connection), TunnelError> {
         let max_endpoint_stopping_retries = self.client_pool(ip_version).len().saturating_add(1);
         let mut endpoint_stopping_retries = 0;
 
         loop {
             let endpoint = self.client_endpoint(ip_version, socket_mark)?;
-            let connecting = match endpoint.connect(addr, "localhost") {
+            let connect_result = match &client_config {
+                Some(config) => endpoint.connect_with(config.clone(), addr, "localhost"),
+                None => endpoint.connect(addr, "localhost"),
+            };
+            let connecting = match connect_result {
                 Ok(connecting) => connecting,
                 Err(ConnectError::EndpointStopping) => {
                     let local_addr = endpoint.local_addr().ok();
@@ -1304,6 +1417,7 @@ pub struct QuicTunnelListener {
     stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
     stealth_socket: Option<Arc<QuicStealthSocket>>,
     bind_mode: Option<QuicBindMode>,
+    transport: QuicTransport,
 }
 
 impl QuicTunnelListener {
@@ -1319,7 +1433,23 @@ impl QuicTunnelListener {
             }),
             None => None,
         };
-        Self::new_inner(addr, global_ctx, bind_mode)
+        Self::new_inner(addr, global_ctx, bind_mode, QuicTransport::Standard)
+    }
+
+    pub fn new_brutal(addr: url::Url, global_ctx: ArcGlobalCtx) -> Result<Self, TunnelError> {
+        let transport = QuicTransport::brutal_from_url(&addr)?;
+        let bind_mode = match addr.host() {
+            Some(url::Host::Ipv4(_)) => Some(QuicBindMode::V4Only),
+            Some(url::Host::Ipv6(ip)) if ip.is_unspecified() => Some(QuicBindMode::DualStack),
+            Some(url::Host::Ipv6(_)) => Some(QuicBindMode::V6Only),
+            Some(url::Host::Domain(host)) => host.parse::<IpAddr>().ok().map(|ip| match ip {
+                IpAddr::V4(_) => QuicBindMode::V4Only,
+                IpAddr::V6(ip) if ip.is_unspecified() => QuicBindMode::DualStack,
+                IpAddr::V6(_) => QuicBindMode::V6Only,
+            }),
+            None => None,
+        };
+        Ok(Self::new_inner(addr, global_ctx, bind_mode, transport))
     }
 
     pub(crate) fn new_with_bind_mode(
@@ -1327,13 +1457,28 @@ impl QuicTunnelListener {
         global_ctx: ArcGlobalCtx,
         bind_mode: QuicBindMode,
     ) -> Self {
-        Self::new_inner(addr, global_ctx, Some(bind_mode))
+        Self::new_inner(addr, global_ctx, Some(bind_mode), QuicTransport::Standard)
+    }
+
+    pub(crate) fn new_brutal_with_bind_mode(
+        addr: url::Url,
+        global_ctx: ArcGlobalCtx,
+        bind_mode: QuicBindMode,
+    ) -> Result<Self, TunnelError> {
+        let transport = QuicTransport::brutal_from_url(&addr)?;
+        Ok(Self::new_inner(
+            addr,
+            global_ctx,
+            Some(bind_mode),
+            transport,
+        ))
     }
 
     fn new_inner(
         addr: url::Url,
         global_ctx: ArcGlobalCtx,
         bind_mode: Option<QuicBindMode>,
+        transport: QuicTransport,
     ) -> Self {
         QuicTunnelListener {
             addr,
@@ -1342,6 +1487,7 @@ impl QuicTunnelListener {
             stealth: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
             stealth_socket: None,
             bind_mode,
+            transport,
         }
     }
 
@@ -1385,14 +1531,15 @@ impl QuicTunnelListener {
             stealth_cleanup,
         });
 
+        let scheme = self.transport.scheme();
         let info = TunnelInfo {
-            tunnel_type: "quic".to_owned(),
+            tunnel_type: scheme.to_owned(),
             local_addr: Some(self.local_url().into()),
             remote_addr: Some(
-                super::build_url_from_socket_addr(&remote_addr.to_string(), "quic").into(),
+                super::build_url_from_socket_addr(&remote_addr.to_string(), scheme).into(),
             ),
             resolved_remote_addr: Some(
-                super::build_url_from_socket_addr(&remote_addr.to_string(), "quic").into(),
+                super::build_url_from_socket_addr(&remote_addr.to_string(), scheme).into(),
             ),
         };
 
@@ -1420,6 +1567,11 @@ impl Drop for QuicTunnelListener {
 #[async_trait::async_trait]
 impl TunnelListener for QuicTunnelListener {
     async fn listen(&mut self) -> Result<(), TunnelError> {
+        if matches!(self.transport, QuicTransport::Brutal(_)) && self.stealth.is_enabled() {
+            return Err(TunnelError::InvalidAddr(
+                "quic-brutal does not support QUIC stealth wrapping".to_owned(),
+            ));
+        }
         let addr = SocketAddr::from_url(self.addr.clone(), IpVersion::Both).await?;
         let bind_mode = self.bind_mode.unwrap_or_else(|| {
             if addr.is_ipv4() {
@@ -1428,8 +1580,13 @@ impl TunnelListener for QuicTunnelListener {
                 QuicBindMode::V6Only
             }
         });
-        let (endpoint, stealth_socket) =
-            QuicEndpointManager::server(&self.global_ctx, addr, bind_mode, self.stealth.clone())?;
+        let (endpoint, stealth_socket) = QuicEndpointManager::server(
+            &self.global_ctx,
+            addr,
+            bind_mode,
+            self.stealth.clone(),
+            &self.transport,
+        )?;
         self.addr
             .set_port(Some(endpoint.local_addr()?.port()))
             .unwrap();
@@ -1464,6 +1621,7 @@ pub struct QuicTunnelConnector {
     resolved_addr: Option<SocketAddr>,
     stealth_candidate: Arc<crate::tunnel::stealth::OuterSessionState>,
     stealth_mode: QuicStealthMode,
+    transport: QuicTransport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1482,7 +1640,21 @@ impl QuicTunnelConnector {
             resolved_addr: None,
             stealth_candidate: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
             stealth_mode: QuicStealthMode::Disabled,
+            transport: QuicTransport::Standard,
         }
+    }
+
+    pub fn new_brutal(addr: url::Url, global_ctx: ArcGlobalCtx) -> Result<Self, TunnelError> {
+        let transport = QuicTransport::brutal_from_url(&addr)?;
+        Ok(Self {
+            addr,
+            global_ctx,
+            ip_version: IpVersion::Both,
+            resolved_addr: None,
+            stealth_candidate: Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),
+            stealth_mode: QuicStealthMode::Disabled,
+            transport,
+        })
     }
 
     pub fn set_stealth_candidate(
@@ -1505,47 +1677,55 @@ impl TunnelConnector for QuicTunnelConnector {
             Some(addr) => addr,
             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
         };
-        let (endpoint, connection, connection_stealth) = match self.stealth_mode {
-            QuicStealthMode::Disabled => {
+        let (endpoint, connection, connection_stealth) = match &self.transport {
+            QuicTransport::Brutal(config) => {
                 let (endpoint, connection) =
-                    QuicEndpointManager::connect(&self.global_ctx, addr).await?;
+                    QuicEndpointManager::connect_brutal(&self.global_ctx, addr, config.clone())
+                        .await?;
                 (endpoint, connection, None)
             }
-            QuicStealthMode::Required => {
-                let (endpoint, connection, session) = QuicEndpointManager::connect_stealth(
-                    &self.global_ctx,
-                    addr,
-                    self.stealth_candidate.clone(),
-                )
-                .await?;
-                (endpoint, connection, Some(session.state.clone()))
-            }
-            QuicStealthMode::PreferLegacyFallback => {
-                match tokio::time::timeout(
-                    QUIC_STEALTH_FALLBACK_TIMEOUT,
-                    QuicEndpointManager::connect_stealth(
+            QuicTransport::Standard => match self.stealth_mode {
+                QuicStealthMode::Disabled => {
+                    let (endpoint, connection) =
+                        QuicEndpointManager::connect(&self.global_ctx, addr).await?;
+                    (endpoint, connection, None)
+                }
+                QuicStealthMode::Required => {
+                    let (endpoint, connection, session) = QuicEndpointManager::connect_stealth(
                         &self.global_ctx,
                         addr,
                         self.stealth_candidate.clone(),
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok((endpoint, connection, session))) => {
-                        (endpoint, connection, Some(session.state.clone()))
-                    }
-                    result => {
-                        tracing::info!(
-                            ?addr,
-                            ?result,
-                            "QUIC stealth attempt failed, retrying legacy wire format"
-                        );
-                        let (endpoint, connection) =
-                            QuicEndpointManager::connect(&self.global_ctx, addr).await?;
-                        (endpoint, connection, None)
+                    )
+                    .await?;
+                    (endpoint, connection, Some(session.state.clone()))
+                }
+                QuicStealthMode::PreferLegacyFallback => {
+                    match tokio::time::timeout(
+                        QUIC_STEALTH_FALLBACK_TIMEOUT,
+                        QuicEndpointManager::connect_stealth(
+                            &self.global_ctx,
+                            addr,
+                            self.stealth_candidate.clone(),
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok((endpoint, connection, session))) => {
+                            (endpoint, connection, Some(session.state.clone()))
+                        }
+                        result => {
+                            tracing::info!(
+                                ?addr,
+                                ?result,
+                                "QUIC stealth attempt failed, retrying legacy wire format"
+                            );
+                            let (endpoint, connection) =
+                                QuicEndpointManager::connect(&self.global_ctx, addr).await?;
+                            (endpoint, connection, None)
+                        }
                     }
                 }
-            }
+            },
         };
 
         let local_addr = endpoint.local_addr()?;
@@ -1555,14 +1735,15 @@ impl TunnelConnector for QuicTunnelConnector {
             .await
             .with_context(|| "open_bi failed")?;
 
+        let scheme = self.transport.scheme();
         let info = TunnelInfo {
-            tunnel_type: "quic".to_owned(),
+            tunnel_type: scheme.to_owned(),
             local_addr: Some(
-                super::build_url_from_socket_addr(&local_addr.to_string(), "quic").into(),
+                super::build_url_from_socket_addr(&local_addr.to_string(), scheme).into(),
             ),
             remote_addr: Some(self.addr.clone().into()),
             resolved_remote_addr: Some(
-                super::build_url_from_socket_addr(&connection.remote_address().to_string(), "quic")
+                super::build_url_from_socket_addr(&connection.remote_address().to_string(), scheme)
                     .into(),
             ),
         };
@@ -1720,6 +1901,90 @@ mod tests {
     }
 
     #[test]
+    fn quic_brutal_pingpong_and_identity() {
+        RUNTIME.block_on(async {
+            let listener = QuicTunnelListener::new_brutal(
+                "quic-brutal://127.0.0.1:21017?tx_bps=100000000"
+                    .parse()
+                    .unwrap(),
+                global_ctx(),
+            )
+            .unwrap();
+            let connector = QuicTunnelConnector::new_brutal(
+                "quic-brutal://127.0.0.1:21017?tx_bps=100000000"
+                    .parse()
+                    .unwrap(),
+                global_ctx(),
+            )
+            .unwrap();
+            assert_eq!(listener.transport.scheme(), "quic-brutal");
+            assert_eq!(connector.transport.scheme(), "quic-brutal");
+            _tunnel_pingpong(listener, connector).await;
+        })
+    }
+
+    #[test]
+    fn quic_brutal_rejects_invalid_parameters() {
+        RUNTIME.block_on(async {
+            for url in [
+                "quic-brutal://127.0.0.1:11013",
+                "quic-brutal://127.0.0.1:11013?tx_bps=0",
+                "quic-brutal://127.0.0.1:11013?tx_bps=auto",
+                "quic-brutal://127.0.0.1:11013?tx_bps=999999",
+                "quic-brutal://127.0.0.1:11013?tx_bps=100000000001",
+                "quic-brutal://127.0.0.1:11013?tx_bps=1000000&tx_bps=2000000",
+                "quic-brutal://127.0.0.1:11013?rate=1000000",
+            ] {
+                let url: url::Url = url.parse().unwrap();
+                assert!(
+                    QuicTunnelConnector::new_brutal(url.clone(), global_ctx()).is_err(),
+                    "accepted invalid quic-brutal URL: {url}"
+                );
+            }
+        })
+    }
+
+    #[test]
+    fn standard_quic_still_works_after_brutal_on_shared_client_context() {
+        RUNTIME.block_on(async {
+            let client_ctx = global_ctx();
+            _tunnel_pingpong(
+                QuicTunnelListener::new("quic://127.0.0.1:21018".parse().unwrap(), global_ctx()),
+                QuicTunnelConnector::new(
+                    "quic://127.0.0.1:21018".parse().unwrap(),
+                    client_ctx.clone(),
+                ),
+            )
+            .await;
+            _tunnel_pingpong(
+                QuicTunnelListener::new_brutal(
+                    "quic-brutal://127.0.0.1:21019?tx_bps=100000000"
+                        .parse()
+                        .unwrap(),
+                    global_ctx(),
+                )
+                .unwrap(),
+                QuicTunnelConnector::new_brutal(
+                    "quic-brutal://127.0.0.1:21019?tx_bps=100000000"
+                        .parse()
+                        .unwrap(),
+                    client_ctx.clone(),
+                )
+                .unwrap(),
+            )
+            .await;
+            _tunnel_pingpong(
+                QuicTunnelListener::new("quic://127.0.0.1:21020".parse().unwrap(), global_ctx()),
+                QuicTunnelConnector::new(
+                    "quic://127.0.0.1:21020".parse().unwrap(),
+                    client_ctx.clone(),
+                ),
+            )
+            .await;
+        })
+    }
+
+    #[test]
     fn quic_stealth_pingpong() {
         RUNTIME.block_on(async {
             let mut listener =
@@ -1870,6 +2135,44 @@ mod tests {
     }
 
     #[test]
+    fn quic_stealth_gso_seals_final_short_segment() {
+        let segment_size = 1200;
+        let overhead = crate::tunnel::stealth::OUTER_OVERHEAD;
+
+        for plaintext_len in [2 * segment_size, 2 * segment_size + 1, 3 * segment_size - 1] {
+            let sender = QuicStealthSession::new(stealth("quic-gso-secret"));
+            let receiver = QuicStealthSession::new(stealth("quic-gso-secret"));
+            let plaintext: Vec<u8> = (0..plaintext_len).map(|index| index as u8).collect();
+            let sealed =
+                QuicStealthSocket::seal_gso_segments(&sender, &plaintext, segment_size).unwrap();
+
+            let segment_count = plaintext_len.div_ceil(segment_size);
+            assert_eq!(
+                sealed.len(),
+                plaintext_len + segment_count * overhead,
+                "sealed length mismatch for plaintext_len={plaintext_len}"
+            );
+
+            let mut opened = Vec::with_capacity(plaintext_len);
+            for segment_index in 0..segment_count {
+                let start = segment_index * (segment_size + overhead);
+                let plaintext_segment_len =
+                    (plaintext_len - segment_index * segment_size).min(segment_size);
+                let end = start + plaintext_segment_len + overhead;
+                opened.extend_from_slice(receiver.open(&sealed[start..end]).unwrap().as_ref());
+            }
+            assert_eq!(opened, plaintext);
+        }
+    }
+
+    #[test]
+    fn quic_stealth_gso_rejects_zero_segment_size() {
+        let session = QuicStealthSession::new(stealth("quic-gso-secret"));
+        let error = QuicStealthSocket::seal_gso_segments(&session, b"payload", 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
     fn quic_bench() {
         RUNTIME.block_on(quic_bench_impl())
     }
@@ -1952,6 +2255,28 @@ mod tests {
     }
 
     #[test]
+    fn quic_brutal_listener_drop_removes_persistent_endpoint() {
+        RUNTIME.block_on(async {
+            let global_ctx = global_ctx();
+            let endpoint_addr = {
+                let mut listener = QuicTunnelListener::new_brutal(
+                    "quic-brutal://127.0.0.1:0?tx_bps=100000000"
+                        .parse()
+                        .unwrap(),
+                    global_ctx.clone(),
+                )
+                .unwrap();
+                listener.listen().await.unwrap();
+                let endpoint_addr = listener.endpoint.as_ref().unwrap().local_addr().unwrap();
+                assert!(QuicEndpointManager::load(&global_ctx).contains_local_addr(endpoint_addr));
+                endpoint_addr
+            };
+
+            assert!(!QuicEndpointManager::load(&global_ctx).contains_local_addr(endpoint_addr));
+        })
+    }
+
+    #[test]
     fn connect_removes_stopped_endpoints_and_retries() {
         let (stopped_endpoint_a, stopped_addr_a) = stopped_client_endpoint();
         let (stopped_endpoint_b, stopped_addr_b) = stopped_client_endpoint();
@@ -1964,7 +2289,7 @@ mod tests {
             assert!(mgr.contains_local_addr(stopped_addr_b));
 
             let err = mgr
-                .connect_with_ip_version("127.0.0.1:0".parse().unwrap(), IpVersion::V4, None)
+                .connect_with_ip_version("127.0.0.1:0".parse().unwrap(), IpVersion::V4, None, None)
                 .await
                 .unwrap_err();
             let err = format!("{:?}", err);

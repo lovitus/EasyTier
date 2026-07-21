@@ -38,6 +38,9 @@ pub mod wireguard;
 #[cfg(feature = "quic")]
 pub mod quic;
 
+#[cfg(feature = "quic")]
+pub mod quic_brutal;
+
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
@@ -313,6 +316,9 @@ pub enum IpScheme {
     Wg,
     #[cfg(feature = "quic")]
     Quic,
+    #[cfg(feature = "quic")]
+    #[strum(serialize = "quic-brutal")]
+    QuicBrutal,
     #[cfg(feature = "websocket")]
     Ws,
     #[cfg(feature = "websocket")]
@@ -330,6 +336,8 @@ impl IpScheme {
             Self::Wg => (Protocol::UDP, 1),
             #[cfg(feature = "quic")]
             Self::Quic => (Protocol::UDP, 2),
+            #[cfg(feature = "quic")]
+            Self::QuicBrutal => (Protocol::UDP, 3),
             #[cfg(feature = "websocket")]
             Self::Ws => (Protocol::TCP, 1),
             #[cfg(feature = "websocket")]
@@ -360,6 +368,14 @@ impl IpScheme {
         }
     }
 
+    pub const fn is_explicit_only(self) -> bool {
+        #[cfg(feature = "quic")]
+        if matches!(self, Self::QuicBrutal) {
+            return true;
+        }
+        false
+    }
+
     pub const fn loop_avoidance_bit(self) -> u64 {
         match self {
             Self::Tcp => 1 << 0,
@@ -374,6 +390,8 @@ impl IpScheme {
             Self::Wss => 1 << 5,
             #[cfg(feature = "faketcp")]
             Self::FakeTcp => 1 << 6,
+            #[cfg(feature = "quic")]
+            Self::QuicBrutal => 1 << 7,
         }
     }
 
@@ -385,6 +403,8 @@ impl IpScheme {
             "wg" => Some(Self::Wg),
             #[cfg(feature = "quic")]
             "quic" => Some(Self::Quic),
+            #[cfg(feature = "quic")]
+            "quic-brutal" => Some(Self::QuicBrutal),
             #[cfg(feature = "websocket")]
             "ws" => Some(Self::Ws),
             #[cfg(feature = "websocket")]
@@ -469,5 +489,24 @@ mod tests {
         let url: url::Url = "udp://[2001:db8::1]:11010".parse().unwrap();
 
         assert!(matches_scheme!(&url, TunnelScheme::Ip(IpScheme::Udp)));
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn quic_brutal_has_independent_scheme_and_udp_slot() {
+        let url: url::Url = "quic-brutal://127.0.0.1:11013?tx_bps=100000000"
+            .parse()
+            .unwrap();
+
+        assert!(matches_scheme!(url, TunnelScheme::Ip(IpScheme::QuicBrutal)));
+        assert_eq!(IpScheme::QuicBrutal.protocol(), socket2::Protocol::UDP);
+        assert_ne!(
+            IpScheme::QuicBrutal.loop_avoidance_bit(),
+            IpScheme::Quic.loop_avoidance_bit()
+        );
+        assert_eq!(
+            IpScheme::from_tunnel_type("quic-brutal"),
+            Some(IpScheme::QuicBrutal)
+        );
     }
 }

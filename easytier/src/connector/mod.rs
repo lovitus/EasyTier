@@ -378,6 +378,10 @@ pub(crate) async fn create_connector_by_url_with_scope(
                     ));
                     connector.boxed()
                 }
+                #[cfg(feature = "quic")]
+                IpScheme::QuicBrutal => {
+                    tunnel::quic::QuicTunnelConnector::new_brutal(url, global_ctx.clone())?.boxed()
+                }
                 #[cfg(feature = "wireguard")]
                 IpScheme::Wg => {
                     use crate::tunnel::wireguard::{WgConfig, WgTunnelConnector};
@@ -553,6 +557,26 @@ mod tests {
         let ret =
             create_connector_by_url("tcp://127.0.0.1:11010", &global_ctx, IpVersion::V4).await;
         assert!(ret.is_ok());
+    }
+
+    #[cfg(feature = "quic")]
+    #[tokio::test]
+    async fn connector_factory_accepts_only_valid_quic_brutal_urls() {
+        let global_ctx = get_mock_global_ctx();
+        assert!(
+            create_connector_by_url(
+                "quic-brutal://127.0.0.1:11013?tx_bps=100000000",
+                &global_ctx,
+                IpVersion::V4,
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            create_connector_by_url("quic-brutal://127.0.0.1:11013", &global_ctx, IpVersion::V4,)
+                .await
+                .is_err()
+        );
     }
 
     #[test]

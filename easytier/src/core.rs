@@ -939,13 +939,16 @@ struct RpcPortalOptions {
 impl Cli {
     fn gen_listeners(addr: SocketAddr) -> impl Iterator<Item = String> {
         let dynamic = addr.port() == 0;
-        IpScheme::VARIANTS.iter().map(move |proto| {
-            let mut addr = addr;
-            if !dynamic {
-                addr.set_port(addr.port() + proto.port_offset());
-            }
-            format!("{}://{}", proto, addr)
-        })
+        IpScheme::VARIANTS
+            .iter()
+            .filter(|proto| !proto.is_explicit_only())
+            .map(move |proto| {
+                let mut addr = addr;
+                if !dynamic {
+                    addr.set_port(addr.port() + proto.port_offset());
+                }
+                format!("{}://{}", proto, addr)
+            })
     }
 
     fn parse_listeners(no_listener: bool, listeners: Vec<String>) -> anyhow::Result<Vec<String>> {
@@ -978,6 +981,10 @@ impl Cli {
             let Ok(scheme) = scheme.parse::<IpScheme>() else {
                 anyhow::bail!("invalid listener: {}", l);
             };
+
+            if scheme.is_explicit_only() && !l.contains("://") {
+                anyhow::bail!("listener {scheme} requires an explicit URL and parameters");
+            }
 
             if rest.is_empty() {
                 parsed.push(format!(
@@ -1974,14 +1981,23 @@ mod tests {
         for (input, output) in cases {
             assert_eq!(
                 Cli::parse_listeners(false, vec![input.to_string()]).unwrap(),
-                IpScheme::VARIANTS.iter().map(output).collect::<Vec<_>>()
+                IpScheme::VARIANTS
+                    .iter()
+                    .filter(|scheme| !scheme.is_explicit_only())
+                    .map(output)
+                    .collect::<Vec<_>>()
             );
         }
 
         let input = cases.iter().map(|(i, _)| i.to_string()).collect::<Vec<_>>();
         let output = cases
             .iter()
-            .flat_map(|(_, o)| IpScheme::VARIANTS.iter().map(o))
+            .flat_map(|(_, o)| {
+                IpScheme::VARIANTS
+                    .iter()
+                    .filter(|scheme| !scheme.is_explicit_only())
+                    .map(o)
+            })
             .collect::<Vec<_>>();
         assert_eq!(Cli::parse_listeners(false, input).unwrap(), output);
 
@@ -2004,22 +2020,52 @@ mod tests {
             assert_eq!(
                 Cli::parse_listeners(
                     false,
-                    IpScheme::VARIANTS.iter().map(input).collect::<Vec<_>>(),
+                    IpScheme::VARIANTS
+                        .iter()
+                        .filter(|scheme| !scheme.is_explicit_only())
+                        .map(input)
+                        .collect::<Vec<_>>(),
                 )
                 .unwrap(),
-                IpScheme::VARIANTS.iter().map(output).collect::<Vec<_>>()
+                IpScheme::VARIANTS
+                    .iter()
+                    .filter(|scheme| !scheme.is_explicit_only())
+                    .map(output)
+                    .collect::<Vec<_>>()
             );
         }
 
         let input = cases
             .iter()
-            .flat_map(|(i, _)| IpScheme::VARIANTS.iter().map(i))
+            .flat_map(|(i, _)| {
+                IpScheme::VARIANTS
+                    .iter()
+                    .filter(|scheme| !scheme.is_explicit_only())
+                    .map(i)
+            })
             .collect::<Vec<_>>();
         let output = cases
             .iter()
-            .flat_map(|(_, o)| IpScheme::VARIANTS.iter().map(o))
+            .flat_map(|(_, o)| {
+                IpScheme::VARIANTS
+                    .iter()
+                    .filter(|scheme| !scheme.is_explicit_only())
+                    .map(o)
+            })
             .collect::<Vec<_>>();
         assert_eq!(Cli::parse_listeners(false, input).unwrap(), output);
+
+        assert_eq!(
+            Cli::parse_listeners(
+                false,
+                vec!["quic-brutal://0.0.0.0:11013?tx_bps=100000000".to_owned()]
+            )
+            .unwrap(),
+            ["quic-brutal://0.0.0.0:11013?tx_bps=100000000"]
+        );
+        for input in ["quic-brutal", "quic-brutal:11013"] {
+            assert!(Cli::parse_listeners(false, vec![input.to_owned()]).is_err());
+        }
 
         let cases = ["tcp://[::1", "xxx", "tcp:/abc", "tcp:abc"];
         for input in cases {

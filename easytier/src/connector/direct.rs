@@ -1926,4 +1926,22 @@ mod tests {
             &local_networks
         ));
     }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn direct_candidate_preserves_quic_brutal_send_rate() {
+        let listener: url::Url = "quic-brutal://0.0.0.0:21013?tx_bps=500000000"
+            .parse()
+            .unwrap();
+        let candidate = DirectConnectorManagerData::listener_url_for_addr(
+            &listener,
+            "192.0.2.10:21013".parse().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            candidate.as_str(),
+            "quic-brutal://192.0.2.10:21013?tx_bps=500000000"
+        );
+    }
 }
