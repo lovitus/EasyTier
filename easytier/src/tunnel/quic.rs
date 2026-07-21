@@ -110,9 +110,9 @@ impl QuicTransport {
             return Ok(Self::Brutal(None));
         };
         if !(QUIC_BRUTAL_MIN_TX_BPS..=QUIC_BRUTAL_MAX_TX_BPS).contains(&tx_bps) {
-            return Err(TunnelError::InvalidAddr(format!(
-                "quic-brutal transmit rate must be in 1..=100000 Mbps"
-            )));
+            return Err(TunnelError::InvalidAddr(
+                "quic-brutal transmit rate must be in 1..=100000 Mbps".to_owned(),
+            ));
         }
         let config = BrutalConfig::new(tx_bps).ok_or_else(|| {
             TunnelError::InvalidAddr("invalid quic-brutal transmit rate".to_owned())
