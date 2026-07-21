@@ -16,14 +16,15 @@ const editing = ref(false)
 const hostFocused = ref(false)
 
 const QUIC_BRUTAL_PROTO = 'quic-brutal'
-const MIN_QUIC_BRUTAL_TX_BPS = 1_000_000
-const MAX_QUIC_BRUTAL_TX_BPS = 100_000_000_000
+const BPS_PER_MBPS = 1_000_000
+const MIN_QUIC_BRUTAL_TX_MBPS = 1
+const MAX_QUIC_BRUTAL_TX_MBPS = 100_000
 
 interface ParsedUrl {
     proto: string
     host: string
     port: number | null
-    txBps: number | null
+    txMbps: number | null
 }
 
 const parseUrl = (val: string | null | undefined): ParsedUrl => {
@@ -51,7 +52,7 @@ const parseUrl = (val: string | null | undefined): ParsedUrl => {
                 const remain = hostAndMaybePort.slice(ipv6End + 1)
                 // null = no explicit port in URL; do not fabricate a default
                 const port: number | null = remain.startsWith(':') ? getValidPort(remain.slice(1), proto) : null
-                return { proto, host, port, txBps: parseTxBps(rest, proto) }
+                return { proto, host, port, txMbps: parseTxMbps(rest, proto) }
             }
         }
         const portMatch = hostAndMaybePort.match(/^(.*):(\d+)$/)
@@ -59,20 +60,20 @@ const parseUrl = (val: string | null | undefined): ParsedUrl => {
         // null = no explicit port in URL; buildUrlValue will omit the port entirely,
         // preserving the protocol's implied standard port (e.g. 443 for wss://).
         const port: number | null = portMatch ? parseInt(portMatch[2]) : null
-        return { proto, host, port, txBps: parseTxBps(rest, proto) }
+        return { proto, host, port, txMbps: parseTxMbps(rest, proto) }
     }
 
     if (!val) {
-        return { proto: 'tcp', host: '', port: props.protos['tcp'] ?? 11010, txBps: null }
+        return { proto: 'tcp', host: '', port: props.protos['tcp'] ?? 11010, txMbps: null }
     }
     const parsedByPattern = parseByPattern(val)
     if (parsedByPattern) {
         return parsedByPattern
     }
-    return { proto: 'tcp', host: '', port: null, txBps: null }
+    return { proto: 'tcp', host: '', port: null, txMbps: null }
 }
 
-const parseTxBps = (rest: string, proto: string): number | null => {
+const parseTxMbps = (rest: string, proto: string): number | null => {
     if (proto !== QUIC_BRUTAL_PROTO) {
         return null
     }
@@ -82,7 +83,7 @@ const parseTxBps = (rest: string, proto: string): number | null => {
         return null
     }
     const value = Number(rawValue)
-    return Number.isSafeInteger(value) ? value : null
+    return Number.isSafeInteger(value) ? value / BPS_PER_MBPS : null
 }
 
 const internalValue = ref(parseUrl(url.value))
@@ -104,7 +105,11 @@ const buildUrlValue = (value: ParsedUrl, forceDefaultHost = false) => {
     if (proto !== QUIC_BRUTAL_PROTO) {
         return authority
     }
-    return value.txBps === null ? authority : `${authority}?tx_bps=${value.txBps}`
+    if (value.txMbps === null) {
+        return authority
+    }
+    const txBps = Math.round(value.txMbps * BPS_PER_MBPS)
+    return `${authority}?tx_bps=${txBps}`
 }
 
 const syncUrlFromInternal = (forceDefaultHost = false) => {
@@ -146,7 +151,7 @@ watch(() => url.value, (newVal) => {
     if (parsed.proto !== internalValue.value.proto ||
         !sameHost ||
         parsed.port !== internalValue.value.port ||
-        parsed.txBps !== internalValue.value.txBps) {
+        parsed.txMbps !== internalValue.value.txMbps) {
         internalValue.value = parsed
     }
 })
@@ -178,9 +183,9 @@ const onProtoChange = (newProto: string) => {
         internalValue.value.port = newDefault
     }
     if (newProto === QUIC_BRUTAL_PROTO && oldProto !== QUIC_BRUTAL_PROTO) {
-        internalValue.value.txBps = null
+        internalValue.value.txMbps = null
     } else if (newProto !== QUIC_BRUTAL_PROTO) {
-        internalValue.value.txBps = null
+        internalValue.value.txMbps = null
     }
     internalValue.value.proto = newProto
 }
@@ -203,11 +208,11 @@ const onProtoChange = (newProto: string) => {
             </template>
             <template v-if="isQuicBrutal">
                 <InputGroupAddon>
-                    <span>bit/s</span>
+                    <span>Mbps</span>
                 </InputGroupAddon>
-                <InputNumber v-model="internalValue.txBps" :format="false"
-                    :min="MIN_QUIC_BRUTAL_TX_BPS" :max="MAX_QUIC_BRUTAL_TX_BPS" class="max-w-40"
-                    :placeholder="t('quic_brutal_tx_bps_placeholder')" fluid />
+                <InputNumber v-model="internalValue.txMbps" :format="false" :min="MIN_QUIC_BRUTAL_TX_MBPS"
+                    :max="MAX_QUIC_BRUTAL_TX_MBPS" :max-fraction-digits="6" class="max-w-40"
+                    :placeholder="t('quic_brutal_tx_mbps_placeholder')" fluid />
             </template>
             <!-- Rendered in both responsive branches; keep action slot content free of side effects and duplicate IDs. -->
             <slot name="actions"></slot>
@@ -241,10 +246,10 @@ const onProtoChange = (newProto: string) => {
                         :placeholder="String(protos[internalValue.proto] ?? 11010)" />
                 </div>
                 <div v-if="isQuicBrutal" class="flex flex-col gap-2">
-                    <label>{{ t('quic_brutal_tx_bps') }}</label>
-                    <InputNumber v-model="internalValue.txBps" :format="false"
-                        :min="MIN_QUIC_BRUTAL_TX_BPS" :max="MAX_QUIC_BRUTAL_TX_BPS"
-                        :placeholder="t('quic_brutal_tx_bps_placeholder')" class="w-full" />
+                    <label>{{ t('quic_brutal_tx_mbps') }}</label>
+                    <InputNumber v-model="internalValue.txMbps" :format="false" :min="MIN_QUIC_BRUTAL_TX_MBPS"
+                        :max="MAX_QUIC_BRUTAL_TX_MBPS" :max-fraction-digits="6"
+                        :placeholder="t('quic_brutal_tx_mbps_placeholder')" class="w-full" />
                 </div>
             </div>
             <template #footer>

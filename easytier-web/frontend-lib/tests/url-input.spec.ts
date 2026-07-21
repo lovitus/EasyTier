@@ -72,20 +72,20 @@ describe('UrlInput quic-brutal support', () => {
     ])
   })
 
-  it('parses and edits quic-brutal tx_bps without changing its address', async () => {
-    const wrapper = mountUrlInput('quic-brutal://[::]:11013?tx_bps=250000000')
+  it('shows quic-brutal tx_bps as Mbps and preserves bps in the URL', async () => {
+    const wrapper = mountUrlInput('quic-brutal://[::]:11013?tx_bps=250000001')
     const inputs = wrapper.findAllComponents({ name: 'InputNumber' })
-    const txBpsInput = inputs.find((input) => input.props('placeholder') === 'quic_brutal_tx_bps_placeholder')
+    const txMbpsInput = inputs.find((input) => input.props('placeholder') === 'quic_brutal_tx_mbps_placeholder')
 
     expect(wrapper.findAllComponents({ name: 'AutoComplete' })[0].props('modelValue')).toBe('quic-brutal')
     expect(inputs.some((input) => input.props('modelValue') === 11013)).toBe(true)
-    expect(txBpsInput?.props('modelValue')).toBe(250000000)
+    expect(txMbpsInput?.props('modelValue')).toBe(250.000001)
 
-    txBpsInput?.vm.$emit('update:modelValue', 300000000)
+    txMbpsInput?.vm.$emit('update:modelValue', 300.500001)
     await nextTick()
 
     expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([
-      'quic-brutal://[::]:11013?tx_bps=300000000',
+      'quic-brutal://[::]:11013?tx_bps=300500001',
     ])
   })
 

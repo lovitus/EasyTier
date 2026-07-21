@@ -18,7 +18,8 @@ priority remain unchanged. The protocol is used only when a
 `quic-brutal://` listener or peer is explicitly configured.
 
 - GUI：在 listener 或 peer 编辑器中显式选择 `quic-brutal`。GUI 为 listener
-  预填端口 `11013`；发送带宽可以留空。
+  预填端口 `11013`，发送带宽按 Mbps 填写，也可以留空。GUI 会自动换算成 URL
+  中兼容的 `tx_bps`。
 - CLI/TOML/RPC：保持现有配置方式，只把所需 URL 写成 `quic-brutal://...`。
 
 ## CLI 示例 / CLI examples
@@ -38,7 +39,8 @@ network secret, virtual address, and other settings as usual.
 
 ## `tx_bps` 怎么填 / Choosing `tx_bps`
 
-`tx_bps` 的单位是 **bit/s**，而且只描述 URL 所在节点的**发送方向**：
+GUI 按 **Mbps** 输入；CLI/TOML/RPC URL 中的兼容参数 `tx_bps` 仍使用
+**bit/s**。它们都只描述 URL 所在节点的**发送方向**：
 
 - listener URL 上的值控制监听节点发送给拨号节点的流量；
 - peer URL 上的值控制拨号节点发送给监听节点的流量；
