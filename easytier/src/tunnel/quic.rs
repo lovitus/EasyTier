@@ -111,7 +111,7 @@ impl QuicTransport {
         };
         if !(QUIC_BRUTAL_MIN_TX_BPS..=QUIC_BRUTAL_MAX_TX_BPS).contains(&tx_bps) {
             return Err(TunnelError::InvalidAddr(format!(
-                "quic-brutal tx_mbps must be in 1..=100000"
+                "quic-brutal transmit rate must be in 1..=100000 Mbps"
             )));
         }
         let config = BrutalConfig::new(tx_bps).ok_or_else(|| {
@@ -2062,6 +2062,7 @@ mod tests {
                 "quic-brutal://127.0.0.1:11013?tx_mbps=1.0000001",
                 "quic-brutal://127.0.0.1:11013?tx_mbps=100000.000001",
                 "quic-brutal://127.0.0.1:11013?tx_mbps=100&tx_bps=100000000",
+                "quic-brutal://127.0.0.1:11013?tx_mbps=100&tx_mbps=200",
                 "quic-brutal://127.0.0.1:11013?rate=1000000",
             ] {
                 let url: url::Url = url.parse().unwrap();

@@ -8,8 +8,8 @@ case "$phase" in
 esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-manifest="$repo_root/easytier/docs/release/v3.0.2_candidate_manifest.md"
-matrix="$repo_root/easytier/docs/release/v3.0.2_validation_matrix.md"
+manifest="$repo_root/easytier/docs/release/v3.0.3_candidate_manifest.md"
+matrix="$repo_root/easytier/docs/release/v3.0.3_validation_matrix.md"
 failures=0
 
 fail() {
@@ -117,7 +117,7 @@ versions=(
   "$(jq -r .version easytier-gui/src-tauri/tauri.conf.json)"
 )
 expected_version=2.6.10
-if [[ "$phase" != "--source" ]]; then expected_version=3.0.2; fi
+if [[ "$phase" != "--source" ]]; then expected_version=3.0.3; fi
 for version in "${versions[@]}"; do
   if [[ "$version" != "$expected_version" ]]; then
     fail "version $version differs from expected $expected_version for $phase"
@@ -186,11 +186,11 @@ if [[ "$phase" == "--release" ]]; then
   if [[ -n "$unresolved_external_gates" ]]; then
     fail "validation matrix contains unresolved external gates: $unresolved_external_gates"
   fi
-  if git show-ref --verify --quiet refs/tags/v3.0.2; then
-    fail "v3.0.2 tag already exists"
+  if git show-ref --verify --quiet refs/tags/v3.0.3; then
+    fail "v3.0.3 tag already exists"
   fi
-  if [[ -n "$(git ls-remote --tags origin refs/tags/v3.0.2 refs/tags/v3.0.2^{} 2>/dev/null)" ]]; then
-    fail "origin already contains v3.0.2"
+  if [[ -n "$(git ls-remote --tags origin refs/tags/v3.0.3 refs/tags/v3.0.3^{} 2>/dev/null)" ]]; then
+    fail "origin already contains v3.0.3"
   fi
 fi
 

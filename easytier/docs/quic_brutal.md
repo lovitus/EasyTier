@@ -36,6 +36,14 @@ easytier-core --peers 'quic-brutal://SERVER:11013?tx_mbps=100'
 The examples show only the relevant arguments. Configure the network name,
 network secret, virtual address, and other settings as usual.
 
+```toml
+# TOML uses the same Mbps-based URLs.
+listeners = ["quic-brutal://0.0.0.0:11013?tx_mbps=1000"]
+
+[[peer]]
+uri = "quic-brutal://SERVER:11013?tx_mbps=100"
+```
+
 ## `tx_mbps` 怎么填 / Choosing `tx_mbps`
 
 GUI、CLI、TOML 和 RPC URL 都按 **Mbps** 填写 `tx_mbps`。它只描述 URL

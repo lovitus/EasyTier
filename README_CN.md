@@ -233,7 +233,7 @@ QUIC/KCP Proxy 故障转移固定采用 `QUIC -> KCP -> Native`。`transport_pri
 `global:quic,faketcp,ws,wg,udp,tcp`。已建立连接的数据面选择会先应用 125% RTT
 合格线，再在合格集合内按协议偏好排序。混合部署细节见
 [兼容性说明](easytier/docs/udp_stealth_compatibility.md)。
-实验性 `quic-brutal` overlay 的显式启用方式、双向 `tx_bps`、GUI/CLI 配置、
+实验性 `quic-brutal` overlay 的显式启用方式、双向 `tx_mbps`、GUI/CLI 配置、
 Stealth 行为和状态检查见
 [quic-brutal 使用说明](easytier/docs/quic_brutal.md)。
 
