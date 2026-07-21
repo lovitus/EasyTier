@@ -260,6 +260,9 @@ the fixed `QUIC -> KCP -> Native` order. The `transport_priority` syntax is
 `global:quic,faketcp,ws,wg,udp,tcp`. It is applied after the 125% RTT
 eligibility check for live connections. See
 [the compatibility notes](easytier/docs/udp_stealth_compatibility.md) for rollout details.
+For the opt-in `quic-brutal` overlay, including directional `tx_bps`, GUI/CLI
+setup, Stealth behavior, and status checks, see the
+[quic-brutal usage guide](easytier/docs/quic_brutal.md).
 
 For operators, the security modes differ as follows:
 
