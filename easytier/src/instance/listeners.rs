@@ -176,15 +176,26 @@ fn create_quic_brutal_listener(
     bind_mode: Option<QuicBindMode>,
 ) -> Result<Box<dyn TunnelListener>, Error> {
     // QUIC reads socket_mark from global_ctx in QuicEndpointManager.
-    let listener = if let Some(bind_mode) = bind_mode {
+    let mut listener = if let Some(bind_mode) = bind_mode {
         tunnel::quic::QuicTunnelListener::new_brutal_with_bind_mode(
             l.clone(),
-            global_ctx,
+            global_ctx.clone(),
             bind_mode,
         )?
     } else {
-        tunnel::quic::QuicTunnelListener::new_brutal(l.clone(), global_ctx)?
+        tunnel::quic::QuicTunnelListener::new_brutal(l.clone(), global_ctx.clone())?
     };
+    let flags = global_ctx.get_flags();
+    let enabled = crate::common::stealth_registry::protocol_enabled(
+        &flags,
+        crate::common::stealth_registry::StealthProtocol::Quic,
+    );
+    listener.set_stealth(crate::tunnel::stealth::build_outer_session(
+        global_ctx.get_network_identity().network_secret.as_deref(),
+        enabled,
+        global_ctx.is_secure_mode_enabled(),
+        flags.stealth_window_secs,
+    ));
     Ok(listener.boxed())
 }
 
@@ -542,7 +553,11 @@ mod tests {
     use tokio::time::timeout;
 
     use crate::{
-        common::global_ctx::tests::get_mock_global_ctx,
+        common::{
+            config::NetworkIdentity,
+            global_ctx::tests::{get_mock_global_ctx, get_mock_global_ctx_with_network},
+        },
+        connector::create_connector_by_url,
         tunnel::{TunnelConnector, TunnelError, packet_def::ZCPacket, ring::RingTunnelConnector},
     };
 
@@ -613,6 +628,52 @@ mod tests {
             create_listener_by_url(&"quic-brutal://127.0.0.1:0".parse().unwrap(), global_ctx,)
                 .is_ok()
         );
+    }
+
+    #[cfg(feature = "quic")]
+    #[tokio::test]
+    async fn quic_brutal_factories_apply_configured_quic_stealth() {
+        let identity =
+            NetworkIdentity::new("factory-stealth".to_owned(), "factory-secret".to_owned());
+        let listener_ctx = get_mock_global_ctx_with_network(Some(identity.clone()));
+        let connector_ctx = get_mock_global_ctx_with_network(Some(identity));
+        let mut listener = create_listener_by_url(
+            &"quic-brutal://127.0.0.1:21031?tx_bps=100000000"
+                .parse()
+                .unwrap(),
+            listener_ctx,
+        )
+        .unwrap();
+        listener.listen().await.unwrap();
+        let accept_task = tokio::spawn(async move { listener.accept().await });
+
+        let mut connector = create_connector_by_url(
+            "quic-brutal://127.0.0.1:21031?tx_bps=100000000",
+            &connector_ctx,
+            crate::tunnel::IpVersion::V4,
+        )
+        .await
+        .unwrap();
+        connector.require_stealth();
+        let client_tunnel = timeout(std::time::Duration::from_secs(5), connector.connect())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(client_tunnel.data().is_some());
+        let (_, mut client_send) = client_tunnel.split();
+        client_send
+            .send(ZCPacket::new_with_payload(b"factory-stealth"))
+            .await
+            .unwrap();
+
+        let server_tunnel = timeout(std::time::Duration::from_secs(5), accept_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(client_tunnel.info().unwrap().tunnel_type, "quic-brutal");
+        assert!(server_tunnel.data().is_some());
     }
 
     #[derive(Debug)]

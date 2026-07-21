@@ -155,6 +155,13 @@ fn direct_stealth_mode(
     }
 }
 
+fn stealth_protocol_key_for_scheme(scheme: &str) -> &str {
+    match scheme {
+        "quic-brutal" => crate::common::stealth_registry::StealthProtocol::Quic.as_str(),
+        _ => scheme,
+    }
+}
+
 fn mapped_listener_port(url: &url::Url) -> Option<u16> {
     url.port().or_else(|| {
         TunnelScheme::try_from(url)
@@ -1005,7 +1012,7 @@ impl DirectConnectorManagerData {
             for candidate in group {
                 let this = self.clone();
                 let stealth_mode = stealth_modes
-                    .get(candidate.url.scheme())
+                    .get(stealth_protocol_key_for_scheme(candidate.url.scheme()))
                     .copied()
                     .unwrap_or_default();
                 let preference_key = target_key.map(|_| {
@@ -1840,6 +1847,16 @@ mod tests {
             super::direct_stealth_mode(StealthProtocol::Tcp, Some(&feature)),
             super::DirectStealthMode::Required
         );
+    }
+
+    #[test]
+    fn quic_brutal_uses_quic_stealth_capability_key() {
+        assert_eq!(super::stealth_protocol_key_for_scheme("quic"), "quic");
+        assert_eq!(
+            super::stealth_protocol_key_for_scheme("quic-brutal"),
+            "quic"
+        );
+        assert_eq!(super::stealth_protocol_key_for_scheme("tcp"), "tcp");
     }
 
     #[tokio::test]

@@ -380,7 +380,20 @@ pub(crate) async fn create_connector_by_url_with_scope(
                 }
                 #[cfg(feature = "quic")]
                 IpScheme::QuicBrutal => {
-                    tunnel::quic::QuicTunnelConnector::new_brutal(url, global_ctx.clone())?.boxed()
+                    let mut connector =
+                        tunnel::quic::QuicTunnelConnector::new_brutal(url, global_ctx.clone())?;
+                    let flags = global_ctx.get_flags();
+                    let enabled = crate::common::stealth_registry::protocol_enabled(
+                        &flags,
+                        crate::common::stealth_registry::StealthProtocol::Quic,
+                    );
+                    connector.set_stealth_candidate(crate::tunnel::stealth::build_outer_session(
+                        global_ctx.get_network_identity().network_secret.as_deref(),
+                        enabled,
+                        global_ctx.is_secure_mode_enabled(),
+                        flags.stealth_window_secs,
+                    ));
+                    connector.boxed()
                 }
                 #[cfg(feature = "wireguard")]
                 IpScheme::Wg => {

@@ -1,6 +1,6 @@
 # quinn-udp 0.5.15 与 quic-brutal Overlay 验证 TODO
 
-> 状态：首个 immutable artifact 与 Linux 早期 A/B 已完成；GUI/可选速率修订、Q 回归、Android 与资源验证进行中
+> 状态：独立 overlay、可选速率和早期多平台验证已完成；正在补齐 Brutal pacing 与 QUIC Stealth 的正交组合并重新验证 exact artifact
 >
 > 修订日期：2026-07-21
 >
@@ -217,6 +217,7 @@ H0 明确不会实现：
 - [x] 完成端口索引、IPv4/IPv6 companion、socket bind/mark、生命周期和 endpoint 清理，行为遵循其他现有 IP transport 的统一约定。
 - [x] 复用现有 endpoint pool；客户端必须使用 `Endpoint::connect_with` 传入专用 Brutal client config，普通 QUIC 继续使用 BBR 默认 config。
 - [x] 增加普通 QUIC config 快照测试，以及同一 endpoint 上 BBR/Brutal 连接配置不串用的测试；不为此建立第二套 endpoint pool。
+- [x] 启用 QUIC Stealth 时，Brutal listener/connector 必须复用现有 outer UDP wrapper；Required 模式失败关闭，未知能力兼容回退保持相同的本地 Brutal/BBR sender mode，不能静默绕开 Stealth 或切换拥塞控制。
 - [ ] 复用现有 mesh 鉴权；错误 secret、错误握手和畸形 overlay frame 必须被拒绝且资源有界。
 - [ ] listener、connector 或握手失败时返回现有调用方可识别的普通 transport 错误，并完整释放本次连接资源；后续选择由现有 connector 和用户配置决定。
 - [ ] 增加聚焦测试，证明未配置 `quic-brutal` 时普通 QUIC 行为不变、失败连接不污染共享 endpoint、关闭后无 Brutal 专属资源残留。
