@@ -78,11 +78,23 @@ const parseTxMbps = (rest: string, proto: string): number | null => {
         return null
     }
     const query = rest.split('?')[1]?.split('#')[0]
-    const rawValue = query ? new URLSearchParams(query).get('tx_bps') : null
-    if (!rawValue || !/^\d+$/.test(rawValue)) {
+    const params = new URLSearchParams(query)
+    const txMbps = params.get('tx_mbps')
+    const legacyTxBps = params.get('tx_bps')
+    if (txMbps !== null && legacyTxBps !== null) {
         return null
     }
-    const value = Number(rawValue)
+    if (txMbps !== null) {
+        if (!/^\d+(?:\.\d{1,6})?$/.test(txMbps)) {
+            return null
+        }
+        const value = Number(txMbps)
+        return Number.isFinite(value) ? value : null
+    }
+    if (legacyTxBps === null || !/^\d+$/.test(legacyTxBps)) {
+        return null
+    }
+    const value = Number(legacyTxBps)
     return Number.isSafeInteger(value) ? value / BPS_PER_MBPS : null
 }
 
@@ -108,8 +120,7 @@ const buildUrlValue = (value: ParsedUrl, forceDefaultHost = false) => {
     if (value.txMbps === null) {
         return authority
     }
-    const txBps = Math.round(value.txMbps * BPS_PER_MBPS)
-    return `${authority}?tx_bps=${txBps}`
+    return `${authority}?tx_mbps=${value.txMbps}`
 }
 
 const syncUrlFromInternal = (forceDefaultHost = false) => {

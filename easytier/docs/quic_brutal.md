@@ -18,18 +18,17 @@ priority remain unchanged. The protocol is used only when a
 `quic-brutal://` listener or peer is explicitly configured.
 
 - GUI：在 listener 或 peer 编辑器中显式选择 `quic-brutal`。GUI 为 listener
-  预填端口 `11013`，发送带宽按 Mbps 填写，也可以留空。GUI 会自动换算成 URL
-  中兼容的 `tx_bps`。
+  预填端口 `11013`，发送带宽按 Mbps 填写，也可以留空。
 - CLI/TOML/RPC：保持现有配置方式，只把所需 URL 写成 `quic-brutal://...`。
 
 ## CLI 示例 / CLI examples
 
 ```bash
 # 监听端：本节点向对端发送时最多按 1 Gbit/s 的 Brutal 速率调度。
-easytier-core --listeners 'quic-brutal://0.0.0.0:11013?tx_bps=1000000000'
+easytier-core --listeners 'quic-brutal://0.0.0.0:11013?tx_mbps=1000'
 
 # 拨号端：本节点向监听端发送时最多按 100 Mbit/s 的 Brutal 速率调度。
-easytier-core --peers 'quic-brutal://SERVER:11013?tx_bps=100000000'
+easytier-core --peers 'quic-brutal://SERVER:11013?tx_mbps=100'
 ```
 
 示例只展示相关参数；网络名称、网络密钥、虚拟地址等仍按现有方式配置。
@@ -37,23 +36,26 @@ easytier-core --peers 'quic-brutal://SERVER:11013?tx_bps=100000000'
 The examples show only the relevant arguments. Configure the network name,
 network secret, virtual address, and other settings as usual.
 
-## `tx_bps` 怎么填 / Choosing `tx_bps`
+## `tx_mbps` 怎么填 / Choosing `tx_mbps`
 
-GUI 按 **Mbps** 输入；CLI/TOML/RPC URL 中的兼容参数 `tx_bps` 仍使用
-**bit/s**。它们都只描述 URL 所在节点的**发送方向**：
+GUI、CLI、TOML 和 RPC URL 都按 **Mbps** 填写 `tx_mbps`。它只描述 URL
+所在节点的**发送方向**：
 
 - listener URL 上的值控制监听节点发送给拨号节点的流量；
 - peer URL 上的值控制拨号节点发送给监听节点的流量；
-- 允许范围是 `1000000` 到 `100000000000`（1 Mbit/s 到 100 Gbit/s）；
+- 允许范围是 `1` 到 `100000` Mbps，最多 6 位小数；
 - 留空不会自动探测带宽，而是让该方向使用普通 QUIC 的 BBR。
 
 例如拨号节点上传 100 Mbit/s、下载 1 Gbit/s 时，拨号节点的 peer URL 填
-`tx_bps=100000000`，监听节点的 listener URL 填 `tx_bps=1000000000`。
+`tx_mbps=100`，监听节点的 listener URL 填 `tx_mbps=1000`。
 
-`tx_bps` is measured in **bit/s** and applies only to the **local sending
+`tx_mbps` is measured in **Mbps** and applies only to the **local sending
 direction**. A listener value controls traffic sent by the listening node; a
 peer value controls traffic sent by the dialing node. Omitting it uses ordinary
 QUIC BBR for that direction; bandwidth is not auto-detected.
+
+3.0.2 已有的 `tx_bps` 配置仍会继续读取，但它只是向后兼容别名；新配置应统一使用
+`tx_mbps`，并且不能在同一个 URL 中同时填写两者。
 
 如果无法准确知道所有节点的链路容量，可以只在确实需要 Brutal 的链路上填写保守值。
 保守值不会破坏连接，但会限制该节点发送方向能利用的带宽；例如在 10 Gbit/s 链路上
@@ -81,7 +83,7 @@ priority or fallback policy.
 # 查看实际连接；Tunnel/协议列应显示 quic-brutal。
 easytier-cli peer list
 
-# 查看当前 listener URL，包括本地 listener 的 tx_bps。
+# 查看当前 listener URL，包括本地 listener 的 tx_mbps。
 easytier-cli node info
 
 # 查看已配置的主动连接。
@@ -89,5 +91,5 @@ easytier-cli connector list
 ```
 
 `peer list` 显示 `quic-brutal` 代表 overlay 已建立；它不会单独显示该方向正在使用
-Brutal 还是因 `tx_bps` 留空而使用 BBR，因此还应结合 `node info` 或
+Brutal 还是因 `tx_mbps` 留空而使用 BBR，因此还应结合 `node info` 或
 `connector list` 检查本地 URL 参数。

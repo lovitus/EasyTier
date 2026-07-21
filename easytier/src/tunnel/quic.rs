@@ -34,8 +34,45 @@ const QUIC_STEALTH_OUTER_SEND_DELAY: Duration = Duration::from_secs(1);
 const QUIC_STEALTH_GATE_RECV_GRACE: Duration = Duration::from_secs(5);
 const QUIC_STEALTH_SESSION_TTL: Duration = Duration::from_secs(600);
 const QUIC_STEALTH_MAX_SESSIONS: usize = 4096;
+const BPS_PER_MBPS: u64 = 1_000_000;
 const QUIC_BRUTAL_MIN_TX_BPS: u64 = 1_000_000;
 const QUIC_BRUTAL_MAX_TX_BPS: u64 = 100_000_000_000;
+
+fn parse_tx_mbps(value: &str) -> Result<u64, TunnelError> {
+    let mut parts = value.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || parts.next().is_some()
+        || fraction.is_some_and(|part| {
+            part.is_empty() || part.len() > 6 || !part.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return Err(TunnelError::InvalidAddr(
+            "quic-brutal tx_mbps must be a number with at most 6 decimal places".to_owned(),
+        ));
+    }
+
+    let whole_bps = whole
+        .parse::<u64>()
+        .ok()
+        .and_then(|whole| whole.checked_mul(BPS_PER_MBPS))
+        .ok_or_else(|| TunnelError::InvalidAddr("quic-brutal tx_mbps is too large".to_owned()))?;
+    let fraction_bps = match fraction {
+        Some(part) => part
+            .parse::<u64>()
+            .ok()
+            .and_then(|fraction| fraction.checked_mul(10_u64.pow(6 - part.len() as u32)))
+            .ok_or_else(|| {
+                TunnelError::InvalidAddr("quic-brutal tx_mbps is too large".to_owned())
+            })?,
+        None => 0,
+    };
+    whole_bps
+        .checked_add(fraction_bps)
+        .ok_or_else(|| TunnelError::InvalidAddr("quic-brutal tx_mbps is too large".to_owned()))
+}
 
 #[derive(Clone, Debug)]
 enum QuicTransport {
@@ -47,19 +84,24 @@ impl QuicTransport {
     fn brutal_from_url(url: &url::Url) -> Result<Self, TunnelError> {
         let mut tx_bps = None;
         for (key, value) in url.query_pairs() {
-            if key != "tx_bps" {
-                return Err(TunnelError::InvalidAddr(format!(
-                    "unsupported quic-brutal parameter: {key}"
-                )));
-            }
             if tx_bps.is_some() {
                 return Err(TunnelError::InvalidAddr(
-                    "duplicate quic-brutal tx_bps parameter".to_owned(),
+                    "quic-brutal accepts only one tx_mbps or legacy tx_bps parameter".to_owned(),
                 ));
             }
-            tx_bps = Some(value.parse::<u64>().map_err(|_| {
-                TunnelError::InvalidAddr("quic-brutal tx_bps must be an integer".to_owned())
-            })?);
+            tx_bps = Some(match key.as_ref() {
+                "tx_mbps" => parse_tx_mbps(&value)?,
+                "tx_bps" => value.parse::<u64>().map_err(|_| {
+                    TunnelError::InvalidAddr(
+                        "legacy quic-brutal tx_bps must be an integer".to_owned(),
+                    )
+                })?,
+                _ => {
+                    return Err(TunnelError::InvalidAddr(format!(
+                        "unsupported quic-brutal parameter: {key}"
+                    )));
+                }
+            });
         }
         let Some(tx_bps) = tx_bps else {
             // A missing rate is deliberately safe: keep the independent
@@ -69,11 +111,12 @@ impl QuicTransport {
         };
         if !(QUIC_BRUTAL_MIN_TX_BPS..=QUIC_BRUTAL_MAX_TX_BPS).contains(&tx_bps) {
             return Err(TunnelError::InvalidAddr(format!(
-                "quic-brutal tx_bps must be in {QUIC_BRUTAL_MIN_TX_BPS}..={QUIC_BRUTAL_MAX_TX_BPS}"
+                "quic-brutal tx_mbps must be in 1..=100000"
             )));
         }
-        let config = BrutalConfig::new(tx_bps)
-            .ok_or_else(|| TunnelError::InvalidAddr("invalid quic-brutal tx_bps".to_owned()))?;
+        let config = BrutalConfig::new(tx_bps).ok_or_else(|| {
+            TunnelError::InvalidAddr("invalid quic-brutal transmit rate".to_owned())
+        })?;
         Ok(Self::Brutal(Some(Arc::new(config))))
     }
 
@@ -1932,16 +1975,12 @@ mod tests {
     fn quic_brutal_pingpong_and_identity() {
         RUNTIME.block_on(async {
             let listener = QuicTunnelListener::new_brutal(
-                "quic-brutal://127.0.0.1:21017?tx_bps=100000000"
-                    .parse()
-                    .unwrap(),
+                "quic-brutal://127.0.0.1:21017?tx_mbps=100".parse().unwrap(),
                 global_ctx(),
             )
             .unwrap();
             let connector = QuicTunnelConnector::new_brutal(
-                "quic-brutal://127.0.0.1:21017?tx_bps=100000000"
-                    .parse()
-                    .unwrap(),
+                "quic-brutal://127.0.0.1:21017?tx_mbps=100".parse().unwrap(),
                 global_ctx(),
             )
             .unwrap();
@@ -1952,7 +1991,7 @@ mod tests {
     }
 
     #[test]
-    fn quic_brutal_without_tx_bps_uses_safe_bbr_fallback() {
+    fn quic_brutal_without_transmit_rate_uses_safe_bbr_fallback() {
         RUNTIME.block_on(async {
             let listener = QuicTunnelListener::new_brutal(
                 "quic-brutal://127.0.0.1:21021".parse().unwrap(),
@@ -2017,6 +2056,12 @@ mod tests {
                 "quic-brutal://127.0.0.1:11013?tx_bps=999999",
                 "quic-brutal://127.0.0.1:11013?tx_bps=100000000001",
                 "quic-brutal://127.0.0.1:11013?tx_bps=1000000&tx_bps=2000000",
+                "quic-brutal://127.0.0.1:11013?tx_mbps=0",
+                "quic-brutal://127.0.0.1:11013?tx_mbps=auto",
+                "quic-brutal://127.0.0.1:11013?tx_mbps=.5",
+                "quic-brutal://127.0.0.1:11013?tx_mbps=1.0000001",
+                "quic-brutal://127.0.0.1:11013?tx_mbps=100000.000001",
+                "quic-brutal://127.0.0.1:11013?tx_mbps=100&tx_bps=100000000",
                 "quic-brutal://127.0.0.1:11013?rate=1000000",
             ] {
                 let url: url::Url = url.parse().unwrap();
@@ -2026,6 +2071,21 @@ mod tests {
                 );
             }
         })
+    }
+
+    #[test]
+    fn quic_brutal_accepts_mbps_and_legacy_bps() {
+        for (url, expected_bytes_per_second) in [
+            ("quic-brutal://127.0.0.1:11013?tx_mbps=100.5", 12_562_500),
+            ("quic-brutal://127.0.0.1:11013?tx_bps=100500000", 12_562_500),
+        ] {
+            let QuicTransport::Brutal(Some(config)) =
+                QuicTransport::brutal_from_url(&url.parse().unwrap()).unwrap()
+            else {
+                panic!("expected Brutal pacing for {url}");
+            };
+            assert_eq!(config.bytes_per_second(), expected_bytes_per_second);
+        }
     }
 
     #[test]

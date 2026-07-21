@@ -863,7 +863,7 @@ impl DirectConnectorManagerData {
 
     fn listener_url_for_addr(listener: &url::Url, addr: SocketAddr) -> Option<url::Url> {
         let mut url = listener.clone();
-        // quic-brutal's tx_bps is local sender state. Advertising a listener's
+        // quic-brutal's tx_mbps (or legacy tx_bps) is local sender state. Advertising a listener's
         // value to the peer would make an asymmetric receiver reuse the wrong
         // direction's rate. A discovered connector therefore uses the safe BBR
         // fallback unless that node has an explicit manual peer URL.

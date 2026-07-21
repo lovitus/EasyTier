@@ -72,7 +72,7 @@ describe('UrlInput quic-brutal support', () => {
     ])
   })
 
-  it('shows quic-brutal tx_bps as Mbps and preserves bps in the URL', async () => {
+  it('reads legacy tx_bps as Mbps and writes the user-facing tx_mbps parameter', async () => {
     const wrapper = mountUrlInput('quic-brutal://[::]:11013?tx_bps=250000001')
     const inputs = wrapper.findAllComponents({ name: 'InputNumber' })
     const txMbpsInput = inputs.find((input) => input.props('placeholder') === 'quic_brutal_tx_mbps_placeholder')
@@ -85,8 +85,16 @@ describe('UrlInput quic-brutal support', () => {
     await nextTick()
 
     expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([
-      'quic-brutal://[::]:11013?tx_bps=300500001',
+      'quic-brutal://[::]:11013?tx_mbps=300.500001',
     ])
+  })
+
+  it('reads the tx_mbps parameter without conversion', () => {
+    const wrapper = mountUrlInput('quic-brutal://0.0.0.0:11013?tx_mbps=1000')
+    const txMbpsInput = wrapper.findAllComponents({ name: 'InputNumber' })
+      .find((input) => input.props('placeholder') === 'quic_brutal_tx_mbps_placeholder')
+
+    expect(txMbpsInput?.props('modelValue')).toBe(1000)
   })
 
   it('removes the Brutal-only query when switching back to ordinary QUIC', async () => {
