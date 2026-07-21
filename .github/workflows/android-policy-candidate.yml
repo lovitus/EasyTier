@@ -5,6 +5,10 @@ on:
   push:
     branches:
       - codex/profiling-beta
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'easytier/docs/**'
 
 concurrency:
   group: android-policy-candidate-${{ github.ref }}

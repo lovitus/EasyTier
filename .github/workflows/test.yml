@@ -4,6 +4,10 @@ on:
   workflow_dispatch:
   push:
     branches: [ "develop", "main" ]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'easytier/docs/**'
   pull_request:
     branches: [ "develop", "main" ]
 

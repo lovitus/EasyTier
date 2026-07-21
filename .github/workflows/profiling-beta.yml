@@ -11,6 +11,10 @@ on:
   push:
     branches:
       - codex/profiling-beta
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'easytier/docs/**'
 
 permissions:
   contents: write

@@ -23,6 +23,37 @@ pass() {
 
 cd "$repo_root"
 
+evidence_sha="$(git rev-parse HEAD)"
+validated_sha="${VALIDATED_SHA:-$evidence_sha}"
+if ! git rev-parse "$validated_sha^{commit}" >/dev/null 2>&1; then
+  fail "validated SHA cannot be resolved: $validated_sha"
+else
+  validated_sha="$(git rev-parse "$validated_sha^{commit}")"
+fi
+
+if [[ "$phase" == "--candidate" && "$validated_sha" != "$evidence_sha" ]]; then
+  fail "candidate audit requires HEAD to be the build candidate; VALIDATED_SHA is only for post-build release evidence"
+fi
+
+if [[ "$validated_sha" != "$evidence_sha" ]]; then
+  if ! git merge-base --is-ancestor "$validated_sha" "$evidence_sha"; then
+    fail "evidence HEAD $evidence_sha does not descend from validated SHA $validated_sha"
+  fi
+  non_documentation_changes="$(
+    while IFS= read -r file_name; do
+      case "$file_name" in
+        *.md|AGENTS.md|*/AGENTS.md|docs/*|*/docs/*) ;;
+        *) printf '%s\n' "$file_name" ;;
+      esac
+    done < <(git diff --name-only "$validated_sha..$evidence_sha")
+  )"
+  if [[ -n "$non_documentation_changes" ]]; then
+    fail "post-build evidence contains non-documentation changes: $non_documentation_changes"
+  else
+    pass "documentation evidence HEAD $evidence_sha reuses validated build SHA $validated_sha"
+  fi
+fi
+
 if [[ -n "$(git status --porcelain)" ]]; then
   fail "current candidate worktree is dirty"
 else
@@ -95,12 +126,12 @@ done
 
 if [[ "$phase" != "--source" ]]; then
   release_base="${RELEASE_BASE:-v3.0.0}"
-  current_sha="$(git rev-parse HEAD)"
-  current_tree="$(git rev-parse HEAD^{tree})"
-  tracked_files="$(git ls-tree -r --name-only HEAD | wc -l | tr -d ' ')"
+  current_sha="$validated_sha"
+  current_tree="$(git rev-parse "$validated_sha^{tree}")"
+  tracked_files="$(git ls-tree -r --name-only "$validated_sha" | wc -l | tr -d ' ')"
   if ! git rev-parse "$release_base^{commit}" >/dev/null 2>&1; then
     fail "release base cannot be resolved: $release_base"
-  elif ! git merge-base --is-ancestor "$release_base" HEAD; then
+  elif ! git merge-base --is-ancestor "$release_base" "$validated_sha"; then
     fail "release base $release_base is not an ancestor of $current_sha"
   else
     pass "candidate $current_sha descends from $release_base with tree $current_tree ($tracked_files tracked files)"
@@ -118,12 +149,14 @@ workflow_success() {
 }
 
 if [[ "$phase" != "--source" ]]; then
-  candidate_sha="$(git rev-parse HEAD)"
-  published_sha="$(git ls-remote --heads origin refs/heads/codex/profiling-beta | awk '{print $1}')"
-  if [[ "$published_sha" != "$candidate_sha" ]]; then
-    fail "origin/codex/profiling-beta $published_sha differs from candidate $candidate_sha"
-  else
-    pass "candidate SHA is the published profiling-beta SHA"
+  candidate_sha="$validated_sha"
+  if [[ "$phase" == "--candidate" ]]; then
+    published_sha="$(git ls-remote --heads origin refs/heads/codex/profiling-beta | awk '{print $1}')"
+    if [[ "$published_sha" != "$candidate_sha" ]]; then
+      fail "origin/codex/profiling-beta $published_sha differs from candidate $candidate_sha"
+    else
+      pass "candidate SHA is the published profiling-beta SHA"
+    fi
   fi
   for workflow_name in "EasyTier Linux Profiling Beta" "EasyTier Android Policy Candidate"; do
     workflow_success "$workflow_name" "$candidate_sha" || fail "$workflow_name is not successful for $candidate_sha"
@@ -131,15 +164,27 @@ if [[ "$phase" != "--source" ]]; then
 fi
 
 if [[ "$phase" == "--release" ]]; then
-  candidate_sha="$(git rev-parse HEAD)"
+  candidate_sha="$validated_sha"
   for workflow_name in "EasyTier Core" "EasyTier GUI" "EasyTier Mobile" "EasyTier OHOS" "EasyTier Test"; do
     workflow_success "$workflow_name" "$candidate_sha" || fail "$workflow_name is not successful for $candidate_sha"
   done
   if ! rg -q '\| Android physical device \| (PASS|WAIVED_BY_MAINTAINER) \|' "$matrix"; then
     fail "Android physical gate is neither PASS nor explicitly waived"
   fi
-  if rg -q '\| (FAIL|BLOCKED|N/A) \|' "$matrix"; then
-    fail "validation matrix still contains an unresolved release gate"
+  if rg -q '\| FAIL \||\| N/A \|' "$matrix"; then
+    fail "validation matrix contains FAIL or N/A"
+  fi
+  unresolved_external_gates="$(
+    awk -F'|' '
+      $3 ~ /^[[:space:]]*BLOCKED[[:space:]]*$/ {
+        gate=$2
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", gate)
+        if (gate !~ /^(Core formal workflow|GUI formal workflow|Mobile formal workflow|OHOS formal workflow|Test formal workflow|Tag and GitHub Release)$/) print gate
+      }
+    ' "$matrix"
+  )"
+  if [[ -n "$unresolved_external_gates" ]]; then
+    fail "validation matrix contains unresolved external gates: $unresolved_external_gates"
   fi
   if git show-ref --verify --quiet refs/tags/v3.0.1; then
     fail "v3.0.1 tag already exists"
