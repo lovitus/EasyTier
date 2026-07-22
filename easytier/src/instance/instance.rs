@@ -1691,7 +1691,7 @@ impl Instance {
             {
                 #[cfg(feature = "tun")]
                 {
-                    return Box::pin(async move {
+                    Box::pin(async move {
                         let container = self.nic_ctx.lock().await;
                         let Some(nic_ctx) = container
                             .as_ref()
@@ -1701,7 +1701,7 @@ impl Instance {
                             return false;
                         };
                         nic_ctx.policy_runtime_running().await
-                    });
+                    })
                 }
                 #[cfg(not(feature = "tun"))]
                 Box::pin(async { false })
