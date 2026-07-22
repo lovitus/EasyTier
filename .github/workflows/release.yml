@@ -6,7 +6,7 @@ on:
       version:
         description: 'Version for this release'
         type: string
-        default: 'v3.0.4'
+        default: 'v3.0.5'
         required: true
       make_latest:
         description: 'Mark this release as latest'

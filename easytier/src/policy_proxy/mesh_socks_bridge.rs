@@ -173,10 +173,10 @@ impl RemoteTcpPreparation {
 }
 
 impl RemoteSlot {
-    fn new(target: MeshProxyTarget) -> Self {
+    fn new(target: Option<MeshProxyTarget>) -> Self {
         Self {
             state: Mutex::new(RemoteState {
-                target: Some(target),
+                target,
                 generation: CancellationToken::new(),
                 preparation: Arc::new(RemoteTcpPreparation::new()),
             }),
@@ -230,9 +230,6 @@ impl MeshProxyBridgeSet {
             if proxy.via != ProxyVia::Mesh {
                 continue;
             }
-            let remote = *resolved
-                .get(name)
-                .ok_or_else(|| anyhow::anyhow!("mesh proxy {name} has no resolved endpoint"))?;
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
             let local = listener.local_addr()?;
             let mut secret = [0u8; 32];
@@ -249,7 +246,13 @@ impl MeshProxyBridgeSet {
                     password: password.clone(),
                 },
             );
-            let remote = Arc::new(RemoteSlot::new(remote));
+            // Mihomo adapter/outbound/socks5.go::{NewSocks5,DialContext} and sing-box
+            // protocol/socks/outbound.go::{NewOutbound,DialContext} construct an
+            // outbound without contacting its server and defer availability failure
+            // to selected traffic. Keep the local Leaf actor alive with no mesh target;
+            // a later route generation can supply the target without changing policy
+            // compilation semantics.
+            let remote = Arc::new(RemoteSlot::new(resolved.get(name).copied()));
             remotes.insert(name.clone(), remote.clone());
             pending.push((
                 name.clone(),
@@ -914,7 +917,7 @@ mod tests {
     #[tokio::test]
     async fn route_identity_change_cancels_only_the_old_generation() {
         let first = MeshProxyTarget::explicit(7, "10.44.0.7:1080".parse().unwrap());
-        let slot = RemoteSlot::new(first);
+        let slot = RemoteSlot::new(Some(first));
         let (_, old_generation, _) = slot.snapshot().unwrap();
         slot.replace(Some(first));
         assert!(!old_generation.is_cancelled());
@@ -929,5 +932,15 @@ mod tests {
         slot.replace(None);
         assert!(new_generation.is_cancelled());
         assert!(slot.snapshot().is_none());
+    }
+
+    #[test]
+    fn unavailable_mesh_actor_slot_accepts_a_later_target() {
+        let slot = RemoteSlot::new(None);
+        assert!(slot.snapshot().is_none());
+
+        let target = MeshProxyTarget::explicit(7, "10.44.0.7:1080".parse().unwrap());
+        slot.replace(Some(target));
+        assert_eq!(slot.snapshot().unwrap().0, target);
     }
 }

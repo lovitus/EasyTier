@@ -3190,10 +3190,10 @@ impl NicCtx {
                 None
             };
             if route.is_none() {
-                return Err(anyhow::anyhow!(
-                    "mesh proxy {name} endpoint is not present in the route table"
-                )
-                .into());
+                // Route-table presence is runtime availability, not policy validity.
+                // MeshProxyBridgeSet keeps this actor unavailable until a later route
+                // generation supplies its target, while all other Leaf actors start.
+                continue;
             }
             if route.is_some_and(|route| route.peer_id == self_peer_id) {
                 return Err(anyhow::anyhow!(
@@ -3617,6 +3617,49 @@ rules: ["FINAL,exit"]
             resolved["exit"].endpoints(),
             &["10.44.0.7:1080".parse().unwrap()]
         );
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", unix))]
+    #[test]
+    fn policy_mesh_endpoint_keeps_other_actors_when_one_route_is_missing() {
+        let present_instance = uuid::Uuid::new_v4();
+        let missing_instance = uuid::Uuid::new_v4();
+        let revision = easytier_policy::PolicyRevision::parse(
+            format!(
+                r#"
+version: 1
+proxies:
+  present:
+    type: socks5
+    server: {{ instance-id: "{present_instance}", virtual-ip: 10.44.0.7 }}
+    port: 1080
+    via: mesh
+  missing:
+    type: socks5
+    server: {{ instance-id: "{missing_instance}", virtual-ip: 10.44.0.8 }}
+    port: 1080
+    via: mesh
+rules: ["FINAL,missing"]
+"#
+            ),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let route = crate::proto::api::instance::Route {
+            peer_id: 7,
+            inst_id: present_instance.to_string(),
+            ipv4_addr: Some(
+                cidr::Ipv4Inet::new("10.44.0.7".parse().unwrap(), 24)
+                    .unwrap()
+                    .into(),
+            ),
+            ..Default::default()
+        };
+
+        let resolved = NicCtx::resolve_policy_mesh_endpoints(&revision, 8, &[route]).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved.contains_key("present"));
+        assert!(!resolved.contains_key("missing"));
     }
 
     #[cfg(all(feature = "leaf-policy-proxy", unix))]

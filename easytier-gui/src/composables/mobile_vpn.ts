@@ -2,7 +2,7 @@ import type { NetworkTypes } from 'easytier-frontend-lib'
 import { addPluginListener } from '@tauri-apps/api/core'
 import { Utils } from 'easytier-frontend-lib'
 import { get_vpn_status, prepare_vpn, start_vpn, stop_vpn } from 'tauri-plugin-vpnservice-api'
-import { setTunFd, updateMobileNetwork } from './backend'
+import { setTunFd, updateMobileNetwork, updateNetworkConfigState } from './backend'
 import { getDnsForVpn, getRoutesForVpn, getStaticVpnBootstrap } from './vpn_routes'
 
 interface vpnStatus {
@@ -226,14 +226,26 @@ async function onVpnNetworkChanged(payload: any) {
 
 async function onVpnServiceStop(payload: any) {
   console.log('vpn service stop', JSON.stringify(payload))
+  const stoppedInstanceId = typeof payload?.instanceId === 'string' && payload.instanceId.length
+    ? payload.instanceId
+    : activeVpnInstanceId
   if (payload?.reason === 'revoked') {
     setVpnRevokedBySystem(true)
     vpnOperationEpoch += 1
-    console.info('Android revoked EasyTier VPN ownership; automatic restart is suppressed')
+    console.info('Android revoked EasyTier VPN ownership; stopping the owning EasyTier instance')
   }
   curVpnStatus.running = false
   activeVpnInstanceId = undefined
   resetVpnConfigStatus()
+  if (payload?.reason === 'revoked' && stoppedInstanceId) {
+    // Mihomo listener/sing_tun/server.go::Listener.Close and sing-box
+    // protocol/tun/inbound.go::Inbound.Close tear down the TUN data plane as one
+    // lifecycle. Android ownership revocation must likewise stop the owning
+    // non-no_tun instance instead of leaving mesh and policy state running.
+    await updateNetworkConfigState(stoppedInstanceId, true).catch((error) => {
+      console.error('failed to stop EasyTier instance after Android VPN revocation', error)
+    })
+  }
 }
 
 async function registerVpnServiceListener() {
@@ -429,6 +441,14 @@ async function applyMobileVpnServiceSync(epoch: number) {
     return
   }
   if (vpnRevokedBySystem) {
+    // The native revoke callback can arrive while the WebView is suspended. Reconcile
+    // the core state from the persisted native marker when the UI resumes as well.
+    const instanceId = await findRunningTunInstanceId()
+    if (epoch === vpnOperationEpoch && instanceId) {
+      await updateNetworkConfigState(instanceId, true).catch((error) => {
+        console.error('failed to reconcile EasyTier instance after Android VPN revocation', error)
+      })
+    }
     return
   }
   const instanceId = await findRunningTunInstanceId()
