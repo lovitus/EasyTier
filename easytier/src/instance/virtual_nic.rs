@@ -1232,6 +1232,22 @@ pub struct NicCtx {
 }
 
 impl NicCtx {
+    pub async fn policy_runtime_running(&self) -> bool {
+        // Mihomo listener/inbound/mieru.go Listen/Close reports lifecycle from
+        // server.IsRunning(), not from whether the listener is configured. Keep
+        // the same observable boundary for EasyTier's independently owned Leaf.
+        #[cfg(all(feature = "leaf-policy-proxy", unix))]
+        if let Some(policy) = self.policy.as_ref() {
+            return policy
+                .active
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|active| active.runtime.is_running());
+        }
+        false
+    }
+
     pub async fn shutdown(&mut self) {
         // Abort and join monitors first so none can replace the active runtime while
         // shutdown is in progress. Mihomo listener Close follows the same observable

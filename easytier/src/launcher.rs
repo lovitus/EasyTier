@@ -477,6 +477,7 @@ impl NetworkInstance {
             } else {
                 Vec::new()
             };
+        let policy_runtime_running = api_service.policy_runtime_running().await;
 
         Ok(NetworkInstanceRunningInfo {
             dev_name,
@@ -510,6 +511,7 @@ impl NetworkInstance {
             error_msg: launcher.error_msg(),
             foreign_network_summary,
             proxy_failover_entries,
+            policy_runtime_running: Some(policy_runtime_running),
         })
     }
 

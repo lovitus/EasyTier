@@ -39,7 +39,7 @@ import {
 } from './managedRuleData'
 
 const config = defineModel<NetworkConfig>({ required: true })
-const props = defineProps<{ api?: Api.RemoteClient }>()
+const props = defineProps<{ api?: Api.RemoteClient; yamlOnly?: boolean }>()
 const { t } = useI18n()
 
 const document = ref<PolicyEditorDocument>(emptyPolicyDocument())
@@ -49,6 +49,7 @@ const editError = ref('')
 const ruleDataMessage = ref('')
 const ruleDataError = ref('')
 const updatingRuleData = ref<PolicyRuleSetKind | ''>('')
+const ruleDataHashes = ref<Partial<Record<PolicyRuleSetKind, string>>>({})
 const outboundInfo = ref<Api.ListPolicyOutboundInterfacesResponse>()
 const outboundLoading = ref(false)
 const outboundError = ref('')
@@ -168,12 +169,18 @@ async function updateRuleData(row: PolicyRuleSetRow) {
   ruleDataError.value = ''
   try {
     const result = await updateManagedRuleData(api, config.value.instance_id, row)
-    setRuleDataCategories(row.type, result.categories)
-    if (!document.value.ruleSets.includes(row)) document.value.ruleSets.push(row)
-    const size = Number(result.size)
+    setRuleDataCategories(row.type, result.categories, result.sha256)
+    if (row.path.trim() && !document.value.ruleSets.includes(row)) document.value.ruleSets.push(row)
+    if (result.updated === false) {
+      ruleDataMessage.value = t('policy.editor.rule_data_unchanged', {
+        type: row.type,
+        size: formatRuleDataSize(result.size),
+      })
+      return
+    }
     ruleDataMessage.value = t('policy.editor.rule_data_updated', {
       type: row.type,
-      size: Number.isFinite(size) ? `${(size / 1024 / 1024).toFixed(1)} MiB` : String(result.size),
+      size: formatRuleDataSize(result.size),
     })
   }
   catch (error) {
@@ -444,11 +451,19 @@ function ruleCategoryOptions(type: string) {
   return []
 }
 
-function setRuleDataCategories(resource: string, categories: string[]) {
-  const normalized = [...new Set(categories.map(category => category.trim().toUpperCase()).filter(Boolean))]
+function formatRuleDataSize(value: number | string) {
+  const size = Number(value)
+  return Number.isFinite(size) ? `${(size / 1024 / 1024).toFixed(1)} MiB` : String(value)
+}
+
+function setRuleDataCategories(resource: string, categories?: string[], sha256?: string) {
+  const normalized = [...new Set((categories ?? []).map(category => category.trim().toUpperCase()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right))
   if (resource === 'geosite') geositeCategoryOptions.value = normalized
   if (resource === 'geoip') geoipCategoryOptions.value = ['LAN', ...normalized.filter(category => category !== 'LAN')]
+  if (resource in MANAGED_RULE_DATA && sha256?.trim()) {
+    ruleDataHashes.value[resource as PolicyRuleSetKind] = sha256.trim()
+  }
 }
 
 async function loadRuleDataCategories() {
@@ -470,7 +485,7 @@ async function loadRuleDataCategories() {
         row?.path.trim() || undefined,
       )
       if (generation !== ruleDataCategoryGeneration) return
-      setRuleDataCategories(resource, result.categories)
+      setRuleDataCategories(resource, result.categories, result.sha256)
     }
     catch {
       // Category discovery is an editor convenience. Typed rules remain usable
@@ -514,6 +529,10 @@ function managedRuleDataStatus(row: PolicyRuleSetRow) {
     : t('policy.editor.installed_unverified')
 }
 
+function managedRuleDataHash(row: PolicyRuleSetRow) {
+  return row.sha256.trim() || ruleDataHashes.value[row.type] || ''
+}
+
 async function loadOutboundInterfaces() {
   if (!props.api?.list_policy_outbound_interfaces || outboundLoading.value) return
   outboundLoading.value = true
@@ -535,7 +554,7 @@ async function loadOutboundInterfaces() {
 }
 
 watch(() => config.value.enable_policy_proxy, enabled => {
-  if (enabled) void loadOutboundInterfaces()
+  if (enabled && !props.yamlOnly) void loadOutboundInterfaces()
 })
 
 const ruleDataCategoryIdentity = computed(() => {
@@ -547,16 +566,43 @@ const ruleDataCategoryIdentity = computed(() => {
   })
 
 watch(ruleDataCategoryIdentity, () => {
-  void loadRuleDataCategories()
+  if (!props.yamlOnly) void loadRuleDataCategories()
 }, { immediate: true })
 
 onMounted(() => {
-  void loadOutboundInterfaces()
+  if (!props.yamlOnly) void loadOutboundInterfaces()
 })
 </script>
 
 <template>
   <div class="flex flex-col gap-4">
+    <template v-if="props.yamlOnly">
+      <div class="flex flex-wrap items-end gap-4">
+        <div class="flex flex-col gap-2">
+          <label class="font-semibold">{{ t('policy.editor.source') }}</label>
+          <SelectButton v-model="sourceMode" :options="sourceOptions" option-label="label" option-value="value"
+            :allow-empty="false" />
+        </div>
+      </div>
+      <template v-if="sourceMode === 'file'">
+        <div class="flex items-center">
+          <label for="policy_config_file_quick">{{ fieldLabel('policy_config_file', '/etc/easytier/policy.yaml') }}</label>
+          <span class="pi pi-question-circle ml-2" v-tooltip="t('policy_config_file_help')" />
+        </div>
+        <InputText id="policy_config_file_quick" v-model="config.policy_config_file"
+          :placeholder="t('policy_config_file_placeholder')" />
+        <Message severity="info" :closable="false">{{ t('policy.editor.file_notice') }}</Message>
+      </template>
+      <template v-else>
+        <Message v-if="parseError" severity="error" :closable="false">
+          {{ t('policy.editor.yaml_error') }}: {{ parseError }}
+        </Message>
+        <label for="policy_config_inline_quick" class="font-semibold">{{ t('policy.editor.advanced_yaml') }}</label>
+        <Textarea id="policy_config_inline_quick" v-model="config.policy_config_inline" rows="20" auto-resize
+          class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')" />
+      </template>
+    </template>
+    <template v-else>
     <Message v-if="outboundInfo && runtimeNoticeKey" :severity="runtimeNoticeSeverity" :closable="false">
       {{ t(runtimeNoticeKey, { platform: outboundInfo.platform }) }}
     </Message>
@@ -914,30 +960,30 @@ onMounted(() => {
               <Message severity="info" :closable="false">{{ t('policy.editor.rule_data_help') }}</Message>
               <Message v-if="ruleDataMessage" severity="success" :closable="false">{{ ruleDataMessage }}</Message>
               <Message v-if="ruleDataError" severity="error" :closable="false">{{ ruleDataError }}</Message>
-              <article v-for="data in ruleDataRows" :key="data.type"
+              <article v-for="data in ruleDataRows" :key="data.type" :data-testid="`policy-rule-data-${data.type}`"
                 class="grid gap-4 rounded-xl border border-surface-200 p-4 lg:grid-cols-[12rem_minmax(16rem,1fr)_12rem] dark:border-surface-700">
                 <div class="flex flex-col gap-1">
                   <span class="font-semibold">{{ t(`policy.editor.resource_${data.type}`) }}</span>
                   <span class="text-xs text-surface-500">{{ data.type }}</span>
                 </div>
                 <div class="flex flex-col gap-2">
-                  <template v-if="usesBundledRuleData(data)">
-                    <div class="break-all font-mono text-xs">{{ managedRuleDataSource(data.type) }}</div>
-                    <small class="text-surface-500">{{ t('policy.editor.builtin_help') }}</small>
-                  </template>
-                  <template v-else>
-                    <label class="font-semibold">{{ fieldLabel('policy.editor.rule_data_source', managedRuleDataSource(data.type)) }}</label>
-                    <InputText :model-value="ruleDataSource(data)" class="w-full"
-                      :aria-label="t('policy.editor.rule_data_source')"
-                      @update:model-value="setRuleDataSource(data, String($event))" />
-                    <small class="text-surface-500">{{ t('policy.editor.rule_data_source_help') }}</small>
-                  </template>
+                  <label class="font-semibold">{{ fieldLabel('policy.editor.rule_data_source', managedRuleDataSource(data.type)) }}</label>
+                  <InputText :model-value="ruleDataSource(data)" class="w-full"
+                    :aria-label="t('policy.editor.rule_data_source')"
+                    @update:model-value="setRuleDataSource(data, String($event))" />
+                  <small class="text-surface-500">{{ usesBundledRuleData(data)
+                    ? t('policy.editor.builtin_help')
+                    : t('policy.editor.rule_data_source_help') }}</small>
                 </div>
                 <div class="flex flex-col items-start gap-2">
                   <span :class="isManagedRuleDataInstalled(data) || usesBundledRuleData(data) ? 'text-green-600' : 'text-surface-500'">
                     {{ managedRuleDataStatus(data) }}
                   </span>
-                  <Button v-if="!usesBundledRuleData(data)" icon="pi pi-refresh"
+                  <div v-if="managedRuleDataHash(data)" class="flex flex-col gap-1">
+                    <span class="text-xs text-surface-500">SHA-256</span>
+                    <code class="break-all text-xs">{{ managedRuleDataHash(data) }}</code>
+                  </div>
+                  <Button icon="pi pi-refresh" :data-testid="`policy-rule-data-update-${data.type}`"
                     :label="t('policy.editor.update_rule_data')" size="small"
                     :loading="updatingRuleData === data.type"
                     :disabled="!props.api?.update_policy_rule_data || !config.instance_id || Boolean(updatingRuleData)"
@@ -957,6 +1003,7 @@ onMounted(() => {
             class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')" />
         </Panel>
       </template>
+    </template>
     </template>
   </div>
 </template>

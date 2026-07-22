@@ -239,6 +239,7 @@ export interface NetworkInstanceRunningInfo {
   peer_route_pairs: PeerRoutePair[]
   running: boolean
   error_msg?: string
+  policy_runtime_running?: boolean
   proxy_failover_entries?: TcpProxyEntry[]
 }
 

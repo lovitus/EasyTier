@@ -147,6 +147,7 @@ message NetworkInstanceRunningInfo {
   optional string error_msg = 8;
   peer_rpc.RouteForeignNetworkSummary foreign_network_summary = 9;
   repeated api.instance.TcpProxyEntry proxy_failover_entries = 10;
+  optional bool policy_runtime_running = 11;
 }
 
 message NetworkInstanceRunningInfoMap {
@@ -187,6 +188,7 @@ message UpdatePolicyRuleDataResponse {
   uint64 size = 3;
   string source_url = 4;
   repeated string categories = 5;
+  optional bool updated = 6;
 }
 
 message ListPolicyRuleDataCategoriesRequest {

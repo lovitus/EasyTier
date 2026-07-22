@@ -116,6 +116,7 @@ pub(crate) struct PolicyRuleDataUpdate {
     pub size: u64,
     pub source_url: String,
     pub categories: Vec<String>,
+    pub updated: bool,
 }
 
 #[derive(Debug)]
@@ -363,11 +364,26 @@ fn update_policy_rule_data_sync(
         "policy rule data download returned HTTP {}",
         response.status()
     );
-    if let Some(content_length) = response.content_length() {
+    let declared_size = response.content_length();
+    if let Some(content_length) = declared_size {
         ensure!(
             content_length <= MAX_RULE_DATA_BYTES,
             "policy rule data declares {content_length} bytes, exceeding the 256 MiB limit"
         );
+        if target_path
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() == content_length)
+            && let Some(index) = load_cached_category_index(&target_path, content_length)
+        {
+            return Ok(PolicyRuleDataUpdate {
+                path: target_path,
+                sha256: index.sha256,
+                size: content_length,
+                source_url,
+                categories: index.categories,
+                updated: false,
+            });
+        }
     }
 
     let mut pending = PendingFile::new(temporary_path.clone());
@@ -378,6 +394,11 @@ fn update_policy_rule_data_sync(
 
     let (mut file, size) = writer.finish();
     ensure!(size > 0, "policy rule data download is empty");
+    ensure!(
+        declared_size.is_none_or(|declared_size| declared_size == size),
+        "policy rule data size mismatch: expected {} bytes, received {size}",
+        declared_size.unwrap_or_default()
+    );
     file.flush().context("flushing policy rule data download")?;
     file.sync_all()
         .context("syncing policy rule data download")?;
@@ -404,6 +425,7 @@ fn update_policy_rule_data_sync(
         size,
         source_url,
         categories,
+        updated: true,
     })
 }
 
@@ -460,6 +482,19 @@ fn load_or_rebuild_category_index(
     };
     let _ = write_category_index(data_path, &index);
     Ok(index)
+}
+
+fn load_cached_category_index(
+    data_path: &Path,
+    expected_size: u64,
+) -> Option<PolicyRuleDataCategoryIndex> {
+    let file = File::open(category_index_path(data_path)).ok()?;
+    let index = serde_json::from_reader::<_, PolicyRuleDataCategoryIndex>(file).ok()?;
+    (index.version == POLICY_RULE_DATA_CATEGORY_INDEX_VERSION
+        && index.size == expected_size
+        && index.sha256.len() == 64
+        && index.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then_some(index)
 }
 
 fn category_index_path(data_path: &Path) -> PathBuf {
@@ -783,5 +818,46 @@ mod tests {
         let (bytes, written) = writer.finish();
         assert_eq!(bytes, b"1234");
         assert_eq!(written, 4);
+    }
+
+    #[test]
+    fn same_size_check_reuses_saved_index_without_hashing_rule_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_path = directory.path().join("country-lite.mmdb");
+        fs::write(&data_path, b"not parsed or hashed on the size-only path").unwrap();
+        let saved_digest = "a".repeat(64);
+        let index = PolicyRuleDataCategoryIndex {
+            version: POLICY_RULE_DATA_CATEGORY_INDEX_VERSION,
+            size: 42,
+            sha256: saved_digest.clone(),
+            categories: Vec::new(),
+        };
+        write_category_index(&data_path, &index).unwrap();
+
+        let cached = load_cached_category_index(&data_path, 42).unwrap();
+        assert_eq!(cached.sha256, saved_digest);
+        assert!(cached.categories.is_empty());
+        assert!(load_cached_category_index(&data_path, 43).is_none());
+    }
+
+    #[test]
+    fn same_size_check_rejects_missing_corrupt_or_unverified_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_path = directory.path().join("country-lite.mmdb");
+        fs::write(&data_path, b"1234").unwrap();
+
+        assert!(load_cached_category_index(&data_path, 4).is_none());
+
+        fs::write(category_index_path(&data_path), b"not json").unwrap();
+        assert!(load_cached_category_index(&data_path, 4).is_none());
+
+        let unverified = PolicyRuleDataCategoryIndex {
+            version: POLICY_RULE_DATA_CATEGORY_INDEX_VERSION,
+            size: 4,
+            sha256: String::new(),
+            categories: Vec::new(),
+        };
+        write_category_index(&data_path, &unverified).unwrap();
+        assert!(load_cached_category_index(&data_path, 4).is_none());
     }
 }

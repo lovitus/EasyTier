@@ -90,4 +90,66 @@ describe('managed Geo rule data', () => {
     expect(row.path).toBe('/existing/geosite.dat')
     expect(row.sha256).toBe('b'.repeat(64))
   })
+
+  it('preserves the saved path and digest when the remote size is unchanged', async () => {
+    const document = emptyPolicyDocument()
+    ensureManagedRuleDataRows(document)
+    const row = document.ruleSets[2]
+    row.path = '/managed/country-lite.mmdb'
+    row.sha256 = 'e'.repeat(64)
+    const api = {
+      update_policy_rule_data: vi.fn(async () => ({
+        path: row.path,
+        sha256: row.sha256,
+        size: 4096,
+        source_url: MANAGED_RULE_DATA.mmdb.source,
+        updated: false,
+      })),
+    } as unknown as Api.RemoteClient
+
+    const result = await updateManagedRuleData(api, 'instance-id', row)
+
+    expect(result.updated).toBe(false)
+    expect(row.path).toBe('/managed/country-lite.mmdb')
+    expect(row.sha256).toBe('e'.repeat(64))
+  })
+
+  it('reattaches a verified managed file when the remote size is unchanged', async () => {
+    const document = emptyPolicyDocument()
+    const row = managedRuleDataRows(document)[2]
+    const api = {
+      update_policy_rule_data: vi.fn(async () => ({
+        path: '/managed/country-lite.mmdb',
+        sha256: 'f'.repeat(64),
+        size: 4096,
+        source_url: MANAGED_RULE_DATA.mmdb.source,
+        updated: false,
+      })),
+    } as unknown as Api.RemoteClient
+
+    await updateManagedRuleData(api, 'instance-id', row)
+
+    expect(row.path).toBe('/managed/country-lite.mmdb')
+    expect(row.sha256).toBe('f'.repeat(64))
+    expect(row.update).toBe('manual')
+  })
+
+  it('does not attach an unchanged file without a verified digest', async () => {
+    const document = emptyPolicyDocument()
+    const row = managedRuleDataRows(document)[2]
+    const api = {
+      update_policy_rule_data: vi.fn(async () => ({
+        path: '/managed/country-lite.mmdb',
+        sha256: '',
+        size: 4096,
+        source_url: MANAGED_RULE_DATA.mmdb.source,
+        updated: false,
+      })),
+    } as unknown as Api.RemoteClient
+
+    await updateManagedRuleData(api, 'instance-id', row)
+
+    expect(row.path).toBe('')
+    expect(row.sha256).toBe('')
+  })
 })

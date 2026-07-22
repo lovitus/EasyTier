@@ -355,6 +355,7 @@ export function normalizeRunningInfo(raw: any): NetworkInstanceRunningInfo | und
     peer_route_pairs: peerRoutePairs,
     running: firstDefined(raw.running, false),
     error_msg: firstDefined(raw.error_msg, raw.errorMsg),
+    policy_runtime_running: firstDefined(raw.policy_runtime_running, raw.policyRuntimeRunning, false),
     proxy_failover_entries: proxyFailoverEntries,
   } as NetworkInstanceRunningInfo
 }

@@ -293,9 +293,10 @@ policy:
     remove_rule: Remove rule
     remove_rule_data: Remove rule data
     managed_source: Managed source
-    update_rule_data: Download and verify
+    update_rule_data: Update manually
     rule_data_help: GeoSite and GeoIP are bundled and work without a download. Country MMDB remains optional. Explicit rule-set paths in advanced YAML override bundled data.
     rule_data_updated: "{type} updated ({size}); save and restart the instance to apply it"
+    rule_data_unchanged: "{type} is already the same remote size ({size}); no update is needed"
     rule_data_source: Resource source URL
     rule_data_source_help: The shown MetaCubeX URL is the default. Edit it only when using a trusted custom mirror.
     resource_geosite: GeoSite domains
@@ -497,6 +498,11 @@ web:
     edit_as_file: Edit as File
     save_config: Save Config
     config_saved: Config Saved
+    edit_policy_yaml: Edit Policy YAML
+    policy_saved_restart_required: Policy configuration saved; restart this network to apply it
+    policy_save_failed: Failed to save policy configuration
+    policy_runtime_running: Leaf Running
+    policy_runtime_stopped: Leaf Stopped
     import_config: Import Config
     create_new: Create New Network
     network_status: Network Status

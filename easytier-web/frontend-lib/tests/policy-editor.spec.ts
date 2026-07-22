@@ -2,6 +2,8 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, reactive } from 'vue'
 import PolicyEditor from '../src/components/policy/PolicyEditor.vue'
+import { MANAGED_RULE_DATA } from '../src/components/policy/managedRuleData'
+import type * as Api from '../src/modules/api'
 import { DEFAULT_NETWORK_CONFIG, type NetworkConfig } from '../src/types/network'
 
 vi.mock('vue-i18n', () => ({
@@ -426,6 +428,101 @@ rules: ["MATCH,exit"]
     expect(model.policy_config_inline).toContain('GEOIP,CN,DIRECT,no-resolve')
     expect(model.policy_config_inline).not.toContain('rule-sets:')
     expect(model.policy_config_inline).not.toContain('sha256:')
+  })
+
+  it('offers sources and manual updates for all Geo resources and accepts empty MMDB categories', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
+    const update = vi.fn(async (_instanceId: string, resource: Api.PolicyRuleDataResource) => ({
+      path: `/managed/${resource}`,
+      sha256: 'd'.repeat(64),
+      size: 4096,
+      source_url: `https://example.invalid/${resource}`,
+      updated: true,
+    }))
+    const api = {
+      update_policy_rule_data: update,
+      list_policy_rule_data_categories: vi.fn(async (_instanceId: string, resource: Api.PolicyRuleDataResource) => ({
+        resource,
+        sha256: resource === 'geosite' ? 'a'.repeat(64) : 'b'.repeat(64),
+        size: 1024,
+        categories: resource === 'geosite' ? ['cn'] : ['cn'],
+      })),
+    } as unknown as Api.RemoteClient
+    const { model, wrapper } = mountEditor(config, api)
+    await flushPromises()
+
+    for (const resource of ['geosite', 'geoip', 'mmdb']) {
+      const card = wrapper.get(`[data-testid="policy-rule-data-${resource}"]`)
+      expect(card.find('input').exists()).toBe(true)
+      expect(card.find(`[data-testid="policy-rule-data-update-${resource}"]`).exists()).toBe(true)
+    }
+    expect(wrapper.get('[data-testid="policy-rule-data-geosite"]').text()).toContain('a'.repeat(64))
+    expect(wrapper.get('[data-testid="policy-rule-data-geoip"]').text()).toContain('b'.repeat(64))
+
+    await wrapper.get('[data-testid="policy-rule-data-update-mmdb"]').trigger('click')
+    await flushPromises()
+
+    expect(update).toHaveBeenCalledWith(config.instance_id, 'mmdb', undefined)
+    expect(wrapper.text()).toContain('policy.editor.rule_data_updated')
+    expect(model.policy_config_inline).toContain('type: mmdb')
+    expect(model.policy_config_inline).toContain('/managed/mmdb')
+    expect(model.policy_config_inline).toContain('d'.repeat(64))
+  })
+
+  it('reports an unchanged remote size without replacing saved rule data', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = `version: 1
+rule-sets:
+  country:
+    type: mmdb
+    path: /managed/country-lite.mmdb
+    sha256: ${'e'.repeat(64)}
+rules: ["MATCH,DIRECT"]
+`
+    const api = {
+      update_policy_rule_data: vi.fn(async () => ({
+        path: '/managed/country-lite.mmdb',
+        sha256: 'e'.repeat(64),
+        size: 4096,
+        source_url: MANAGED_RULE_DATA.mmdb.source,
+        updated: false,
+      })),
+    } as unknown as Api.RemoteClient
+    const { model, wrapper } = mountEditor(config, api)
+    const before = model.policy_config_inline
+
+    await wrapper.get('[data-testid="policy-rule-data-update-mmdb"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('policy.editor.rule_data_unchanged')
+    expect(model.policy_config_inline).toBe(before)
+    expect(wrapper.get('[data-testid="policy-rule-data-mmdb"]').text()).toContain('e'.repeat(64))
+  })
+
+  it('adds a verified existing file to YAML when the remote size is unchanged', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
+    const api = {
+      update_policy_rule_data: vi.fn(async () => ({
+        path: '/managed/country-lite.mmdb',
+        sha256: 'f'.repeat(64),
+        size: 4096,
+        source_url: MANAGED_RULE_DATA.mmdb.source,
+        updated: false,
+      })),
+    } as unknown as Api.RemoteClient
+    const { model, wrapper } = mountEditor(config, api)
+
+    await wrapper.get('[data-testid="policy-rule-data-update-mmdb"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('policy.editor.rule_data_unchanged')
+    expect(model.policy_config_inline).toContain('/managed/country-lite.mmdb')
+    expect(model.policy_config_inline).toContain('f'.repeat(64))
   })
 
   it('keeps existing node, group, and rule cards compact until Edit is selected', async () => {

@@ -62,6 +62,15 @@ export async function updateManagedRuleData(
     row.type,
     customSource || undefined,
   )
+  if (result.updated === false) {
+    if (!row.path.trim() && result.path.trim() && result.sha256.trim()) {
+      row.path = result.path
+      row.sha256 = result.sha256
+      row.update = 'manual'
+      row.sourceUrl = customSource ? result.source_url : ''
+    }
+    return result
+  }
   row.path = result.path
   row.sha256 = result.sha256
   row.update = 'manual'

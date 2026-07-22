@@ -193,6 +193,7 @@ describe('statusDisplay', () => {
         generation: '4',
         ambiguousTimeoutStrikes: '1',
       }],
+      policyRuntimeRunning: true,
       running: true,
     } as any)
 
@@ -216,6 +217,7 @@ describe('statusDisplay', () => {
     expect(normalized?.proxy_failover_entries?.[0].requested_transport).toBe('quic,kcp,native')
     expect(normalized?.proxy_failover_entries?.[0].src?.ip.oneofKind).toBe('ipv4')
     expect(normalized?.proxy_failover_entries?.[0].generation).toBe(4)
+    expect(normalized?.policy_runtime_running).toBe(true)
   })
 
   it('keeps only the newest failover entries returned by older cores', () => {

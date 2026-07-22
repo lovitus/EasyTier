@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Button, ConfirmPopup, Divider, IftaLabel, Menu, Message, Select, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
+import { Button, Checkbox, ConfirmPopup, Dialog, Divider, IftaLabel, Menu, Message, Select, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
 import { computed, onMounted, onUnmounted, Ref, ref, shallowRef, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import * as Api from '../modules/api';
@@ -7,6 +7,8 @@ import * as Utils from '../modules/utils';
 import * as NetworkTypes from '../types/network';
 import { type MenuItem } from 'primevue/menuitem';
 import { normalizeRunningInfo } from '../modules/statusDisplay';
+import PolicyEditor from './policy/PolicyEditor.vue';
+import { DEFAULT_POLICY_TEMPLATE } from './policy/policyDocument';
 
 const { t } = useI18n()
 
@@ -35,6 +37,10 @@ let retainedNetworkInfo: NetworkTypes.NetworkInstance | null = null;
 const showConfigEditDialog = ref(false);
 const isEditingNetwork = ref(false); // Flag to indicate if we're in network editing mode
 const currentNetworkConfig = ref<NetworkTypes.NetworkConfig | undefined>(undefined);
+let networkConfigRequestEpoch = 0;
+const policyConfigDraft = ref<NetworkTypes.NetworkConfig | undefined>(undefined);
+const showPolicyYamlDialog = ref(false);
+const policyConfigSaving = ref(false);
 
 const listInstanceIdResponse = ref<Api.ListNetworkInstanceIdResponse | undefined>(undefined);
 
@@ -186,8 +192,8 @@ watch(selectedInstanceId, async (newVal, oldVal) => {
         resetNetworkInfoRetention(true);
     }
 
-    if (newVal?.uuid !== oldVal?.uuid && (networkIsDisabled.value || isEditingNetwork.value)) {
-        await loadCurrentNetworkConfig();
+    if (newVal?.uuid !== oldVal?.uuid) {
+        await Promise.all([loadCurrentNetworkConfig(), loadCurrentNetworkInfo()]);
     } else {
         await loadCurrentNetworkInfo();
     }
@@ -232,14 +238,18 @@ watch(networkIsDisabled, async (newVal, oldVal) => {
 });
 
 const loadCurrentNetworkConfig = async () => {
+    const requestEpoch = ++networkConfigRequestEpoch;
     currentNetworkConfig.value = undefined;
 
     if (!selectedInstanceId.value) {
         return;
     }
 
-    let ret = await props.api.get_network_config(selectedInstanceId.value!.uuid);
-    currentNetworkConfig.value = ret;
+    const requestedInstanceId = selectedInstanceId.value.uuid;
+    const ret = await props.api.get_network_config(requestedInstanceId);
+    if (requestEpoch === networkConfigRequestEpoch && selectedInstanceId.value?.uuid === requestedInstanceId) {
+        currentNetworkConfig.value = ret;
+    }
 }
 
 const stopNetwork = async () => {
@@ -251,6 +261,25 @@ const stopNetwork = async () => {
     lifecycleGeneration++;
     await props.api.update_network_instance_state(selectedInstanceId.value.uuid, true);
     await loadNetworkInstanceIds();
+}
+
+const floatingNetworkActionPending = ref(false);
+
+const runFloatingNetworkAction = async () => {
+    if (!selectedInstanceId.value || floatingNetworkActionPending.value) {
+        return;
+    }
+
+    floatingNetworkActionPending.value = true;
+    try {
+        if (networkIsDisabled.value) {
+            await saveAndRunNewNetwork();
+        } else {
+            await stopNetwork();
+        }
+    } finally {
+        floatingNetworkActionPending.value = false;
+    }
 }
 
 let lifecycleGeneration = 0;
@@ -368,6 +397,69 @@ const saveNetworkConfig = async () => {
     await loadNetworkMetas([currentNetworkConfig.value.instance_id]);
 
     toast.add({ severity: 'success', summary: t("web.common.success"), detail: t("web.device_management.config_saved"), life: 2000 });
+}
+
+const cloneNetworkConfig = (config: NetworkTypes.NetworkConfig): NetworkTypes.NetworkConfig =>
+    JSON.parse(JSON.stringify(config)) as NetworkTypes.NetworkConfig;
+
+const savePolicyConfig = async (config: NetworkTypes.NetworkConfig): Promise<boolean> => {
+    if (!(await validateNetworkConfigOrWarn(config))) {
+        return false;
+    }
+    policyConfigSaving.value = true;
+    try {
+        await props.api.save_config(config);
+        currentNetworkConfig.value = config;
+        delete networkMetaCache.value[config.instance_id];
+        await loadNetworkMetas([config.instance_id]);
+        toast.add({
+            severity: 'success',
+            summary: t('web.common.success'),
+            detail: t('web.device_management.policy_saved_restart_required'),
+            life: 5000,
+        });
+        return true;
+    } catch (e: any) {
+        console.error(e);
+        toast.add({
+            severity: 'error',
+            summary: 'Error',
+            detail: t('web.device_management.policy_save_failed') + ': ' + errorDetail(e),
+            life: 10000,
+        });
+        return false;
+    } finally {
+        policyConfigSaving.value = false;
+    }
+}
+
+const setPolicyRoutingEnabled = async (enabled: boolean) => {
+    if (!currentNetworkConfig.value || policyConfigSaving.value || !currentNetworkControl.editable.value) {
+        return;
+    }
+    const config = cloneNetworkConfig(currentNetworkConfig.value);
+    config.enable_policy_proxy = enabled;
+    if (enabled && !config.policy_config_file?.trim() && !config.policy_config_inline?.trim()) {
+        config.policy_config_inline = DEFAULT_POLICY_TEMPLATE;
+    }
+    await savePolicyConfig(config);
+}
+
+const editPolicyYaml = () => {
+    if (!currentNetworkConfig.value || !currentNetworkControl.editable.value) {
+        return;
+    }
+    policyConfigDraft.value = cloneNetworkConfig(currentNetworkConfig.value);
+    showPolicyYamlDialog.value = true;
+}
+
+const savePolicyYaml = async () => {
+    if (!policyConfigDraft.value) {
+        return;
+    }
+    if (await savePolicyConfig(cloneNetworkConfig(policyConfigDraft.value))) {
+        showPolicyYamlDialog.value = false;
+    }
 }
 const newNetwork = async () => {
     const newNetworkConfig = props.newConfigGenerator?.() ?? NetworkTypes.DEFAULT_NETWORK_CONFIG();
@@ -742,7 +834,7 @@ onUnmounted(() => {
 
         <!-- 网络选择和操作按钮始终在同一行 -->
         <div class="network-header bg-surface-50 p-3 rounded-lg shadow-sm mb-1">
-            <div class="flex flex-row justify-between items-center gap-2" style="align-items: center;">
+            <div class="network-header-row flex flex-row justify-between items-center gap-2">
                 <!-- 网络选择 -->
                 <div class="flex-1 min-w-0">
                     <IftaLabel class="w-full">
@@ -799,6 +891,27 @@ onUnmounted(() => {
 
                 <!-- 简化的按钮区域 - 无论屏幕大小都显示 -->
                 <div class="flex gap-2 shrink-0 button-container items-center">
+                    <div v-if="selectedInstanceId" class="policy-home-controls flex items-center gap-2 rounded-lg border border-surface-200 px-3 py-2 dark:border-surface-700"
+                        data-testid="policy-home-controls">
+                        <Checkbox input-id="home-enable-policy-routing"
+                            :model-value="Boolean(currentNetworkConfig?.enable_policy_proxy)" binary
+                            :disabled="!currentNetworkConfig || !currentNetworkControl.editable.value || policyConfigSaving"
+                            data-testid="policy-home-toggle"
+                            @update:model-value="setPolicyRoutingEnabled(Boolean($event))" />
+                        <label for="home-enable-policy-routing" class="whitespace-nowrap">
+                            {{ t('enable_policy_proxy') }}
+                        </label>
+                        <Tag :severity="currentNetworkStatusInfo?.detail?.policy_runtime_running ? 'success' : 'secondary'"
+                            :value="t(currentNetworkStatusInfo?.detail?.policy_runtime_running
+                                ? 'web.device_management.policy_runtime_running'
+                                : 'web.device_management.policy_runtime_stopped')"
+                            data-testid="policy-runtime-status" />
+                        <Button icon="pi pi-file-edit" severity="secondary" size="small"
+                            :label="t('web.device_management.edit_policy_yaml')"
+                            :disabled="!currentNetworkConfig || !currentNetworkControl.editable.value || policyConfigSaving"
+                            data-testid="policy-home-edit-yaml" @click="editPolicyYaml" />
+                    </div>
+
                     <!-- Create/Cancel button based on state -->
                     <Button v-if="!isEditingNetwork" @click="newNetwork" icon="pi pi-plus"
                         :label="screenWidth > 640 ? t('web.device_management.create_new') : undefined"
@@ -884,12 +997,34 @@ onUnmounted(() => {
             </div>
         </div>
 
+        <Button v-if="selectedInstanceId && !isEditingNetwork"
+            class="floating-network-action"
+            :label="t(networkIsDisabled ? 'run_network' : 'web.device_management.disable_network')"
+            :icon="networkIsDisabled ? 'pi pi-play' : 'pi pi-power-off'"
+            :severity="networkIsDisabled ? 'success' : 'danger'"
+            :disabled="networkIsDisabled ? !currentNetworkConfig : !currentNetworkControl.deletable.value"
+            :loading="floatingNetworkActionPending"
+            rounded raised
+            data-testid="floating-network-action"
+            @click="runFloatingNetworkAction" />
+
         <!-- Keep only the config edit dialogs -->
         <!-- <ConfigEditDialog v-if="networkIsDisabled" v-model:visible="showCreateNetworkDialog"
             :cur-network="currentNetworkConfig" :generate-config="generateConfig" :save-config="saveConfig" /> -->
 
         <ConfigEditDialog v-model:visible="showConfigEditDialog" :cur-network="currentNetworkConfig"
             :generate-config="generateConfig" :save-config="syncTomlConfig" />
+
+        <Dialog v-model:visible="showPolicyYamlDialog" modal :header="t('web.device_management.edit_policy_yaml')"
+            class="w-[min(52rem,95vw)]" data-testid="policy-yaml-dialog">
+            <PolicyEditor v-if="policyConfigDraft" v-model="policyConfigDraft" :api="props.api" yaml-only />
+            <template #footer>
+                <Button :label="t('web.common.cancel')" severity="secondary" text
+                    :disabled="policyConfigSaving" @click="showPolicyYamlDialog = false" />
+                <Button :label="t('web.common.save')" icon="pi pi-save" :loading="policyConfigSaving"
+                    data-testid="policy-yaml-save" @click="savePolicyYaml" />
+            </template>
+        </Dialog>
     </div>
 </template>
 
@@ -898,6 +1033,7 @@ onUnmounted(() => {
     height: 100%;
     display: flex;
     flex-direction: column;
+    position: relative;
 }
 
 .network-content {
@@ -914,6 +1050,14 @@ onUnmounted(() => {
 .create-button {
     font-weight: 600;
     min-width: 3rem;
+}
+
+.floating-network-action {
+    position: absolute;
+    right: max(1rem, env(safe-area-inset-right));
+    bottom: max(1rem, env(safe-area-inset-bottom));
+    z-index: 20;
+    box-shadow: 0 0.5rem 1.25rem rgba(0, 0, 0, 0.25);
 }
 
 /* 菜单样式定制 */
@@ -995,6 +1139,22 @@ onUnmounted(() => {
 @media (max-width: 768px) {
     .network-header {
         padding: 0.75rem;
+    }
+
+    .network-header-row {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .button-container {
+        width: 100%;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+
+    .policy-home-controls {
+        flex: 1 0 100%;
+        flex-wrap: wrap;
     }
 
     .network-content {

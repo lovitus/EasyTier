@@ -18,14 +18,15 @@ export interface UpdatePolicyRuleDataResponse {
     sha256: string;
     size: number | string;
     source_url: string;
-    categories: string[];
+    categories?: string[];
+    updated?: boolean;
 }
 
 export interface ListPolicyRuleDataCategoriesResponse {
     resource: PolicyRuleDataResource;
     sha256: string;
     size: number | string;
-    categories: string[];
+    categories?: string[];
 }
 
 export interface PolicyOutboundInterface {

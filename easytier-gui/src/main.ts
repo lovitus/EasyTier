@@ -21,10 +21,6 @@ if (import.meta.env.PROD) {
       event.preventDefault()
     }
   })
-
-  document.addEventListener('contextmenu', (event) => {
-    event.preventDefault()
-  })
 }
 
 async function main() {

@@ -1655,6 +1655,8 @@ impl Instance {
 
         #[derive(Clone)]
         struct ApiRpcServiceImpl<A, B, C, D, E, F, G, H> {
+            #[cfg(feature = "tun")]
+            nic_ctx: ArcNicCtx,
             peer_mgr_rpc_service: A,
             connector_mgr_rpc_service: B,
             mapped_listener_mgr_rpc_service: C,
@@ -1683,6 +1685,28 @@ impl Instance {
             H: ConfigRpc<Controller = BaseController> + Send + Sync,
         > InstanceRpcService for ApiRpcServiceImpl<A, B, C, D, E, F, G, H>
         {
+            fn policy_runtime_running(
+                &self,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>
+            {
+                #[cfg(feature = "tun")]
+                {
+                    return Box::pin(async move {
+                        let container = self.nic_ctx.lock().await;
+                        let Some(nic_ctx) = container
+                            .as_ref()
+                            .and_then(|container| container.nic_ctx.as_ref())
+                            .and_then(|nic_ctx| nic_ctx.downcast_ref::<NicCtx>())
+                        else {
+                            return false;
+                        };
+                        nic_ctx.policy_runtime_running().await
+                    });
+                }
+                #[cfg(not(feature = "tun"))]
+                Box::pin(async { false })
+            }
+
             fn get_peer_manage_service(&self) -> &dyn PeerManageRpc<Controller = BaseController> {
                 &self.peer_mgr_rpc_service
             }
@@ -1745,6 +1769,8 @@ impl Instance {
         }
 
         ApiRpcServiceImpl {
+            #[cfg(feature = "tun")]
+            nic_ctx: self.nic_ctx.clone(),
             peer_mgr_rpc_service: PeerManagerRpcService::new(self.peer_manager.clone()),
             connector_mgr_rpc_service: ConnectorManagerRpcService(Arc::downgrade(
                 &self.conn_manager,

@@ -21,6 +21,10 @@ pub type ApiRpcServer<T> = self::api::ApiRpcServer<T>;
 pub use json_rpc::call_json_rpc;
 
 pub trait InstanceRpcService: Sync + Send {
+    fn policy_runtime_running(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>;
+
     fn get_peer_manage_service(
         &self,
     ) -> &dyn crate::proto::api::instance::PeerManageRpc<

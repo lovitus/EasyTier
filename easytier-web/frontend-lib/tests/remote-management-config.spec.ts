@@ -105,6 +105,36 @@ vi.mock('primevue', async () => {
     },
   })
 
+  const CheckboxStub = defineComponent({
+    name: 'Checkbox',
+    props: {
+      modelValue: Boolean,
+      disabled: Boolean,
+    },
+    emits: ['update:modelValue'],
+    setup(props, { emit }) {
+      return () => h('input', {
+        type: 'checkbox',
+        checked: props.modelValue,
+        disabled: props.disabled,
+        onChange: (event: Event) => emit('update:modelValue', (event.target as HTMLInputElement).checked),
+      })
+    },
+  })
+
+  const DialogStub = defineComponent({
+    name: 'Dialog',
+    props: {
+      visible: Boolean,
+    },
+    emits: ['update:visible'],
+    setup(props, { slots }) {
+      return () => props.visible
+        ? h('div', { 'data-stub': 'dialog' }, [slots.default?.(), slots.footer?.()])
+        : null
+    },
+  })
+
   const MenuStub = defineComponent({
     name: 'Menu',
     setup(_, { expose }) {
@@ -115,7 +145,9 @@ vi.mock('primevue', async () => {
 
   return {
     Button: ButtonStub,
+    Checkbox: CheckboxStub,
     ConfirmPopup: PassThrough,
+    Dialog: DialogStub,
     Divider: PassThrough,
     IftaLabel: PassThrough,
     Menu: MenuStub,
@@ -333,6 +365,133 @@ describe('RemoteManagement persisted selection', () => {
 })
 
 describe('RemoteManagement config save', () => {
+  it('saves the home policy toggle without restarting a running network', async () => {
+    const config = {
+      ...DEFAULT_NETWORK_CONFIG(),
+      instance_id: INSTANCE_ID,
+      enable_policy_proxy: false,
+      policy_config_inline: '',
+    }
+    const api = makeStatusApi(vi.fn(async () => ({
+      ...runningInfo('policy-home'),
+      policy_runtime_running: true,
+    })))
+    api.get_network_config = vi.fn(async () => cloneConfig(config))
+    api.get_network_metas = vi.fn(async () => ({
+      metas: {
+        [INSTANCE_ID]: {
+          config_permission: 0,
+          network_name: 'policy-home',
+        },
+      },
+    }))
+    api.list_network_instance_ids = vi.fn(async () => ({
+      disabled_inst_ids: [],
+      running_inst_ids: [INSTANCE_UUID],
+    }))
+    api.validate_config = vi.fn(async () => ({ policy_diagnostics: [] }))
+
+    const wrapper = mount(RemoteManagement, {
+      props: { api, instanceId: INSTANCE_ID },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          PolicyEditor: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+
+      const toggle = wrapper.find('[data-testid="policy-home-toggle"]')
+      expect(toggle.exists()).toBe(true)
+      expect(toggle.attributes('disabled')).toBeUndefined()
+      expect(wrapper.find('[data-testid="policy-runtime-status"]').attributes('data-value'))
+        .toBe('web.device_management.policy_runtime_running')
+
+      await toggle.setValue(true)
+      await settleAsync()
+
+      expect(api.validate_config).toHaveBeenCalledOnce()
+      expect(api.save_config).toHaveBeenCalledOnce()
+      expect(api.save_config.mock.calls[0][0]).toMatchObject({
+        instance_id: INSTANCE_ID,
+        enable_policy_proxy: true,
+      })
+      expect((api.save_config.mock.calls[0][0] as NetworkConfig).policy_config_inline).toContain('version: 1')
+      expect(api.run_network).not.toHaveBeenCalled()
+      expect(api.update_network_instance_state).not.toHaveBeenCalled()
+      expect(toastAdd).toHaveBeenCalledWith(expect.objectContaining({
+        detail: 'web.device_management.policy_saved_restart_required',
+      }))
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('opens the focused policy YAML editor and saves its draft without restarting', async () => {
+    const config = {
+      ...DEFAULT_NETWORK_CONFIG(),
+      instance_id: INSTANCE_ID,
+      enable_policy_proxy: true,
+      policy_config_inline: 'version: 1\nrules:\n  - FINAL,DIRECT\n',
+    }
+    const api = makeStatusApi(vi.fn(async () => runningInfo('policy-yaml')))
+    api.get_network_config = vi.fn(async () => cloneConfig(config))
+    api.get_network_metas = vi.fn(async () => ({
+      metas: {
+        [INSTANCE_ID]: {
+          config_permission: 0,
+          network_name: 'policy-yaml',
+        },
+      },
+    }))
+    api.list_network_instance_ids = vi.fn(async () => ({
+      disabled_inst_ids: [],
+      running_inst_ids: [INSTANCE_UUID],
+    }))
+    api.validate_config = vi.fn(async () => ({ policy_diagnostics: [] }))
+
+    const wrapper = mount(RemoteManagement, {
+      props: { api, instanceId: INSTANCE_ID },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          PolicyEditor: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+      await wrapper.find('[data-testid="policy-home-edit-yaml"]').trigger('click')
+      await nextTick()
+
+      const editor = wrapper.findComponent({ name: 'PolicyEditor' })
+      expect(editor.exists()).toBe(true)
+      expect(editor.props('yamlOnly')).toBe(true)
+      editor.vm.$emit('update:modelValue', {
+        ...cloneConfig(config),
+        policy_config_inline: 'version: 1\nrules:\n  - FINAL,REJECT\n',
+      })
+      await nextTick()
+      await wrapper.find('[data-testid="policy-yaml-save"]').trigger('click')
+      await settleAsync()
+
+      expect(api.save_config).toHaveBeenCalledOnce()
+      expect((api.save_config.mock.calls[0][0] as NetworkConfig).policy_config_inline).toContain('FINAL,REJECT')
+      expect(api.run_network).not.toHaveBeenCalled()
+      expect(api.update_network_instance_state).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('saves the current network config without dropping boolean fields', async () => {
     const config = makeFlagConfig()
     const expectedFlags = snapshotBooleanConfigFields(config)
@@ -461,6 +620,120 @@ describe('RemoteManagement config save', () => {
       expect(api.validate_config).toHaveBeenCalledOnce()
       expect(api.save_config).not.toHaveBeenCalled()
       expect(api.update_network_instance_state).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+})
+
+describe('RemoteManagement floating network action', () => {
+  it('reuses the existing stop action for a running network', async () => {
+    const api = makeStatusApi(vi.fn(async () => runningInfo('floating-stop')))
+    api.get_network_config = vi.fn(async () => ({
+      ...DEFAULT_NETWORK_CONFIG(),
+      instance_id: INSTANCE_ID,
+    }))
+    api.get_network_metas = vi.fn(async () => ({
+      metas: {
+        [INSTANCE_ID]: {
+          config_permission: 0,
+          network_name: 'floating-stop',
+        },
+      },
+    }))
+
+    const wrapper = mount(RemoteManagement, {
+      props: { api, instanceId: INSTANCE_ID },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+
+      const action = wrapper.get('[data-testid="floating-network-action"]')
+      expect(action.attributes('data-label')).toBe('web.device_management.disable_network')
+      expect(action.attributes('disabled')).toBeUndefined()
+
+      await action.trigger('click')
+      await settleAsync()
+
+      expect(api.update_network_instance_state).toHaveBeenCalledOnce()
+      expect(api.update_network_instance_state).toHaveBeenCalledWith(INSTANCE_ID, true)
+      expect(api.run_network).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('reuses the existing save-and-run action for a disabled network', async () => {
+    const config = {
+      ...DEFAULT_NETWORK_CONFIG(),
+      instance_id: INSTANCE_ID,
+    }
+    const api = makeStatusApi(vi.fn(async () => undefined))
+    api.get_network_config = vi.fn(async () => cloneConfig(config))
+    api.list_network_instance_ids = vi.fn(async () => ({
+      disabled_inst_ids: [INSTANCE_UUID],
+      running_inst_ids: [],
+    }))
+    api.validate_config = vi.fn(async () => ({ policy_diagnostics: [] }))
+
+    const wrapper = mount(RemoteManagement, {
+      props: { api, instanceId: INSTANCE_ID },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: true,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+
+      const action = wrapper.get('[data-testid="floating-network-action"]')
+      expect(action.attributes('data-label')).toBe('run_network')
+
+      await action.trigger('click')
+      await settleAsync()
+
+      expect(api.validate_config).toHaveBeenCalledOnce()
+      expect(api.save_config).toHaveBeenCalledWith(expect.objectContaining({ instance_id: INSTANCE_ID }))
+      expect(api.update_network_instance_state).toHaveBeenCalledWith(INSTANCE_ID, false)
+      expect(api.run_network).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('does not show the floating action without a selected network', async () => {
+    const api = makeStatusApi(vi.fn(async () => undefined))
+    api.list_network_instance_ids = vi.fn(async () => ({
+      disabled_inst_ids: [],
+      running_inst_ids: [],
+    }))
+
+    const wrapper = mount(RemoteManagement, {
+      props: { api },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          Status: true,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+      expect(wrapper.find('[data-testid="floating-network-action"]').exists()).toBe(false)
     } finally {
       wrapper.unmount()
     }

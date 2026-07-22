@@ -294,9 +294,10 @@ policy:
     remove_rule: 删除规则
     remove_rule_data: 删除规则数据
     managed_source: 官方数据源
-    update_rule_data: 下载并校验
+    update_rule_data: 手动更新
     rule_data_help: GeoSite 和 GeoIP 已内置，无需下载即可使用；Country MMDB 仍为可选资源。高级 YAML 中显式配置的同类数据文件优先于内置数据。
     rule_data_updated: "{type} 已更新（{size}），请保存并重新运行实例"
+    rule_data_unchanged: "{type} 远端文件大小与当前文件相同（{size}），无需更新"
     rule_data_source: 资源来源 URL
     rule_data_source_help: 当前显示的是 MetaCubeX 默认地址；仅在使用可信自定义镜像时修改。
     resource_geosite: GeoSite 域名数据
@@ -497,6 +498,11 @@ web:
     edit_as_file: 编辑为文件
     save_config: 保存配置
     config_saved: 配置已保存
+    edit_policy_yaml: 编辑 Policy YAML
+    policy_saved_restart_required: Policy 配置已保存，重启该网络后生效
+    policy_save_failed: 保存 Policy 配置失败
+    policy_runtime_running: Leaf 运行中
+    policy_runtime_stopped: Leaf 已停止
     import_config: 导入配置
     create_new: 创建新网络
     network_status: 网络状态

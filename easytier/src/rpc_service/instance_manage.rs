@@ -290,6 +290,7 @@ impl WebClientService for InstanceManageRpcService {
                 size: update.size,
                 source_url: update.source_url,
                 categories: update.categories,
+                updated: Some(update.updated),
             })
         }
         #[cfg(not(feature = "leaf-policy-proxy"))]
