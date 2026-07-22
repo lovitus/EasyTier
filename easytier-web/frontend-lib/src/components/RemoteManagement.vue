@@ -434,7 +434,7 @@ const savePolicyConfig = async (config: NetworkTypes.NetworkConfig): Promise<boo
 }
 
 const setPolicyRoutingEnabled = async (enabled: boolean) => {
-    if (!currentNetworkConfig.value || policyConfigSaving.value || !currentNetworkControl.editable.value) {
+    if (!networkIsDisabled.value || !currentNetworkConfig.value || policyConfigSaving.value || !currentNetworkControl.editable.value) {
         return;
     }
     const config = cloneNetworkConfig(currentNetworkConfig.value);
@@ -446,7 +446,7 @@ const setPolicyRoutingEnabled = async (enabled: boolean) => {
 }
 
 const editPolicyYaml = () => {
-    if (!currentNetworkConfig.value || !currentNetworkControl.editable.value) {
+    if (!networkIsDisabled.value || !currentNetworkConfig.value || !currentNetworkControl.editable.value) {
         return;
     }
     policyConfigDraft.value = cloneNetworkConfig(currentNetworkConfig.value);
@@ -454,7 +454,7 @@ const editPolicyYaml = () => {
 }
 
 const savePolicyYaml = async () => {
-    if (!policyConfigDraft.value) {
+    if (!networkIsDisabled.value || !policyConfigDraft.value) {
         return;
     }
     if (await savePolicyConfig(cloneNetworkConfig(policyConfigDraft.value))) {
@@ -891,27 +891,6 @@ onUnmounted(() => {
 
                 <!-- 简化的按钮区域 - 无论屏幕大小都显示 -->
                 <div class="flex gap-2 shrink-0 button-container items-center">
-                    <div v-if="selectedInstanceId" class="policy-home-controls flex items-center gap-2 rounded-lg border border-surface-200 px-3 py-2 dark:border-surface-700"
-                        data-testid="policy-home-controls">
-                        <Checkbox input-id="home-enable-policy-routing"
-                            :model-value="Boolean(currentNetworkConfig?.enable_policy_proxy)" binary
-                            :disabled="!currentNetworkConfig || !currentNetworkControl.editable.value || policyConfigSaving"
-                            data-testid="policy-home-toggle"
-                            @update:model-value="setPolicyRoutingEnabled(Boolean($event))" />
-                        <label for="home-enable-policy-routing" class="whitespace-nowrap">
-                            {{ t('enable_policy_proxy') }}
-                        </label>
-                        <Tag :severity="currentNetworkStatusInfo?.detail?.policy_runtime_running ? 'success' : 'secondary'"
-                            :value="t(currentNetworkStatusInfo?.detail?.policy_runtime_running
-                                ? 'web.device_management.policy_runtime_running'
-                                : 'web.device_management.policy_runtime_stopped')"
-                            data-testid="policy-runtime-status" />
-                        <Button icon="pi pi-file-edit" severity="secondary" size="small"
-                            :label="t('web.device_management.edit_policy_yaml')"
-                            :disabled="!currentNetworkConfig || !currentNetworkControl.editable.value || policyConfigSaving"
-                            data-testid="policy-home-edit-yaml" @click="editPolicyYaml" />
-                    </div>
-
                     <!-- Create/Cancel button based on state -->
                     <Button v-if="!isEditingNetwork" @click="newNetwork" icon="pi pi-plus"
                         :label="screenWidth > 640 ? t('web.device_management.create_new') : undefined"
@@ -935,6 +914,28 @@ onUnmounted(() => {
                         @click="menuRef.toggle($event)" :aria-label="t('web.device_management.more_actions')"
                         :tooltip="t('web.device_management.more_actions')" tooltipOptions="{ position: 'bottom' }" />
                 </div>
+            </div>
+
+            <div v-if="selectedInstanceId"
+                class="policy-home-controls mt-2 flex items-center gap-2 rounded-lg border border-surface-200 px-3 py-2 dark:border-surface-700"
+                data-testid="policy-home-controls">
+                <Checkbox input-id="home-enable-policy-routing"
+                    :model-value="Boolean(currentNetworkConfig?.enable_policy_proxy)" binary
+                    :disabled="!networkIsDisabled || !currentNetworkConfig || !currentNetworkControl.editable.value || policyConfigSaving"
+                    data-testid="policy-home-toggle"
+                    @update:model-value="setPolicyRoutingEnabled(Boolean($event))" />
+                <label for="home-enable-policy-routing" class="whitespace-nowrap">
+                    {{ t('enable_policy_proxy') }}
+                </label>
+                <Tag :severity="currentNetworkStatusInfo?.detail?.policy_runtime_running ? 'success' : 'secondary'"
+                    :value="t(currentNetworkStatusInfo?.detail?.policy_runtime_running
+                        ? 'web.device_management.policy_runtime_running'
+                        : 'web.device_management.policy_runtime_stopped')"
+                    data-testid="policy-runtime-status" />
+                <Button icon="pi pi-file-edit" severity="secondary" size="small"
+                    :label="t('web.device_management.edit_policy_yaml')"
+                    :disabled="!networkIsDisabled || !currentNetworkConfig || !currentNetworkControl.editable.value || policyConfigSaving"
+                    data-testid="policy-home-edit-yaml" @click="editPolicyYaml" />
             </div>
         </div>
 
@@ -1142,18 +1143,16 @@ onUnmounted(() => {
     }
 
     .network-header-row {
-        flex-direction: column;
-        align-items: stretch;
+        align-items: center;
     }
 
     .button-container {
-        width: 100%;
-        flex-wrap: wrap;
+        width: auto;
+        flex-wrap: nowrap;
         justify-content: flex-end;
     }
 
     .policy-home-controls {
-        flex: 1 0 100%;
         flex-wrap: wrap;
     }
 

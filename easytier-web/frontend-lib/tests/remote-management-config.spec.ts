@@ -365,17 +365,14 @@ describe('RemoteManagement persisted selection', () => {
 })
 
 describe('RemoteManagement config save', () => {
-  it('saves the home policy toggle without restarting a running network', async () => {
+  it('saves the home policy toggle for a stopped network without starting it', async () => {
     const config = {
       ...DEFAULT_NETWORK_CONFIG(),
       instance_id: INSTANCE_ID,
       enable_policy_proxy: false,
       policy_config_inline: '',
     }
-    const api = makeStatusApi(vi.fn(async () => ({
-      ...runningInfo('policy-home'),
-      policy_runtime_running: true,
-    })))
+    const api = makeStatusApi(vi.fn(async () => undefined))
     api.get_network_config = vi.fn(async () => cloneConfig(config))
     api.get_network_metas = vi.fn(async () => ({
       metas: {
@@ -386,8 +383,8 @@ describe('RemoteManagement config save', () => {
       },
     }))
     api.list_network_instance_ids = vi.fn(async () => ({
-      disabled_inst_ids: [],
-      running_inst_ids: [INSTANCE_UUID],
+      disabled_inst_ids: [INSTANCE_UUID],
+      running_inst_ids: [],
     }))
     api.validate_config = vi.fn(async () => ({ policy_diagnostics: [] }))
 
@@ -409,8 +406,15 @@ describe('RemoteManagement config save', () => {
       const toggle = wrapper.find('[data-testid="policy-home-toggle"]')
       expect(toggle.exists()).toBe(true)
       expect(toggle.attributes('disabled')).toBeUndefined()
+      const header = wrapper.get('.network-header')
+      const headerRow = header.get('.network-header-row')
+      const buttonContainer = headerRow.get('.button-container')
+      expect(headerRow.find('[data-testid="policy-home-controls"]').exists()).toBe(false)
+      expect(buttonContainer.find('.create-button').exists()).toBe(true)
+      expect(header.get('[data-testid="policy-home-controls"]').element.parentElement)
+        .toBe(header.element)
       expect(wrapper.find('[data-testid="policy-runtime-status"]').attributes('data-value'))
-        .toBe('web.device_management.policy_runtime_running')
+        .toBe('web.device_management.policy_runtime_stopped')
 
       await toggle.setValue(true)
       await settleAsync()
@@ -432,14 +436,72 @@ describe('RemoteManagement config save', () => {
     }
   })
 
-  it('opens the focused policy YAML editor and saves its draft without restarting', async () => {
+  it('keeps policy controls read-only while the network is running', async () => {
     const config = {
       ...DEFAULT_NETWORK_CONFIG(),
       instance_id: INSTANCE_ID,
       enable_policy_proxy: true,
       policy_config_inline: 'version: 1\nrules:\n  - FINAL,DIRECT\n',
     }
-    const api = makeStatusApi(vi.fn(async () => runningInfo('policy-yaml')))
+    const api = makeStatusApi(vi.fn(async () => ({
+      ...runningInfo('policy-read-only'),
+      policy_runtime_running: true,
+    })))
+    api.get_network_config = vi.fn(async () => cloneConfig(config))
+    api.get_network_metas = vi.fn(async () => ({
+      metas: {
+        [INSTANCE_ID]: {
+          config_permission: 0,
+          network_name: 'policy-read-only',
+        },
+      },
+    }))
+    api.list_network_instance_ids = vi.fn(async () => ({
+      disabled_inst_ids: [],
+      running_inst_ids: [INSTANCE_UUID],
+    }))
+
+    const wrapper = mount(RemoteManagement, {
+      props: { api, instanceId: INSTANCE_ID },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          PolicyEditor: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+
+      const toggle = wrapper.get('[data-testid="policy-home-toggle"]')
+      const editYaml = wrapper.get('[data-testid="policy-home-edit-yaml"]')
+      expect(toggle.attributes('disabled')).toBeDefined()
+      expect(editYaml.attributes('disabled')).toBeDefined()
+      expect(wrapper.get('[data-testid="policy-runtime-status"]').attributes('data-value'))
+        .toBe('web.device_management.policy_runtime_running')
+
+      await toggle.setValue(false)
+      await editYaml.trigger('click')
+      await settleAsync()
+
+      expect(api.save_config).not.toHaveBeenCalled()
+      expect(wrapper.findComponent({ name: 'PolicyEditor' }).exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('opens the focused policy YAML editor for a stopped network and saves its draft without starting', async () => {
+    const config = {
+      ...DEFAULT_NETWORK_CONFIG(),
+      instance_id: INSTANCE_ID,
+      enable_policy_proxy: true,
+      policy_config_inline: 'version: 1\nrules:\n  - FINAL,DIRECT\n',
+    }
+    const api = makeStatusApi(vi.fn(async () => undefined))
     api.get_network_config = vi.fn(async () => cloneConfig(config))
     api.get_network_metas = vi.fn(async () => ({
       metas: {
@@ -450,8 +512,8 @@ describe('RemoteManagement config save', () => {
       },
     }))
     api.list_network_instance_ids = vi.fn(async () => ({
-      disabled_inst_ids: [],
-      running_inst_ids: [INSTANCE_UUID],
+      disabled_inst_ids: [INSTANCE_UUID],
+      running_inst_ids: [],
     }))
     api.validate_config = vi.fn(async () => ({ policy_diagnostics: [] }))
 
