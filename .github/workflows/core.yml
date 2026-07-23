@@ -226,13 +226,43 @@ jobs:
           
           cargo $BUILD --locked --release --target $TARGET --features=$FEATURES
 
-      - name: Verify Windows policy feature
+      - name: Stage Windows runtime payload
         if: contains(matrix.TARGET, 'windows')
         run: |
           set -euo pipefail
-          "target/$TARGET/release/easytier-core.exe" --help > "$RUNNER_TEMP/easytier-core-help.txt"
-          grep -F -- "--policy-config" "$RUNNER_TEMP/easytier-core-help.txt"
-          test -f "target/$TARGET/release/easytier-leaf-worker.exe"
+          case "$TARGET" in
+            x86_64*)  ARCH_DIR=x86_64 ;;
+            i686*)    ARCH_DIR=i686 ;;
+            aarch64*) ARCH_DIR=arm64 ;;
+            *)        echo "unsupported Windows target: $TARGET" >&2; exit 1 ;;
+          esac
+          runtime_dir="target/$TARGET/release"
+          find "easytier/third_party/$ARCH_DIR" -maxdepth 1 -type f \
+            \( -name "*.dll" -o -name "*.sys" \) -exec cp {} "$runtime_dir/" \;
+          test -f "$runtime_dir/wintun.dll"
+          test -f "$runtime_dir/Packet.dll"
+
+      - name: Verify Windows policy feature
+        if: contains(matrix.TARGET, 'windows')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $runtimeDir = Join-Path $PWD "target/$env:TARGET/release"
+          $core = Join-Path $runtimeDir "easytier-core.exe"
+          $worker = Join-Path $runtimeDir "easytier-leaf-worker.exe"
+          $helpFile = Join-Path $env:RUNNER_TEMP "easytier-core-help.txt"
+          foreach ($required in @($core, $worker, (Join-Path $runtimeDir "wintun.dll"), (Join-Path $runtimeDir "Packet.dll"))) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "missing Windows runtime payload: $required"
+            }
+          }
+          & $core --help 2>&1 | Tee-Object -FilePath $helpFile
+          if ($LASTEXITCODE -ne 0) {
+            throw "easytier-core --help exited with code $LASTEXITCODE"
+          }
+          if (-not (Select-String -LiteralPath $helpFile -SimpleMatch -Pattern "--policy-config")) {
+            throw "easytier-core --help is missing --policy-config"
+          }
 
       - name: Build (MIPS)
         if: ${{ contains(matrix.TARGET, 'mips') }}
