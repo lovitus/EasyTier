@@ -40,7 +40,7 @@ jobs:
           concurrent_skipping: 'same_content_newer'
           skip_after_successful_duplicate: 'true'
           cancel_others: 'true'
-          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "third_party/**", "easytier-gui/**", ".github/workflows/gui.yml", ".github/actions/**", "easytier-web/frontend-lib/**"]'
+          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "easytier-policy/**", "easytier-socks-egress/**", "third_party/**", "scripts/build-hev-socks-egress.sh", "easytier-gui/**", ".github/workflows/gui.yml", ".github/actions/**", "easytier-web/frontend-lib/**"]'
   build-gui:
     strategy:
       fail-fast: true
@@ -122,14 +122,21 @@ jobs:
               find "./easytier/third_party/${ARCH_DIR}" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) -exec cp {} ./easytier-gui/src-tauri/ \;
           fi
 
-      - name: Build Leaf policy sidecar
-        if: contains(matrix.GUI_TARGET, 'darwin')
+      - name: Build policy sidecars
+        if: contains(matrix.GUI_TARGET, 'darwin') || contains(matrix.GUI_TARGET, 'linux')
+        env:
+          HEV_SERVER_COMMIT: 97e74f1068bd924e740032382cdc94ca83741ae6
         run: |
           set -euo pipefail
-          cargo build --release --target "$GUI_TARGET" --package easytier-policy --bin easytier-leaf-worker --features leaf-worker
+          cargo build --locked --release --target "$GUI_TARGET" \
+            --package easytier-policy --bin easytier-leaf-worker --features leaf-worker
           mkdir -p easytier-gui/src-tauri/binaries
           cp "target/$GUI_TARGET/release/easytier-leaf-worker" \
             "easytier-gui/src-tauri/binaries/easytier-leaf-worker-$GUI_TARGET"
+          scripts/build-hev-socks-egress.sh "$GUI_TARGET" \
+            "easytier-gui/src-tauri/binaries/easytier-hev-socks-egress-$GUI_TARGET"
+          test -x "easytier-gui/src-tauri/binaries/easytier-leaf-worker-$GUI_TARGET"
+          test -x "easytier-gui/src-tauri/binaries/easytier-hev-socks-egress-$GUI_TARGET"
 
       - name: Build GUI
         if: matrix.GUI_TARGET != ''
@@ -137,6 +144,31 @@ jobs:
         with:
           projectPath: ./easytier-gui
           args: --verbose --target ${{ matrix.GUI_TARGET }}
+
+      - name: Verify bundled policy sidecars
+        if: contains(matrix.GUI_TARGET, 'darwin') || contains(matrix.GUI_TARGET, 'linux')
+        run: |
+          set -euo pipefail
+          if [[ "$GUI_TARGET" == *darwin* ]]; then
+            app_dir=$(find "target/$GUI_TARGET/release/bundle/macos" -maxdepth 1 -type d -name '*.app' -print -quit)
+            test -n "$app_dir"
+            for executable in easytier-gui easytier-leaf-worker easytier-hev-socks-egress; do
+              test -x "$app_dir/Contents/MacOS/$executable"
+              codesign --verify --strict --verbose=2 "$app_dir/Contents/MacOS/$executable"
+            done
+            codesign --verify --deep --strict --verbose=2 "$app_dir"
+          else
+            deb_file=$(find "target/$GUI_TARGET/release/bundle/deb" -maxdepth 1 -type f -name '*.deb' -print -quit)
+            test -n "$deb_file"
+            extract_dir="$RUNNER_TEMP/easytier-gui-deb"
+            mkdir -p "$extract_dir"
+            dpkg-deb -x "$deb_file" "$extract_dir"
+            for executable in easytier-leaf-worker easytier-hev-socks-egress; do
+              bundled=$(find "$extract_dir" -type f -name "$executable" -print -quit)
+              test -n "$bundled"
+              test -x "$bundled"
+            done
+          fi
 
       - name: Collect artifact
         run: |

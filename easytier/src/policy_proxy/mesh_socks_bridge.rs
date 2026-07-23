@@ -139,31 +139,33 @@ impl RemoteTcpPreparation {
         &self,
         peer_mgr: &Arc<PeerManager>,
         remote: MeshProxyTarget,
-    ) -> Option<SocketAddr> {
-        let default_endpoint = remote.endpoints().first().copied()?;
+    ) -> anyhow::Result<Option<SocketAddr>> {
+        let Some(default_endpoint) = remote.endpoints().first().copied() else {
+            return Ok(None);
+        };
         if !remote.is_built_in() {
-            return Some(default_endpoint);
+            return Ok(Some(default_endpoint));
         }
         if let Some(endpoint) = *self.endpoint.read().unwrap() {
-            return Some(endpoint);
+            return Ok(Some(endpoint));
         }
         let _guard = self.lock.lock().await;
         if let Some(endpoint) = *self.endpoint.read().unwrap() {
-            return Some(endpoint);
+            return Ok(Some(endpoint));
         }
         match prepare_remote_tcp_egress(peer_mgr, remote.peer_id, default_endpoint).await {
-            Ok(endpoint) => {
+            Ok(Some(endpoint)) => {
                 *self.endpoint.write().unwrap() = Some(endpoint);
-                Some(endpoint)
+                Ok(Some(endpoint))
             }
-            Err(error) => {
+            Ok(None) => {
                 tracing::debug!(
                     peer_id = remote.peer_id,
-                    ?error,
-                    "built-in mesh egress prepare unavailable; data plane will use capability fallback"
+                    "destination has no TCP prepare RPC; data plane will use the legacy fixed endpoint"
                 );
-                Some(default_endpoint)
+                Ok(Some(default_endpoint))
             }
+            Err(error) => Err(error.context("destination failed to prepare built-in HEV egress")),
         }
     }
 
@@ -484,7 +486,7 @@ async fn relay_socks5(
             let mut last_error = None;
             let mut upstream = None;
             for attempt in 0..attempts {
-                let prepared_endpoint = preparation.ensure(&peer_mgr, remote).await;
+                let prepared_endpoint = preparation.ensure(&peer_mgr, remote).await?;
                 let result = async {
                     let mut stream = connect_remote(&data_plane, remote, prepared_endpoint).await?;
                     negotiate_policy_proxy_auth(&mut stream, credentials.as_ref()).await?;

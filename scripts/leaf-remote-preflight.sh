@@ -36,6 +36,7 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   policy_rule_data::tests
   instance::virtual_nic::tests::leaf_owned_tun_selection_is_default_off_and_backend_bounded
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
+  instance::instance::tests::socks_egress_uses_the_configured_linux_policy_mark
   tests::three_node::port_forward_with_inbound_default_drop_acl_test::case_2
 )
 readonly -a DEFAULT_POLICY_TEST_FILTERS=(

@@ -65,19 +65,9 @@ jobs:
           HEV_SERVER_COMMIT: 97e74f1068bd924e740032382cdc94ca83741ae6
         run: |
           set -euo pipefail
-          hev_src="$RUNNER_TEMP/hev-socks5-server"
           hev_bin="$RUNNER_TEMP/hev-bin"
-          git init "$hev_src"
-          git -C "$hev_src" remote add origin https://github.com/lovitus/hev-socks5-server.git
-          git -C "$hev_src" fetch --depth=1 origin "$HEV_SERVER_COMMIT"
-          git -C "$hev_src" checkout --detach FETCH_HEAD
-          git -C "$hev_src" submodule update --init --recursive --depth=1
-          make -C "$hev_src" -j"$(nproc)" exec \
-            CC=x86_64-linux-musl-gcc \
-            PP='x86_64-linux-musl-gcc -E' \
-            ENABLE_STATIC=1
           mkdir -p "$hev_bin"
-          install -m 0755 "$hev_src/bin/hev-socks5-server" \
+          scripts/build-hev-socks-egress.sh "$TARGET" \
             "$hev_bin/easytier-hev-socks-egress"
           file "$hev_bin/easytier-hev-socks-egress" | tee hev-file-info.txt
           grep -q 'statically linked' hev-file-info.txt

@@ -540,7 +540,7 @@ pub(crate) async fn prepare_remote_tcp_egress(
     peer_mgr: &Arc<PeerManager>,
     dst_peer_id: PeerId,
     proxy_addr: SocketAddr,
-) -> anyhow::Result<SocketAddr> {
+) -> anyhow::Result<Option<SocketAddr>> {
     let client = peer_mgr
         .get_peer_rpc_mgr()
         .rpc_client()
@@ -560,12 +560,26 @@ pub(crate) async fn prepare_remote_tcp_egress(
         ),
     )
     .await
-    .context("policy TCP relay prepare RPC timed out")?
-    .map_err(anyhow::Error::from)?;
-    Ok(response
-        .proxy_addr
-        .context("policy TCP relay prepare returned no endpoint")?
-        .into())
+    .context("policy TCP relay prepare RPC timed out")?;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) if prepare_capability_is_unavailable(&error) => return Ok(None),
+        Err(error) => return Err(anyhow::Error::from(error)),
+    };
+    Ok(Some(
+        response
+            .proxy_addr
+            .context("policy TCP relay prepare returned no endpoint")?
+            .into(),
+    ))
+}
+
+fn prepare_capability_is_unavailable(error: &rpc_types::error::Error) -> bool {
+    matches!(
+        error,
+        rpc_types::error::Error::InvalidServiceKey(_, _)
+            | rpc_types::error::Error::InvalidMethodIndex(_, _)
+    )
 }
 
 pub(crate) struct RemoteUdpAssociation {
@@ -1287,6 +1301,22 @@ mod tests {
         peers::tests::{connect_peer_manager, create_mock_peer_manager, wait_route_appear},
         tunnel::common::tests::wait_for_condition,
     };
+
+    #[test]
+    fn tcp_prepare_falls_back_only_for_an_older_rpc_capability() {
+        assert!(prepare_capability_is_unavailable(
+            &rpc_types::error::Error::InvalidServiceKey(
+                "PolicyUdpRelayRpc".to_owned(),
+                String::new()
+            )
+        ));
+        assert!(prepare_capability_is_unavailable(
+            &rpc_types::error::Error::InvalidMethodIndex(0, "PolicyUdpRelayRpc".to_owned())
+        ));
+        assert!(!prepare_capability_is_unavailable(
+            &rpc_types::error::Error::ExecutionError(anyhow::anyhow!("HEV executable is missing"))
+        ));
+    }
 
     #[test]
     fn relay_frame_is_versioned_and_token_bound() {

@@ -666,29 +666,61 @@ impl Drop for SocksEgressGuard {
 #[cfg(feature = "leaf-policy-proxy")]
 struct SocksEgressManager {
     guard: tokio::sync::Mutex<Option<SocksEgressGuard>>,
+    #[cfg(target_os = "linux")]
+    socket_mark: Option<u32>,
+    #[cfg(target_os = "macos")]
+    outbound_interface: Option<String>,
 }
 
 #[cfg(feature = "leaf-policy-proxy")]
 impl SocksEgressManager {
-    fn new() -> Self {
+    fn new(socket_mark: Option<u32>, outbound_interface: Option<String>) -> Self {
+        #[cfg(not(target_os = "linux"))]
+        let _ = socket_mark;
+        #[cfg(not(target_os = "macos"))]
+        let _ = outbound_interface;
         Self {
             guard: tokio::sync::Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            socket_mark,
+            #[cfg(target_os = "macos")]
+            outbound_interface,
         }
     }
 
     #[cfg(not(mobile))]
-    async fn start_guard() -> anyhow::Result<SocksEgressGuard> {
-        let executable_name = format!("easytier-hev-socks-egress{}", std::env::consts::EXE_SUFFIX);
-        let executable = std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(|parent| parent.join(&executable_name)))
-            .filter(|path| path.is_file())
-            .unwrap_or_else(|| executable_name.into());
+    fn process_config(
+        &self,
+        executable: std::path::PathBuf,
+    ) -> easytier_socks_egress::ProcessConfig {
         let mut config = easytier_socks_egress::ProcessConfig::new(executable);
         #[cfg(target_os = "linux")]
         {
-            config.server.socket_mark = Some(crate::policy_proxy::POLICY_SOCKET_MARK);
+            config.server.socket_mark = self.socket_mark;
         }
+        #[cfg(target_os = "macos")]
+        {
+            config.server.bind_interface = self.outbound_interface.clone();
+        }
+        config
+    }
+
+    #[cfg(not(mobile))]
+    async fn start_guard(&self) -> anyhow::Result<SocksEgressGuard> {
+        let executable_name = format!("easytier-hev-socks-egress{}", std::env::consts::EXE_SUFFIX);
+        let current_executable = std::env::current_exe()
+            .context("failed to resolve the EasyTier executable for managed HEV")?;
+        let executable = current_executable
+            .parent()
+            .context("EasyTier executable has no parent directory")?
+            .join(&executable_name);
+        if !executable.is_file() {
+            anyhow::bail!(
+                "managed HEV sidecar is missing beside EasyTier: {}",
+                executable.display()
+            );
+        }
+        let config = self.process_config(executable);
         let runtime = easytier_socks_egress::ProcessRuntime::start(config).await?;
         let endpoint = runtime.endpoint();
         let cancel = CancellationToken::new();
@@ -706,7 +738,7 @@ impl SocksEgressManager {
     }
 
     #[cfg(all(mobile, target_os = "android"))]
-    async fn start_guard() -> anyhow::Result<SocksEgressGuard> {
+    async fn start_guard(&self) -> anyhow::Result<SocksEgressGuard> {
         let runtime = easytier_socks_egress::InProcessRuntime::start(
             easytier_socks_egress::SocksEgressConfig::default(),
         )
@@ -727,7 +759,7 @@ impl SocksEgressManager {
     }
 
     #[cfg(all(mobile, not(target_os = "android")))]
-    async fn start_guard() -> anyhow::Result<SocksEgressGuard> {
+    async fn start_guard(&self) -> anyhow::Result<SocksEgressGuard> {
         anyhow::bail!("built-in HEV is unavailable on this platform host")
     }
 
@@ -741,7 +773,7 @@ impl SocksEgressManager {
         if let Some(guard) = guard.as_ref() {
             return Ok(guard.endpoint);
         }
-        let started = Self::start_guard().await?;
+        let started = self.start_guard().await?;
         let endpoint = started.endpoint;
         tracing::info!(%endpoint, "started built-in HEV on first mesh actor request");
         *guard = Some(started);
@@ -1356,7 +1388,14 @@ impl Instance {
             // userspace mesh ports; SocksEgressManager still starts HEV lazily on
             // the first built-in TCP/UDP request. Do not make this conditional on
             // local policy configuration as a disabled-mode optimization.
-            let socks_egress = Arc::new(SocksEgressManager::new());
+            let policy_config = self.global_ctx.config.get_policy_proxy_config();
+            let outbound_interface = policy_config
+                .filter(|config| config.enabled)
+                .and_then(|config| config.outbound_interface);
+            let socks_egress = Arc::new(SocksEgressManager::new(
+                self.global_ctx.get_flags().socket_mark,
+                outbound_interface,
+            ));
             let endpoint_provider: Arc<dyn crate::policy_proxy::LocalSocksEndpointProvider> =
                 socks_egress.clone();
             let relay = crate::policy_proxy::MeshSocksRelayService::new(
@@ -1987,6 +2026,24 @@ mod tests {
         guard.shutdown().await;
 
         assert!(finished_rx.await.is_ok());
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", not(mobile), target_os = "linux"))]
+    #[test]
+    fn socks_egress_uses_the_configured_linux_policy_mark() {
+        let manager = super::SocksEgressManager::new(Some(77), None);
+        let config = manager.process_config("/tmp/easytier-hev-socks-egress".into());
+
+        assert_eq!(config.server.socket_mark, Some(77));
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", not(mobile), target_os = "macos"))]
+    #[test]
+    fn socks_egress_binds_macos_outbound_interface() {
+        let manager = super::SocksEgressManager::new(None, Some("en0".to_owned()));
+        let config = manager.process_config("/tmp/easytier-hev-socks-egress".into());
+
+        assert_eq!(config.server.bind_interface.as_deref(), Some("en0"));
     }
 
     #[tokio::test]

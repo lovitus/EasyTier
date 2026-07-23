@@ -99,11 +99,45 @@ else
 fi
 
 expected_hev="$(sed -n 's/^- HEV SHA: `\([^`]*\)`.*/\1/p' "$manifest")"
-for workflow_file in .github/workflows/profiling-beta.yml .github/workflows/mobile.yml; do
+for workflow_file in \
+  .github/workflows/android-policy-candidate.yml \
+  .github/workflows/core.yml \
+  .github/workflows/gui.yml \
+  .github/workflows/gui-macos-aarch64-test.yml \
+  .github/workflows/mobile.yml \
+  .github/workflows/profiling-beta.yml
+do
   if ! rg -q "HEV_SERVER_COMMIT:?[= ]+$expected_hev" "$workflow_file"; then
     fail "HEV pin missing from $workflow_file"
   fi
 done
+
+if ! rg -q 'FEATURES="\$FEATURES,leaf-policy-proxy"' .github/workflows/core.yml; then
+  fail "formal Core workflow does not enable leaf-policy-proxy for policy targets"
+fi
+for sidecar in easytier-leaf-worker easytier-hev-socks-egress; do
+  if ! rg -q "$sidecar" .github/workflows/core.yml; then
+    fail "formal Core workflow does not package $sidecar"
+  fi
+  if ! rg -q "$sidecar" .github/workflows/gui.yml; then
+    fail "formal GUI workflow does not package $sidecar"
+  fi
+  for tauri_config in \
+    easytier-gui/src-tauri/tauri.linux.conf.json \
+    easytier-gui/src-tauri/tauri.macos.conf.json
+  do
+    if ! jq -e --arg sidecar "binaries/$sidecar" \
+      '.bundle.externalBin | index($sidecar) != null' "$tauri_config" >/dev/null
+    then
+      fail "$tauri_config does not bundle $sidecar"
+    fi
+  done
+done
+if ! rg -q "cfg\(any\(target_os = \"linux\", target_os = \"macos\"\)\)" \
+  easytier-gui/src-tauri/Cargo.toml
+then
+  fail "GUI does not enable the shared Linux/macOS policy dependency boundary"
+fi
 
 read_cargo_version() {
   awk '/^version = "/ { gsub(/version = |"/, ""); print; exit }' "$1"

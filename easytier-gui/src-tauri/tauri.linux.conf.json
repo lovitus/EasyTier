@@ -3,9 +3,6 @@
     "externalBin": [
       "binaries/easytier-leaf-worker",
       "binaries/easytier-hev-socks-egress"
-    ],
-    "macOS": {
-      "signingIdentity": "-"
-    }
+    ]
   }
 }

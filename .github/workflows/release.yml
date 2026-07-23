@@ -141,6 +141,22 @@ jobs:
           repo: ${{ github.repository }}
           path: release_assets_nozip
 
+      - name: Verify policy release payloads
+        run: |
+          set -euo pipefail
+          for artifact in \
+            easytier-linux-x86_64 \
+            easytier-linux-aarch64 \
+            easytier-macos-x86_64 \
+            easytier-macos-aarch64
+          do
+            artifact_dir=$(find release_assets -type d -name "$artifact" -print -quit)
+            test -n "$artifact_dir"
+            for executable in easytier-core easytier-leaf-worker easytier-hev-socks-egress; do
+              test -f "$artifact_dir/$executable"
+            done
+          done
+
       - name: Zip release assets
         env:
           VERSION: ${{ inputs.version }}

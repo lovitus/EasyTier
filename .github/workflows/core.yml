@@ -41,7 +41,7 @@ jobs:
           concurrent_skipping: 'same_content_newer'
           skip_after_successful_duplicate: 'true'
           cancel_others: 'true'
-          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "third_party/**", ".github/workflows/core.yml", ".github/actions/**", "easytier-web/**"]'
+          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "easytier-policy/**", "easytier-socks-egress/**", "third_party/**", "scripts/build-hev-socks-egress.sh", ".github/workflows/core.yml", ".github/actions/**", "easytier-web/**"]'
   build_web:
     runs-on: ubuntu-latest
     needs: pre_job
@@ -68,9 +68,11 @@ jobs:
           - TARGET: x86_64-unknown-linux-musl
             OS: ubuntu-24.04
             ARTIFACT_NAME: linux-x86_64
+            POLICY_RELEASE: true
           - TARGET: aarch64-unknown-linux-musl
             OS: ubuntu-24.04-arm
             ARTIFACT_NAME: linux-aarch64
+            POLICY_RELEASE: true
 
           - TARGET: riscv64gc-unknown-linux-musl
             OS: ubuntu-24.04
@@ -107,9 +109,11 @@ jobs:
           - TARGET: x86_64-apple-darwin
             OS: macos-latest
             ARTIFACT_NAME: macos-x86_64
+            POLICY_RELEASE: true
           - TARGET: aarch64-apple-darwin
             OS: macos-latest
             ARTIFACT_NAME: macos-aarch64
+            POLICY_RELEASE: true
 
           - TARGET: x86_64-pc-windows-msvc
             OS: windows-latest
@@ -126,6 +130,7 @@ jobs:
       NAME: easytier
       TARGET: ${{ matrix.TARGET }}
       OS: ${{ matrix.OS }}
+      POLICY_RELEASE: ${{ matrix.POLICY_RELEASE || false }}
       OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
     needs:
       - pre_job
@@ -171,6 +176,17 @@ jobs:
         with:
           tool: cargo-zigbuild
 
+      - name: Build policy sidecars
+        if: matrix.POLICY_RELEASE == true
+        env:
+          HEV_SERVER_COMMIT: 97e74f1068bd924e740032382cdc94ca83741ae6
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target "$TARGET" \
+            --package easytier-policy --bin easytier-leaf-worker --features leaf-worker
+          scripts/build-hev-socks-egress.sh "$TARGET" \
+            "target/$TARGET/release/easytier-hev-socks-egress"
+
       - name: Build
         if: ${{ !contains(matrix.TARGET, 'mips') }}
         run: |          
@@ -191,6 +207,9 @@ jobs:
           else
             FEATURES="jemalloc"
           fi
+          if [[ "$POLICY_RELEASE" == "true" ]]; then
+            FEATURES="$FEATURES,leaf-policy-proxy"
+          fi
           
           cargo $BUILD --release --target $TARGET --package=easytier-web --features=embed
           mv ./target/$TARGET/release/easytier-web"$SUFFIX" ./target/$TARGET/release/easytier-web-embed"$SUFFIX"
@@ -203,6 +222,24 @@ jobs:
           RUSTC_BOOTSTRAP: 1
         run: |
           cargo build -r --target $TARGET -Z build-std=std,panic_abort --package=easytier --features=jemalloc
+
+      - name: Sign and verify macOS release executables
+        if: contains(matrix.TARGET, 'darwin') && matrix.POLICY_RELEASE == true
+        run: |
+          set -euo pipefail
+          for executable in \
+            easytier-core \
+            easytier-cli \
+            easytier-web \
+            easytier-web-embed \
+            easytier-leaf-worker \
+            easytier-hev-socks-egress
+          do
+            binary="target/$TARGET/release/$executable"
+            test -x "$binary"
+            codesign --force --sign - "$binary"
+            codesign --verify --strict --verbose=2 "$binary"
+          done
 
       - name: Compress
         run: |
@@ -252,6 +289,14 @@ jobs:
             fi
           done
 
+          if [[ "$POLICY_RELEASE" == "true" ]]; then
+            for SIDECAR in easytier-leaf-worker easytier-hev-socks-egress; do
+              BIN="./target/$TARGET/release/$SIDECAR$SUFFIX"
+              test -x "$BIN"
+              mv "$BIN" ./artifacts/objects/
+            done
+          fi
+
           mv ./artifacts/objects/* ./artifacts/
           rm -rf ./artifacts/objects/
 
@@ -284,6 +329,8 @@ jobs:
           cp ./downloaded-binaries/easytier-core ./easytier-contrib/easytier-magisk/
           cp ./downloaded-binaries/easytier-cli ./easytier-contrib/easytier-magisk/
           cp ./downloaded-binaries/easytier-web ./easytier-contrib/easytier-magisk/
+          cp ./downloaded-binaries/easytier-leaf-worker ./easytier-contrib/easytier-magisk/
+          cp ./downloaded-binaries/easytier-hev-socks-egress ./easytier-contrib/easytier-magisk/
 
       # 上传生成的模块
       - name: Upload Magisk Module

@@ -23,6 +23,33 @@ const START_TIMEOUT: Duration = Duration::from_secs(2);
 const READY_INTERVAL: Duration = Duration::from_millis(25);
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 
+#[cfg(all(
+    feature = "hev-sidecar-bin",
+    any(target_os = "linux", target_os = "macos")
+))]
+unsafe extern "C" {
+    fn hev_socks5_server_main_from_file(config_path: *const std::ffi::c_char) -> std::ffi::c_int;
+}
+
+/// Runs the pinned HEV server in the managed sidecar process.
+///
+/// The sidecar binary deliberately calls this library entry point instead of
+/// declaring a second FFI boundary. That keeps Cargo's native-link metadata on
+/// the library target that owns the HEV dependency.
+#[cfg(all(
+    feature = "hev-sidecar-bin",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub fn run_managed_hev_from_file(config_path: &Path) -> Result<(), String> {
+    let config_path = std::ffi::CString::new(config_path.as_os_str().as_encoded_bytes())
+        .map_err(|_| "HEV configuration path contains a NUL byte".to_owned())?;
+    let status = unsafe { hev_socks5_server_main_from_file(config_path.as_ptr()) };
+    if status != 0 {
+        return Err(format!("HEV exited with status {status}"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SocksEgressConfig {
     pub listen_address: IpAddr,
@@ -226,6 +253,10 @@ async fn start_candidate(
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
+    #[cfg(target_os = "macos")]
+    command
+        .arg("--parent-pid")
+        .arg(unsafe { libc::getpid() }.to_string());
     #[cfg(target_os = "linux")]
     unsafe {
         command.pre_exec(move || configure_parent_death(parent_pid));

@@ -1757,7 +1757,7 @@ policy schema 兼容变更：
 
 ### 41.3 Route-aware DNS 的精确语义
 
-EasyTier lockfile固定 Leaf `b1e33b50e37ea3b396e3cee2a1d60bb0c599655c`。该精确 revision 已实现：
+EasyTier lockfile固定 Leaf `013a1497dd29355a00cd776628ff2de72e02e861`。该精确 revision 已实现：
 
 - `direct_lookup` 强制 `DnsQueryRoute::direct()`，选择 `direct:` resolver 子集并使用独立 cache scope。
 - 普通应用 DNS lookup 先按 first-match policy 选择 outbound tag；DIRECT 使用 direct resolver，代理 DNS 请求携带选中 tag dispatch。
@@ -1767,15 +1767,15 @@ EasyTier lockfile固定 Leaf `b1e33b50e37ea3b396e3cee2a1d60bb0c599655c`。该精
 
 以后审计 Leaf 行为必须以 `Cargo.lock` SHA 对齐工作树；旧 Cargo cache checkout 或默认分支不能作为当前产品语义证据。
 
-### 41.4 macOS v2 边界
+### 41.4 macOS v3.0.5 候选边界
 
-macOS 已有 policy route/TUN 和外部 Leaf worker 宿主基础；HEV process runtime 的协议与生命周期不需要另一套实现。尚缺：
+macOS 已有 policy route/TUN 和外部 Leaf worker 宿主基础；HEV process runtime 的协议与生命周期不需要另一套实现。v3.0.5 修复候选已经加入：
 
-- 在 macOS workflow 用固定 HEV fork构建并签名/打包 `easytier-hev-socks-egress`。
-- 验证 app bundle 相邻 executable 查找、quarantine/codesign、utun bypass/interface binding 和停止清理。
-- 用精确 workflow 制品覆盖 TCP/UDP、端口冲突、sleep/wake、Wi-Fi切换和资源回基线。
+- macOS workflow 用固定 HEV fork构建 `easytier-hev-socks-egress`，与 Leaf 一起作为相邻 external binary 打包。
+- process config 把 policy outbound interface传给 HEV；sidecar wrapper监控 EasyTier parent，补足父进程 `SIGKILL` 后的清理。
+- Tauri app和内部可执行文件执行 ad-hoc签名及严格验证；运行时只接受相邻 sidecar，不搜索 `PATH`。
 
-这属于 v2 平台交付工作，不应混入 Linux/Android v1 候选，也不得在维护者低性能 Mac 上构建 EasyTier。
+这些仍是**待精确制品验证的候选实现**，不能从源码或 `.160` Linux链接成功直接宣称 macOS 已完成。必须用专用 macOS ARM64 workflow 制品验证 app bundle、quarantine/codesign、utun bypass/interface binding、TCP/UDP、端口冲突、parent `SIGKILL`、sleep/wake、Wi-Fi切换和资源回基线。不得在维护者本机编译 EasyTier。
 
 ### 41.5 Windows v2 边界
 
