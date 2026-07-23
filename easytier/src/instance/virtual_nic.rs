@@ -2904,7 +2904,7 @@ impl NicCtx {
         let runtime = match LeafProcessRuntime::start_with_dns_servers_and_options(
             &config.leaf_executable,
             &document.base_dir,
-            Some(&config.outbound_interface),
+            Some(&underlay.interface_name),
             mesh_bridges.as_ref(),
             &dns_servers,
             document.revision.clone(),
@@ -2937,11 +2937,41 @@ impl NicCtx {
             runtime.stop().await;
             return Err(error);
         }
+        let enable_ipv6 = self.global_ctx.get_flags().enable_ipv6;
+        let route_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match easytier_policy::windows_interface_owns_default_routes(
+                &leaf_tun_interface,
+                enable_ipv6,
+            ) {
+                Ok(true) => break,
+                Ok(false) if tokio::time::Instant::now() >= route_deadline => {
+                    mesh_bridges.disable_all();
+                    runtime.stop().await;
+                    return Err(anyhow::anyhow!(
+                        "Windows policy capture routes are owned by another interface; stop the competing VPN or adjust its route priority"
+                    )
+                    .into());
+                }
+                Err(error) if tokio::time::Instant::now() >= route_deadline => {
+                    mesh_bridges.disable_all();
+                    runtime.stop().await;
+                    return Err(anyhow::anyhow!(
+                        "failed to verify Windows policy capture routes: {error}"
+                    )
+                    .into());
+                }
+                _ => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
 
         let monitored_runtime = runtime.clone();
         let close_notifier = self.close_notifier.clone();
-        let outbound_interface = config.outbound_interface.clone();
+        let configured_outbound_interface = config.outbound_interface.clone();
+        let resolved_outbound_interface = underlay.interface_name.clone();
         let underlay_signature = underlay.signature;
+        let automatic_environment_signature = underlay.automatic_environment_signature;
+        let monitored_leaf_tun_interface = leaf_tun_interface.clone();
         self.tasks.spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -2952,19 +2982,84 @@ impl NicCtx {
                     close_notifier.notify_one();
                     break;
                 }
-                match easytier_policy::windows_underlay(&outbound_interface) {
+                match easytier_policy::windows_interface_owns_default_routes(
+                    &monitored_leaf_tun_interface,
+                    enable_ipv6,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::error!(
+                            interface = %monitored_leaf_tun_interface,
+                            "another Windows VPN took policy capture-route precedence; stopping instead of silently bypassing policy"
+                        );
+                        close_notifier.notify_one();
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            interface = %monitored_leaf_tun_interface,
+                            %error,
+                            "Windows policy capture routes cannot be verified; stopping fail-closed"
+                        );
+                        close_notifier.notify_one();
+                        break;
+                    }
+                }
+                if let Some(expected) = automatic_environment_signature.as_deref() {
+                    match easytier_policy::windows_underlay_environment_signature() {
+                        Ok(current) if current == expected => {}
+                        Ok(_) => {
+                            tracing::info!(
+                                "Windows physical underlay set changed; rebuilding automatic policy selection"
+                            );
+                            close_notifier.notify_one();
+                            break;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "Windows automatic underlay cannot be verified; rebuilding fail-closed"
+                            );
+                            close_notifier.notify_one();
+                            break;
+                        }
+                    }
+                }
+                match easytier_policy::windows_underlay(&resolved_outbound_interface) {
                     Ok(current) if current.signature == underlay_signature => {}
                     Ok(_) => {
                         tracing::info!(
-                            %outbound_interface,
+                            %resolved_outbound_interface,
                             "Windows policy underlay changed; rebuilding the instance and Leaf worker"
                         );
                         close_notifier.notify_one();
                         break;
                     }
                     Err(error) => {
+                        if configured_outbound_interface.eq_ignore_ascii_case(
+                            easytier_policy::AUTOMATIC_WINDOWS_UNDERLAY,
+                        ) {
+                            match easytier_policy::windows_underlay(
+                                easytier_policy::AUTOMATIC_WINDOWS_UNDERLAY,
+                            ) {
+                                Ok(next)
+                                    if !next
+                                        .interface_name
+                                        .eq_ignore_ascii_case(&resolved_outbound_interface) =>
+                                {
+                                    tracing::info!(
+                                        previous = %resolved_outbound_interface,
+                                        next = %next.interface_name,
+                                        "Windows automatic policy underlay changed; rebuilding the instance and Leaf worker"
+                                    );
+                                    close_notifier.notify_one();
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
                         tracing::warn!(
-                            %outbound_interface,
+                            %resolved_outbound_interface,
                             %error,
                             "Windows policy underlay is unavailable; rebuilding fail-closed"
                         );
@@ -2983,7 +3078,7 @@ impl NicCtx {
         tracing::info!(
             revision = %document.revision.id,
             policy_source = %document.source_label,
-            outbound_interface = %config.outbound_interface,
+            outbound_interface = %underlay.interface_name,
             "Windows transparent policy proxy is ready"
         );
         Ok(())

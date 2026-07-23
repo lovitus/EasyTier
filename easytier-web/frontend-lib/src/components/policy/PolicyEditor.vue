@@ -74,12 +74,18 @@ const groupTypeOptions = ['fallback', 'chain']
 const geositeCategoryOptions = ref<string[]>([])
 const geoipCategoryOptions = ref<string[]>(['LAN'])
 const geoipDataCategoryCount = computed(() => Math.max(0, geoipCategoryOptions.value.length - 1))
-const outboundOptions = computed(() => (outboundInfo.value?.interfaces ?? []).map(item => ({
-  label: item.addresses.length
-    ? `${item.name} (${item.addresses.join(', ')})${item.recommended ? ` · ${t('policy.editor.recommended')}` : ''}`
-    : `${item.name}${item.recommended ? ` · ${t('policy.editor.recommended')}` : ''}`,
-  value: item.name,
-})))
+const outboundOptions = computed(() => {
+  const interfaces = (outboundInfo.value?.interfaces ?? []).map(item => ({
+    label: item.addresses.length
+      ? `${item.name} (${item.addresses.join(', ')})${item.recommended ? ` · ${t('policy.editor.recommended')}` : ''}`
+      : `${item.name}${item.recommended ? ` · ${t('policy.editor.recommended')}` : ''}`,
+    value: item.name,
+  }))
+  const platform = outboundInfo.value?.platform?.trim().toLowerCase()
+  return platform === 'windows' || platform === 'win32'
+    ? [{ label: t('policy.editor.outbound_auto'), value: 'auto' }, ...interfaces]
+    : interfaces
+})
 const ruleTypeOptions = [
   'GEOSITE', 'GEOIP', 'COUNTRY', 'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD', 'IP-CIDR',
   'NETWORK', 'PORT-RANGE', 'INBOUND-TAG', 'EXTERNAL', 'MATCH', 'FINAL',
@@ -543,8 +549,14 @@ async function loadOutboundInterfaces() {
     const result = await props.api.list_policy_outbound_interfaces()
     outboundInfo.value = result
     if (result.required && !config.value.policy_outbound_interface?.trim()) {
-      const recommended = result.interfaces.find(item => item.recommended)
-      if (recommended) config.value.policy_outbound_interface = recommended.name
+      const platform = result.platform?.trim().toLowerCase()
+      if (platform === 'windows' || platform === 'win32') {
+        config.value.policy_outbound_interface = 'auto'
+      }
+      else {
+        const recommended = result.interfaces.find(item => item.recommended)
+        if (recommended) config.value.policy_outbound_interface = recommended.name
+      }
     }
   }
   catch (error) {

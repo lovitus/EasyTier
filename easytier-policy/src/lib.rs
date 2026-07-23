@@ -55,4 +55,7 @@ pub use supervisor::{
     RuntimeRestartDecision,
 };
 #[cfg(windows)]
-pub use windows::{WindowsUnderlay, windows_underlay};
+pub use windows::{
+    AUTOMATIC_WINDOWS_UNDERLAY, WindowsUnderlay, windows_interface_owns_default_routes,
+    windows_underlay, windows_underlay_environment_signature,
+};

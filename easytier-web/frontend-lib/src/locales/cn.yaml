@@ -311,8 +311,9 @@ policy:
     builtin_help: 内置 2026-07-13 MetaCubeX 快照；在线替换功能延后到下个版本处理。
     not_installed: 未安装
     recommended: 推荐
+    outbound_auto: 自动选择物理出口（推荐）
     refresh_interfaces: 刷新接口
-    outbound_required: "{platform} 桌面策略路由必须选择物理出口接口。EasyTier 只列出活动物理接口；不要选择 EasyTier TUN 或其他 VPN 接口。"
+    outbound_required: "{platform} 桌面策略路由必须选择物理出口接口。Windows 的“自动”会随 WLAN、有线或 USB 网络切换；其他 VPN/TUN 占用默认路由且存在多个物理出口时，请显式选择。"
     outbound_automatic: "{platform} 策略模式由系统 VPN 服务提供网络路径，不需要填写出口接口。"
     outbound_unavailable: "{platform} 尚不支持透明策略路由，填写出口接口不会生效。"
     outbound_load_failed: 无法获取出口接口列表

@@ -40,12 +40,15 @@ libc = "0.2"
 ipconfig = "0.3.2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
     "Win32_System_Threading",
 ] }
 
 [target.'cfg(any(unix, windows))'.dependencies.leaf]
 git = "https://github.com/lovitus/leaf.git"
-rev = "e73ec228883965850f6bfbb339e64fd8fe86ef1f"
+rev = "43515219f84df0bf5a9ed9e49bb60fdb4018ac06"
 optional = true
 default-features = false
 features = [

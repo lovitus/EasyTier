@@ -1,6 +1,8 @@
 # macOS Leaf policy routing fix
 
-Status: implementation candidate
+Status: route and packet-framing fixes passed focused checks; the first
+candidate failed repeated macOS bridge-backpressure validation, and the
+event-driven `tun` follow-up is awaiting a new packaged macOS artifact
 
 ## Reference contract
 
@@ -39,6 +41,32 @@ Externally observable semantics followed here:
 4. A real Darwin utun descriptor keeps its required four-byte packet information
    header. EasyTier's AF_UNIX datagram bridge transports raw IP and explicitly
    disables that header instead of modifying every packet.
+
+Backpressure reference and required semantics:
+
+- Mihomo `/Users/fanli/Documents/mihomo-rev` at
+  `0a87b94845ef908c15f8495871e4cd8e33116328`,
+  `listener/sing_tun/server.go::New`, pins and constructs sing-tun v0.4.17.
+- sing-tun v0.4.17
+  `internal/fdbased_darwin/errno.go::TranslateErrno` classifies Darwin
+  `ENOBUFS` as `ErrNoBufferSpace`, while
+  `internal/fdbased_darwin/endpoint.go::writePacket` documents and implements
+  transient non-writability as packet-level pressure rather than endpoint
+  teardown.
+- EasyTier intentionally keeps the pending framed packet and waits for real
+  descriptor writability instead of adopting sing-tun's packet drop. A
+  temporary Darwin `ENOBUFS` must not terminate Leaf's TUN inbound or close the
+  netstack channels. Permanent descriptor errors still terminate the inbound.
+  This difference preserves more traffic without adding a timer, unbounded
+  queue, fixed-size tuning, or packet-hot-path polling.
+- The exact follow-up dependency is
+  `https://github.com/lovitus/rust-tun.git` at
+  `028b861d1a8e69cbb8950bfefb7ee81e44b46ff5`, based on `tun` 0.7.22 upstream
+  commit `5a0362650f2ba46e15b68cd24853652004b38499`. Only Darwin `ENOBUFS` from
+  POSIX `write`/`writev` is normalized to `WouldBlock`, allowing the existing
+  Tokio `AsyncFd` readiness path to retain the pending frame, clear stale
+  writable readiness, and await a kernel event. Other platforms and permanent
+  errors are unchanged.
 
 ## Intentional EasyTier boundary
 
@@ -79,6 +107,9 @@ locked raw-FD/PI source path isolates the independent packet-framing mismatch.
   Do not add per-packet allocation, copying, polling, or fixed-size buffering.
 - Pass a NUL-terminated interface name to EasyTier's Darwin
   `if_nametoindex` call.
+- Patch Leaf's locked crates.io `tun` 0.7.22 to the exact follow-up revision
+  above. Do not change socket buffers, channel capacities, retry timers, or
+  packet queueing.
 
 ## Tests
 
@@ -90,6 +121,9 @@ locked raw-FD/PI source path isolates the independent packet-framing mismatch.
   classification.
 - Existing Leaf config/lifecycle and Linux policy routing tests remain green on
   the remote builder.
+- The patched `tun` crate's Darwin `ENOBUFS` normalization and
+  non-Darwin/permanent-error preservation tests compile with its `async`
+  feature and pass on the remote builder.
 - Exact packaged macOS artifact validation covers IPv4 TCP/UDP DIRECT, proxied
   traffic, DNS/FakeDNS, mesh precedence, route loss/recovery, repeated restart,
   cleanup, and a policy-disabled baseline. IPv6 receives a separate scoped-route
@@ -141,3 +175,61 @@ complete candidate snapshot:
 - The builder has Linux and Android targets but no Apple SDK or Windows target.
   macOS and Windows target compilation/package inspection therefore remain
   workflow-only gates and are not inferred from the Linux preflight.
+
+The event-driven `tun` follow-up was then preflighted against the complete
+combined workspace snapshot:
+
+- `tun` 0.7.22 at
+  `028b861d1a8e69cbb8950bfefb7ee81e44b46ff5` compiled with its `async` feature;
+  both focused error-normalization tests passed.
+- A fresh `--locked` EasyTier no-run build resolved that exact `tun` revision
+  and Leaf revision `43515219f84df0bf5a9ed9e49bb60fdb4018ac06`.
+  Every configured EasyTier, policy, and netstack focused filter passed.
+- The frontend policy/runtime suite passed 32 tests across three files.
+  Dependency-ordered `frontend-lib`, Web frontend, VPN plugin, and GUI
+  production builds passed.
+- Rust formatting, `git diff --check`, validation-script syntax, dependency
+  source pins, and platform `cfg` boundaries were inspected. A macOS artifact
+  and real-device backpressure rerun are still required.
+
+## Post-build macOS evidence
+
+The immutable macOS ARM64 GUI workflow `29989179967` built commit
+`9d0ae14c35afcc4bf2e3a63cec7c24116d7d4e73` successfully. The downloaded DMG
+checksum was
+`8d3136aade2395b1ae96e08051f29c9a30e39da4a5e256715db8bacd1ba49d25`;
+the installed core reported `easytier-core 3.0.5-9d0ae14c`, and strict
+codesign checks passed for the core, Leaf worker, and HEV sidecar.
+
+One focused real-device run passed on 2026-07-23:
+
+- policy startup reached `transparent policy proxy is ready` in under one
+  second and spawned the packaged Leaf worker;
+- the policy TUN owned both IPv4 split-default capture routes while the selected
+  physical interface retained the matching interface-scoped default;
+- IPv4 TCP and UDP `MATCH,DIRECT` probes succeeded through the policy path;
+- deleting the EasyTier-owned scoped default caused the existing supervisor to
+  restore it in three seconds without replacing the Leaf runtime, after which
+  both TCP and UDP probes succeeded again;
+- the log contained neither `wire::Error` nor `invalid IP packet`, confirming
+  the raw-IP packet-information framing fix on the exercised path;
+- SIGTERM removed the core, Leaf worker, split-default routes, policy TUN, and
+  EasyTier-owned scoped default while retaining pre-existing system routes.
+
+That single PASS was not accepted as final evidence. A five-round wrapper
+reproduced a failure in round two:
+
+- startup, scoped default installation, and initial TCP/UDP DIRECT probes
+  succeeded;
+- after Leaf reported `Sending packet to TUN failed: No buffer space available
+  (os error 55)`, its smoltcp inbound ended and subsequent packet injection
+  reported `channel closed`;
+- EasyTier then dropped policy packets fail-closed, and the post-route-recovery
+  TCP probe timed out even though the scoped default itself was restored in
+  three seconds;
+- shutdown still removed candidate processes and routes.
+
+The candidate therefore proves the route and raw-IP framing fixes but fails
+runtime backpressure/lifecycle acceptance. Proxy, DNS/FakeDNS, mesh precedence,
+IPv6, throughput, policy-disabled regression, and a clean repeated-restart run
+remain pending and must not be inferred from the earlier single PASS.

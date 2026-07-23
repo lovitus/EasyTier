@@ -103,7 +103,9 @@ sync_snapshot() {
     --exclude '/target/' \
     --exclude '/.artifacts/' \
     --exclude '/.claude/' \
+    --exclude '/.corepack/' \
     --exclude '/.envrc.local' \
+    --exclude 'node_modules/' \
     --exclude '/easytier-gui/src-tauri/gen/' \
     --exclude '/easytier-gui/src-tauri/.gradle/' \
     -e "ssh ${SSH_OPTIONS[*]}" \

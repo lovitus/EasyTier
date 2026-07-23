@@ -44,9 +44,10 @@ fn run() -> Result<(), String> {
         }
     }
     let config = config.ok_or_else(|| "missing -c policy config".to_owned())?;
-    if let Some(interface) = outbound_interface.as_deref() {
-        validate_outbound_interface(interface)?;
-    }
+    let outbound_interface = outbound_interface
+        .as_deref()
+        .map(validate_outbound_interface)
+        .transpose()?;
     if check {
         return leaf::test_config(&config).map_err(|error| error.to_string());
     }
@@ -147,9 +148,10 @@ fn start_parent_watchdog(_parent_pid: u32) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn validate_outbound_interface(interface: &str) -> Result<(), String> {
+fn validate_outbound_interface(interface: &str) -> Result<String, String> {
     use std::ffi::CString;
 
+    let interface_name = interface.to_owned();
     let interface =
         CString::new(interface).map_err(|_| "outbound interface contains a NUL byte".to_owned())?;
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
@@ -173,13 +175,14 @@ fn validate_outbound_interface(interface: &str) -> Result<(), String> {
     if result != 0 {
         return Err(format!("cannot bind policy sockets to interface: {error}"));
     }
-    Ok(())
+    Ok(interface_name)
 }
 
 #[cfg(target_os = "macos")]
-fn validate_outbound_interface(interface: &str) -> Result<(), String> {
+fn validate_outbound_interface(interface: &str) -> Result<String, String> {
     use std::ffi::CString;
 
+    let interface_name = interface.to_owned();
     let interface =
         CString::new(interface).map_err(|_| "outbound interface contains a NUL byte".to_owned())?;
     if unsafe { libc::if_nametoindex(interface.as_ptr()) } == 0 {
@@ -188,17 +191,17 @@ fn validate_outbound_interface(interface: &str) -> Result<(), String> {
             interface.to_string_lossy()
         ));
     }
-    Ok(())
+    Ok(interface_name)
 }
 
 #[cfg(target_os = "windows")]
-fn validate_outbound_interface(interface: &str) -> Result<(), String> {
-    easytier_policy::windows_underlay(interface).map(|_| ())
+fn validate_outbound_interface(interface: &str) -> Result<String, String> {
+    easytier_policy::windows_underlay(interface).map(|underlay| underlay.interface_name)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn validate_outbound_interface(_interface: &str) -> Result<(), String> {
-    Ok(())
+fn validate_outbound_interface(interface: &str) -> Result<String, String> {
+    Ok(interface.to_owned())
 }
 
 #[cfg(test)]

@@ -310,8 +310,9 @@ policy:
     builtin_help: Bundled MetaCubeX snapshot from 2026-07-13. Online replacement is deferred to the next version.
     not_installed: Not installed
     recommended: Recommended
+    outbound_auto: Automatic physical underlay (recommended)
     refresh_interfaces: Refresh interfaces
-    outbound_required: "{platform} desktop policy routing requires a physical outbound interface. EasyTier lists active physical interfaces; do not select the EasyTier TUN or another VPN interface."
+    outbound_required: "{platform} desktop policy routing requires a physical outbound interface. Windows automatic mode follows WLAN, Ethernet, and USB network changes; select an interface explicitly when another VPN/TUN owns the default route and multiple physical underlays are active."
     outbound_automatic: "{platform} policy mode obtains its network path from the host VPN service; no outbound interface is required."
     outbound_unavailable: "Transparent policy routing is not available on {platform}; an outbound interface value would have no effect."
     outbound_load_failed: Failed to list outbound interfaces

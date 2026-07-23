@@ -4969,7 +4969,7 @@ dependencies = [
 [[package]]
 name = "leaf"
 version = "0.1.2"
-source = "git+https://github.com/lovitus/leaf.git?rev=e73ec228883965850f6bfbb339e64fd8fe86ef1f#e73ec228883965850f6bfbb339e64fd8fe86ef1f"
+source = "git+https://github.com/lovitus/leaf.git?rev=43515219f84df0bf5a9ed9e49bb60fdb4018ac06#43515219f84df0bf5a9ed9e49bb60fdb4018ac06"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -5038,6 +5038,7 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots 0.26.3",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11217,8 +11218,7 @@ checksum = "7b3e06c9b9d80ed6b745c7159c40b311ad2916abb34a49e9be2653b90db0d8dd"
 [[package]]
 name = "tun"
 version = "0.7.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7904c94104239657089d14bccbf23fd6d363e30639ce49af21ef008a445baf97"
+source = "git+https://github.com/lovitus/rust-tun.git?rev=028b861d1a8e69cbb8950bfefb7ee81e44b46ff5#028b861d1a8e69cbb8950bfefb7ee81e44b46ff5"
 dependencies = [
  "bytes",
  "cfg-if",

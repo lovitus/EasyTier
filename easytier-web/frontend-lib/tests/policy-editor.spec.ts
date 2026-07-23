@@ -435,6 +435,9 @@ rules: ["MATCH,exit"]
   })
 
   it('shows an available Windows runtime when the backend reports support', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const api = {
       list_policy_outbound_interfaces: vi.fn(async () => ({
         platform: 'windows',
@@ -443,9 +446,14 @@ rules: ["MATCH,exit"]
         interfaces: [{ name: 'Ethernet', addresses: ['192.0.2.10/24'], recommended: true }],
       })),
     } as unknown as import('../src/modules/api').RemoteClient
-    const { wrapper } = mountEditor(DEFAULT_NETWORK_CONFIG(), api)
+    const { model, wrapper } = mountEditor(config, api)
     await flushPromises()
 
+    expect(model.policy_outbound_interface).toBe('auto')
+    expect(
+      wrapper.findAll<HTMLOptionElement>('#policy_outbound_interface option')
+        .map(option => option.element.value),
+    ).toEqual(['auto', 'Ethernet'])
     expect(wrapper.text()).toContain('policy.editor.runtime_windows_supported')
     expect(wrapper.find<HTMLInputElement>('#enable_policy_proxy').element.disabled).toBe(false)
   })
