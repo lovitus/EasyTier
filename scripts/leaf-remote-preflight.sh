@@ -59,6 +59,7 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   leaf_config::tests::preserves_unresolved_domain_contract_for_direct_socks_and_fallback
   leaf_config::tests::leaf_owned_tun_is_explicit_and_legacy_fd_mode_remains_unchanged
   leaf_config::tests::locked_leaf_preserves_explicit_packet_information_presence
+  packet::unix_bridge::tests::macos_enobufs_is_retryable_without_hiding_permanent_errors
   leaf_process::tests::linux_owned_tun_readiness_requires_interface_up_flag
   leaf_process::tests::owned_tun_identity_is_bounded_unique_and_outside_default_fake_ip
   leaf_process::tests::starts_worker_without_retaining_private_config_and_stops_it

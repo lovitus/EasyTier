@@ -169,11 +169,39 @@ fn destination_ip(packet: &[u8]) -> Result<IpAddr, PacketError> {
 
 #[cfg(unix)]
 mod unix_bridge {
+    #[cfg(any(target_os = "macos", test))]
+    use std::io;
     use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 
+    #[cfg(target_os = "macos")]
+    use tokio::io::Interest;
     use tokio::net::UnixDatagram;
 
     use super::{MAX_PACKET_SIZE, PacketError};
+
+    #[cfg(any(target_os = "macos", test))]
+    fn normalize_macos_datagram_send_error(error: io::Error) -> io::Error {
+        if error.raw_os_error() == Some(libc::ENOBUFS) {
+            io::ErrorKind::WouldBlock.into()
+        } else {
+            error
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn try_send_macos_datagram(socket: &UnixDatagram, packet: &[u8]) -> io::Result<usize> {
+        // SAFETY: the socket owns a live descriptor for this call, and `packet`
+        // supplies a valid immutable buffer of exactly `packet.len()` bytes.
+        let sent =
+            unsafe { libc::send(socket.as_raw_fd(), packet.as_ptr().cast(), packet.len(), 0) };
+        if sent < 0 {
+            Err(normalize_macos_datagram_send_error(
+                io::Error::last_os_error(),
+            ))
+        } else {
+            Ok(sent as usize)
+        }
+    }
 
     /// Mux-owned packet endpoint. Datagram semantics preserve packet boundaries.
     pub struct LeafPacketBridge {
@@ -201,6 +229,14 @@ mod unix_bridge {
             if packet.len() > MAX_PACKET_SIZE {
                 return Err(PacketError::TooLarge);
             }
+            #[cfg(target_os = "macos")]
+            let sent = self
+                .socket
+                .async_io(Interest::WRITABLE, || {
+                    try_send_macos_datagram(&self.socket, packet)
+                })
+                .await?;
+            #[cfg(not(target_os = "macos"))]
             let sent = self.socket.send(packet).await?;
             if sent != packet.len() {
                 return Err(PacketError::Io(std::io::Error::new(
@@ -291,6 +327,17 @@ mod unix_bridge {
                 bridge.send_to_leaf(&packet).await,
                 Err(PacketError::TooLarge)
             ));
+        }
+
+        #[test]
+        fn macos_enobufs_is_retryable_without_hiding_permanent_errors() {
+            let error =
+                normalize_macos_datagram_send_error(io::Error::from_raw_os_error(libc::ENOBUFS));
+            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+
+            let error =
+                normalize_macos_datagram_send_error(io::Error::from_raw_os_error(libc::EPIPE));
+            assert_eq!(error.raw_os_error(), Some(libc::EPIPE));
         }
     }
 }

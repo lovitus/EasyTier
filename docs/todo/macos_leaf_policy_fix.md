@@ -1,8 +1,9 @@
 # macOS Leaf policy routing fix
 
 Status: route and packet-framing fixes passed focused checks; the first
-candidate failed repeated macOS bridge-backpressure validation, and the
-event-driven `tun` follow-up is awaiting a new packaged macOS artifact
+candidate failed Leaf-to-TUN backpressure validation, and the first
+event-driven follow-up exposed the same Darwin `ENOBUFS` boundary on the
+EasyTier-to-Leaf datagram sender in round three
 
 ## Reference contract
 
@@ -54,6 +55,13 @@ Backpressure reference and required semantics:
   `internal/fdbased_darwin/endpoint.go::writePacket` documents and implements
   transient non-writability as packet-level pressure rather than endpoint
   teardown.
+- Mihomo's pinned sing-tun v0.4.17
+  `stack_system.go::System.tunLoop` logs a per-packet TUN write error and
+  continues the loop. sing-box `/Users/fanli/Documents/singbox-withfallback`
+  at `a9cd6f89d919a55353ec2170bf88add0d87882f1` pins sing-tun
+  v0.8.0-beta.18; `stack_mixed.go::Mixed.tunLoop` and
+  `Mixed.batchTUNLoop` likewise log a failed write and keep the endpoint
+  alive. Neither project has EasyTier's separate AF_UNIX packet bridge.
 - EasyTier intentionally keeps the pending framed packet and waits for real
   descriptor writability instead of adopting sing-tun's packet drop. A
   temporary Darwin `ENOBUFS` must not terminate Leaf's TUN inbound or close the
@@ -68,6 +76,12 @@ Backpressure reference and required semantics:
   Tokio `AsyncFd` readiness path to retain the pending frame, clear stale
   writable readiness, and await a kernel event. Other platforms and permanent
   errors are unchanged.
+- The AF_UNIX datagram sender must use the same boundary: on macOS only,
+  `ENOBUFS` from the actual `send(2)` attempt is treated as temporary
+  non-writability inside Tokio's existing writable-readiness loop. The already
+  queued datagram remains pending until the kernel reports capacity; no timer,
+  retry spin, queue-capacity change, or non-macOS behavior change is allowed.
+  Closed-peer and all other permanent errors remain errors.
 
 ## Intentional EasyTier boundary
 
@@ -125,6 +139,8 @@ locked raw-FD/PI source path isolates the independent packet-framing mismatch.
 - The patched `tun` crate's Darwin `ENOBUFS` normalization and
   non-Darwin/permanent-error preservation tests compile with its `async`
   feature and pass on the remote builder.
+- EasyTier's packet bridge test covers the macOS-only `ENOBUFS` to
+  `WouldBlock` normalization and preservation of permanent datagram errors.
 - Exact packaged macOS artifact validation covers IPv4 TCP/UDP DIRECT, proxied
   traffic, DNS/FakeDNS, mesh precedence, route loss/recovery, repeated restart,
   cleanup, and a policy-disabled baseline. IPv6 receives a separate scoped-route
@@ -234,3 +250,44 @@ The candidate therefore proves the route and raw-IP framing fixes but fails
 runtime backpressure/lifecycle acceptance. Proxy, DNS/FakeDNS, mesh precedence,
 IPv6, throughput, policy-disabled regression, and a clean repeated-restart run
 remain pending and must not be inferred from the earlier single PASS.
+
+The immutable macOS ARM64 GUI workflow `29994602946` then built commit
+`5eb0ff54b6cd3418f1408b61b6ea0712461f6689` with the event-driven `tun`
+follow-up. Its downloaded DMG SHA-256 was
+`dfa99c76fee34c75400c57ab47c6d217e7600f8470b35a691b35ffc5d7179d95`;
+the packaged core reported `easytier-core 3.0.5-5eb0ff54`, all three packaged
+executables were arm64, and strict app/core/Leaf/HEV signature checks passed.
+
+A ten-round wrapper passed rounds one and two but failed round three:
+
+- the initial TCP/UDP probes and the complete 4 MiB response succeeded;
+- neither the original Leaf-to-TUN `ENOBUFS` failure nor `channel closed`
+  recurred;
+- at the burst peak, EasyTier logged exactly one fail-closed drop with
+  `Leaf input queue is unavailable`;
+- the Leaf process and remote fixture remained alive, and cleanup left no
+  candidate process, split capture route, or mount.
+
+This is not accepted as a pass. It isolates a second transient-error boundary:
+Tokio's Unix datagram sender receives Darwin `ENOBUFS` before the patched TUN
+writer, and currently returns it as a packet-send failure instead of clearing
+writable readiness and waiting. The next candidate changes only that macOS
+sender error classification and adds a focused regression test; it does not
+increase the existing bounded queue.
+
+## AF_UNIX sender follow-up pre-build evidence
+
+The complete `b198d3bc7205ffbabe18bf2e0fc395aad223410d`-based workspace plus the
+macOS sender change, regression test, preflight filter, and this failure record
+was synchronized to the dedicated `.160` builder on 2026-07-23:
+
+- the exact `scripts/leaf-remote-preflight.sh` `--locked` no-run build completed
+  successfully and produced the EasyTier, policy, and netstack library test
+  binaries;
+- `packet::unix_bridge::tests::macos_enobufs_is_retryable_without_hiding_permanent_errors`
+  passed, as did every configured EasyTier, policy, and netstack filter;
+- local Rust 1.95 formatting, shell syntax, and `git diff --check` passed;
+- `Cargo.lock`, the macOS-only raw-send/readiness `cfg`, workflow scope, and
+  complete candidate diff remain dispatch gates. The Apple implementation
+  itself still requires the exact workflow-built macOS artifact and the same
+  ten-round real-device test.
