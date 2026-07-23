@@ -125,6 +125,7 @@ jobs:
         env:
           ORG_GRADLE_PROJECT_easytierPolicyCandidate: 'true'
         run: |
+          cargo metadata --format-version 1 --locked > /dev/null
           cd easytier-gui
           pnpm tauri android build --debug --apk --target aarch64 --split-per-abi
 

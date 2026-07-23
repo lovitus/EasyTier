@@ -39,7 +39,7 @@ jobs:
           # All of these options are optional, so you can remove them if you are happy with the defaults
           concurrent_skipping: 'never'
           skip_after_successful_duplicate: 'true'
-          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "third_party/**", ".github/workflows/test.yml", ".github/actions/**"]'
+          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "easytier-policy/**", "easytier-socks-egress/**", "third_party/**", ".github/workflows/test.yml", ".github/actions/**"]'
 
   check:
     name: Run linters & check
@@ -69,11 +69,11 @@ jobs:
 
       - name: Check Clippy
         if: ${{ !cancelled() }}
-        run: cargo clippy --all-targets --features full --all -- -D warnings
+        run: cargo clippy --locked --all-targets --features full --all -- -D warnings
 
       - name: Check features
         if: ${{ !cancelled() }}
-        run: cargo hack check --package easytier --each-feature --exclude-features macos-ne --verbose
+        run: cargo hack check --locked --package easytier --each-feature --exclude-features macos-ne --verbose
 
       - name: Check Cargo.lock is up to date
         if: ${{ !cancelled() }}
@@ -107,7 +107,7 @@ jobs:
         # unit and integration tests run in the existing network-safe partitions. The
         # profiling workflow then only has to build production artifacts once.
         run: >-
-          cargo nextest archive --archive-file tests.tar.zst
+          cargo nextest archive --locked --archive-file tests.tar.zst
           --package easytier --package easytier-policy
           --features easytier/full,easytier/leaf-policy-proxy
 

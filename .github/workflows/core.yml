@@ -221,10 +221,10 @@ jobs:
             FEATURES="$FEATURES,leaf-policy-windows"
           fi
           
-          cargo $BUILD --release --target $TARGET --package=easytier-web --features=embed
+          cargo $BUILD --locked --release --target $TARGET --package=easytier-web --features=embed
           mv ./target/$TARGET/release/easytier-web"$SUFFIX" ./target/$TARGET/release/easytier-web-embed"$SUFFIX"
           
-          cargo $BUILD --release --target $TARGET --features=$FEATURES
+          cargo $BUILD --locked --release --target $TARGET --features=$FEATURES
 
       - name: Verify Windows policy feature
         if: contains(matrix.TARGET, 'windows')
@@ -239,7 +239,7 @@ jobs:
         env:
           RUSTC_BOOTSTRAP: 1
         run: |
-          cargo build -r --target $TARGET -Z build-std=std,panic_abort --package=easytier --features=jemalloc
+          cargo build --locked -r --target $TARGET -Z build-std=std,panic_abort --package=easytier --features=jemalloc
 
       - name: Sign and verify macOS release executables
         if: contains(matrix.TARGET, 'darwin') && matrix.POLICY_RELEASE == true

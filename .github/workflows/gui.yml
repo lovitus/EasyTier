@@ -153,7 +153,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         with:
           projectPath: ./easytier-gui
-          args: --verbose --target ${{ matrix.GUI_TARGET }}
+          args: --verbose --target ${{ matrix.GUI_TARGET }} -- --locked
 
       - name: Verify bundled policy sidecars
         if: contains(matrix.GUI_TARGET, 'darwin') || contains(matrix.GUI_TARGET, 'linux')

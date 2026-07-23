@@ -38,7 +38,7 @@ jobs:
           fi
 
           cargo_version=$(
-            cargo metadata --format-version 1 --no-deps \
+            cargo metadata --format-version 1 --locked --no-deps \
               | jq -r '.packages[] | select(.name == "easytier") | .version'
           )
           if [[ "${VERSION}" != "v${cargo_version}" ]]; then

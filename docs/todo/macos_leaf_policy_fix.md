@@ -1,9 +1,8 @@
 # macOS Leaf policy routing fix
 
-Status: route and packet-framing fixes passed focused checks; the first
-candidate failed Leaf-to-TUN backpressure validation, and the first
-event-driven follow-up exposed the same Darwin `ENOBUFS` boundary on the
-EasyTier-to-Leaf datagram sender in round three
+Status: route, packet-framing, and both Darwin `ENOBUFS` boundaries passed the
+focused ten-round macOS acceptance test; broader proxy/DNS/IPv6/throughput
+release validation remains pending
 
 ## Reference contract
 
@@ -291,3 +290,34 @@ was synchronized to the dedicated `.160` builder on 2026-07-23:
   complete candidate diff remain dispatch gates. The Apple implementation
   itself still requires the exact workflow-built macOS artifact and the same
   ten-round real-device test.
+
+## AF_UNIX sender follow-up post-build evidence
+
+The immutable macOS ARM64 GUI workflow `29997237387` built commit
+`a480e6f5f7cf0b9660ed19c68cf6ce85c05136ed` successfully. The downloaded
+artifact ZIP passed `unzip -t`; the DMG SHA-256 was
+`dd7bb7055174b072ab5a4707393f902cff54c3126917a903ef3e73e7bb17da52`.
+The packaged core reported `easytier-core 3.0.5-a480e6f5`, all three
+executables were arm64, and strict app/core/Leaf/HEV signature checks passed.
+
+The unchanged ten-round real-device wrapper passed all rounds on 2026-07-23:
+
+- every round completed initial and post-route-recovery TCP and UDP DIRECT
+  probes;
+- every round transferred exactly 4 MiB both before and after recovery, for
+  twenty complete pressure transfers total;
+- the EasyTier-owned interface-scoped default was restored in two seconds in
+  every round;
+- no round logged Leaf-to-TUN `ENOBUFS`, netstack `channel closed`,
+  `Leaf input queue is unavailable`, writer-queue overflow, fail-closed policy
+  packet drops, `wire::Error`, or invalid-IP framing;
+- every client-error and emergency-cleanup log was empty, and the packaged
+  binary manifest remained identical across all rounds;
+- sampled core and Leaf CPU was 0.0-0.1%; shutdown left no candidate process,
+  split capture route, or DMG mount. The remote fixture was stopped and its
+  ports were verified clean afterward.
+
+This accepts the targeted macOS route/framing/backpressure/restart/cleanup
+fix. It does not establish proxy protocol, DNS/FakeDNS, IPv6, or 10 Gbit/s
+throughput compatibility; those broader release checks remain separate and
+must not be inferred from this focused result.
