@@ -45,6 +45,15 @@ pub trait IfConfiguerTrait: Send + Sync {
     ) -> Result<(), Error> {
         Ok(())
     }
+    async fn remove_ipv4_route_with_gateway(
+        &self,
+        name: &str,
+        address: Ipv4Addr,
+        cidr_prefix: u8,
+        _gateway: Ipv4Addr,
+    ) -> Result<(), Error> {
+        self.remove_ipv4_route(name, address, cidr_prefix).await
+    }
     async fn add_ipv4_ip(
         &self,
         _name: &str,

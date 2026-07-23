@@ -39,7 +39,7 @@ import {
 } from './managedRuleData'
 
 const config = defineModel<NetworkConfig>({ required: true })
-const props = defineProps<{ api?: Api.RemoteClient; yamlOnly?: boolean }>()
+const props = defineProps<{ api?: Api.RemoteClient; yamlOnly?: boolean; readOnly?: boolean }>()
 const { t } = useI18n()
 
 const document = ref<PolicyEditorDocument>(emptyPolicyDocument())
@@ -94,7 +94,9 @@ const runtimeNotice = computed(() => outboundInfo.value
   ? policyRuntimeNotice(outboundInfo.value)
   : undefined)
 const runtimeNoticeSeverity = computed(() => {
-  if (runtimeNotice.value === 'linux-supported' || runtimeNotice.value === 'supported') return 'success'
+  if (runtimeNotice.value === 'linux-supported'
+    || runtimeNotice.value === 'windows-supported'
+    || runtimeNotice.value === 'supported') return 'success'
   if (runtimeNotice.value === 'windows-unsupported' || runtimeNotice.value === 'unsupported') return 'error'
   return 'warn'
 })
@@ -581,7 +583,7 @@ onMounted(() => {
         <div class="flex flex-col gap-2">
           <label class="font-semibold">{{ t('policy.editor.source') }}</label>
           <SelectButton v-model="sourceMode" :options="sourceOptions" option-label="label" option-value="value"
-            :allow-empty="false" />
+            :allow-empty="false" :disabled="props.readOnly" />
         </div>
       </div>
       <template v-if="sourceMode === 'file'">
@@ -590,7 +592,7 @@ onMounted(() => {
           <span class="pi pi-question-circle ml-2" v-tooltip="t('policy_config_file_help')" />
         </div>
         <InputText id="policy_config_file_quick" v-model="config.policy_config_file"
-          :placeholder="t('policy_config_file_placeholder')" />
+          :placeholder="t('policy_config_file_placeholder')" :readonly="props.readOnly" />
         <Message severity="info" :closable="false">{{ t('policy.editor.file_notice') }}</Message>
       </template>
       <template v-else>
@@ -599,7 +601,8 @@ onMounted(() => {
         </Message>
         <label for="policy_config_inline_quick" class="font-semibold">{{ t('policy.editor.advanced_yaml') }}</label>
         <Textarea id="policy_config_inline_quick" v-model="config.policy_config_inline" rows="20" auto-resize
-          class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')" />
+          class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')"
+          :readonly="props.readOnly" />
       </template>
     </template>
     <template v-else>

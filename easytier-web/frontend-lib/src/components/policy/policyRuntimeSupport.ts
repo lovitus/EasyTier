@@ -7,6 +7,7 @@ export type PolicyRuntimeNotice =
   | 'linux-supported'
   | 'android-experimental'
   | 'macos-partial'
+  | 'windows-supported'
   | 'windows-unsupported'
   | 'supported'
   | 'unsupported'
@@ -28,7 +29,7 @@ export function policyRuntimeNotice(
     return 'macos-partial'
   }
   if (platform === 'windows' || platform === 'win32') {
-    return 'windows-unsupported'
+    return capability.supported ? 'windows-supported' : 'windows-unsupported'
   }
   if (!capability.supported) return 'unsupported'
   if (platform === 'linux') return 'linux-supported'

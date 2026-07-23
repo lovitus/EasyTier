@@ -27,9 +27,11 @@ readonly -a BUILD_SSH_OPTIONS=(
 
 readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   common::underlay_guard::tests::should_block_configured_and_runtime_addresses_when_enabled
+  common::config::tests::policy_proxy_config_roundtrips_and_preserves_disabled_preference
   core::tests::check_config_fully_parses_policy_only_input_like_mihomo_test_mode
   gateway::socks5::dataplane::tests::mesh_only_connect_never_falls_back_to_kernel
   peers::peer_ospf_route::tests::peer_removal_restarts_remaining_generation_and_invalidates_remote_cache
+  policy_proxy::macos_routing_tests::tests
   policy_proxy::mesh_udp_relay::tests
   policy_proxy::policy_routing::tests::leaf_owned_capture_keeps_the_legacy_tun_as_lower_priority_fallback
   policy_proxy::tests::resolves_inline_instance_config_without_persisting_generated_state
@@ -37,6 +39,7 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   instance::virtual_nic::tests::leaf_owned_tun_selection_is_default_off_and_backend_bounded
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
   instance::instance::tests::socks_egress_uses_the_configured_linux_policy_mark
+  launcher::tests::network_config_roundtrips_policy_proxy_envelope
   tests::three_node::port_forward_with_inbound_default_drop_acl_test::case_2
 )
 readonly -a DEFAULT_POLICY_TEST_FILTERS=(
@@ -55,8 +58,10 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   leaf_config::tests::expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap
   leaf_config::tests::preserves_unresolved_domain_contract_for_direct_socks_and_fallback
   leaf_config::tests::leaf_owned_tun_is_explicit_and_legacy_fd_mode_remains_unchanged
+  leaf_config::tests::locked_leaf_preserves_explicit_packet_information_presence
   leaf_process::tests::linux_owned_tun_readiness_requires_interface_up_flag
   leaf_process::tests::owned_tun_identity_is_bounded_unique_and_outside_default_fake_ip
+  leaf_process::tests::starts_worker_without_retaining_private_config_and_stops_it
   geodata::tests
   inprocess::tests::packet_fd_guard_closes_an_unclaimed_descriptor
 )
@@ -121,7 +126,7 @@ check_builder_idle() {
 run_no_run_build() {
   local exit_code=0
   ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
-    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --package netstack-smoltcp --lib --features easytier/leaf-policy-proxy,easytier-policy/leaf-inprocess > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
+    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890 CARGO_NET_GIT_FETCH_WITH_CLI=true CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --package netstack-smoltcp --lib --features easytier/leaf-policy-proxy,easytier-policy/leaf-inprocess > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
     || exit_code=$?
 
   ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
@@ -174,9 +179,10 @@ run_focused_tests() {
 sync_snapshot
 check_builder_idle
 run_no_run_build
-readonly EASYTIER_TEST_BINARY="$(resolve_test_binary easytier)"
-readonly POLICY_TEST_BINARY="$(resolve_test_binary easytier_policy)"
-readonly NETSTACK_TEST_BINARY="$(resolve_test_binary netstack_smoltcp)"
+EASYTIER_TEST_BINARY="$(resolve_test_binary easytier)"
+POLICY_TEST_BINARY="$(resolve_test_binary easytier_policy)"
+NETSTACK_TEST_BINARY="$(resolve_test_binary netstack_smoltcp)"
+readonly EASYTIER_TEST_BINARY POLICY_TEST_BINARY NETSTACK_TEST_BINARY
 printf 'Using exact EasyTier library test binary: %s\n' "$EASYTIER_TEST_BINARY"
 printf 'Using exact policy library test binary: %s\n' "$POLICY_TEST_BINARY"
 printf 'Using exact netstack library test binary: %s\n' "$NETSTACK_TEST_BINARY"

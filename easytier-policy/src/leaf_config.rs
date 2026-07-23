@@ -117,6 +117,7 @@ pub fn compile_leaf_config_with_options(
     }
     verify_revision_rule_sets(revision, base_dir)?;
     let document = &revision.document;
+    let platform_dns_servers = dns_servers;
     let dns_servers = compile_dns_servers(document, dns_servers);
     let mut outbounds = vec![
         serde_json::json!({ "tag": "DIRECT", "protocol": "direct" }),
@@ -244,6 +245,9 @@ pub fn compile_leaf_config_with_options(
             "fakeDnsIpv6": options.fake_dns_ipv6,
             "fakeDnsIpv6Range": document.dns.fake_ip_range6,
             "tun2socks": "smoltcp",
+            // The locked Leaf Windows TUN applies this list to its Wintun
+            // adapter. Other platforms parse but do not consume the field.
+            "dnsServers": platform_dns_servers,
         })
     } else {
         serde_json::json!({
@@ -254,6 +258,20 @@ pub fn compile_leaf_config_with_options(
             "fakeDnsIpv6Range": document.dns.fake_ip_range6,
             "tun2socks": "smoltcp",
         })
+    };
+    #[cfg(target_os = "macos")]
+    let tun_settings = {
+        let mut tun_settings = tun_settings;
+        if options.leaf_owned_tun.is_none() {
+            // The inherited descriptor is EasyTier's AF_UNIX datagram raw-IP
+            // bridge, not a native utun. Locked Leaf otherwise keeps the Darwin
+            // tun crate's four-byte AF packet-information framing enabled.
+            tun_settings
+                .as_object_mut()
+                .expect("TUN settings are a JSON object")
+                .insert("packetInformation".to_owned(), false.into());
+        }
+        tun_settings
     };
     let config = serde_json::json!({
         "log": { "level": "warn" },
@@ -788,6 +806,17 @@ mod tests {
         assert_eq!(legacy["inbounds"][0]["settings"]["fd"], 7);
         assert!(legacy["inbounds"][0]["settings"].get("auto").is_none());
         assert!(legacy["inbounds"][0]["settings"].get("name").is_none());
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            legacy["inbounds"][0]["settings"]["packetInformation"],
+            false
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert!(
+            legacy["inbounds"][0]["settings"]
+                .get("packetInformation")
+                .is_none()
+        );
 
         let owned = compile_leaf_config_with_options(
             &revision,
@@ -816,6 +845,63 @@ mod tests {
         assert_eq!(settings["gateway"], "198.18.0.5");
         assert_eq!(settings["netmask"], "255.255.255.252");
         assert_eq!(settings["mtu"], 1_500);
+        assert_eq!(settings["dnsServers"], serde_json::json!(["1.1.1.1"]));
+        assert!(settings.get("packetInformation").is_none());
+    }
+
+    #[cfg(feature = "leaf-runtime")]
+    #[test]
+    fn locked_leaf_preserves_explicit_packet_information_presence() {
+        let config = leaf::config::json::from_string(
+            r#"{
+                "inbounds": [{
+                    "tag": "tun",
+                    "protocol": "tun",
+                    "settings": {
+                        "fd": 3,
+                        "packetInformation": false,
+                        "tun2socks": "smoltcp"
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        // Protobuf field 16, wire type 0, explicit false. Presence matters:
+        // absence must retain the tun crate's platform default.
+        assert!(config.inbounds[0].settings.ends_with(&[0x80, 0x01, 0x00]));
+
+        let omitted = leaf::config::json::from_string(
+            r#"{
+                "inbounds": [{
+                    "tag": "tun",
+                    "protocol": "tun",
+                    "settings": {
+                        "fd": 3,
+                        "tun2socks": "smoltcp"
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert!(!omitted.inbounds[0].settings.ends_with(&[0x80, 0x01, 0x00]));
+
+        let err = leaf::config::json::from_string(
+            r#"{
+                "inbounds": [{
+                    "tag": "tun",
+                    "protocol": "tun",
+                    "settings": {
+                        "packetInformation": false,
+                        "tun2socks": "smoltcp"
+                    }
+                }]
+            }"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("packetInformation requires an external fd")
+        );
     }
 
     #[test]

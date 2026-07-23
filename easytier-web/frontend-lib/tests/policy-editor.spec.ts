@@ -55,12 +55,13 @@ const MessageStub = defineComponent({
 
 const TextareaStub = defineComponent({
   name: 'Textarea',
-  props: { modelValue: String, id: String },
+  props: { modelValue: String, id: String, readonly: Boolean },
   emits: ['update:modelValue'],
   setup(props, { emit }) {
     return () => h('textarea', {
       id: props.id,
       value: props.modelValue,
+      readonly: props.readonly,
       onInput: (event: Event) => emit('update:modelValue', (event.target as HTMLTextAreaElement).value),
     })
   },
@@ -69,15 +70,29 @@ const TextareaStub = defineComponent({
 const InputTextStub = defineComponent({
   name: 'InputText',
   inheritAttrs: false,
-  props: { modelValue: String, id: String },
+  props: { modelValue: String, id: String, readonly: Boolean },
   emits: ['update:modelValue'],
   setup(props, { attrs, emit }) {
     return () => h('input', {
       ...attrs,
       id: props.id,
       value: props.modelValue,
+      readonly: props.readonly,
       onInput: (event: Event) => emit('update:modelValue', (event.target as HTMLInputElement).value),
     })
+  },
+})
+
+const SelectButtonStub = defineComponent({
+  name: 'SelectButton',
+  props: { modelValue: String, disabled: Boolean },
+  emits: ['update:modelValue'],
+  setup(props) {
+    return () => h('button', {
+      type: 'button',
+      disabled: props.disabled,
+      'data-stub': 'select-button',
+    }, props.modelValue)
   },
 })
 
@@ -98,10 +113,14 @@ const SelectStub = defineComponent({
   },
 })
 
-function mountEditor(config: NetworkConfig, api?: import('../src/modules/api').RemoteClient) {
+function mountEditor(
+  config: NetworkConfig,
+  api?: import('../src/modules/api').RemoteClient,
+  options: { yamlOnly?: boolean; readOnly?: boolean } = {},
+) {
   const model = reactive(config) as NetworkConfig
   const wrapper = mount(PolicyEditor, {
-    props: { modelValue: model, api },
+    props: { modelValue: model, api, ...options },
     global: {
       directives: { tooltip: () => {} },
       stubs: {
@@ -115,7 +134,7 @@ function mountEditor(config: NetworkConfig, api?: import('../src/modules/api').R
         Panel: PanelStub,
         Password: true,
         Select: SelectStub,
-        SelectButton: true,
+        SelectButton: SelectButtonStub,
         Textarea: TextareaStub,
       },
     },
@@ -129,6 +148,32 @@ async function expandRow(wrapper: ReturnType<typeof mountEditor>['wrapper'], tes
 }
 
 describe('PolicyEditor', () => {
+  it('makes the focused YAML controls read-only in view mode', () => {
+    const inline = DEFAULT_NETWORK_CONFIG()
+    inline.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
+    const { wrapper: inlineWrapper } = mountEditor(
+      inline,
+      undefined,
+      { yamlOnly: true, readOnly: true },
+    )
+
+    expect(inlineWrapper.get<HTMLTextAreaElement>('#policy_config_inline_quick').element.readOnly)
+      .toBe(true)
+    expect(inlineWrapper.get<HTMLButtonElement>('[data-stub="select-button"]').element.disabled)
+      .toBe(true)
+
+    const file = DEFAULT_NETWORK_CONFIG()
+    file.policy_config_file = '/etc/easytier/policy.yaml'
+    const { wrapper: fileWrapper } = mountEditor(
+      file,
+      undefined,
+      { yamlOnly: true, readOnly: true },
+    )
+
+    expect(fileWrapper.get<HTMLInputElement>('#policy_config_file_quick').element.readOnly)
+      .toBe(true)
+  })
+
   it('keeps policy mode plugin-like and initializes a safe inline document only when enabled', async () => {
     const { model, wrapper } = mountEditor(DEFAULT_NETWORK_CONFIG())
     expect(model.enable_policy_proxy).toBe(false)
@@ -387,6 +432,22 @@ rules: ["MATCH,exit"]
     expect(model.policy_outbound_interface).toBe('')
     expect(wrapper.text()).toContain('policy.editor.outbound_automatic')
     expect(wrapper.text()).toContain('policy.editor.runtime_android_experimental')
+  })
+
+  it('shows an available Windows runtime when the backend reports support', async () => {
+    const api = {
+      list_policy_outbound_interfaces: vi.fn(async () => ({
+        platform: 'windows',
+        required: true,
+        supported: true,
+        interfaces: [{ name: 'Ethernet', addresses: ['192.0.2.10/24'], recommended: true }],
+      })),
+    } as unknown as import('../src/modules/api').RemoteClient
+    const { wrapper } = mountEditor(DEFAULT_NETWORK_CONFIG(), api)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('policy.editor.runtime_windows_supported')
+    expect(wrapper.find<HTMLInputElement>('#enable_policy_proxy').element.disabled).toBe(false)
   })
 
   it('shows partial macOS and unavailable Windows runtime status even while disabled', async () => {

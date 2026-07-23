@@ -1,24 +1,83 @@
 # EasyTier
 
-[![Github release](https://img.shields.io/github/v/tag/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/releases)
-[![GitHub](https://img.shields.io/github/license/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
-[![GitHub last commit](https://img.shields.io/github/last-commit/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/commits/main)
-[![GitHub issues](https://img.shields.io/github/issues/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/issues)
-[![GitHub Core Actions](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml)
-[![GitHub GUI Actions](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml)
-[![GitHub Test Actions](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml)
+[![Github release](https://img.shields.io/github/v/tag/lovitus/EasyTier)](https://github.com/lovitus/EasyTier/releases)
+[![GitHub](https://img.shields.io/github/license/lovitus/EasyTier)](LICENSE)
+[![GitHub last commit](https://img.shields.io/github/last-commit/lovitus/EasyTier)](https://github.com/lovitus/EasyTier/commits/main)
+[![GitHub issues](https://img.shields.io/github/issues/lovitus/EasyTier)](https://github.com/lovitus/EasyTier/issues)
+[![GitHub Core Actions](https://github.com/lovitus/EasyTier/actions/workflows/core.yml/badge.svg)](https://github.com/lovitus/EasyTier/actions/workflows/core.yml)
+[![GitHub GUI Actions](https://github.com/lovitus/EasyTier/actions/workflows/gui.yml/badge.svg)](https://github.com/lovitus/EasyTier/actions/workflows/gui.yml)
+[![GitHub Test Actions](https://github.com/lovitus/EasyTier/actions/workflows/test.yml/badge.svg)](https://github.com/lovitus/EasyTier/actions/workflows/test.yml)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/EasyTier/EasyTier)
 
-[简体中文](/README_CN.md) | [English](/README.md)
+[简体中文](README_CN.md) | [English](README.md)
 
-> ✨ A simple, secure, decentralized virtual private network solution powered by Rust and Tokio
+> ✨ An enhanced fork of upstream EasyTier: decentralized mesh networking plus
+> policy routing, selectable peer egress, Stealth, and experimental transports.
 
 <p align="center">
 <img src="assets/config-page.png" width="300" alt="config page">
 <img src="assets/running-page.png" width="300" alt="running page">
 </p>
 
-📚 **[Full Documentation](https://easytier.cn/en/)** | 🖥️ **[Web Console](https://easytier.cn/web)** | 📝 **[Download Releases](https://github.com/EasyTier/EasyTier/releases)** | 🧩 **[Third Party Tools](https://easytier.cn/en/guide/installation_gui.html#third-party-graphical-interfaces)** | ❤️ **[Sponsor](#sponsor)**
+📚 **[Upstream Base Documentation](https://easytier.cn/en/)** | 🖥️ **[Web Console](https://easytier.cn/web)** | 📝 **[Download This Fork](https://github.com/lovitus/EasyTier/releases)** | 🍃 **[Leaf Guide (Chinese)](easytier/docs/leaf_policy_proxy_cn.md)** | ❤️ **[Sponsor](#sponsor)**
+
+> [!IMPORTANT]
+> Leaf/HEV, the Stealth extensions, and `quic-brutal` are fork-only features.
+> Upstream `EasyTier/EasyTier` installers, Homebrew packages, and releases do not
+> contain these additions. Use only a formal
+> [`lovitus/EasyTier` release](https://github.com/lovitus/EasyTier/releases) when
+> you need fork features. `EasyTier Profiling Beta` is a diagnostic artifact,
+> not a production release.
+
+## What This Fork Adds
+
+The base EasyTier mesh keeps its original cross-platform purpose. The optional
+Leaf policy layer adds first-match DIRECT/REJECT routing, domain and IP rules,
+GeoSite/GeoIP, FakeDNS, SOCKS5, Shadowsocks/UoT, Trojan, VMess, VLESS, chains,
+and fallback groups. A portless `via: mesh` actor can select an
+**EasyTier peer that has Leaf/HEV capability** as a managed TCP/UDP egress.
+The target peer needs no separately configured SOCKS server; managed HEV starts
+on first use.
+
+### Feature and Platform Status
+
+| Capability | Status | Platforms and boundary |
+| --- | --- | --- |
+| Base mesh, NAT traversal, subnet proxy, WireGuard | Stable, inherited from upstream | Windows, macOS, Linux, FreeBSD, Android, and other upstream-supported targets |
+| Leaf policy routing v1 | Implemented and formally device-validated | Linux x86_64/aarch64 and Android |
+| Managed HEV peer egress | Implemented and formally device-validated | Linux x86_64/aarch64 and Android; only capable peers are eligible, and HEV is demand-started rather than permanently resident |
+| macOS Leaf/managed HEV | Pre-release completion in progress | x86_64/aarch64 code and packaging paths exist, but formal support is not claimed until an exact packaged artifact passes device validation and reaches a formal release |
+| Windows Leaf policy routing | Pre-release candidate | x86_64/i686/ARM64 Core and GUI build paths include the Leaf worker and Wintun payload; formal support is not claimed until exact packaged artifacts pass Windows device validation |
+| Leaf on FreeBSD, other Linux architectures, iOS/OHOS; managed HEV on Windows | Not supported yet | Base mesh remains usable; these targets cannot currently use the listed Leaf/HEV path |
+| Multi-transport Stealth and transport priority | Released | Read the [compatibility notes](easytier/docs/udp_stealth_compatibility.md) before deployment |
+| `quic-brutal` | Experimental and explicitly enabled | Private EasyTier overlay, not Hysteria2-compatible; it is not guaranteed to outperform ordinary QUIC BBR on every path |
+
+Leaf accepts a strict EasyTier-defined subset; it is not a complete Mihomo,
+Leaf, or sing-box configuration compatibility layer. Unsupported fields such as
+SS2022, Reality, XTLS/XUDP/XHTTP, and VMess legacy alter-id are not silently
+ignored. See the
+[Leaf policy routing guide](easytier/docs/leaf_policy_proxy_cn.md) for complete
+examples, protocol boundaries, and Linux/Android setup.
+
+### Shortest Path to Use It
+
+- **Android:** install a formal APK from this fork, assign a fixed virtual IPv4
+  to the network, enable Policy Routing and save the policy while the network is
+  stopped, then start the network and grant Android VPN permission.
+- **Linux:** enable Leaf only from a formal release that provides
+  `easytier-core`, `easytier-cli`, `easytier-leaf-worker`, and
+  `easytier-hev-socks-egress` together. Keep all four files adjacent, never mix
+  versions, and do not start HEV manually.
+- **Windows:** use only a formal Core ZIP or GUI installer that bundles
+  `easytier-leaf-worker.exe` and the matching-architecture `wintun.dll`; run with
+  administrator privileges. No separate Wintun installation is required.
+- **Choose a peer egress:** create a `via: mesh` policy actor without `port`, and
+  point `server.virtual-ip` or `instance-id` at a Leaf/HEV-capable peer. This
+  does not make every peer on every platform an automatic egress.
+- **Upgrade conservatively:** when `policy_proxy` is absent or disabled, the
+  original mesh data plane remains in use. Keep a known-good network
+  configuration and validate DNS, first-match ordering, and egress reachability
+  before enabling policy routing broadly.
 
 ## Features
 
@@ -46,7 +105,14 @@
 
 ### 📥 Installation
 
-Choose the installation method that best suits your needs:
+To use fork-only features, download a formal artifact for your platform from
+[`lovitus/EasyTier` releases](https://github.com/lovitus/EasyTier/releases) and
+read that version's release notes. Do not install the `EasyTier Profiling Beta`
+asset as a production build.
+
+The one-click scripts, Homebrew, Cargo, and OpenWrt entries below belong to
+upstream and install base EasyTier only. They do not install this fork's
+Leaf/HEV additions:
 
 Linux (Recommended):
 ```bash
@@ -69,7 +135,7 @@ Install via cargo (Latest development version):
 cargo install --git https://github.com/EasyTier/EasyTier.git easytier
 ```
 
-[Install pre-built binary](https://github.com/EasyTier/EasyTier/releases) (Recommended, All platforms supported)
+[Install an upstream pre-built binary](https://github.com/EasyTier/EasyTier/releases) (base EasyTier only)
 
 [Install via Docker](https://easytier.cn/en/guide/installation.html#installation-methods)
 

@@ -1040,7 +1040,7 @@ impl Instance {
         use rand::Rng;
         let peer_manager_c = Arc::downgrade(&self.peer_manager.clone());
         let global_ctx_c = self.get_global_ctx();
-        #[cfg(all(feature = "leaf-policy-proxy", unix, not(mobile)))]
+        #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows), not(mobile)))]
         let policy_data_plane = Arc::downgrade(&self.socks5_server);
         #[cfg(feature = "tun")]
         let nic_ctx = self.nic_ctx.clone();
@@ -1127,7 +1127,7 @@ impl Instance {
                             &peer_manager_c,
                             _peer_packet_receiver.clone(),
                             nic_closed_notifier.clone(),
-                            #[cfg(all(feature = "leaf-policy-proxy", unix))]
+                            #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
                             policy_data_plane.clone(),
                         );
                         if let Err(e) = new_nic_ctx.run(Some(ip), global_ctx_c.get_ipv6()).await {
@@ -1177,7 +1177,7 @@ impl Instance {
         let nic_ctx = self.nic_ctx.clone();
         let peer_mgr = Arc::downgrade(&self.peer_manager);
         let peer_packet_receiver = self.peer_packet_receiver.clone();
-        #[cfg(all(feature = "leaf-policy-proxy", unix, not(mobile)))]
+        #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows), not(mobile)))]
         let policy_data_plane = Arc::downgrade(&self.socks5_server);
 
         tokio::spawn(async move {
@@ -1199,7 +1199,7 @@ impl Instance {
                         &peer_mgr,
                         peer_packet_receiver.clone(),
                         close_notifier.clone(),
-                        #[cfg(all(feature = "leaf-policy-proxy", unix))]
+                        #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
                         policy_data_plane.clone(),
                     );
 

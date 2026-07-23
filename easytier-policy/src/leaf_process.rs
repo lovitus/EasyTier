@@ -1,6 +1,5 @@
 use std::{
     future::Future,
-    os::fd::RawFd,
     path::{Path, PathBuf},
     pin::Pin,
     process::Stdio,
@@ -11,20 +10,21 @@ use std::{
 
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
-
 use tokio::process::{Child, Command};
 
+#[cfg(unix)]
+use crate::LeafPacketBridge;
 use crate::{
-    LeafOwnedTunConfig, LeafPacketBridge, MeshServerResolver, PolicyRevision, PolicyRuntime,
+    LeafOwnedTunConfig, MeshServerResolver, PolicyRevision, PolicyRuntime,
     PolicyRuntimeBuildFuture, PolicyRuntimeFactory,
 };
 
-const LEAF_TUN_FD: RawFd = 3;
+const LEAF_TUN_FD: i32 = 3;
 const LEAF_CONFIG_VALIDATION_TIMEOUT: Duration = Duration::from_secs(30);
 static CONFIG_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static OWNED_TUN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// Allocate a bounded, process-unique Linux TUN identity for one transactional
+/// Allocate a bounded, process-unique desktop policy TUN identity for one transactional
 /// Leaf candidate. The address pool is RFC 2544 benchmarking space and does
 /// not overlap EasyTier's default 198.19.0.0/16 FakeIP pool.
 pub fn next_leaf_owned_tun_config() -> LeafOwnedTunConfig {
@@ -73,6 +73,7 @@ impl LeafProcessFactory {
 
 pub struct LeafProcessRuntime {
     revision_id: String,
+    #[cfg(unix)]
     bridge: Arc<LeafPacketBridge>,
     child: Mutex<Option<Child>>,
     config_path: PathBuf,
@@ -80,6 +81,7 @@ pub struct LeafProcessRuntime {
 }
 
 impl LeafProcessRuntime {
+    #[cfg(unix)]
     pub fn bridge(&self) -> Arc<LeafPacketBridge> {
         self.bridge.clone()
     }
@@ -136,17 +138,22 @@ impl LeafProcessRuntime {
         revision: Arc<PolicyRevision>,
         options: crate::LeafConfigOptions,
     ) -> Result<Arc<Self>, String> {
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         if options.leaf_owned_tun.is_some() {
             return Err("Leaf-owned policy TUN is currently supported only on Linux".to_owned());
         }
+        #[cfg(target_os = "windows")]
+        if options.leaf_owned_tun.is_none() {
+            return Err("Windows Leaf worker requires an explicitly owned Wintun".to_owned());
+        }
         let owned_tun = options.leaf_owned_tun.clone();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         if let Some(tun) = owned_tun.as_ref()
             && interface_index(&tun.name)?.is_some()
         {
             return Err(format!("Leaf-owned TUN {} already exists", tun.name));
         }
+        #[cfg(unix)]
         let (bridge, endpoint) = LeafPacketBridge::pair().map_err(|error| error.to_string())?;
         let tun_fd = if owned_tun.is_some() { -1 } else { LEAF_TUN_FD };
         let config = crate::compile_leaf_config_with_options(
@@ -189,6 +196,7 @@ impl LeafProcessRuntime {
             ));
         }
 
+        #[cfg(unix)]
         let endpoint_fd = if owned_tun.is_some() {
             drop(endpoint);
             None
@@ -208,12 +216,16 @@ impl LeafProcessRuntime {
         if let Some(interface) = outbound_interface {
             command.arg("-b").arg(interface);
         }
-        let parent_pid = unsafe { libc::getpid() };
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
+        let parent_pid = unsafe { libc::getpid() } as u32;
+        #[cfg(target_os = "windows")]
+        let parent_pid = std::process::id();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         command.arg("--parent-pid").arg(parent_pid.to_string());
+        #[cfg(unix)]
         unsafe {
             command.pre_exec(move || {
-                configure_parent_death(parent_pid)?;
+                configure_parent_death(parent_pid as libc::pid_t)?;
                 if let Some(endpoint_fd) = endpoint_fd {
                     if libc::dup2(endpoint_fd, LEAF_TUN_FD) < 0 {
                         return Err(std::io::Error::last_os_error());
@@ -226,6 +238,7 @@ impl LeafProcessRuntime {
             });
         }
         let child_result = command.spawn();
+        #[cfg(unix)]
         if let Some(endpoint_fd) = endpoint_fd {
             unsafe {
                 libc::close(endpoint_fd);
@@ -250,6 +263,7 @@ impl LeafProcessRuntime {
                 }
                 Ok(Arc::new(Self {
                     revision_id: revision.id.clone(),
+                    #[cfg(unix)]
                     bridge: Arc::new(bridge),
                     child: Mutex::new(Some(child)),
                     config_path,
@@ -271,7 +285,7 @@ impl LeafProcessRuntime {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         if let Some(tun) = self.owned_tun.as_ref() {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
             while interface_index(&tun.name).ok().flatten().is_some()
@@ -310,7 +324,7 @@ async fn wait_for_leaf_readiness(
             Err(error) => Err(format!("failed to inspect Leaf readiness: {error}")),
         };
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {
@@ -335,7 +349,7 @@ async fn wait_for_leaf_readiness(
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = tun;
         unreachable!()
@@ -347,6 +361,16 @@ fn interface_index(name: &str) -> Result<Option<u32>, String> {
     let name = CString::new(name).map_err(|_| "TUN name contains a NUL byte".to_owned())?;
     let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
     Ok((index != 0).then_some(index))
+}
+
+#[cfg(target_os = "windows")]
+fn interface_index(name: &str) -> Result<Option<u32>, String> {
+    let adapters = ipconfig::get_adapters()
+        .map_err(|error| format!("failed to enumerate adapters: {error}"))?;
+    Ok(adapters
+        .iter()
+        .find(|adapter| adapter.friendly_name().eq_ignore_ascii_case(name))
+        .map(ipconfig::Adapter::ipv6_if_index))
 }
 
 #[cfg(target_os = "linux")]
@@ -364,6 +388,16 @@ fn interface_is_up(name: &str) -> Result<bool, String> {
     let flags = parse_linux_interface_flags(&flags)
         .map_err(|error| format!("invalid flags for Leaf owned TUN {name}: {error}"))?;
     Ok(flags & libc::IFF_UP as u32 != 0)
+}
+
+#[cfg(target_os = "windows")]
+fn interface_is_up(name: &str) -> Result<bool, String> {
+    let adapters = ipconfig::get_adapters()
+        .map_err(|error| format!("failed to enumerate adapters: {error}"))?;
+    Ok(adapters.iter().any(|adapter| {
+        adapter.friendly_name().eq_ignore_ascii_case(name)
+            && adapter.oper_status() == ipconfig::OperStatus::IfOperStatusUp
+    }))
 }
 
 #[cfg(target_os = "linux")]
@@ -418,7 +452,7 @@ fn configure_parent_death(parent_pid: libc::pid_t) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn configure_parent_death(_parent_pid: libc::pid_t) -> std::io::Result<()> {
     Ok(())
 }
@@ -576,12 +610,25 @@ impl PolicyRuntimeFactory for LeafProcessFactory {
     }
 }
 
+#[cfg(unix)]
 fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt as _};
 
     let mut options = OpenOptions::new();
     options.write(true).create_new(true).mode(0o600);
     let mut file = options.open(path)?;
+    std::io::Write::write_all(&mut file, contents)?;
+    file.sync_all()
+}
+
+#[cfg(windows)]
+fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+
+    // Windows user temp directories inherit an ACL restricted to that user,
+    // administrators, and SYSTEM. create_new additionally prevents replacement
+    // or following a pre-created path.
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     std::io::Write::write_all(&mut file, contents)?;
     file.sync_all()
 }
@@ -594,7 +641,7 @@ fn remove_private_config(path: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::{fs, os::unix::fs::PermissionsExt as _, time::Instant};
 

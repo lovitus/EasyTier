@@ -122,7 +122,8 @@ struct Cli {
         feature = "leaf-policy-proxy",
         any(
             target_os = "linux",
-            all(target_os = "macos", not(feature = "macos-ne"))
+            all(target_os = "macos", not(feature = "macos-ne")),
+            all(feature = "leaf-policy-windows", target_os = "windows")
         )
     ))]
     #[arg(long, env = "ET_POLICY_PROXY_CONFIG")]
@@ -132,7 +133,8 @@ struct Cli {
         feature = "leaf-policy-proxy",
         any(
             target_os = "linux",
-            all(target_os = "macos", not(feature = "macos-ne"))
+            all(target_os = "macos", not(feature = "macos-ne")),
+            all(feature = "leaf-policy-windows", target_os = "windows")
         )
     ))]
     #[arg(
@@ -146,7 +148,8 @@ struct Cli {
         feature = "leaf-policy-proxy",
         any(
             target_os = "linux",
-            all(target_os = "macos", not(feature = "macos-ne"))
+            all(target_os = "macos", not(feature = "macos-ne")),
+            all(feature = "leaf-policy-windows", target_os = "windows")
         )
     ))]
     #[arg(long, env = "ET_POLICY_OUTBOUND_INTERFACE")]
@@ -156,7 +159,8 @@ struct Cli {
         feature = "leaf-policy-proxy",
         any(
             target_os = "linux",
-            all(target_os = "macos", not(feature = "macos-ne"))
+            all(target_os = "macos", not(feature = "macos-ne")),
+            all(feature = "leaf-policy-windows", target_os = "windows")
         )
     ))]
     #[arg(
@@ -1546,15 +1550,18 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     let mut cli = cli;
     #[cfg(all(
         feature = "leaf-policy-proxy",
-        target_os = "macos",
-        not(feature = "macos-ne")
+        any(
+            all(target_os = "macos", not(feature = "macos-ne")),
+            all(feature = "leaf-policy-windows", target_os = "windows")
+        )
     ))]
     let cli = cli;
     #[cfg(all(
         feature = "leaf-policy-proxy",
         any(
             target_os = "linux",
-            all(target_os = "macos", not(feature = "macos-ne"))
+            all(target_os = "macos", not(feature = "macos-ne")),
+            all(feature = "leaf-policy-windows", target_os = "windows")
         )
     ))]
     if let Some(policy_file) = cli.policy_config.clone() {
@@ -1884,7 +1891,8 @@ async fn validate_config(cli: &Cli) -> anyhow::Result<()> {
                 feature = "leaf-policy-proxy",
                 any(
                     target_os = "linux",
-                    all(target_os = "macos", not(feature = "macos-ne"))
+                    all(target_os = "macos", not(feature = "macos-ne")),
+                    all(feature = "leaf-policy-windows", target_os = "windows")
                 )
             ))]
             crate::policy_proxy::configured_for(&_config)?;
@@ -1895,7 +1903,8 @@ async fn validate_config(cli: &Cli) -> anyhow::Result<()> {
         feature = "leaf-policy-proxy",
         any(
             target_os = "linux",
-            all(target_os = "macos", not(feature = "macos-ne"))
+            all(target_os = "macos", not(feature = "macos-ne")),
+            all(feature = "leaf-policy-windows", target_os = "windows")
         )
     ))]
     if let Some(policy_file) = cli.policy_config.as_deref() {

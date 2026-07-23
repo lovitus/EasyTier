@@ -154,7 +154,8 @@ impl NetworkInstanceManager {
                     target_os = "macos",
                     not(feature = "macos-ne")
                 ),
-                all(feature = "leaf-policy-mobile", target_os = "android")
+                all(feature = "leaf-policy-mobile", target_os = "android"),
+                all(feature = "leaf-policy-windows", target_os = "windows")
             ))
         {
             anyhow::bail!("policy_proxy is enabled but this build has no supported policy runtime");

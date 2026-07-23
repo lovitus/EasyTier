@@ -7,7 +7,7 @@ use std::{
     task::{Context, Poll},
 };
 
-#[cfg(all(feature = "leaf-policy-proxy", unix))]
+#[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
 use std::{collections::BTreeMap, net::SocketAddr};
 
 #[cfg(all(feature = "leaf-policy-proxy", unix))]
@@ -60,16 +60,19 @@ use zerocopy::{NativeEndian, NetworkEndian};
 #[cfg(target_os = "windows")]
 use crate::common::ifcfg::RegistryManager;
 
-#[cfg(all(feature = "leaf-policy-proxy", unix))]
+#[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
 use crate::gateway::socks5::Socks5Server;
 
-#[cfg(all(
-    feature = "leaf-policy-proxy",
-    any(
-        target_os = "linux",
-        all(target_os = "macos", not(feature = "macos-ne"))
-    )
-))]
+#[cfg(all(any(
+    all(
+        feature = "leaf-policy-proxy",
+        any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "macos-ne"))
+        )
+    ),
+    all(feature = "leaf-policy-windows", target_os = "windows")
+)))]
 use easytier_policy::LeafProcessRuntime;
 #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
 use easytier_policy::{InProcessLeafFactory, InProcessLeafRuntime};
@@ -110,6 +113,14 @@ struct PolicyActiveRuntime {
         all(target_os = "macos", not(feature = "macos-ne"))
     ))]
     leaf_tun_interface: Option<String>,
+}
+
+#[cfg(all(feature = "leaf-policy-windows", target_os = "windows"))]
+struct WindowsPolicyContext {
+    runtime: Arc<LeafProcessRuntime>,
+    mesh_bridges: Arc<crate::policy_proxy::MeshProxyBridgeSet>,
+    leaf_tun: easytier_policy::LeafOwnedTunConfig,
+    _lease: crate::policy_proxy::PolicyInstanceLease,
 }
 
 #[cfg(all(feature = "leaf-policy-proxy", unix))]
@@ -211,7 +222,7 @@ impl PolicyDnsMonitor {
     }
 }
 
-#[cfg(all(feature = "leaf-policy-proxy", unix))]
+#[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
 fn ensure_policy_mesh_credentials_confidential(
     global_ctx: &ArcGlobalCtx,
     revision: &easytier_policy::PolicyRevision,
@@ -1222,7 +1233,9 @@ pub struct NicCtx {
 
     #[cfg(all(feature = "leaf-policy-proxy", unix))]
     policy: Option<PolicyNicContext>,
-    #[cfg(all(feature = "leaf-policy-proxy", unix))]
+    #[cfg(all(feature = "leaf-policy-windows", target_os = "windows"))]
+    windows_policy: Option<WindowsPolicyContext>,
+    #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
     policy_data_plane: Weak<Socks5Server>,
     #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
     mobile_network_updates: tokio::sync::watch::Receiver<crate::launcher::MobileNetworkState>,
@@ -1245,6 +1258,10 @@ impl NicCtx {
                 .as_ref()
                 .is_some_and(|active| active.runtime.is_running());
         }
+        #[cfg(all(feature = "leaf-policy-windows", target_os = "windows"))]
+        if let Some(policy) = self.windows_policy.as_ref() {
+            return policy.runtime.is_running();
+        }
         false
     }
 
@@ -1258,6 +1275,33 @@ impl NicCtx {
             stop_policy_active_runtime(&policy.active, &policy.bridge, &policy.bridge_updates)
                 .await;
         }
+        #[cfg(all(feature = "leaf-policy-windows", target_os = "windows"))]
+        if let Some(policy) = self.windows_policy.take() {
+            policy.mesh_bridges.disable_all();
+            policy.runtime.stop().await;
+            let ifcfg = self.nic.lock().await.get_ifcfg();
+            if let Err(error) = ifcfg
+                .remove_ipv4_route_with_gateway(
+                    &policy.leaf_tun.name,
+                    Ipv4Addr::UNSPECIFIED,
+                    0,
+                    policy
+                        .leaf_tun
+                        .gateway
+                        .parse()
+                        .expect("allocated policy gateway is valid"),
+                )
+                .await
+            {
+                tracing::debug!(?error, "Windows policy IPv4 route was already removed");
+            }
+            if let Err(error) = ifcfg
+                .remove_ipv6_route(&policy.leaf_tun.name, Ipv6Addr::UNSPECIFIED, 0)
+                .await
+            {
+                tracing::debug!(?error, "Windows policy IPv6 route was already removed");
+            }
+        }
     }
 
     pub fn new(
@@ -1265,7 +1309,9 @@ impl NicCtx {
         peer_manager: &Arc<PeerManager>,
         peer_packet_receiver: Arc<Mutex<PacketRecvChanReceiver>>,
         close_notifier: Arc<Notify>,
-        #[cfg(all(feature = "leaf-policy-proxy", unix))] policy_data_plane: Weak<Socks5Server>,
+        #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))] policy_data_plane: Weak<
+            Socks5Server,
+        >,
         #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
         mobile_network_updates: tokio::sync::watch::Receiver<
             crate::launcher::MobileNetworkState,
@@ -1283,7 +1329,9 @@ impl NicCtx {
 
             #[cfg(all(feature = "leaf-policy-proxy", unix))]
             policy: None,
-            #[cfg(all(feature = "leaf-policy-proxy", unix))]
+            #[cfg(all(feature = "leaf-policy-windows", target_os = "windows"))]
+            windows_policy: None,
+            #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
             policy_data_plane,
             #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
             mobile_network_updates,
@@ -2800,6 +2848,147 @@ impl NicCtx {
         });
     }
 
+    #[cfg(all(feature = "leaf-policy-windows", target_os = "windows"))]
+    async fn start_policy_proxy_windows(
+        &mut self,
+        config: crate::policy_proxy::PolicyProcessConfig,
+        lease: crate::policy_proxy::PolicyInstanceLease,
+    ) -> Result<(), Error> {
+        if !self.global_ctx.get_flags().bind_device {
+            return Err(anyhow::anyhow!(
+                "Windows policy mode requires EasyTier bind_device=true to prevent underlay recursion"
+            )
+            .into());
+        }
+        let easytier_interface = self.nic.lock().await.ifname().to_owned();
+        if easytier_interface.eq_ignore_ascii_case(&config.outbound_interface) {
+            return Err(anyhow::anyhow!(
+                "policy outbound interface cannot be the EasyTier virtual NIC"
+            )
+            .into());
+        }
+        let underlay = easytier_policy::windows_underlay(&config.outbound_interface)
+            .map_err(anyhow::Error::msg)?;
+        let dns_servers = underlay.dns_servers.clone();
+        let document = crate::policy_proxy::ResolvedPolicyDocument {
+            revision: config.revision.clone(),
+            source_label: config.source_label.clone(),
+            base_dir: config.base_dir.clone(),
+        };
+        ensure_policy_mesh_credentials_confidential(&self.global_ctx, &document.revision)?;
+        let data_plane = self
+            .policy_data_plane
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("policy data plane is not available"))?;
+        let peer_mgr = self
+            .peer_mgr
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("peer manager not available"))?;
+        let routes = peer_mgr.list_routes().await;
+        let mesh_endpoints = Self::resolve_policy_mesh_endpoints(
+            &document.revision,
+            peer_mgr.my_peer_id(),
+            &routes,
+        )?;
+        let mesh_bridges = Arc::new(
+            crate::policy_proxy::MeshProxyBridgeSet::start(
+                data_plane,
+                peer_mgr,
+                &document.revision,
+                &mesh_endpoints,
+            )
+            .await?,
+        );
+        let leaf_tun = easytier_policy::next_leaf_owned_tun_config();
+        let leaf_tun_interface = leaf_tun.name.clone();
+        let runtime = match LeafProcessRuntime::start_with_dns_servers_and_options(
+            &config.leaf_executable,
+            &document.base_dir,
+            Some(&config.outbound_interface),
+            mesh_bridges.as_ref(),
+            &dns_servers,
+            document.revision.clone(),
+            easytier_policy::LeafConfigOptions {
+                fake_dns_ipv6: self.global_ctx.get_flags().enable_ipv6,
+                leaf_owned_tun: Some(leaf_tun.clone()),
+            },
+        )
+        .await
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                mesh_bridges.disable_all();
+                return Err(anyhow::Error::msg(error).into());
+            }
+        };
+
+        let ifcfg = self.nic.lock().await.get_ifcfg();
+        if let Err(error) = ifcfg.wait_interface_show(&leaf_tun_interface).await {
+            mesh_bridges.disable_all();
+            runtime.stop().await;
+            return Err(error);
+        }
+        if self.global_ctx.get_flags().enable_ipv6
+            && let Err(error) = ifcfg
+                .add_ipv6_route(&leaf_tun_interface, Ipv6Addr::UNSPECIFIED, 0, Some(0))
+                .await
+        {
+            mesh_bridges.disable_all();
+            runtime.stop().await;
+            return Err(error);
+        }
+
+        let monitored_runtime = runtime.clone();
+        let close_notifier = self.close_notifier.clone();
+        let outbound_interface = config.outbound_interface.clone();
+        let underlay_signature = underlay.signature;
+        self.tasks.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if !monitored_runtime.is_running() {
+                    tracing::error!(
+                        "Windows policy runtime exited; stopping the instance instead of bypassing policy"
+                    );
+                    close_notifier.notify_one();
+                    break;
+                }
+                match easytier_policy::windows_underlay(&outbound_interface) {
+                    Ok(current) if current.signature == underlay_signature => {}
+                    Ok(_) => {
+                        tracing::info!(
+                            %outbound_interface,
+                            "Windows policy underlay changed; rebuilding the instance and Leaf worker"
+                        );
+                        close_notifier.notify_one();
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %outbound_interface,
+                            %error,
+                            "Windows policy underlay is unavailable; rebuilding fail-closed"
+                        );
+                        close_notifier.notify_one();
+                        break;
+                    }
+                }
+            }
+        });
+        self.windows_policy = Some(WindowsPolicyContext {
+            runtime,
+            mesh_bridges,
+            leaf_tun,
+            _lease: lease,
+        });
+        tracing::info!(
+            revision = %document.revision.id,
+            policy_source = %document.source_label,
+            outbound_interface = %config.outbound_interface,
+            "Windows transparent policy proxy is ready"
+        );
+        Ok(())
+    }
+
     #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
     async fn start_policy_proxy_mobile(
         &mut self,
@@ -3156,7 +3345,7 @@ impl NicCtx {
         });
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", unix))]
+    #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
     fn resolve_policy_mesh_endpoints(
         revision: &easytier_policy::PolicyRevision,
         self_peer_id: u32,
@@ -3322,6 +3511,15 @@ impl NicCtx {
         } else {
             None
         };
+        #[cfg(all(feature = "leaf-policy-windows", target_os = "windows"))]
+        let windows_policy_config =
+            crate::policy_proxy::configured_for(self.global_ctx.config.as_ref())?;
+        #[cfg(all(feature = "leaf-policy-windows", target_os = "windows"))]
+        let windows_policy_lease = if windows_policy_config.is_some() {
+            Some(crate::policy_proxy::acquire_instance()?)
+        } else {
+            None
+        };
         #[cfg(all(
             feature = "leaf-policy-proxy",
             any(
@@ -3330,12 +3528,17 @@ impl NicCtx {
             )
         ))]
         let policy_owns_default_route = policy_lease.is_some();
-        #[cfg(not(all(
-            feature = "leaf-policy-proxy",
-            any(
-                target_os = "linux",
-                all(target_os = "macos", not(feature = "macos-ne"))
-            )
+        #[cfg(all(feature = "leaf-policy-windows", target_os = "windows"))]
+        let policy_owns_default_route = windows_policy_lease.is_some();
+        #[cfg(not(any(
+            all(
+                feature = "leaf-policy-proxy",
+                any(
+                    target_os = "linux",
+                    all(target_os = "macos", not(feature = "macos-ne"))
+                )
+            ),
+            all(feature = "leaf-policy-windows", target_os = "windows")
         )))]
         let policy_owns_default_route = false;
 
@@ -3357,6 +3560,13 @@ impl NicCtx {
             self.start_policy_proxy(ipv4_addr, ipv6_addr, policy_config.clone(), policy_lease)
                 .await?;
             self.run_policy_route_updater(ipv4_addr, ipv6_addr, policy_config);
+        }
+        #[cfg(all(feature = "leaf-policy-windows", target_os = "windows"))]
+        if let (Some(policy_config), Some(policy_lease)) =
+            (windows_policy_config, windows_policy_lease)
+        {
+            self.start_policy_proxy_windows(policy_config, policy_lease)
+                .await?;
         }
 
         let mut nic = self.nic.lock().await;

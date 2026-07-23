@@ -17,6 +17,11 @@ use crate::common::config::{ConfigLoader, PolicyProxyConfig};
 
 #[cfg(all(target_os = "macos", not(feature = "macos-ne")))]
 mod macos_routing;
+// Keep the Darwin route parser/argument model covered by the mandatory Linux
+// preflight without exposing or selecting the macOS runtime implementation.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "policy_proxy/macos_routing.rs"]
+mod macos_routing_tests;
 mod mesh_socks_bridge;
 mod mesh_udp_relay;
 #[cfg(target_os = "linux")]
@@ -288,19 +293,22 @@ fn resolve_process_inputs(
 
 fn resolve_executable(executable: &Path) -> anyhow::Result<PathBuf> {
     if executable.components().count() > 1 || executable.is_absolute() {
+        if let Some(candidate) = existing_executable(executable) {
+            return Ok(candidate);
+        }
         require_regular_file(executable, "Leaf executable")?;
         return Ok(executable.to_owned());
     }
     if let Some(directory) = std::env::current_exe()?.parent() {
         let candidate = directory.join(executable);
-        if candidate.is_file() {
+        if let Some(candidate) = existing_executable(&candidate) {
             return Ok(candidate);
         }
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
     for directory in std::env::split_paths(&path) {
         let candidate = directory.join(executable);
-        if candidate.is_file() {
+        if let Some(candidate) = existing_executable(&candidate) {
             return Ok(candidate);
         }
     }
@@ -308,6 +316,20 @@ fn resolve_executable(executable: &Path) -> anyhow::Result<PathBuf> {
         "Leaf executable {} was not found in PATH",
         executable.display()
     )
+}
+
+fn existing_executable(candidate: &Path) -> Option<PathBuf> {
+    if candidate.is_file() {
+        return Some(candidate.to_owned());
+    }
+    #[cfg(windows)]
+    if candidate.extension().is_none() {
+        let candidate = candidate.with_extension("exe");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 pub fn configured_for(config: &dyn ConfigLoader) -> anyhow::Result<Option<PolicyProcessConfig>> {

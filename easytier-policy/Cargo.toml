@@ -36,9 +36,16 @@ url = "2"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[target.'cfg(unix)'.dependencies.leaf]
+[target.'cfg(windows)'.dependencies]
+ipconfig = "0.3.2"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(any(unix, windows))'.dependencies.leaf]
 git = "https://github.com/lovitus/leaf.git"
-rev = "013a1497dd29355a00cd776628ff2de72e02e861"
+rev = "e73ec228883965850f6bfbb339e64fd8fe86ef1f"
 optional = true
 default-features = false
 features = [

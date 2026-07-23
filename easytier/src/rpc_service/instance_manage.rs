@@ -36,7 +36,7 @@ pub struct InstanceManageRpcService {
     remote_mutation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
-#[cfg(all(feature = "leaf-policy-proxy", unix))]
+#[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
 fn validate_policy_config(
     config: &dyn ConfigLoader,
 ) -> anyhow::Result<Vec<PolicyConfigDiagnostic>> {
@@ -65,7 +65,7 @@ fn validate_policy_config(
     )
 }
 
-#[cfg(not(all(feature = "leaf-policy-proxy", unix)))]
+#[cfg(not(all(feature = "leaf-policy-proxy", any(unix, windows))))]
 fn validate_policy_config(
     config: &dyn ConfigLoader,
 ) -> anyhow::Result<Vec<PolicyConfigDiagnostic>> {
@@ -358,7 +358,8 @@ impl WebClientService for InstanceManageRpcService {
             feature = "leaf-policy-proxy",
             any(
                 target_os = "linux",
-                all(target_os = "macos", not(feature = "macos-ne"))
+                all(target_os = "macos", not(feature = "macos-ne")),
+                all(feature = "leaf-policy-windows", target_os = "windows")
             )
         ));
         let supported =

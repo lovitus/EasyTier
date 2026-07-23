@@ -436,7 +436,7 @@ describe('RemoteManagement config save', () => {
     }
   })
 
-  it('keeps policy controls read-only while the network is running', async () => {
+  it('opens policy YAML read-only while the network is running', async () => {
     const config = {
       ...DEFAULT_NETWORK_CONFIG(),
       instance_id: INSTANCE_ID,
@@ -477,18 +477,23 @@ describe('RemoteManagement config save', () => {
       await settleRemoteManagement()
 
       const toggle = wrapper.get('[data-testid="policy-home-toggle"]')
-      const editYaml = wrapper.get('[data-testid="policy-home-edit-yaml"]')
+      const viewYaml = wrapper.get('[data-testid="policy-home-edit-yaml"]')
       expect(toggle.attributes('disabled')).toBeDefined()
-      expect(editYaml.attributes('disabled')).toBeDefined()
+      expect(viewYaml.attributes('disabled')).toBeUndefined()
+      expect(viewYaml.attributes('data-label')).toBe('web.device_management.view_policy_yaml')
       expect(wrapper.get('[data-testid="policy-runtime-status"]').attributes('data-value'))
         .toBe('web.device_management.policy_runtime_running')
 
       await toggle.setValue(false)
-      await editYaml.trigger('click')
+      await viewYaml.trigger('click')
       await settleAsync()
 
       expect(api.save_config).not.toHaveBeenCalled()
-      expect(wrapper.findComponent({ name: 'PolicyEditor' }).exists()).toBe(false)
+      const editor = wrapper.findComponent({ name: 'PolicyEditor' })
+      expect(editor.exists()).toBe(true)
+      expect(editor.props('yamlOnly')).toBe(true)
+      expect(editor.props('readOnly')).toBe(true)
+      expect(wrapper.find('[data-testid="policy-yaml-save"]').exists()).toBe(false)
     } finally {
       wrapper.unmount()
     }
@@ -537,6 +542,9 @@ describe('RemoteManagement config save', () => {
       const editor = wrapper.findComponent({ name: 'PolicyEditor' })
       expect(editor.exists()).toBe(true)
       expect(editor.props('yamlOnly')).toBe(true)
+      expect(editor.props('readOnly')).toBe(false)
+      expect(wrapper.get('[data-testid="policy-home-edit-yaml"]').attributes('data-label'))
+        .toBe('web.device_management.edit_policy_yaml')
       editor.vm.$emit('update:modelValue', {
         ...cloneConfig(config),
         policy_config_inline: 'version: 1\nrules:\n  - FINAL,REJECT\n',

@@ -418,6 +418,10 @@ leaf-policy-mobile = [
     "easytier-policy/leaf-inprocess",
     "easytier-socks-egress/hev-inprocess",
 ]
+leaf-policy-windows = [
+    "leaf-policy-proxy",
+    "easytier-policy/leaf-worker",
+]
 jemalloc = ["dep:jemallocator", "dep:jemalloc-sys"]
 jemalloc-prof = [
     "jemalloc",

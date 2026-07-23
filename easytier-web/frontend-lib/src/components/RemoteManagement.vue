@@ -231,6 +231,9 @@ const networkIsDisabled = computed(() => {
     }
     return listInstanceIdResponse.value?.disabled_inst_ids.map(Utils.UuidToStr).includes(selectedInstanceId.value?.uuid);
 });
+const policyYamlReadOnly = computed(() =>
+    !networkIsDisabled.value || !currentNetworkControl.editable.value
+);
 watch(networkIsDisabled, async (newVal, oldVal) => {
     if (newVal !== oldVal && newVal === true) {
         await loadCurrentNetworkConfig();
@@ -445,8 +448,8 @@ const setPolicyRoutingEnabled = async (enabled: boolean) => {
     await savePolicyConfig(config);
 }
 
-const editPolicyYaml = () => {
-    if (!networkIsDisabled.value || !currentNetworkConfig.value || !currentNetworkControl.editable.value) {
+const openPolicyYaml = () => {
+    if (!currentNetworkConfig.value) {
         return;
     }
     policyConfigDraft.value = cloneNetworkConfig(currentNetworkConfig.value);
@@ -454,7 +457,7 @@ const editPolicyYaml = () => {
 }
 
 const savePolicyYaml = async () => {
-    if (!networkIsDisabled.value || !policyConfigDraft.value) {
+    if (policyYamlReadOnly.value || !policyConfigDraft.value) {
         return;
     }
     if (await savePolicyConfig(cloneNetworkConfig(policyConfigDraft.value))) {
@@ -932,10 +935,12 @@ onUnmounted(() => {
                         ? 'web.device_management.policy_runtime_running'
                         : 'web.device_management.policy_runtime_stopped')"
                     data-testid="policy-runtime-status" />
-                <Button icon="pi pi-file-edit" severity="secondary" size="small"
-                    :label="t('web.device_management.edit_policy_yaml')"
-                    :disabled="!networkIsDisabled || !currentNetworkConfig || !currentNetworkControl.editable.value || policyConfigSaving"
-                    data-testid="policy-home-edit-yaml" @click="editPolicyYaml" />
+                <Button :icon="policyYamlReadOnly ? 'pi pi-eye' : 'pi pi-file-edit'" severity="secondary" size="small"
+                    :label="t(policyYamlReadOnly
+                        ? 'web.device_management.view_policy_yaml'
+                        : 'web.device_management.edit_policy_yaml')"
+                    :disabled="!currentNetworkConfig || policyConfigSaving"
+                    data-testid="policy-home-edit-yaml" @click="openPolicyYaml" />
             </div>
         </div>
 
@@ -1016,13 +1021,19 @@ onUnmounted(() => {
         <ConfigEditDialog v-model:visible="showConfigEditDialog" :cur-network="currentNetworkConfig"
             :generate-config="generateConfig" :save-config="syncTomlConfig" />
 
-        <Dialog v-model:visible="showPolicyYamlDialog" modal :header="t('web.device_management.edit_policy_yaml')"
+        <Dialog v-model:visible="showPolicyYamlDialog" modal
+            :header="t(policyYamlReadOnly
+                ? 'web.device_management.view_policy_yaml'
+                : 'web.device_management.edit_policy_yaml')"
             class="w-[min(52rem,95vw)]" data-testid="policy-yaml-dialog">
-            <PolicyEditor v-if="policyConfigDraft" v-model="policyConfigDraft" :api="props.api" yaml-only />
+            <PolicyEditor v-if="policyConfigDraft" v-model="policyConfigDraft" :api="props.api"
+                yaml-only :read-only="policyYamlReadOnly" />
             <template #footer>
-                <Button :label="t('web.common.cancel')" severity="secondary" text
+                <Button :label="t(policyYamlReadOnly ? 'web.common.close' : 'web.common.cancel')"
+                    severity="secondary" text
                     :disabled="policyConfigSaving" @click="showPolicyYamlDialog = false" />
-                <Button :label="t('web.common.save')" icon="pi pi-save" :loading="policyConfigSaving"
+                <Button v-if="!policyYamlReadOnly" :label="t('web.common.save')" icon="pi pi-save"
+                    :loading="policyConfigSaving"
                     data-testid="policy-yaml-save" @click="savePolicyYaml" />
             </template>
         </Dialog>

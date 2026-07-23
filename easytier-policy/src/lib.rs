@@ -9,7 +9,7 @@ mod geodata;
 #[cfg(all(unix, feature = "leaf-inprocess"))]
 mod inprocess;
 mod leaf_config;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod leaf_process;
 mod packet;
 mod preflight;
@@ -19,6 +19,8 @@ mod supervisor;
 mod trojan;
 mod vless;
 mod vmess;
+#[cfg(windows)]
+mod windows;
 
 pub use config::{
     ChainKind, DEFAULT_FAKE_DNS_IPV4_RANGE, DEFAULT_FAKE_DNS_IPV6_RANGE, PolicyDns, PolicyDocument,
@@ -36,7 +38,7 @@ pub use leaf_config::{
     LeafConfigError, LeafConfigOptions, LeafOwnedTunConfig, MeshServerResolver, ResolvedMeshServer,
     compile_leaf_config, compile_leaf_config_with_options,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use leaf_process::{
     LeafProcessFactory, LeafProcessRuntime, next_leaf_owned_tun_config, system_dns_servers,
 };
@@ -52,3 +54,5 @@ pub use supervisor::{
     PolicyStatus, PolicySupervisor, RetryDecision, RetryPolicy, RuntimeRestartBudget,
     RuntimeRestartDecision,
 };
+#[cfg(windows)]
+pub use windows::{WindowsUnderlay, windows_underlay};

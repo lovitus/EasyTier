@@ -587,7 +587,8 @@ impl PolicyProxyConfig {
                 target_os = "macos",
                 not(feature = "macos-ne")
             ),
-            all(feature = "leaf-policy-mobile", target_os = "android")
+            all(feature = "leaf-policy-mobile", target_os = "android"),
+            all(feature = "leaf-policy-windows", target_os = "windows")
         ))
     }
 
@@ -2984,7 +2985,8 @@ config_inline = "version: 1\nrules: [FINAL,DIRECT]"
             target_os = "macos",
             not(feature = "macos-ne")
         ),
-        all(feature = "leaf-policy-mobile", target_os = "android")
+        all(feature = "leaf-policy-mobile", target_os = "android"),
+        all(feature = "leaf-policy-windows", target_os = "windows")
     )))]
     #[test]
     fn policy_proxy_enabled_rejects_build_without_runtime() {

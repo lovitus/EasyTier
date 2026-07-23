@@ -1445,7 +1445,8 @@ mod tests {
             target_os = "macos",
             not(feature = "macos-ne")
         ),
-        all(feature = "leaf-policy-mobile", target_os = "android")
+        all(feature = "leaf-policy-mobile", target_os = "android"),
+        all(feature = "leaf-policy-windows", target_os = "windows")
     )))]
     #[test]
     fn network_config_rejects_enabled_policy_proxy_without_runtime() {

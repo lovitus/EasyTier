@@ -227,6 +227,7 @@ policy:
     runtime_linux_supported: Linux policy proxy is supported and included in first-release device validation.
     runtime_android_experimental: Android policy proxy is experimental first-release support. VpnService owns the runtime path; validate it with real network changes and application traffic.
     runtime_macos_partial: macOS currently has partial policy configuration support. The runtime capability reported by this build determines whether it can be enabled; transparent policy routing is not a first-release commitment.
+    runtime_windows_supported: Windows policy proxy is available through the bundled Leaf worker and Wintun runtime.
     runtime_windows_unsupported: Transparent policy routing is not currently supported on Windows. The configuration remains visible but cannot be enabled in this build.
     runtime_supported: "This {platform} build reports an available policy runtime, but it is not covered by the complete first-release validation matrix."
     runtime_unsupported: "This {platform} build has no policy runtime. The configuration remains visible but cannot be enabled."
@@ -499,6 +500,7 @@ web:
     save_config: Save Config
     config_saved: Config Saved
     edit_policy_yaml: Edit Policy YAML
+    view_policy_yaml: View Policy YAML
     policy_saved_restart_required: Policy configuration saved; restart this network to apply it
     policy_save_failed: Failed to save policy configuration
     policy_runtime_running: Leaf Running
@@ -526,6 +528,7 @@ web:
   common:
     confirm: Confirm
     cancel: Cancel
+    close: Close
     save: Save
     delete: Delete
     edit: Edit

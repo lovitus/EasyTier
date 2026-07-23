@@ -1,24 +1,74 @@
 # EasyTier
 
-[![Github release](https://img.shields.io/github/v/tag/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/releases)
-[![GitHub](https://img.shields.io/github/license/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
-[![GitHub last commit](https://img.shields.io/github/last-commit/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/commits/main)
-[![GitHub issues](https://img.shields.io/github/issues/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/issues)
-[![GitHub Core Actions](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml)
-[![GitHub GUI Actions](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml)
-[![GitHub Test Actions](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml)
+[![Github release](https://img.shields.io/github/v/tag/lovitus/EasyTier)](https://github.com/lovitus/EasyTier/releases)
+[![GitHub](https://img.shields.io/github/license/lovitus/EasyTier)](LICENSE)
+[![GitHub last commit](https://img.shields.io/github/last-commit/lovitus/EasyTier)](https://github.com/lovitus/EasyTier/commits/main)
+[![GitHub issues](https://img.shields.io/github/issues/lovitus/EasyTier)](https://github.com/lovitus/EasyTier/issues)
+[![GitHub Core Actions](https://github.com/lovitus/EasyTier/actions/workflows/core.yml/badge.svg)](https://github.com/lovitus/EasyTier/actions/workflows/core.yml)
+[![GitHub GUI Actions](https://github.com/lovitus/EasyTier/actions/workflows/gui.yml/badge.svg)](https://github.com/lovitus/EasyTier/actions/workflows/gui.yml)
+[![GitHub Test Actions](https://github.com/lovitus/EasyTier/actions/workflows/test.yml/badge.svg)](https://github.com/lovitus/EasyTier/actions/workflows/test.yml)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/EasyTier/EasyTier)
 
-[简体中文](/README_CN.md) | [English](/README.md)
+[简体中文](README_CN.md) | [English](README.md)
 
-> ✨ 一个由 Rust 和 Tokio 驱动的简单、安全、去中心化的异地组网方案
+> ✨ 基于上游 EasyTier 的增强 fork：保留去中心化 mesh 组网，并增加策略路由、可选
+> peer 出口、Stealth 和实验性传输能力。
 
 <p align="center">
 <img src="assets/config-page.png" width="300" alt="配置页面">
 <img src="assets/running-page.png" width="300" alt="运行页面">
 </p>
 
-📚 **[完整文档](https://easytier.cn)** | 🖥️ **[Web 控制台](https://easytier.cn/web)** | 📝 **[下载发布版本](https://github.com/EasyTier/EasyTier/releases)** | 🧩 **[第三方工具](https://easytier.cn/guide/installation_gui.html#%E7%AC%AC%E4%B8%89%E6%96%B9%E5%9B%BE%E5%BD%A2%E7%95%8C%E9%9D%A2)** | ❤️ **[赞助](#赞助)**
+📚 **[上游基础文档](https://easytier.cn)** | 🖥️ **[Web 控制台](https://easytier.cn/web)** | 📝 **[下载本 Fork](https://github.com/lovitus/EasyTier/releases)** | 🍃 **[Leaf 使用指南](easytier/docs/leaf_policy_proxy_cn.md)** | ❤️ **[赞助](#赞助)**
+
+> [!IMPORTANT]
+> 本仓库的 Leaf/HEV、Stealth 扩展和 `quic-brutal` 等能力只存在于本 fork。
+> 上游 `EasyTier/EasyTier` 的安装脚本、Homebrew 包和 Release 不包含这些增量。
+> 需要 fork 功能时，请只使用
+> [`lovitus/EasyTier` 的正式 Release](https://github.com/lovitus/EasyTier/releases)；
+> `EasyTier Profiling Beta` 是诊断制品，不是生产发布。
+
+## 本 Fork 能做什么
+
+基础 EasyTier mesh 仍保持原来的跨平台用途。fork 新增的 Leaf 策略层可以按首条匹配
+规则执行 DIRECT/REJECT、域名与 IP 分流、GeoSite/GeoIP、FakeDNS，以及
+SOCKS5、Shadowsocks/UoT、Trojan、VMess、VLESS、chain 和 fallback。通过端口省略的
+`via: mesh`，可以把**具备 Leaf/HEV 能力的 EasyTier peer**选作 TCP/UDP 出口；目标
+peer 不需要另外启动 SOCKS 服务，HEV 会在第一次被选中时按需启动。
+
+### 功能和平台进度
+
+| 能力 | 当前状态 | 平台和边界 |
+| --- | --- | --- |
+| 基础 mesh、NAT 穿透、子网代理、WireGuard | 稳定，继承上游 | Windows、macOS、Linux、FreeBSD、Android 等上游支持平台 |
+| Leaf 策略路由 v1 | 已实现并完成正式实机验证 | Linux x86_64/aarch64、Android |
+| 托管 HEV peer 出口 | 已实现并完成正式实机验证 | Linux x86_64/aarch64、Android；仅能选择具备相同能力的 peer，按需启动而非常驻 |
+| macOS Leaf/托管 HEV | 预发布完善中 | x86_64/aarch64 已有代码和打包路径，但在完成精确制品实机验证并进入正式 Release 前不声明正式支持 |
+| Windows Leaf 策略路由 | 预发布候选 | x86_64/i686/ARM64 的 Core 与 GUI 构建路径均包含 Leaf worker 和 Wintun；精确安装制品完成 Windows 实机验证前不声明正式支持 |
+| FreeBSD、其他 Linux 架构、iOS/OHOS Leaf；Windows 托管 HEV | 尚未支持 | 仍可使用基础 mesh，但不能使用表中所列的 Leaf/HEV 路径 |
+| 多传输 Stealth 与传输优先级 | 已发布 | 使用前必须阅读[兼容性说明](easytier/docs/udp_stealth_compatibility.md) |
+| `quic-brutal` | 实验性、必须显式启用 | EasyTier 私有 overlay，不兼容 Hysteria2；不同链路不保证都比普通 QUIC BBR 更快 |
+
+Leaf 使用的是 EasyTier 定义并严格校验的配置子集，不是 Mihomo、Leaf 或 sing-box
+配置的完整兼容层。SS2022、Reality、XTLS/XUDP/XHTTP、VMess legacy alter-id 等未实现
+字段不会被静默忽略。完整示例、协议边界和 Linux/Android 启用步骤见
+[Leaf 策略路由指南](easytier/docs/leaf_policy_proxy_cn.md)。
+
+### 最短使用入口
+
+- **Android**：安装本 fork 的正式 APK；为网络设置固定虚拟 IPv4；在网络停止时从
+  GUI 开启 Policy Routing、编辑/保存策略，然后启动网络并授予 VPN 权限。
+- **Linux**：只有在正式 Release 同时提供 `easytier-core`、`easytier-cli`、
+  `easytier-leaf-worker` 和 `easytier-hev-socks-egress` 时，才使用该 Release 启用
+  Leaf。四个文件应放在同一目录；不要混用不同版本，也不要手工启动 HEV。
+- **Windows**：只使用同时包含 `easytier-leaf-worker.exe` 和对应架构
+  `wintun.dll` 的正式 Core ZIP 或 GUI 安装包，并以管理员权限运行；无需另行安装
+  Wintun。
+- **选择 peer 出口**：在 policy 中使用 `via: mesh` 并省略 `port`，将
+  `server.virtual-ip` 或 `instance-id` 指向支持 Leaf/HEV 的目标 peer。它不是“mesh
+  中任意平台的 peer 都自动能当出口”。
+- **保守升级**：不配置或不启用 `policy_proxy` 时，继续使用原有 mesh 数据面。首次
+  启用策略路由前应保留一份可工作的网络配置，并先验证 DNS、规则顺序和出口可达性。
 
 ## 特性
 
@@ -46,7 +96,13 @@
 
 ### 📥 安装
 
-选择最适合您需求的安装方式：
+需要本 fork 新功能时，推荐直接从
+[`lovitus/EasyTier` Release](https://github.com/lovitus/EasyTier/releases)
+下载对应平台的正式制品，并阅读该版本的 Release Notes。不要把同页的
+`EasyTier Profiling Beta` 当作正式安装包。
+
+下面的一键脚本、Homebrew、Cargo 和 OpenWrt 入口来自上游，只适合安装基础 EasyTier；
+它们不会安装本 fork 的 Leaf/HEV 等增量：
 
 Linux（推荐）：
 ```bash
@@ -69,7 +125,7 @@ irm "https://github.com/EasyTier/EasyTier/blob/main/script/install.ps1?raw=true"
 cargo install --git https://github.com/EasyTier/EasyTier.git easytier
 ```
 
-[下载预编译文件](https://github.com/EasyTier/EasyTier/releases)（推荐，支持所有平台）
+[下载上游预编译文件](https://github.com/EasyTier/EasyTier/releases)（仅基础 EasyTier）
 
 [通过 Docker 安装](https://easytier.cn/guide/installation.html#%E5%AE%89%E8%A3%85%E6%96%B9%E5%BC%8F)
 

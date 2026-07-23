@@ -1,6 +1,8 @@
 {
     "bundle": {
-        "externalBin": [],
+        "externalBin": [
+            "binaries/easytier-leaf-worker"
+        ],
         "resources": [
             "./wintun.dll",
             "./Packet.dll",

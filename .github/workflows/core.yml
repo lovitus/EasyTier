@@ -187,6 +187,13 @@ jobs:
           scripts/build-hev-socks-egress.sh "$TARGET" \
             "target/$TARGET/release/easytier-hev-socks-egress"
 
+      - name: Build Windows policy worker
+        if: contains(matrix.TARGET, 'windows')
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target "$TARGET" \
+            --package easytier-policy --bin easytier-leaf-worker --features leaf-worker
+
       - name: Build
         if: ${{ !contains(matrix.TARGET, 'mips') }}
         run: |          
@@ -210,11 +217,22 @@ jobs:
           if [[ "$POLICY_RELEASE" == "true" ]]; then
             FEATURES="$FEATURES,leaf-policy-proxy"
           fi
+          if [[ "$TARGET" == *windows* ]]; then
+            FEATURES="$FEATURES,leaf-policy-windows"
+          fi
           
           cargo $BUILD --release --target $TARGET --package=easytier-web --features=embed
           mv ./target/$TARGET/release/easytier-web"$SUFFIX" ./target/$TARGET/release/easytier-web-embed"$SUFFIX"
           
           cargo $BUILD --release --target $TARGET --features=$FEATURES
+
+      - name: Verify Windows policy feature
+        if: contains(matrix.TARGET, 'windows')
+        run: |
+          set -euo pipefail
+          "target/$TARGET/release/easytier-core.exe" --help > "$RUNNER_TEMP/easytier-core-help.txt"
+          grep -F -- "--policy-config" "$RUNNER_TEMP/easytier-core-help.txt"
+          test -f "target/$TARGET/release/easytier-leaf-worker.exe"
 
       - name: Build (MIPS)
         if: ${{ contains(matrix.TARGET, 'mips') }}
@@ -255,6 +273,7 @@ jobs:
               esac
               if [[ -n "$ARCH_DIR" ]]; then
                   find "easytier/third_party/${ARCH_DIR}" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) -exec cp {} ./artifacts/objects/ \;
+                  test -f ./artifacts/objects/wintun.dll
               fi
           fi
 
@@ -295,6 +314,11 @@ jobs:
               test -x "$BIN"
               mv "$BIN" ./artifacts/objects/
             done
+          fi
+          if [[ "$TARGET" == *windows* ]]; then
+            BIN="./target/$TARGET/release/easytier-leaf-worker$SUFFIX"
+            test -f "$BIN"
+            mv "$BIN" ./artifacts/objects/
           fi
 
           mv ./artifacts/objects/* ./artifacts/

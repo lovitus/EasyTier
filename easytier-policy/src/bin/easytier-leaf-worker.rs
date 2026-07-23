@@ -36,7 +36,7 @@ fn run() -> Result<(), String> {
                     args.next()
                         .ok_or_else(|| "missing --parent-pid value".to_owned())?
                         .to_string_lossy()
-                        .parse::<libc::pid_t>()
+                        .parse::<u32>()
                         .map_err(|_| "invalid --parent-pid value".to_owned())?,
                 );
             }
@@ -92,8 +92,8 @@ fn take_runtime_config(path: &str) -> Result<String, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn start_parent_watchdog(parent_pid: libc::pid_t) -> Result<(), String> {
-    if parent_pid <= 1 || unsafe { libc::getppid() } != parent_pid {
+fn start_parent_watchdog(parent_pid: u32) -> Result<(), String> {
+    if parent_pid <= 1 || unsafe { libc::getppid() } as u32 != parent_pid {
         return Err("EasyTier parent exited while starting Leaf".to_owned());
     }
     std::thread::Builder::new()
@@ -101,7 +101,7 @@ fn start_parent_watchdog(parent_pid: libc::pid_t) -> Result<(), String> {
         .spawn(move || {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(1));
-                if unsafe { libc::getppid() } != parent_pid {
+                if unsafe { libc::getppid() } as u32 != parent_pid {
                     std::process::exit(0);
                 }
             }
@@ -110,8 +110,39 @@ fn start_parent_watchdog(parent_pid: libc::pid_t) -> Result<(), String> {
         .map_err(|error| format!("failed to start Leaf parent watchdog: {error}"))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn start_parent_watchdog(_parent_pid: libc::pid_t) -> Result<(), String> {
+#[cfg(target_os = "windows")]
+fn start_parent_watchdog(parent_pid: u32) -> Result<(), String> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_OBJECT_0},
+        System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+    };
+
+    let parent = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, parent_pid) };
+    if parent.is_null() {
+        return Err("EasyTier parent exited while starting Leaf".to_owned());
+    }
+    // A Windows HANDLE is represented as a raw pointer and is therefore not
+    // `Send`. Transfer its integer value and reconstruct it in the watchdog.
+    let parent_handle = parent as usize;
+    let watcher = std::thread::Builder::new()
+        .name("easytier-leaf-parent-watch".to_owned())
+        .spawn(move || {
+            let parent = parent_handle as windows_sys::Win32::Foundation::HANDLE;
+            let result = unsafe { WaitForSingleObject(parent, u32::MAX) };
+            unsafe { CloseHandle(parent) };
+            if result == WAIT_OBJECT_0 {
+                std::process::exit(0);
+            }
+        });
+    if let Err(error) = watcher {
+        unsafe { CloseHandle(parent_handle as windows_sys::Win32::Foundation::HANDLE) };
+        return Err(format!("failed to start Leaf parent watchdog: {error}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn start_parent_watchdog(_parent_pid: u32) -> Result<(), String> {
     Ok(())
 }
 
@@ -160,7 +191,12 @@ fn validate_outbound_interface(interface: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+fn validate_outbound_interface(interface: &str) -> Result<(), String> {
+    easytier_policy::windows_underlay(interface).map(|_| ())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn validate_outbound_interface(_interface: &str) -> Result<(), String> {
     Ok(())
 }

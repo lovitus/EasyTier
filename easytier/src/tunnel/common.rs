@@ -595,15 +595,20 @@ fn setup_socket2_ext(
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     if let Some(dev_name) = bind_dev {
         // use IP_BOUND_IF to bind device
-        unsafe {
-            let dev_idx = nix::libc::if_nametoindex(dev_name.as_str().as_ptr() as *const i8);
-            tracing::warn!(?dev_idx, ?dev_name, "bind device");
-            if bind_addr.is_ipv4() {
-                socket2_socket.bind_device_by_index_v4(std::num::NonZeroU32::new(dev_idx))?;
-            } else {
-                socket2_socket.bind_device_by_index_v6(std::num::NonZeroU32::new(dev_idx))?;
-            }
-            tracing::warn!(?dev_idx, ?dev_name, "bind device doen");
+        let dev_name_c = std::ffi::CString::new(dev_name.as_str()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "bind device contains a NUL byte",
+            )
+        })?;
+        let dev_idx = unsafe { nix::libc::if_nametoindex(dev_name_c.as_ptr()) };
+        let dev_idx =
+            std::num::NonZeroU32::new(dev_idx).ok_or_else(std::io::Error::last_os_error)?;
+        tracing::trace!(?dev_idx, ?dev_name, "bind device");
+        if bind_addr.is_ipv4() {
+            socket2_socket.bind_device_by_index_v4(Some(dev_idx))?;
+        } else {
+            socket2_socket.bind_device_by_index_v6(Some(dev_idx))?;
         }
     }
 

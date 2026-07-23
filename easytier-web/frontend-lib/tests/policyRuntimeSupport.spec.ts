@@ -21,6 +21,7 @@ describe('policyRuntimeNotice', () => {
     expect(policyRuntimeNotice({ platform: 'linux', supported: true })).toBe('linux-supported')
     expect(policyRuntimeNotice({ platform: 'android', supported: true })).toBe('android-experimental')
     expect(policyRuntimeNotice({ platform: 'darwin', supported: false })).toBe('macos-partial')
+    expect(policyRuntimeNotice({ platform: 'windows', supported: true })).toBe('windows-supported')
     expect(policyRuntimeNotice({ platform: 'windows', supported: false })).toBe('windows-unsupported')
   })
 })

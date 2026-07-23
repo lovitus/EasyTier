@@ -2567,6 +2567,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "cidr 0.3.1",
+ "ipconfig",
  "leaf",
  "libc",
  "maxminddb",
@@ -2582,6 +2583,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4967,7 +4969,7 @@ dependencies = [
 [[package]]
 name = "leaf"
 version = "0.1.2"
-source = "git+https://github.com/lovitus/leaf.git?rev=013a1497dd29355a00cd776628ff2de72e02e861#013a1497dd29355a00cd776628ff2de72e02e861"
+source = "git+https://github.com/lovitus/leaf.git?rev=e73ec228883965850f6bfbb339e64fd8fe86ef1f#e73ec228883965850f6bfbb339e64fd8fe86ef1f"
 dependencies = [
  "aes",
  "aes-gcm",
