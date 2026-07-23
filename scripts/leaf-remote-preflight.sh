@@ -32,6 +32,7 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   gateway::socks5::dataplane::tests::mesh_only_connect_never_falls_back_to_kernel
   peers::peer_ospf_route::tests::peer_removal_restarts_remaining_generation_and_invalidates_remote_cache
   policy_proxy::macos_routing_tests::tests
+  policy_proxy::mesh_socks_bridge::tests::route_snapshot_updates_and_disables_only_the_changed_actor
   policy_proxy::mesh_udp_relay::tests
   policy_proxy::policy_routing::tests::leaf_owned_capture_keeps_the_legacy_tun_as_lower_priority_fallback
   policy_proxy::tests::resolves_inline_instance_config_without_persisting_generated_state
@@ -41,6 +42,10 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   instance::instance::tests::socks_egress_uses_the_configured_linux_policy_mark
   launcher::tests::network_config_roundtrips_policy_proxy_envelope
   tests::three_node::port_forward_with_inbound_default_drop_acl_test::case_2
+)
+readonly -a DEFAULT_SOCKS_EGRESS_TEST_FILTERS=(
+  tests::renders_bounded_direct_egress_config
+  tests::occupied_candidate_is_rejected_without_connecting_to_owner
 )
 readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   config::tests::parses_legacy_and_named_udp_modes_canonically
@@ -129,7 +134,7 @@ check_builder_idle() {
 run_no_run_build() {
   local exit_code=0
   ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
-    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890 CARGO_NET_GIT_FETCH_WITH_CLI=true CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --package netstack-smoltcp --lib --features easytier/leaf-policy-proxy,easytier-policy/leaf-inprocess > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
+    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890 CARGO_NET_GIT_FETCH_WITH_CLI=true CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package easytier --package easytier-policy --package easytier-socks-egress --package netstack-smoltcp --lib --features easytier/leaf-policy-proxy,easytier-policy/leaf-inprocess > $BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
     || exit_code=$?
 
   ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
@@ -184,12 +189,15 @@ check_builder_idle
 run_no_run_build
 EASYTIER_TEST_BINARY="$(resolve_test_binary easytier)"
 POLICY_TEST_BINARY="$(resolve_test_binary easytier_policy)"
+SOCKS_EGRESS_TEST_BINARY="$(resolve_test_binary easytier_socks_egress)"
 NETSTACK_TEST_BINARY="$(resolve_test_binary netstack_smoltcp)"
-readonly EASYTIER_TEST_BINARY POLICY_TEST_BINARY NETSTACK_TEST_BINARY
+readonly EASYTIER_TEST_BINARY POLICY_TEST_BINARY SOCKS_EGRESS_TEST_BINARY NETSTACK_TEST_BINARY
 printf 'Using exact EasyTier library test binary: %s\n' "$EASYTIER_TEST_BINARY"
 printf 'Using exact policy library test binary: %s\n' "$POLICY_TEST_BINARY"
+printf 'Using exact SOCKS egress library test binary: %s\n' "$SOCKS_EGRESS_TEST_BINARY"
 printf 'Using exact netstack library test binary: %s\n' "$NETSTACK_TEST_BINARY"
 run_focused_tests "$EASYTIER_TEST_BINARY" reset "${DEFAULT_EASYTIER_TEST_FILTERS[@]}" "$@"
+run_focused_tests "$SOCKS_EGRESS_TEST_BINARY" append "${DEFAULT_SOCKS_EGRESS_TEST_FILTERS[@]}"
 run_focused_tests "$NETSTACK_TEST_BINARY" append "${DEFAULT_NETSTACK_TEST_FILTERS[@]}"
 run_focused_tests "$POLICY_TEST_BINARY" append "${DEFAULT_POLICY_TEST_FILTERS[@]}"
 printf 'Leaf/HEV remote preflight passed. GitHub release artifacts were not built.\n'

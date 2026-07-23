@@ -806,8 +806,7 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(MAX_RULE_DATA_REDIRECTS >= 5);
-        assert!(MAX_RULE_DATA_REDIRECTS < 6);
+        const { assert!(MAX_RULE_DATA_REDIRECTS == 5) };
     }
 
     #[test]

@@ -312,6 +312,18 @@ impl MeshProxyBridgeSet {
         Ok(())
     }
 
+    /// Reconcile every configured actor with one route-generation snapshot.
+    ///
+    /// Mihomo 0a87b948 `adapter/outbound/wireguard.go` updates resolved peer
+    /// endpoints in place. The equivalent EasyTier boundary is `RemoteSlot`:
+    /// replacing it cancels the old generation without rebuilding Leaf, while
+    /// an absent route disables only that actor until a later snapshot restores it.
+    pub(crate) fn replace_remote_snapshot(&self, resolved: &BTreeMap<String, MeshProxyTarget>) {
+        for (name, remote) in &self.remotes {
+            remote.replace(resolved.get(name).copied());
+        }
+    }
+
     pub(crate) fn disable_all(&self) {
         for remote in self.remotes.values() {
             remote.replace(None);
@@ -944,5 +956,29 @@ mod tests {
         let target = MeshProxyTarget::explicit(7, "10.44.0.7:1080".parse().unwrap());
         slot.replace(Some(target));
         assert_eq!(slot.snapshot().unwrap().0, target);
+    }
+
+    #[test]
+    fn route_snapshot_updates_and_disables_only_the_changed_actor() {
+        let first = Arc::new(RemoteSlot::new(None));
+        let old_second = MeshProxyTarget::explicit(8, "10.44.0.8:1080".parse().unwrap());
+        let second = Arc::new(RemoteSlot::new(Some(old_second)));
+        let (_, old_second_generation, _) = second.snapshot().unwrap();
+        let bridges = MeshProxyBridgeSet {
+            endpoints: BTreeMap::new(),
+            remotes: BTreeMap::from([
+                ("first".to_owned(), first.clone()),
+                ("second".to_owned(), second.clone()),
+            ]),
+            cancel: CancellationToken::new(),
+            listeners: Vec::new(),
+        };
+        let new_first = MeshProxyTarget::explicit(7, "10.44.0.7:1080".parse().unwrap());
+
+        bridges.replace_remote_snapshot(&BTreeMap::from([("first".to_owned(), new_first)]));
+
+        assert_eq!(first.snapshot().unwrap().0, new_first);
+        assert!(second.snapshot().is_none());
+        assert!(old_second_generation.is_cancelled());
     }
 }

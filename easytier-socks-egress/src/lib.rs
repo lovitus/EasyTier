@@ -62,7 +62,11 @@ pub struct SocksEgressConfig {
 impl Default for SocksEgressConfig {
     fn default() -> Self {
         Self {
-            listen_address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            // Mihomo 0a87b948 component/tsnet/tsnet.go::{retryStartSocks5TCP,
+            // retryStartSocks5UDP} exposes its SOCKS ingress only inside the
+            // userspace tailnet. EasyTier owns the equivalent userspace mesh
+            // ingress separately, so the private hop into HEV stays loopback-only.
+            listen_address: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port_candidates: DEFAULT_PORT_CANDIDATES.to_vec(),
             workers: 1,
             bind_interface: None,
@@ -410,9 +414,16 @@ mod tests {
             socket_mark: Some(0x2333),
             ..Default::default()
         };
+        assert_eq!(
+            config.listen_address,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            "the managed HEV hop must not expose an unauthenticated host listener"
+        );
         let rendered = render_hev_config(&config, 11080);
         assert!(rendered.contains("port: 11080"));
         assert!(rendered.contains("udp-port: 0"));
+        assert!(rendered.contains("listen-address: '127.0.0.1'"));
+        assert!(rendered.contains("udp-listen-address: '127.0.0.1'"));
         assert!(rendered.contains("bind-interface: 'eth0'"));
         assert!(rendered.contains("mark: 9011"));
     }

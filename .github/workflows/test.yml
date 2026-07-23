@@ -63,6 +63,20 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-hack
 
+      - name: Prepare GUI sidecar fixtures for static checks
+        run: |
+          set -euo pipefail
+          host_target="$(rustc -vV | sed -n 's/^host: //p')"
+          test -n "$host_target"
+          mkdir -p easytier-gui/src-tauri/binaries
+          for sidecar in easytier-leaf-worker easytier-hev-socks-egress; do
+            sidecar_path="easytier-gui/src-tauri/binaries/${sidecar}-${host_target}"
+            install -m 0755 /bin/true "$sidecar_path"
+            test -x "$sidecar_path"
+          done
+          # Clippy only needs Tauri's declared externalBin paths to exist. Formal
+          # GUI workflows build, package, and inspect the real Leaf/HEV sidecars.
+
       - name: Check formatting
         if: ${{ !cancelled() }}
         run: cargo fmt --all -- --check

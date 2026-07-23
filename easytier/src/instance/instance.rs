@@ -693,7 +693,9 @@ impl SocksEgressManager {
         &self,
         executable: std::path::PathBuf,
     ) -> easytier_socks_egress::ProcessConfig {
-        let mut config = easytier_socks_egress::ProcessConfig::new(executable);
+        let config = easytier_socks_egress::ProcessConfig::new(executable);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut config = config;
         #[cfg(target_os = "linux")]
         {
             config.server.socket_mark = self.socket_mark;

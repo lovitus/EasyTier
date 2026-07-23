@@ -44,7 +44,7 @@ use pin_project_lite::pin_project;
 use pnet::packet::{ipv4::Ipv4Packet, ipv6::Ipv6Packet};
 #[cfg(all(feature = "leaf-policy-proxy", unix))]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(all(feature = "leaf-policy-proxy", unix))]
+#[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
 use std::time::Duration;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -63,7 +63,7 @@ use crate::common::ifcfg::RegistryManager;
 #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
 use crate::gateway::socks5::Socks5Server;
 
-#[cfg(all(any(
+#[cfg(any(
     all(
         feature = "leaf-policy-proxy",
         any(
@@ -72,7 +72,7 @@ use crate::gateway::socks5::Socks5Server;
         )
     ),
     all(feature = "leaf-policy-windows", target_os = "windows")
-)))]
+))]
 use easytier_policy::LeafProcessRuntime;
 #[cfg(all(feature = "leaf-policy-mobile", target_os = "android"))]
 use easytier_policy::{InProcessLeafFactory, InProcessLeafRuntime};
@@ -2265,6 +2265,7 @@ impl NicCtx {
             all(target_os = "macos", not(feature = "macos-ne"))
         )
     ))]
+    #[allow(clippy::too_many_arguments)]
     async fn build_policy_runtime(
         config: &crate::policy_proxy::PolicyProcessConfig,
         revision: Arc<easytier_policy::PolicyRevision>,
@@ -2893,7 +2894,7 @@ impl NicCtx {
         let mesh_bridges = Arc::new(
             crate::policy_proxy::MeshProxyBridgeSet::start(
                 data_plane,
-                peer_mgr,
+                peer_mgr.clone(),
                 &document.revision,
                 &mesh_endpoints,
             )
@@ -2972,7 +2973,11 @@ impl NicCtx {
         let underlay_signature = underlay.signature;
         let automatic_environment_signature = underlay.automatic_environment_signature;
         let monitored_leaf_tun_interface = leaf_tun_interface.clone();
+        let monitored_peer_mgr = Arc::downgrade(&peer_mgr);
+        let monitored_mesh_bridges = mesh_bridges.clone();
+        let monitored_revision = document.revision.clone();
         self.tasks.spawn(async move {
+            let mut last_mesh_endpoints = Some(mesh_endpoints);
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 if !monitored_runtime.is_running() {
@@ -3065,6 +3070,33 @@ impl NicCtx {
                         );
                         close_notifier.notify_one();
                         break;
+                    }
+                }
+                let Some(peer_mgr) = monitored_peer_mgr.upgrade() else {
+                    break;
+                };
+                let routes = peer_mgr.list_routes().await;
+                match Self::resolve_policy_mesh_endpoints(
+                    &monitored_revision,
+                    peer_mgr.my_peer_id(),
+                    &routes,
+                ) {
+                    Ok(endpoints) if last_mesh_endpoints.as_ref() != Some(&endpoints) => {
+                        monitored_mesh_bridges.replace_remote_snapshot(&endpoints);
+                        last_mesh_endpoints = Some(endpoints);
+                        tracing::info!(
+                            "Windows mesh proxy targets followed the latest route generation"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        if last_mesh_endpoints.take().is_some() {
+                            monitored_mesh_bridges.disable_all();
+                            tracing::warn!(
+                                ?error,
+                                "disabled Windows mesh proxy targets until route resolution recovers"
+                            );
+                        }
                     }
                 }
             }
