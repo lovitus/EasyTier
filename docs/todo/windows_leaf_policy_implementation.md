@@ -7,7 +7,7 @@ Status: implementation candidate
 - Failure-baseline Leaf source: `https://github.com/lovitus/leaf.git` at
   `013a1497dd29355a00cd776628ff2de72e02e861` (the exact revision used by the
   prior artifact). The combined Windows/macOS candidate locks
-  `43515219f84df0bf5a9ed9e49bb60fdb4018ac06`.
+  `682d1dc43585a703c993e8875fe4e937b1038733`.
   - `leaf/src/proxy/tun/inbound.rs::new` captures the physical IPv4 address before
     creating Wintun, binds direct outbound traffic to that address, configures
     Wintun with metric `0`, and applies the configured DNS servers.
@@ -151,6 +151,15 @@ tuple.
 
 ## Pre-build gate evidence
 
+- On 2026-07-23, `scripts/leaf-remote-preflight.sh` passed the current complete
+  workspace on `.160`, including the `--locked` no-run build and every configured
+  Leaf/HEV focused test.
+- The preflight resolved and compiled Leaf revision
+  `682d1dc43585a703c993e8875fe4e937b1038733`; it generated the EasyTier,
+  `easytier-policy`, and `netstack-smoltcp` test binaries successfully.
+- `.160` is a Linux compiler and logic gate, not Windows compilation or real-device
+  evidence. Windows Core/GUI workflows and physical Windows validation remain
+  release gates.
 - The complete combined snapshot passed the dedicated `.160` `--locked`
   no-run build and every configured EasyTier, policy, and netstack focused
   test.

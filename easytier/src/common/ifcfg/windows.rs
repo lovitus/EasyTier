@@ -251,48 +251,6 @@ impl IfConfiguerTrait for WindowsIfConfiger {
         Self::add_ip_address(name, Ipv4Inet::new(address, cidr_prefix).unwrap()).await
     }
 
-    async fn add_ipv6_route(
-        &self,
-        name: &str,
-        address: Ipv6Addr,
-        cidr_prefix: u8,
-        cost: Option<i32>,
-    ) -> Result<(), Error> {
-        let Some(if_index) = Self::get_interface_index(name) else {
-            return Err(Error::NotFound);
-        };
-        let luid = InterfaceLuid::luid_from_index(if_index).map_err(|e| {
-            anyhow::anyhow!("Failed to get interface luid: {}", format_win_error(e))
-        })?;
-        luid.add_routes_ipv6([RouteDataIpv6 {
-            destination: Ipv6Inet::new(address, cidr_prefix).unwrap(),
-            next_hop: Ipv6Addr::UNSPECIFIED,
-            metric: cost.unwrap_or(0) as u32,
-        }])
-        .map_err(|e| anyhow::anyhow!("Failed to add IPv6 route: {}", format_win_error(e)))?;
-        Ok(())
-    }
-
-    async fn remove_ipv6_route(
-        &self,
-        name: &str,
-        address: Ipv6Addr,
-        cidr_prefix: u8,
-    ) -> Result<(), Error> {
-        let Some(if_index) = Self::get_interface_index(name) else {
-            return Err(Error::NotFound);
-        };
-        let luid = InterfaceLuid::luid_from_index(if_index).map_err(|e| {
-            anyhow::anyhow!("Failed to get interface luid: {}", format_win_error(e))
-        })?;
-        luid.delete_route_ipv6(
-            &Ipv6Inet::new(address, cidr_prefix).unwrap(),
-            &Ipv6Addr::UNSPECIFIED,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to delete IPv6 route: {}", format_win_error(e)))?;
-        Ok(())
-    }
-
     async fn set_link_status(&self, name: &str, up: bool) -> Result<(), Error> {
         Self::set_interface_status(name, up).await
     }

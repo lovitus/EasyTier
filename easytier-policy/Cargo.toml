@@ -48,7 +48,7 @@ windows-sys = { version = "0.59", features = [
 
 [target.'cfg(any(unix, windows))'.dependencies.leaf]
 git = "https://github.com/lovitus/leaf.git"
-rev = "43515219f84df0bf5a9ed9e49bb60fdb4018ac06"
+rev = "682d1dc43585a703c993e8875fe4e937b1038733"
 optional = true
 default-features = false
 features = [

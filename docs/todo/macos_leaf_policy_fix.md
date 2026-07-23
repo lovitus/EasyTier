@@ -8,8 +8,9 @@ event-driven `tun` follow-up is awaiting a new packaged macOS artifact
 
 - Failure-baseline Leaf source: `https://github.com/lovitus/leaf.git` at
   `013a1497dd29355a00cd776628ff2de72e02e861`, exactly matching the tested
-  artifact's `Cargo.lock`. The candidate updates the lock to
-  `e73ec228883965850f6bfbb339e64fd8fe86ef1f`.
+  artifact's `Cargo.lock`. The intermediate macOS candidate updated the lock to
+  `e73ec228883965850f6bfbb339e64fd8fe86ef1f`; the combined desktop candidate
+  now locks `682d1dc43585a703c993e8875fe4e937b1038733`.
   - `leaf/src/proxy/tun/inbound.rs::new` passes an externally supplied `fd` to
     `tun::Configuration::raw_fd` without overriding Darwin packet information.
   - Locked `tun` `0.7.22` defaults
