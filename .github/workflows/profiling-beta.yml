@@ -70,7 +70,7 @@ jobs:
           scripts/build-hev-socks-egress.sh "$TARGET" \
             "$hev_bin/easytier-hev-socks-egress"
           file "$hev_bin/easytier-hev-socks-egress" | tee hev-file-info.txt
-          grep -q 'statically linked' hev-file-info.txt
+          grep -Eq 'statically linked|static-pie linked' hev-file-info.txt
           echo "HEV_EGRESS_BINARY=$hev_bin/easytier-hev-socks-egress" >> "$GITHUB_ENV"
           echo "HEV_SERVER_COMMIT=$HEV_SERVER_COMMIT" >> "$GITHUB_ENV"
 
