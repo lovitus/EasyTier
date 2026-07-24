@@ -37,8 +37,6 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   policy_proxy::policy_routing::tests::leaf_owned_capture_keeps_the_legacy_tun_as_lower_priority_fallback
   policy_proxy::tests::resolves_inline_instance_config_without_persisting_generated_state
   policy_rule_data::tests
-  tunnel::quic::tests::macos_quinn_false_readiness_backoff_is_bounded
-  tunnel::quic::tests::macos_quinn_runtime_preserves_udp_receive_semantics
   instance::virtual_nic::tests::leaf_owned_tun_selection_is_default_off_and_backend_bounded
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
   instance::instance::tests::socks_egress_uses_the_configured_linux_policy_mark

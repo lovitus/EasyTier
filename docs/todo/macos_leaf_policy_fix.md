@@ -346,6 +346,15 @@ packet-framing, and AF_UNIX sender implementation. The later
 so this installed-GUI case is treated as a previously uncovered scheduling
 boundary, not evidence that the accepted packet bridge was reverted.
 
+The `6d5fa34f` outer-backoff candidate was subsequently deployed and reproduced
+the same failure. A bounded sample of the installed artifact showed two Tokio
+workers continuously inside `recvmsg`. Offline disassembly at the sampled
+return address proved that locked `quinn-udp 0.5.15` tested stale
+`msghdr.msg_flags & MSG_TRUNC` and jumped back to `recvmsg` before checking the
+negative syscall result. The dependency call therefore never returned EAGAIN
+to the EasyTier adapter. The outer-backoff implementation is recorded as a
+failed fix and is removed by the follow-up dependency-level candidate.
+
 Reference behavior:
 
 - Mihomo `/Users/fanli/Documents/mihomo-rev` at
@@ -359,7 +368,7 @@ Reference behavior:
   one poll call. On this Darwin socket state, kqueue remained readable while
   `recvmsg` kept returning `EAGAIN`, so the loop never returned to Tokio.
 
-Candidate boundary:
+Failed candidate boundary (`6d5fa34f`):
 
 - only macOS Quinn sockets use the EasyTier Tokio UDP adapter;
 - successful receives, Quinn's UDP metadata/batching capabilities, sends,

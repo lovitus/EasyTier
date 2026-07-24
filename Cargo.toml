@@ -6,6 +6,7 @@ members = [
     "easytier-socks-egress",
     "third_party/kcp-sys",
     "third_party/netstack-smoltcp",
+    "third_party/quinn-udp",
     "easytier-gui/src-tauri",
     "easytier-web",
     "easytier-contrib/easytier-ffi",
@@ -38,3 +39,4 @@ netstack-smoltcp = { path = "third_party/netstack-smoltcp" }
 
 [patch.crates-io]
 tun = { git = "https://github.com/lovitus/rust-tun.git", rev = "028b861d1a8e69cbb8950bfefb7ee81e44b46ff5" }
+quinn-udp = { path = "third_party/quinn-udp" }
