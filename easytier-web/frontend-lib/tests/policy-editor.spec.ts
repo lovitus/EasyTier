@@ -413,6 +413,37 @@ rules: ["MATCH,exit"]
     expect(model.policy_outbound_interface).toBe('eth0')
   })
 
+  it('treats protobuf-omitted address arrays as empty for macOS interfaces', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
+    const api = {
+      list_policy_outbound_interfaces: vi.fn(async () => ({
+        platform: 'macos',
+        required: true,
+        supported: true,
+        interfaces: [
+          {
+            name: 'en0',
+            addresses: ['192.168.234.162/24'],
+            recommended: true,
+          },
+          { name: 'bridge0' },
+          { name: 'en1' },
+        ],
+      })),
+    } as unknown as import('../src/modules/api').RemoteClient
+
+    const { model, wrapper } = mountEditor(config, api)
+    await flushPromises()
+
+    expect(model.policy_outbound_interface).toBe('en0')
+    expect(
+      wrapper.findAll<HTMLOptionElement>('#policy_outbound_interface option')
+        .map(option => option.element.value),
+    ).toEqual(['en0', 'bridge0', 'en1'])
+  })
+
   it('does not request an outbound interface on Android policy mode', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
@@ -538,6 +569,30 @@ rules: ["MATCH,exit"]
     expect(model.policy_config_inline).toContain('type: mmdb')
     expect(model.policy_config_inline).toContain('/managed/mmdb')
     expect(model.policy_config_inline).toContain('d'.repeat(64))
+  })
+
+  it('offers searchable GeoSite categories returned by normal GUI mode', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["GEOSITE,CN,DIRECT"]\n'
+    const api = {
+      list_policy_rule_data_categories: vi.fn(async (_instanceId: string, resource: Api.PolicyRuleDataResource) => ({
+        resource,
+        sha256: resource === 'geosite' ? 'a'.repeat(64) : 'b'.repeat(64),
+        size: 1024,
+        categories: resource === 'geosite' ? ['cn', 'github', 'google'] : ['cn'],
+      })),
+    } as unknown as Api.RemoteClient
+    const { wrapper } = mountEditor(config, api)
+    await flushPromises()
+
+    await expandRow(wrapper, 'policy-rule-edit-0')
+
+    const category = wrapper.get('[data-testid="policy-rule-category-0"]')
+    expect(category.attributes('filter')).toBeDefined()
+    expect(
+      category.findAll<HTMLOptionElement>('option').map(option => option.element.value),
+    ).toEqual(['CN', 'GITHUB', 'GOOGLE'])
   })
 
   it('reports an unchanged remote size without replacing saved rule data', async () => {

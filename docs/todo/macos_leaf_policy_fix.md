@@ -321,3 +321,57 @@ This accepts the targeted macOS route/framing/backpressure/restart/cleanup
 fix. It does not establish proxy protocol, DNS/FakeDNS, IPv6, or 10 Gbit/s
 throughput compatibility; those broader release checks remain separate and
 must not be inferred from this focused result.
+
+## v3.0.5 installed-GUI false-readiness regression
+
+The installed formal `3.0.5-6cc96616` GUI on macOS 15.2 reproduced a separate
+failure when policy mode was enabled on `en0`:
+
+- both IPv4 split-default routes were present and the `en0`-scoped physical
+  default was valid;
+- DIRECT and proxied traffic timed out, while temporarily removing only the
+  two capture routes immediately produced a successful TCP, TLS, and HTTP 200
+  exchange over the unchanged physical interface;
+- the core consumed one full CPU, and a five-second `fs_usage` trace recorded
+  about 4.84 million `recvmsg` attempts on one Quinn UDP descriptor, each
+  returning Darwin `EAGAIN`;
+- the Leaf AF_UNIX return endpoint transmitted packets, while the core endpoint
+  accumulated a near-full receive queue; terminating Leaf did not run the
+  existing supervisor because the owning instance runtime remained trapped
+  inside one Quinn `poll_recv` call.
+
+The earlier ten-round `a480e6f5` acceptance used the same policy route,
+packet-framing, and AF_UNIX sender implementation. The later
+`a480e6f5..6cc96616` build-affecting diff did not change Quinn or macOS routing,
+so this installed-GUI case is treated as a previously uncovered scheduling
+boundary, not evidence that the accepted packet bridge was reverted.
+
+Reference behavior:
+
+- Mihomo `/Users/fanli/Documents/mihomo-rev` at
+  `0a87b94845ef908c15f8495871e4cd8e33116328`,
+  `common/net/packet/packet_posix.go::enhanceUDPConn.WaitReadFrom`, returns
+  `false` from `syscall.RawConn.Read` when `Recvmsg` reports `EAGAIN`. This
+  leaves the goroutine with the platform netpoller instead of retrying inside
+  one callback.
+- The locked Quinn `0.11.8`
+  `quinn/src/runtime/tokio.rs::UdpSocket::poll_recv` retries false readiness in
+  one poll call. On this Darwin socket state, kqueue remained readable while
+  `recvmsg` kept returning `EAGAIN`, so the loop never returned to Tokio.
+
+Candidate boundary:
+
+- only macOS Quinn sockets use the EasyTier Tokio UDP adapter;
+- successful receives, Quinn's UDP metadata/batching capabilities, sends,
+  timers, and non-macOS runtimes remain unchanged;
+- a false-readable `EAGAIN` returns control to Tokio and uses a fault-only
+  exponential retry of 1, 2, 4, 8, then at most 16 ms; any successful receive
+  resets the state immediately;
+- this anomaly-only bound avoids an unbounded busy loop without adding polling,
+  sleeps, allocation, or latency to the normal packet path.
+
+Required validation is a focused `.160` no-run build and exact unit tests,
+followed by an immutable macOS artifact A/B on the same host: policy startup,
+idle CPU, DIRECT/proxy/DNS, Leaf kill/restart, repeated policy restarts, QUIC
+mesh continuity, route cleanup, and confirmation that `recvmsg(EAGAIN)` no
+longer starves the bridge or supervisor.

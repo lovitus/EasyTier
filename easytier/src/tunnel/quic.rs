@@ -15,18 +15,26 @@ use derivative::Derivative;
 use derive_more::{Deref, DerefMut};
 use parking_lot::RwLock;
 use quinn::udp::{RecvMeta, Transmit};
+#[cfg(any(target_os = "macos", test))]
+use quinn::{AsyncTimer, Runtime, TokioRuntime};
 use quinn::{
     AsyncUdpSocket, ClientConfig, ConnectError, Connection, Endpoint, EndpointConfig, ServerConfig,
     TransportConfig, UdpPoller, congestion::BbrConfig, default_runtime,
 };
 use std::collections::HashMap;
+#[cfg(any(target_os = "macos", test))]
+use std::future::Future;
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
+#[cfg(any(target_os = "macos", test))]
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Instant;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
+#[cfg(any(target_os = "macos", test))]
+use tokio::io::Interest;
 use tokio::net::UdpSocket;
 
 const QUIC_STEALTH_FALLBACK_TIMEOUT: Duration = Duration::from_secs(1);
@@ -37,6 +45,219 @@ const QUIC_STEALTH_MAX_SESSIONS: usize = 4096;
 const BPS_PER_MBPS: u64 = 1_000_000;
 const QUIC_BRUTAL_MIN_TX_BPS: u64 = 1_000_000;
 const QUIC_BRUTAL_MAX_TX_BPS: u64 = 100_000_000_000;
+#[cfg(any(target_os = "macos", test))]
+const MACOS_QUIC_FALSE_READY_MAX_BACKOFF: Duration = Duration::from_millis(16);
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_quic_false_ready_backoff(consecutive: u8) -> Duration {
+    Duration::from_millis(1_u64 << consecutive.min(4)).min(MACOS_QUIC_FALSE_READY_MAX_BACKOFF)
+}
+
+#[cfg(any(target_os = "macos", test))]
+struct MacosQuinnRecvBackoff {
+    consecutive: AtomicU8,
+    retry: Mutex<Option<Pin<Box<tokio::time::Sleep>>>>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Default for MacosQuinnRecvBackoff {
+    fn default() -> Self {
+        Self {
+            consecutive: AtomicU8::new(0),
+            retry: Mutex::new(None),
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl std::fmt::Debug for MacosQuinnRecvBackoff {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MacosQuinnRecvBackoff")
+            .field("consecutive", &self.consecutive.load(Ordering::Relaxed))
+            .field("retry_armed", &self.retry.lock().unwrap().is_some())
+            .finish()
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+type MacosQuinnWritableFuture =
+    Pin<Box<dyn Future<Output = io::Result<()>> + Send + Sync + 'static>>;
+
+#[cfg(any(target_os = "macos", test))]
+struct MacosQuinnUdpPoller {
+    socket: Arc<MacosQuinnUdpSocket>,
+    future: Option<MacosQuinnWritableFuture>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl std::fmt::Debug for MacosQuinnUdpPoller {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MacosQuinnUdpPoller")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl UdpPoller for MacosQuinnUdpPoller {
+    fn poll_writable(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        let this = self.as_mut().get_mut();
+        if this.future.is_none() {
+            let socket = this.socket.clone();
+            this.future = Some(Box::pin(async move { socket.io.writable().await }));
+        }
+        let result = this
+            .future
+            .as_mut()
+            .expect("writable future was initialized")
+            .as_mut()
+            .poll(cx);
+        if result.is_ready() {
+            this.future = None;
+        }
+        result
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug)]
+struct MacosQuinnUdpSocket {
+    io: UdpSocket,
+    inner: quinn::udp::UdpSocketState,
+    recv_backoff: MacosQuinnRecvBackoff,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl AsyncUdpSocket for MacosQuinnUdpSocket {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        Box::pin(MacosQuinnUdpPoller {
+            socket: self,
+            future: None,
+        })
+    }
+
+    fn try_send(&self, transmit: &Transmit) -> io::Result<()> {
+        self.io.try_io(Interest::WRITABLE, || {
+            self.inner.send((&self.io).into(), transmit)
+        })
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut TaskContext<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        let was_backing_off = self.recv_backoff.consecutive.load(Ordering::Acquire) != 0;
+        if was_backing_off {
+            let mut retry_slot = self.recv_backoff.retry.lock().unwrap();
+            if let Some(retry) = retry_slot.as_mut() {
+                if Future::poll(retry.as_mut(), cx).is_pending() {
+                    return Poll::Pending;
+                }
+                *retry_slot = None;
+            }
+        }
+
+        match self.io.poll_recv_ready(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {
+                match self.io.try_io(Interest::READABLE, || {
+                    self.inner.recv((&self.io).into(), bufs, meta)
+                }) {
+                    Ok(received) => {
+                        if was_backing_off {
+                            self.recv_backoff.consecutive.store(0, Ordering::Release);
+                        }
+                        Poll::Ready(Ok(received))
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        // Mihomo common/net/packet/packet_posix.go::WaitReadFrom returns
+                        // false from RawConn.Read on EAGAIN so the platform netpoller waits.
+                        // Darwin can instead keep reporting a route-invalidated UDP socket
+                        // as readable while recvmsg returns EAGAIN forever. Quinn's Tokio
+                        // adapter retries inside one poll call, which starves the complete
+                        // single-instance runtime. Back off only this false-readiness state;
+                        // successful receive and every non-Darwin path remain unchanged.
+                        let consecutive = self.recv_backoff.consecutive.load(Ordering::Relaxed);
+                        let delay = macos_quic_false_ready_backoff(consecutive);
+                        let mut retry = Box::pin(tokio::time::sleep(delay));
+                        let _ = Future::poll(retry.as_mut(), cx);
+                        {
+                            let mut retry_slot = self.recv_backoff.retry.lock().unwrap();
+                            *retry_slot = Some(retry);
+                            self.recv_backoff
+                                .consecutive
+                                .store(consecutive.saturating_add(1), Ordering::Release);
+                        }
+                        Poll::Pending
+                    }
+                    Err(error) => Poll::Ready(Err(error)),
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.io.local_addr()
+    }
+
+    fn may_fragment(&self) -> bool {
+        self.inner.may_fragment()
+    }
+
+    fn max_transmit_segments(&self) -> usize {
+        self.inner.max_gso_segments()
+    }
+
+    fn max_receive_segments(&self) -> usize {
+        self.inner.gro_segments()
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug)]
+struct MacosQuinnRuntime;
+
+#[cfg(any(target_os = "macos", test))]
+impl Runtime for MacosQuinnRuntime {
+    fn new_timer(&self, deadline: Instant) -> Pin<Box<dyn AsyncTimer>> {
+        Runtime::new_timer(&TokioRuntime, deadline)
+    }
+
+    fn spawn(&self, future: Pin<Box<dyn Future<Output = ()> + Send>>) {
+        Runtime::spawn(&TokioRuntime, future);
+    }
+
+    fn wrap_udp_socket(&self, socket: std::net::UdpSocket) -> io::Result<Arc<dyn AsyncUdpSocket>> {
+        let inner = quinn::udp::UdpSocketState::new((&socket).into())?;
+        let io = UdpSocket::from_std(socket)?;
+        Ok(Arc::new(MacosQuinnUdpSocket {
+            io,
+            inner,
+            recv_backoff: MacosQuinnRecvBackoff::default(),
+        }))
+    }
+
+    fn now(&self) -> Instant {
+        Runtime::now(&TokioRuntime)
+    }
+}
+
+fn easytier_quic_runtime() -> Option<Arc<dyn quinn::Runtime>> {
+    #[cfg(target_os = "macos")]
+    {
+        tokio::runtime::Handle::try_current()
+            .ok()
+            .map(|_| Arc::new(MacosQuinnRuntime) as Arc<dyn quinn::Runtime>)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        default_runtime()
+    }
+}
 
 fn parse_tx_mbps(value: &str) -> Result<u64, TunnelError> {
     let mut parts = value.split('.');
@@ -1099,7 +1320,7 @@ impl QuicEndpointManager {
             .only_v6(addr.is_ipv6() && !dual_stack)
             .maybe_socket_mark(socket_mark)
             .call()?;
-        let runtime = default_runtime().ok_or(TunnelError::InternalError(
+        let runtime = easytier_quic_runtime().ok_or(TunnelError::InternalError(
             "no async runtime found".to_owned(),
         ))?;
         let socket = runtime.wrap_udp_socket(socket.into_std()?)?;
@@ -1891,6 +2112,54 @@ mod tests {
             Err(ConnectError::EndpointStopping)
         ));
         (endpoint, local_addr)
+    }
+
+    #[test]
+    fn macos_quinn_false_readiness_backoff_is_bounded() {
+        let delays = (0..8)
+            .map(macos_quic_false_ready_backoff)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            delays,
+            vec![
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+                Duration::from_millis(4),
+                Duration::from_millis(8),
+                Duration::from_millis(16),
+                Duration::from_millis(16),
+                Duration::from_millis(16),
+                Duration::from_millis(16),
+            ]
+        );
+    }
+
+    #[test]
+    fn macos_quinn_runtime_preserves_udp_receive_semantics() {
+        RUNTIME.block_on(async {
+            let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            receiver.set_nonblocking(true).unwrap();
+            let receiver_addr = receiver.local_addr().unwrap();
+            let socket = quinn::Runtime::wrap_udp_socket(&MacosQuinnRuntime, receiver).unwrap();
+            let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            sender.send_to(b"quinn-macos", receiver_addr).await.unwrap();
+
+            let mut packet = [0u8; 64];
+            let mut buffers = [IoSliceMut::new(&mut packet)];
+            let mut metadata = [RecvMeta::default()];
+            let received = tokio::time::timeout(
+                Duration::from_secs(1),
+                std::future::poll_fn(|cx| socket.poll_recv(cx, &mut buffers, &mut metadata)),
+            )
+            .await
+            .expect("custom Quinn runtime did not receive UDP")
+            .unwrap();
+
+            assert_eq!(received, 1);
+            let payload_len = metadata[0].len;
+            drop(buffers);
+            assert_eq!(&packet[..payload_len], b"quinn-macos");
+        });
     }
 
     #[test]

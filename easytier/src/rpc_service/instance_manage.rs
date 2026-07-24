@@ -310,11 +310,7 @@ impl WebClientService for InstanceManageRpcService {
             .inst_id
             .ok_or_else(|| anyhow::anyhow!("instance id is required"))?
             .into();
-        let config_dir = self
-            .manager
-            .get_config_dir()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("managed config directory is unavailable"))?;
+        let config_dir = self.manager.get_config_dir().cloned();
 
         #[cfg(feature = "leaf-policy-proxy")]
         {

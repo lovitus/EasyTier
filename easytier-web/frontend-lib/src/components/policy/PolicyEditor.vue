@@ -75,12 +75,15 @@ const geositeCategoryOptions = ref<string[]>([])
 const geoipCategoryOptions = ref<string[]>(['LAN'])
 const geoipDataCategoryCount = computed(() => Math.max(0, geoipCategoryOptions.value.length - 1))
 const outboundOptions = computed(() => {
-  const interfaces = (outboundInfo.value?.interfaces ?? []).map(item => ({
-    label: item.addresses.length
-      ? `${item.name} (${item.addresses.join(', ')})${item.recommended ? ` · ${t('policy.editor.recommended')}` : ''}`
-      : `${item.name}${item.recommended ? ` · ${t('policy.editor.recommended')}` : ''}`,
-    value: item.name,
-  }))
+  const interfaces = (outboundInfo.value?.interfaces ?? []).map(item => {
+    const addresses = item.addresses ?? []
+    return {
+      label: addresses.length
+        ? `${item.name} (${addresses.join(', ')})${item.recommended ? ` · ${t('policy.editor.recommended')}` : ''}`
+        : `${item.name}${item.recommended ? ` · ${t('policy.editor.recommended')}` : ''}`,
+      value: item.name,
+    }
+  })
   const platform = outboundInfo.value?.platform?.trim().toLowerCase()
   return platform === 'windows' || platform === 'win32'
     ? [{ label: t('policy.editor.outbound_auto'), value: 'auto' }, ...interfaces]

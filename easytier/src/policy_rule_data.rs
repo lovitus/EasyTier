@@ -257,7 +257,7 @@ pub(crate) async fn update_policy_rule_data(
 }
 
 pub(crate) async fn list_policy_rule_data_categories(
-    config_dir: PathBuf,
+    config_dir: Option<PathBuf>,
     instance_id: Uuid,
     resource: PolicyRuleDataResource,
     expected_sha256: Option<String>,
@@ -265,7 +265,7 @@ pub(crate) async fn list_policy_rule_data_categories(
 ) -> anyhow::Result<PolicyRuleDataCategories> {
     tokio::task::spawn_blocking(move || {
         list_policy_rule_data_categories_sync(
-            &config_dir,
+            config_dir.as_deref(),
             instance_id,
             resource,
             expected_sha256.as_deref(),
@@ -277,7 +277,7 @@ pub(crate) async fn list_policy_rule_data_categories(
 }
 
 fn list_policy_rule_data_categories_sync(
-    config_dir: &Path,
+    config_dir: Option<&Path>,
     instance_id: Uuid,
     resource: PolicyRuleDataResource,
     expected_sha256: Option<&str>,
@@ -293,15 +293,24 @@ fn list_policy_rule_data_categories_sync(
         .map(PathBuf::from)
         .map(|path| {
             if path.is_absolute() {
-                path
+                Ok(path)
             } else {
-                config_dir.join(path)
+                config_dir
+                    .map(|config_dir| config_dir.join(path))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "relative rule data path requires a managed config directory"
+                        )
+                    })
             }
-        });
-    let managed_path = config_dir
-        .join("policy-rule-data")
-        .join(instance_id.to_string())
-        .join(resource.file_name());
+        })
+        .transpose()?;
+    let managed_path = config_dir.map(|config_dir| {
+        config_dir
+            .join("policy-rule-data")
+            .join(instance_id.to_string())
+            .join(resource.file_name())
+    });
     let (path, builtin_sha256) = if let Some(path) = configured_path {
         ensure!(
             path.is_file(),
@@ -309,12 +318,10 @@ fn list_policy_rule_data_categories_sync(
             path.display()
         );
         (path, None)
-    } else if managed_path.is_file() {
+    } else if let Some(managed_path) = managed_path.filter(|path| path.is_file()) {
         (managed_path, None)
     } else {
-        let cache_dir = config_dir
-            .join(".easytier-policy-rule-data")
-            .join(BUILTIN_SNAPSHOT);
+        let cache_dir = builtin_category_cache_dir(config_dir);
         let path = materialize_builtin_rule_data(&cache_dir, resource)?;
         let sha256 = resource.builtin().map(|(_, sha256)| sha256);
         (path, sha256)
@@ -330,6 +337,25 @@ fn list_policy_rule_data_categories_sync(
         size: index.size,
         categories: index.categories,
     })
+}
+
+fn builtin_category_cache_dir(config_dir: Option<&Path>) -> PathBuf {
+    // Mihomo component/geodata/utils.go::LoadGeoSiteMatcher caches successful
+    // decoded lists and forgets failures. GUI category discovery likewise
+    // reuses a validated sidecar index, but normal GUI mode has no managed
+    // config directory, so it must share the runtime's existing temp fallback.
+    config_dir.map_or_else(
+        || {
+            std::env::temp_dir()
+                .join("easytier-policy-rule-data")
+                .join(BUILTIN_SNAPSHOT)
+        },
+        |config_dir| {
+            config_dir
+                .join(".easytier-policy-rule-data")
+                .join(BUILTIN_SNAPSHOT)
+        },
+    )
 }
 
 fn update_policy_rule_data_sync(
@@ -768,6 +794,42 @@ mod tests {
             assert_eq!(sha256_file(&rule_set.path).unwrap(), expected_sha256);
             resource.validate(&rule_set.path).unwrap();
         }
+    }
+
+    #[test]
+    fn category_cache_without_managed_config_matches_runtime_fallback() {
+        assert_eq!(
+            builtin_category_cache_dir(None),
+            std::env::temp_dir()
+                .join("easytier-policy-rule-data")
+                .join(BUILTIN_SNAPSHOT)
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            builtin_category_cache_dir(Some(directory.path())),
+            directory
+                .path()
+                .join(".easytier-policy-rule-data")
+                .join(BUILTIN_SNAPSHOT)
+        );
+    }
+
+    #[test]
+    fn normal_gui_mode_lists_and_caches_builtin_geosite_categories() {
+        let listing = list_policy_rule_data_categories_sync(
+            None,
+            Uuid::nil(),
+            PolicyRuleDataResource::Geosite,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(listing.categories.iter().any(|category| category == "CN"));
+        let data_path =
+            builtin_category_cache_dir(None).join(PolicyRuleDataResource::Geosite.file_name());
+        assert!(category_index_path(&data_path).is_file());
     }
 
     #[test]
