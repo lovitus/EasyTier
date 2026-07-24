@@ -45,6 +45,15 @@ jobs:
           cache-targets: true
           cache-on-failure: true
 
+      - name: Test Quinn UDP truncated datagram handling
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          cargo test --locked --target "$GUI_TARGET" \
+            --package quinn-udp --test tests \
+            truncated_datagram_does_not_spin_after_eagain -- \
+            --exact --nocapture
+
       - name: Build policy sidecars
         env:
           HEV_SERVER_COMMIT: 97e74f1068bd924e740032382cdc94ca83741ae6
