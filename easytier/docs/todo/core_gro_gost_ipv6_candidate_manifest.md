@@ -1,14 +1,16 @@
 # Core GRO, GOST, and IPv6 candidate manifest
 
-Status: GRO PRODUCTION OPTIMIZATION REJECTED; IPV6 AND GOST FIXES RETAINED
+Status: FINAL IPV6 AND GOST CANDIDATE PASSED; GRO OPTIMIZATION REJECTED
 
 Date: 2026-07-26
 
-The immutable profiling candidate was
-`49682dbdf864749f7a17eab8e1ab14ad30bb718f`, workflow
-`30200437716`. The workflow passed, but public dual-stack runtime validation
-rejected the Linux GRO scratch change. The next candidate must remove only that
-production optimization and retain the independently tested IPv6 and GOST
+The experimental GRO profiling candidate was
+`49682dbdf864749f7a17eab8e1ab14ad30bb718f`, workflow `30200437716`.
+The final candidate is
+`35c81d5b62d3b5aed033f8f259ae24ae4f8680bc`, workflow `30201638416`.
+Both workflows passed. Controlled public dual-stack runtime validation found no
+repeatable GRO throughput benefit, so the final candidate removes only that
+production optimization and retains the independently tested IPv6 and GOST
 fixes.
 
 ## Baseline and scope
@@ -134,44 +136,72 @@ separately reviewable and testable.
 
 ## Runtime result and disposition
 
-The public pair was healthy immediately before the comparison:
+The public pair was healthy immediately before and during the comparison:
 
 - raw IPv4: 7,773.3 Mbit/s;
 - raw IPv6: 7,482.2 Mbit/s;
 - raw IPv4 recheck during the candidate regression: 7,779.6 Mbit/s.
 
-Exact `08fb17d3` baseline, three ten-second runs per direction:
+The first automatic-transport series produced:
 
-- public host 2 to public host 3:
-  76.8, 336.5, and 336.6 Mbit/s; median 336.5 Mbit/s. The first run was a
-  path-warmup outlier and was not used to inflate the candidate comparison.
-- public host 3 to public host 2:
-  308.0, 320.0, and 302.1 Mbit/s; median 308.0 Mbit/s.
+- exact `08fb17d3` baseline: 336.5 Mbit/s forward median and 308.0 Mbit/s
+  reverse median;
+- exact `49682dbd` GRO candidate: 163.8 Mbit/s forward median and 302.4 Mbit/s
+  reverse median;
+- exact `35c81d5b` final candidate without the GRO change: 152.2 Mbit/s forward
+  median and 297.0 Mbit/s reverse median.
 
-Exact `49682dbd` candidate:
+An early A/B/A switch returned the baseline forward median to 337.1 Mbit/s.
+That appeared to implicate the GRO change, but the final candidate, whose
+offload source is byte-identical to `08fb17d3`, reproduced the same slow
+automatic forward path. Logs showed that automatic runs established both UDP
+and QUIC connections. The 51% comparison was therefore confounded by transport
+selection and is rejected as causal evidence.
 
-- public host 2 to public host 3:
-  168.5, 163.8, and 158.3 Mbit/s; median 163.8 Mbit/s.
-- public host 3 to public host 2:
-  297.1, 302.4, and 343.4 Mbit/s; median 302.4 Mbit/s.
-- an additional first-direction candidate run was 176.7 Mbit/s.
+The accepted comparison fixed `transport_priority = "global:udp"` while
+retaining enabled KCP and QUIC proxy features, identical listeners, virtual
+addresses, MTU, encryption setting, hosts, direction, payload, and duration:
 
-An A/B/A confirmation switched the same hosts, ports, virtual addresses,
-unencrypted mesh, and enabled KCP/QUIC settings back to `08fb17d3`. The
-first-direction results recovered to 276.7, 352.5, and 337.1 Mbit/s; median
-337.1 Mbit/s.
+- exact `08fb17d3`: 371.1 and 357.6 Mbit/s; median 364.4 Mbit/s;
+- exact `35c81d5b`: 361.0 and 356.7 Mbit/s; median 358.9 Mbit/s, 1.5% below
+  baseline and inside the 5% acceptance bound;
+- exact `49682dbd` with GRO scratch: 348.4, 350.4, and 364.4 Mbit/s; median
+  350.4 Mbit/s, 3.8% below baseline.
 
-The candidate therefore caused an approximately 51% median regression in the
-direction whose receiver used the expanded GRO scratch while leaving the
-reverse control direction almost unchanged. Raw networking remained above
-7.7 Gbit/s. This is sufficient causal evidence to reject the production
-change; no additional workflow or platform rollout is justified for that
-implementation.
+The GRO scratch therefore has no measured Core throughput benefit. Its isolated
+probe result does not justify an extra copy, approximately 65 KiB retained
+buffer, and larger kernel GSO frames. Keeping the production revert is the
+lowest-risk result; it is not described as a 51% regression.
 
 The standalone probe remains useful as a failed-assumption record: increasing
 buffer capacity allowed larger legal GRO frames in isolation, but that
-mechanism did not improve the real Core/kernel path and materially reduced
-throughput on the tested Linux receiver.
+mechanism did not improve the real Core/kernel path.
+
+## Final functional and lifecycle evidence
+
+The exact `35c81d5b` artifact passed:
+
+- outer and inner SHA-256 verification, commit, target, workflow run, and
+  Build ID checks;
+- packaged GOST `v3.2.9-easytier.1`, expected binary SHA-256, source commit,
+  protocol source commit, and upstream-baseline checks;
+- explicit `fd44:80::82/64` and `fd44:80::83/64` configuration on the two
+  public hosts;
+- automatic connected `fd44:80::/64` kernel routes on both TUNs with no manual
+  `/128` route;
+- bidirectional IPv4 and IPv6 overlay ICMP with zero loss and approximately
+  0.6-1.0 ms latency;
+- one real SOCKS5 UDP association through the Core-managed GOST and mesh with
+  an 8,192-byte payload echoed exactly;
+- first-packet source pinning: a second UDP socket using a different source
+  port on the same association received no reply;
+- graceful Core termination on both hosts, followed by removal of Core, GOST,
+  TUN devices, FDs, and loopback ports `11080-11082`.
+
+Pre-stop Core state was bounded:
+
+- public host 2: 28,888 KiB RSS, 16 threads, 40 FDs;
+- public host 3: 24,320 KiB RSS, 8 threads, 36 FDs.
 
 ## Core optimization boundary during the build
 
