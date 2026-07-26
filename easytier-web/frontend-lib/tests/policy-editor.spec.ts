@@ -238,7 +238,7 @@ describe('PolicyEditor', () => {
     await nextTick()
 
     expect(model).toMatchObject({
-      enable_policy_proxy: true,
+      enable_policy_proxy: false,
       policy_proxy_backend: 'mihomo',
       policy_config_inline: '',
       policy_outbound_interface: '',

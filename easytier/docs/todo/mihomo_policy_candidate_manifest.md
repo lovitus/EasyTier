@@ -219,6 +219,16 @@ integration target compiled in 4.49 seconds and passed all 8 Linux integration
 tests. macOS-only resolver ownership and Darwin truncated-datagram execution
 remain assigned to the exact-SHA macOS workflow.
 
+The first workflow dispatch at `5e1f74800e734520519f1527b98d89b50608cc2d`
+failed during `pnpm install --frozen-lockfile` before Android or macOS
+compilation because the lockfile omitted the existing root `happy-dom`
+override. The Linux run was cancelled after that tracked-input failure
+invalidated the SHA. The lockfile now matches `package.json`, the stale
+explicit-Mihomo frontend assertion now expects the normalized legacy boolean,
+and `.160` passed frozen install, all 51 focused frontend tests, frontend-lib,
+Web, VPN-plugin, and GUI production builds. The release audit now rejects any
+future root/lockfile override mismatch.
+
 - `.160` locked no-run build for the complete current snapshot.
 - `.160` locked no-run plus complete integration-test execution for the
   vendored `quinn-udp` target.

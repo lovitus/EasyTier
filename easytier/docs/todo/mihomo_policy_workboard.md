@@ -37,6 +37,14 @@ focused filters passed with three-node in 3.08s, and vendored `quinn-udp`
 compiled in 4.49s and passed 8/8 integration tests. The focused macOS workflow
 and immutable artifacts remain pending.
 
+The first exact-SHA workflow dispatch (`5e1f7480`) exposed a missing
+`happy-dom` root override in `pnpm-lock.yaml`; Android and macOS stopped during
+frozen install before platform compilation, and the Linux run was cancelled.
+The lockfile and one stale explicit-Mihomo frontend assertion were corrected.
+The `.160` frontend lane then passed frozen install, all 51 focused tests, and
+all four dependency-order production builds. The release audit now compares
+root and lockfile pnpm overrides before dispatch.
+
 ## Current parallel lanes
 
 | Lane | Objective | Write scope | Status |

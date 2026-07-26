@@ -5,6 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  happy-dom: 16.8.1
   minimatch: 10.2.4
 
 importers:

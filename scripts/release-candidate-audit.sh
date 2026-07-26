@@ -98,6 +98,41 @@ else
   pass "Leaf lock matches manifest"
 fi
 
+package_overrides="$(
+  jq -r '
+    .pnpm.overrides // {} |
+    to_entries |
+    sort_by(.key)[] |
+    "\(.key)=\(.value)"
+  ' package.json
+)"
+lock_overrides="$(
+  awk '
+    $0 == "overrides:" {
+      in_overrides = 1
+      next
+    }
+    in_overrides && /^[^ ]/ {
+      exit
+    }
+    in_overrides && /^  [^ ]/ {
+      line = substr($0, 3)
+      separator = index(line, ": ")
+      if (separator > 0) {
+        key = substr(line, 1, separator - 1)
+        value = substr(line, separator + 2)
+        gsub(/^['\''"]|['\''"]$/, "", value)
+        print key "=" value
+      }
+    }
+  ' pnpm-lock.yaml | sort
+)"
+if [[ "$package_overrides" != "$lock_overrides" ]]; then
+  fail "pnpm overrides differ between package.json and pnpm-lock.yaml"
+else
+  pass "pnpm overrides match lockfile"
+fi
+
 expected_hev="$(sed -n 's/^- HEV SHA: `\([^`]*\)`.*/\1/p' "$manifest")"
 for workflow_file in \
   .github/workflows/android-policy-candidate.yml \
