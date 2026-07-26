@@ -1405,53 +1405,32 @@ impl Instance {
 
         #[cfg(feature = "leaf-policy-proxy")]
         {
-            // The neutral 11080-11082 mesh entry is Core-owned and shared by all
-            // networks. Leaf direct egress remains policy-instance-owned on
-            // 11180-11182 for non-Android hosts.
-            #[cfg(target_os = "android")]
-            let endpoint_provider: Arc<
-                dyn crate::policy_proxy::LocalSocksEndpointProvider,
-            > = crate::instance_manager::CoreMeshEntryHandle::global();
-            #[cfg(not(target_os = "android"))]
-            let policy_socks_egress = {
-                let policy_config = self.global_ctx.config.get_policy_proxy_config();
-                let outbound_interface = policy_config
-                    .filter(|config| config.is_leaf_enabled())
-                    .and_then(|config| config.outbound_interface);
-                let direct_config =
-                    easytier_socks_egress::SocksEgressConfig::leaf_direct_egress(None, None);
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
-                let mut direct_config = direct_config;
-                #[cfg(target_os = "linux")]
-                {
-                    direct_config.socket_mark = self.global_ctx.get_flags().socket_mark;
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    direct_config.bind_interface = outbound_interface;
-                }
-                #[cfg(not(target_os = "macos"))]
-                let _ = outbound_interface;
-                Arc::new(SocksEgressManager::new(direct_config))
-            };
-            #[cfg(not(target_os = "android"))]
-            let endpoint_provider: Arc<
-                dyn crate::policy_proxy::LocalSocksEndpointProvider,
-            > = policy_socks_egress.clone();
+            // Keep the virtual peer endpoint and the local source endpoint on the
+            // same process-global neutral mesh entry. On desktop this is GOST; on
+            // Android the global handle owns the in-process HEV compatibility
+            // backend. In particular, do not route desktop peer ingress to the
+            // Leaf-only direct egress: nested SOCKS UDP would otherwise publish a
+            // loopback relay address from a different endpoint.
+            //
+            // Mihomo parity reference:
+            // adapter/outbound/socks5.go::listenPacketContext and
+            // component/proxydialer/{byname,proxydialer}.go::ListenPacket use the
+            // configured dialer-proxy for both the control stream and UDP relay.
+            let endpoint_provider: Arc<dyn crate::policy_proxy::LocalSocksEndpointProvider> =
+                crate::instance_manager::CoreMeshEntryHandle::global();
             let relay = crate::policy_proxy::MeshSocksRelayService::new(
                 &self.peer_manager,
                 self.socks5_server.clone(),
                 Some(endpoint_provider),
             );
             relay.register();
+            // Desktop uses a kernel listener bound only to this instance's
+            // virtual IPv4 addresses. Android VpnService has no kernel-local
+            // virtual address, so the same call selects its smoltcp ingress.
             if let Err(error) = relay.start_local_tcp_ingress_background() {
-                tracing::warn!(?error, "failed to schedule built-in HEV mesh TCP ingress");
+                tracing::warn!(?error, "failed to schedule neutral mesh TCP ingress");
             }
             self.policy_socks_relay = Some(relay);
-            #[cfg(not(target_os = "android"))]
-            {
-                self.policy_socks_egress = Some(policy_socks_egress);
-            }
         }
 
         Ok(())

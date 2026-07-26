@@ -163,3 +163,100 @@ useful diagnostic history but do not satisfy the current GOST dispatch gate.
 | Test/GUI real Mihomo mapping | PASS, latest-stable resolve plus MUSL asset under Linux GNU bundle name |
 | macOS runtime | BLOCKED: the configured validation host was not reachable over SSH |
 | Windows/runtime Unix | PENDING immutable workflow artifacts |
+
+## 2026-07-27 nested SOCKS UDP wiring correction
+
+Exact source references inspected before implementation:
+
+- Mihomo
+  `adapter/outbound/socks5.go::listenPacketContext` delegates packet creation
+  to the outbound dialer.
+- Mihomo
+  `component/proxydialer/byname.go::ListenPacket` and
+  `component/proxydialer/proxydialer.go::ListenPacket` preserve
+  `dialer-proxy` for UDP as well as TCP.
+- The pinned GOST wrapper's SOCKS5 UDP handler accepts `publicAddr`; an
+  unspecified address is returned as the UDP ASSOCIATE `BND.ADDR`.
+
+Pre-change exact-artifact diagnosis for
+`1af984c9931577ab6e40a0ce24effed95ce509fc`:
+
+- Core-owned GOST TCP/UDP readiness passed locally.
+- Mihomo selected the configured peer exit for UDP, but the virtual peer
+  `11080` ingress terminated at the policy-instance Leaf/HEV direct egress on
+  desktop instead of the process-global GOST.
+- TCP happened to work because both endpoints could provide a direct stream.
+  Nested UDP failed because the private endpoint advertised a loopback relay
+  address that was local to the peer.
+- A bounded proof using the same artifact and an explicitly mesh-reachable
+  peer GOST passed exact `64`, `1200`, and `8192` byte UDP echoes. This isolates
+  the failure from the mesh UDP data plane, GOST relay implementation, and
+  Mihomo `dialer-proxy`.
+
+Minimal implementation boundary:
+
+- Reuse `CoreMeshEntryHandle::global()` as the endpoint owner on every
+  supported platform. Desktop uses GOST; Android retains its in-process HEV
+  compatibility backend.
+- Keep process-global GOST loopback-only. On desktop, bind ordinary Tokio TCP
+  listeners only to each instance's exact virtual IPv4 and the three reserved
+  candidate ports, then relay accepted streams to the selected loopback GOST
+  endpoint.
+- Use fixed `128 KiB` buffers in each direction. Per admitted stream memory is
+  therefore `256 KiB`, bounded per network instance by the existing
+  `TCP_RELAY_LIMIT` semaphore.
+- Keep the userspace virtual TCP ingress only on Android, where VpnService does
+  not provide a kernel-local virtual address.
+- Make managed GOST advertise `publicAddr=0.0.0.0`, allowing the nested client
+  to substitute the configured peer address.
+- Do not change mesh transports, policy RPC, proxy configuration, Mihomo YAML,
+  routing, or packet formats.
+
+Performance diagnosis before the kernel-ingress correction used the same
+source and destination nodes and three sequential 32 MiB rounds:
+
+- direct mesh median: approximately `253 Mbit/s`;
+- local GOST to mesh median: approximately `213 Mbit/s`;
+- full chain through the desktop userspace virtual ingress: approximately
+  `55 Mbit/s`.
+
+Core CPU remained essentially constant in the earlier optimized-artifact
+control; the additional cost was isolated to proxy/relay layers. A standalone
+kernel-listener prototype then produced these full-chain medians:
+
+- default `8 KiB` copy buffers: approximately `144 Mbit/s`;
+- `64 KiB` per direction: approximately `155 Mbit/s`;
+- `128 KiB` per direction: approximately `168 Mbit/s` across five runs;
+- `256 KiB` per direction: approximately `174 Mbit/s`.
+
+The selected `128 KiB` point stays within about 9% of the no-relay full-chain
+control while halving per-flow memory versus `256 KiB`. The implementation
+removes the redundant desktop userspace TCP stack without changing mesh
+transport selection.
+
+Post-change evidence:
+
+- `.160` locked no-run and the complete focused suite passed, including the
+  platform-ingress relay, delayed IPv4 retry, GOST, Mihomo, three-node, Leaf,
+  netstack, macOS DNS/route, and Quinn UDP tests.
+- A non-release x86_64-musl Core built on `.160` was verified as static PIE
+  with Build ID `4cc289c67b7027201807f5ecda7818b8b5b80e41` and SHA256
+  `80a6607bf0734d414429926a2e30dc33772f9e13dcc6bcd0e20c910707d64046`.
+- On the public dual-stack pair, both directions passed IPv4 and IPv6 mesh
+  reachability. GOST remained loopback-only, while Core owned only each
+  instance's exact virtual IPv4 ports `11080-11082`.
+- The real Mihomo -> local GOST -> peer virtual `11080` -> peer GOST chain
+  completed five 32 MiB TCP runs. The median was approximately `170 Mbit/s`,
+  versus approximately `55 Mbit/s` through the old desktop smoltcp ingress.
+- Exact `64`, `1200`, and `8192` byte UDP echoes all passed through the same
+  peer `11080` chain.
+- Killing the peer GOST produced a new child on the same port within four
+  seconds. Post-recovery TCP was approximately `172 Mbit/s`, and all three UDP
+  sizes passed again.
+- Graceful Core stop removed the GOST child, all virtual and loopback SOCKS
+  listeners, and the TUN. Final cleanup on both nodes found no Core, prototype
+  relay, test listener, or TUN residue. No firewall rules were added.
+
+This is strong implementation evidence but not an immutable optimized workflow
+artifact. The next single profiling candidate must repeat the TCP/UDP,
+crash/recovery, resource, and cleanup checks from its exact packaged artifact.

@@ -141,13 +141,99 @@ impl MeshSocksRelayService {
             );
     }
 
-    /// Mihomo's embedded Tailscale runtime exposes its mesh SOCKS listener on
-    /// the userspace tailnet (`runtime.retryStartSocks5TCP` in
-    /// component/tsnet/tsnet.go), rather than relying on a host kernel listener
-    /// bound to the virtual address. Do the same here: smoltcp owns the mesh
-    /// endpoint and this narrow relay owns only the hop to the independent HEV
-    /// runtime. This is required on Android VpnService, whose virtual address is
-    /// not a normal kernel-local listener address.
+    /// Desktop TUN addresses are kernel-local, so desktop uses exact-address
+    /// kernel listeners and a bounded hop to the process-global GOST endpoint.
+    /// Android VpnService has no kernel-local virtual address and retains the
+    /// smoltcp ingress, matching Mihomo's userspace-tailnet listener model in
+    /// `component/tsnet/tsnet.go::runtime.retryStartSocks5TCP`.
+    #[cfg(not(target_os = "android"))]
+    pub(crate) async fn start_local_tcp_ingress(&self) -> anyhow::Result<()> {
+        const COPY_BUFFER_SIZE: usize = 128 * 1024;
+
+        let endpoint_provider = self
+            .local_socks_endpoint_provider
+            .clone()
+            .context("neutral mesh entry has no endpoint provider")?;
+        let local_endpoint = tokio::time::timeout(SETUP_TIMEOUT, endpoint_provider.endpoint())
+            .await
+            .context("neutral mesh entry startup timed out")??;
+        let peer_mgr = self
+            .peer_mgr
+            .upgrade()
+            .context("peer manager is no longer available")?;
+        let local_virtual_ip = peer_mgr
+            .get_global_ctx()
+            .get_ipv4()
+            .context("local peer has no virtual IPv4 address")?
+            .address();
+
+        let mut listeners =
+            Vec::with_capacity(easytier_socks_egress::DEFAULT_PORT_CANDIDATES.len());
+        for port in easytier_socks_egress::DEFAULT_PORT_CANDIDATES {
+            listeners.push(
+                TcpListener::bind(SocketAddr::new(IpAddr::V4(local_virtual_ip), port))
+                    .await
+                    .with_context(|| {
+                        format!("failed to bind neutral mesh TCP ingress {local_virtual_ip}:{port}")
+                    })?,
+            );
+        }
+
+        let mut task_slots = self.tcp_ingress_tasks.lock().unwrap();
+        if !task_slots.is_empty() {
+            bail!("neutral mesh TCP ingress is already running");
+        }
+        let cancel = self.cancel.child_token();
+        let permits = Arc::new(Semaphore::new(TCP_RELAY_LIMIT));
+        for listener in listeners {
+            let cancel = cancel.child_token();
+            let permits = permits.clone();
+            task_slots.push(tokio::spawn(async move {
+                let mut sessions = JoinSet::new();
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        accepted = listener.accept() => {
+                            let Ok((mut mesh_stream, source)) = accepted else {
+                                break;
+                            };
+                            let Ok(permit) = permits.clone().try_acquire_owned() else {
+                                tracing::warn!(%source, "neutral mesh TCP relay is at capacity");
+                                continue;
+                            };
+                            sessions.spawn(async move {
+                                let _permit = permit;
+                                let connected = tokio::time::timeout(
+                                    SETUP_TIMEOUT,
+                                    tokio::net::TcpStream::connect(local_endpoint),
+                                )
+                                .await;
+                                let Ok(Ok(mut local_stream)) = connected else {
+                                    return;
+                                };
+                                // Two fixed 128 KiB buffers per admitted stream keep
+                                // memory bounded by 256 KiB * TCP_RELAY_LIMIT while
+                                // avoiding the measured 8 KiB copy bottleneck.
+                                let _ = tokio::io::copy_bidirectional_with_sizes(
+                                    &mut mesh_stream,
+                                    &mut local_stream,
+                                    COPY_BUFFER_SIZE,
+                                    COPY_BUFFER_SIZE,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                    while sessions.try_join_next().is_some() {}
+                }
+                sessions.abort_all();
+                while sessions.join_next().await.is_some() {}
+            }));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "android")]
     pub(crate) async fn start_local_tcp_ingress(&self) -> anyhow::Result<()> {
         let endpoint_provider = self
             .local_socks_endpoint_provider
@@ -1772,7 +1858,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepares_then_relays_built_in_tcp_from_mesh_data_plane() {
+    async fn prepares_then_relays_built_in_tcp_from_platform_ingress() {
         struct CountingEndpointProvider {
             endpoint: SocketAddr,
             calls: std::sync::atomic::AtomicUsize,
@@ -1790,8 +1876,16 @@ mod tests {
         let peer_a = create_mock_peer_manager().await;
         let peer_b = create_mock_peer_manager().await;
         connect_peer_manager(peer_a.clone(), peer_b.clone()).await;
-        let ip_a: cidr::Ipv4Inet = "10.179.0.1/24".parse().unwrap();
-        let ip_b: cidr::Ipv4Inet = "10.179.0.2/24".parse().unwrap();
+        #[cfg(target_os = "android")]
+        let (ip_a, ip_b): (cidr::Ipv4Inet, cidr::Ipv4Inet) = (
+            "10.179.0.1/24".parse().unwrap(),
+            "10.179.0.2/24".parse().unwrap(),
+        );
+        #[cfg(not(target_os = "android"))]
+        let (ip_a, ip_b): (cidr::Ipv4Inet, cidr::Ipv4Inet) = (
+            "127.179.0.1/8".parse().unwrap(),
+            "127.179.0.2/8".parse().unwrap(),
+        );
         peer_a.get_global_ctx().set_ipv4(Some(ip_a));
         peer_b.get_global_ctx().set_ipv4(Some(ip_b));
         wait_route_appear(peer_a.clone(), peer_b.clone())
@@ -1831,12 +1925,21 @@ mod tests {
             Some(endpoint_provider.clone()),
         );
         relay.start_local_tcp_ingress().await.unwrap();
+        #[cfg(target_os = "android")]
         assert_eq!(
             endpoint_provider
                 .calls
                 .load(std::sync::atomic::Ordering::Relaxed),
             0,
-            "registering the mesh ingress must not start the local SOCKS runtime",
+            "Android userspace ingress resolves its endpoint lazily",
+        );
+        #[cfg(not(target_os = "android"))]
+        assert_eq!(
+            endpoint_provider
+                .calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "desktop kernel ingress resolves the already-running Core endpoint once",
         );
         let local_server = tokio::spawn(async move {
             let (mut stream, _) = local_listener.accept().await.unwrap();
@@ -1866,12 +1969,15 @@ mod tests {
             endpoint_provider
                 .calls
                 .load(std::sync::atomic::Ordering::Relaxed),
-            1,
+            if cfg!(target_os = "android") { 1 } else { 2 },
         );
+        #[cfg(target_os = "android")]
         let mut stream = data_plane_a
             .data_plane_tcp_connect_mesh_only(mesh_endpoint, SETUP_TIMEOUT)
             .await
             .unwrap();
+        #[cfg(not(target_os = "android"))]
+        let mut stream = tokio::net::TcpStream::connect(mesh_endpoint).await.unwrap();
         stream.write_all(b"ping").await.unwrap();
         stream.flush().await.unwrap();
         let mut reply = [0u8; 4];
@@ -1887,11 +1993,21 @@ mod tests {
         drop(stream);
 
         relay.shutdown().await;
+        #[cfg(target_os = "android")]
         assert!(
             data_plane_a
                 .data_plane_tcp_connect_mesh_only(mesh_endpoint, Duration::from_secs(1))
                 .await
                 .is_err()
+        );
+        #[cfg(not(target_os = "android"))]
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::net::TcpStream::connect(mesh_endpoint),
+            )
+            .await
+            .is_ok_and(|result| result.is_err())
         );
     }
 
@@ -1927,7 +2043,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(relay.tcp_ingress_tasks.lock().unwrap().is_empty());
 
+        #[cfg(target_os = "android")]
         let ipv4: cidr::Ipv4Inet = "10.179.1.2/24".parse().unwrap();
+        #[cfg(not(target_os = "android"))]
+        let ipv4: cidr::Ipv4Inet = "127.179.1.2/8".parse().unwrap();
         global_ctx.set_ipv4(Some(ipv4));
         global_ctx.issue_event(GlobalCtxEvent::DhcpIpv4Changed(previous_ipv4, Some(ipv4)));
         wait_for_condition(

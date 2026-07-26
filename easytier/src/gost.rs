@@ -127,8 +127,13 @@ impl GostRuntime {
 }
 
 fn gost_listener_url(endpoint: SocketAddr) -> String {
+    // GOST otherwise advertises its loopback control-listener address in the
+    // UDP ASSOCIATE reply. An unspecified BND.ADDR lets RFC 1928 clients use
+    // the configured proxy address instead, which is required when Mihomo's
+    // SOCKS outbound reaches a peer through dialer-proxy. This does not expose
+    // the loopback-only listener or change the UDP relay socket binding.
     format!(
-        "socks5://{endpoint}?udp=true&udpBufferSize={UDP_BUFFER_SIZE}&udpSourceCheck={UDP_SOURCE_CHECK}"
+        "socks5://{endpoint}?udp=true&udpBufferSize={UDP_BUFFER_SIZE}&udpSourceCheck={UDP_SOURCE_CHECK}&publicAddr=0.0.0.0"
     )
 }
 
@@ -334,11 +339,14 @@ mod tests {
 
     #[test]
     fn managed_gost_uses_bounded_udp_and_first_packet_source_pinning() {
+        let config = GostProcessConfig::new("/tmp/easytier-gost".into());
+        assert_eq!(config.listen_address, IpAddr::V4(Ipv4Addr::LOCALHOST));
         let listener = gost_listener_url(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            config.listen_address,
             DEFAULT_PORT_CANDIDATES[0],
         ));
         assert!(listener.contains("udpBufferSize=65535"));
         assert!(listener.contains("udpSourceCheck=first-packet"));
+        assert!(listener.contains("publicAddr=0.0.0.0"));
     }
 }
