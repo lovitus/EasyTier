@@ -1,9 +1,10 @@
 use std::{collections::HashSet, sync::Arc};
 
+#[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
+use crate::common::config::PolicyProxyBackend;
 use crate::{
     common::config::{
-        ConfigFileControl, ConfigFilePermission, ConfigLoader, ConfigSource, PolicyProxyBackend,
-        TomlConfigLoader,
+        ConfigFileControl, ConfigFilePermission, ConfigLoader, ConfigSource, TomlConfigLoader,
     },
     instance_manager::NetworkInstanceManager,
     proto::{

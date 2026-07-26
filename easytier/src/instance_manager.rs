@@ -3,10 +3,10 @@ use crate::launcher::{DataPlaneTcpListener, DataPlaneTcpStream, DataPlaneUdpSock
 use anyhow::Context as _;
 use dashmap::DashMap;
 use std::fmt::{Display, Formatter};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+#[cfg(feature = "mesh-socks-egress")]
 use std::{
-    collections::BTreeMap,
-    path::PathBuf,
-    sync::{Arc, OnceLock, mpsc as std_mpsc},
+    sync::{OnceLock, mpsc as std_mpsc},
     thread,
     time::Duration,
 };
@@ -832,12 +832,10 @@ impl NetworkInstanceManager {
         }
 
         self.instance_map.insert(instance_id, instance);
-        if watch_event {
-            if let Err(error) = self.start_instance_task(instance_id) {
-                self.instance_map.remove(&instance_id);
-                let _ = self.mihomo_owner.stop(instance_id);
-                return Err(error);
-            }
+        if watch_event && let Err(error) = self.start_instance_task(instance_id) {
+            self.instance_map.remove(&instance_id);
+            let _ = self.mihomo_owner.stop(instance_id);
+            return Err(error);
         }
         Ok(instance_id)
     }
@@ -1002,7 +1000,7 @@ impl NetworkInstanceManager {
     ) -> crate::proto::api::manage::NeutralMeshEntryStatus {
         #[cfg(feature = "mesh-socks-egress")]
         {
-            return CoreMeshEntryHandle::global().status().into_proto();
+            CoreMeshEntryHandle::global().status().into_proto()
         }
 
         #[cfg(not(feature = "mesh-socks-egress"))]
@@ -1584,7 +1582,7 @@ outbound_interface = "eth0"
 
     #[test]
     #[serial_test::serial]
-    fn test_no_tokio_runtime() {
+    fn watcher_registration_failure_rolls_back_the_new_instance() {
         let manager = NetworkInstanceManager::new();
         let cfg_str = r#"
             listeners = []
@@ -1648,7 +1646,7 @@ outbound_interface = "eth0"
 
         assert!(!crate::utils::check_tcp_available(port));
 
-        assert_eq!(manager.list_network_instance_ids().len(), 5);
+        assert_eq!(manager.list_network_instance_ids().len(), 2);
         assert_eq!(
             manager
                 .instance_map
@@ -1656,8 +1654,8 @@ outbound_interface = "eth0"
                 .map(|item| item.is_easytier_running())
                 .filter(|x| *x)
                 .count(),
-            5
-        ); // stop tasks failed not affect instance running status
+            2
+        ); // Failed watcher registration must not leave unmanaged instances running.
         assert_eq!(manager.instance_stop_tasks.len(), 0);
     }
 

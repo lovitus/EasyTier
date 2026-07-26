@@ -15,7 +15,11 @@ use tokio::sync::oneshot;
 use tokio::sync::{Mutex, Notify};
 #[cfg(feature = "tun")]
 use tokio::task::JoinSet;
-#[cfg(any(feature = "magic-dns", feature = "leaf-policy-proxy"))]
+#[cfg(any(
+    feature = "magic-dns",
+    feature = "leaf-policy-proxy",
+    feature = "mesh-socks-egress"
+))]
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 

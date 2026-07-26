@@ -89,6 +89,8 @@ impl PolicyDnsHijackGuard {
             .read(true)
             .write(true)
             .create(true)
+            // Opening must not mutate a lock file before ownership is acquired.
+            .truncate(false)
             .mode(0o600)
             .open(POLICY_DNS_LOCK_PATH)
             .context("failed to open macOS policy DNS ownership lock")?;

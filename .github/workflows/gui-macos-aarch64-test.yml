@@ -123,6 +123,16 @@ jobs:
           bash scripts/fetch-gost-release.sh fetch "$GUI_TARGET" \
             "easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET" \
             "easytier-gui/src-tauri/binaries/easytier-gost.manifest.json"
+          codesign --force --sign - \
+            "easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET"
+          codesign --verify --strict --verbose=2 \
+            "easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET"
+          bash scripts/fetch-gost-release.sh record-distributed "$GUI_TARGET" \
+            "easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET" \
+            "easytier-gui/src-tauri/binaries/easytier-gost.manifest.json"
+          bash scripts/fetch-gost-release.sh verify "$GUI_TARGET" \
+            "easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET" \
+            "easytier-gui/src-tauri/binaries/easytier-gost.manifest.json"
           cp easytier/resources/gost/LICENSE \
             easytier-gui/src-tauri/binaries/GOST_LICENSE.txt
           cp easytier/resources/gost/SOURCE.md \
@@ -165,6 +175,13 @@ jobs:
             )"
             test -n "$resource_path"
           done
+          gost_metadata=$(
+            find "$app_dir/Contents/Resources" -type f \
+              -name easytier-gost.manifest.json -print -quit
+          )
+          test -n "$gost_metadata"
+          bash scripts/fetch-gost-release.sh verify "$GUI_TARGET" \
+            "$app_dir/Contents/MacOS/easytier-gost" "$gost_metadata"
           codesign --verify --deep --strict --verbose=2 "$app_dir"
 
       - name: Collect artifact

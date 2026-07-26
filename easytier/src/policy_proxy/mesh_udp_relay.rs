@@ -385,14 +385,13 @@ impl MeshSocksRelayService {
             association.value().cancel.cancel();
         }
         let start_task = self.tcp_ingress_start_task.lock().unwrap().take();
-        if let Some(mut task) = start_task {
-            if tokio::time::timeout(Duration::from_secs(5), &mut task)
+        if let Some(mut task) = start_task
+            && tokio::time::timeout(Duration::from_secs(5), &mut task)
                 .await
                 .is_err()
-            {
-                task.abort();
-                let _ = task.await;
-            }
+        {
+            task.abort();
+            let _ = task.await;
         }
         let tasks = std::mem::take(&mut *self.tcp_ingress_tasks.lock().unwrap());
         for mut task in tasks {

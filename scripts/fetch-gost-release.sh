@@ -5,12 +5,13 @@ set -euo pipefail
 usage() {
   echo "usage: $0 fetch TARGET OUTPUT METADATA_OUTPUT" >&2
   echo "       $0 verify TARGET BINARY METADATA" >&2
+  echo "       $0 record-distributed TARGET BINARY METADATA" >&2
   exit 2
 }
 
 mode=${1:-}
 case "$mode" in
-  fetch|verify)
+  fetch|verify|record-distributed)
     [[ $# -eq 4 ]] || usage
     target=$2
     binary_path=$3
@@ -159,7 +160,33 @@ else:
     for key, value in expected.items():
         if metadata.get(key) != value:
             raise SystemExit(f"GOST metadata mismatch for {key}")
-    if metadata.get("binary_sha256") != digest(data):
-        raise SystemExit("GOST binary SHA-256 mismatch")
     verify_format(data)
+    actual_digest = digest(data)
+    source_digest = metadata.get("binary_sha256")
+    if not isinstance(source_digest, str) or len(source_digest) != 64:
+        raise SystemExit("GOST source binary SHA-256 is missing or invalid")
+
+    if mode == "record-distributed":
+        if entry["binary_format"] != "macho" or "apple-darwin" not in target:
+            raise SystemExit(
+                "record-distributed is restricted to Apple Mach-O GOST binaries"
+            )
+        if actual_digest == source_digest:
+            raise SystemExit("GOST distributed binary was not transformed by codesign")
+        metadata["distribution_transform"] = "apple-codesign-ad-hoc"
+        metadata["distributed_binary_sha256"] = actual_digest
+        with tempfile.NamedTemporaryFile(
+            dir=metadata_path.parent, mode="w", delete=False
+        ) as temporary:
+            temporary.write(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+            temporary_path = pathlib.Path(temporary.name)
+        temporary_path.replace(metadata_path)
+    elif actual_digest != source_digest:
+        if (
+            entry["binary_format"] != "macho"
+            or "apple-darwin" not in target
+            or metadata.get("distribution_transform") != "apple-codesign-ad-hoc"
+            or metadata.get("distributed_binary_sha256") != actual_digest
+        ):
+            raise SystemExit("GOST binary SHA-256 mismatch")
 PY

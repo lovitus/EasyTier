@@ -302,7 +302,7 @@ fn root_mapping(document: &mut Value) -> anyhow::Result<&mut Mapping> {
 fn protected_snapshot(root: &Mapping) -> Vec<(&'static str, Option<Value>)> {
     PROTECTED_PROXY_KEYS
         .iter()
-        .map(|key| (*key, root.get(&yaml_key(key)).cloned()))
+        .map(|key| (*key, root.get(yaml_key(key)).cloned()))
         .collect()
 }
 
@@ -312,7 +312,7 @@ fn ensure_protected_unchanged(
 ) -> anyhow::Result<()> {
     for (key, expected) in before {
         ensure!(
-            root.get(&yaml_key(key)).cloned() == *expected,
+            root.get(yaml_key(key)).cloned() == *expected,
             "internal error: Mihomo overlay changed protected field {key}"
         );
     }
@@ -447,7 +447,7 @@ fn apply_private_controller(
     report: &mut MihomoOverlayReport,
 ) -> anyhow::Result<()> {
     for field in CONTROLLER_KEYS {
-        if root.remove(&yaml_key(field)).is_some() {
+        if root.remove(yaml_key(field)).is_some() {
             report.removed_controller_fields.push((*field).to_owned());
         }
     }
@@ -1294,19 +1294,10 @@ pub struct MihomoCoreStartRequest {
     pub route_exclude_addresses: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MihomoCoreStatus {
     pub owner_instance_id: Option<uuid::Uuid>,
     pub process: MihomoStatus,
-}
-
-impl Default for MihomoCoreStatus {
-    fn default() -> Self {
-        Self {
-            owner_instance_id: None,
-            process: MihomoStatus::default(),
-        }
-    }
 }
 
 enum CoreOwnerCommand {
@@ -1688,9 +1679,9 @@ rules:
         let second = compile_runtime_config(&second_source, &overlay()).unwrap();
         let document: Value = serde_yaml::from_str(&second.yaml).unwrap();
         let root = document.as_mapping().unwrap();
-        let tun = root.get(&yaml_key("tun")).unwrap().as_mapping().unwrap();
+        let tun = root.get(yaml_key("tun")).unwrap().as_mapping().unwrap();
         let routes = tun
-            .get(&yaml_key("route-exclude-address"))
+            .get(yaml_key("route-exclude-address"))
             .unwrap()
             .as_sequence()
             .unwrap();
@@ -1701,7 +1692,7 @@ rules:
         assert!(route_strings.contains("10.44.0.0/16"));
         assert!(route_strings.contains("fd00:44::/48"));
 
-        let rules = root.get(&yaml_key("rules")).unwrap().as_sequence().unwrap();
+        let rules = root.get(yaml_key("rules")).unwrap().as_sequence().unwrap();
         assert_eq!(
             rules
                 .iter()

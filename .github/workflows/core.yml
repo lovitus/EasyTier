@@ -436,6 +436,12 @@ jobs:
             codesign --force --sign - "$binary"
             codesign --verify --strict --verbose=2 "$binary"
           done
+          bash scripts/fetch-gost-release.sh record-distributed "$TARGET" \
+            "target/$TARGET/release/easytier-gost" \
+            "target/$TARGET/release/easytier-gost.manifest.json"
+          bash scripts/fetch-gost-release.sh verify "$TARGET" \
+            "target/$TARGET/release/easytier-gost" \
+            "target/$TARGET/release/easytier-gost.manifest.json"
 
       - name: Compress
         run: |

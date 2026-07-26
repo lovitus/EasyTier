@@ -233,6 +233,14 @@ jobs:
           cp easytier/resources/gost/SOURCE.md \
             easytier-gui/src-tauri/binaries/GOST_SOURCE.md
           if [[ "$GUI_TARGET" == *darwin* ]]; then
+            gost_binary="easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET"
+            gost_metadata="easytier-gui/src-tauri/binaries/easytier-gost.manifest.json"
+            codesign --force --sign - "$gost_binary"
+            codesign --verify --strict --verbose=2 "$gost_binary"
+            bash scripts/fetch-gost-release.sh record-distributed "$GUI_TARGET" \
+              "$gost_binary" "$gost_metadata"
+            bash scripts/fetch-gost-release.sh verify "$GUI_TARGET" \
+              "$gost_binary" "$gost_metadata"
             cargo build --locked --release --target "$GUI_TARGET" \
               --package easytier-socks-egress --bin easytier-gost-guardian
             cp "target/$GUI_TARGET/release/easytier-gost-guardian" \
@@ -258,6 +266,13 @@ jobs:
               test -x "$app_dir/Contents/MacOS/$executable"
               codesign --verify --strict --verbose=2 "$app_dir/Contents/MacOS/$executable"
             done
+            gost_metadata=$(
+              find "$app_dir/Contents/Resources" -type f \
+                -name easytier-gost.manifest.json -print -quit
+            )
+            test -n "$gost_metadata"
+            bash scripts/fetch-gost-release.sh verify "$GUI_TARGET" \
+              "$app_dir/Contents/MacOS/easytier-gost" "$gost_metadata"
             codesign --verify --deep --strict --verbose=2 "$app_dir"
           else
             deb_file=$(find "target/$GUI_TARGET/release/bundle/deb" -maxdepth 1 -type f -name '*.deb' -print -quit)
@@ -299,7 +314,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bundle_root="easytier-gui/src-tauri/target/${GUI_TARGET}/release/bundle"
+          bundle_root="target/${GUI_TARGET}/release/bundle"
           test -d "$bundle_root"
           for required_name in \
             easytier-mihomo-manifest.json \
