@@ -97,7 +97,11 @@ impl LeafProcessRuntime {
         resolver: &dyn MeshServerResolver,
         revision: Arc<PolicyRevision>,
     ) -> Result<Arc<Self>, String> {
-        let dns_servers = system_dns_servers()?;
+        let dns_servers = if crate::leaf_config::requires_platform_dns(&revision.document) {
+            system_dns_servers_for_interface(outbound_interface)?
+        } else {
+            Vec::new()
+        };
         Self::start_with_dns_servers(
             executable,
             base_dir,
@@ -458,6 +462,99 @@ fn configure_parent_death(_parent_pid: libc::pid_t) -> std::io::Result<()> {
 }
 
 pub fn system_dns_servers() -> Result<Vec<std::net::IpAddr>, String> {
+    system_dns_servers_for_interface(None)
+}
+
+#[cfg(target_os = "macos")]
+pub fn system_dns_servers_for_interface(
+    outbound_interface: Option<&str>,
+) -> Result<Vec<std::net::IpAddr>, String> {
+    let interface = outbound_interface
+        .filter(|interface| !interface.is_empty())
+        .ok_or_else(|| {
+            "macOS system DNS lookup requires the selected outbound interface".to_owned()
+        })?;
+    let output = std::process::Command::new("/usr/sbin/scutil")
+        .arg("--dns")
+        .output()
+        .map_err(|error| format!("failed to run /usr/sbin/scutil --dns: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "/usr/sbin/scutil --dns failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_macos_scoped_dns_servers(&String::from_utf8_lossy(&output.stdout), interface)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn parse_macos_scoped_dns_servers(
+    contents: &str,
+    interface: &str,
+) -> Result<Vec<std::net::IpAddr>, String> {
+    let mut in_scoped_section = false;
+    let mut block_interface = None::<String>;
+    let mut block_servers = Vec::new();
+    let mut servers = Vec::new();
+
+    let flush = |block_interface: &mut Option<String>,
+                 block_servers: &mut Vec<std::net::IpAddr>,
+                 servers: &mut Vec<std::net::IpAddr>| {
+        if block_interface.as_deref() == Some(interface) {
+            for server in block_servers.drain(..) {
+                if usable_dns_server(server) && !servers.contains(&server) && servers.len() < 4 {
+                    servers.push(server);
+                }
+            }
+        } else {
+            block_servers.clear();
+        }
+        *block_interface = None;
+    };
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed == "DNS configuration (for scoped queries)" {
+            flush(&mut block_interface, &mut block_servers, &mut servers);
+            in_scoped_section = true;
+            continue;
+        }
+        if trimmed == "DNS configuration" {
+            in_scoped_section = false;
+            continue;
+        }
+        if !in_scoped_section {
+            continue;
+        }
+        if trimmed.starts_with("resolver #") {
+            flush(&mut block_interface, &mut block_servers, &mut servers);
+        } else if let Some(value) = trimmed.strip_prefix("nameserver[") {
+            if let Some((_, address)) = value.split_once(" : ")
+                && let Ok(address) = address.trim().parse()
+            {
+                block_servers.push(address);
+            }
+        } else if let Some(value) = trimmed.strip_prefix("if_index :")
+            && let Some((_, name)) = value.split_once('(')
+            && let Some(name) = name.strip_suffix(')')
+        {
+            block_interface = Some(name.trim().to_owned());
+        }
+    }
+    flush(&mut block_interface, &mut block_servers, &mut servers);
+    if servers.is_empty() {
+        Err(format!(
+            "no usable scoped DNS server found for macOS outbound interface {interface}"
+        ))
+    } else {
+        Ok(servers)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn system_dns_servers_for_interface(
+    _outbound_interface: Option<&str>,
+) -> Result<Vec<std::net::IpAddr>, String> {
     const PRIMARY: &str = "/etc/resolv.conf";
     const MANAGED_CANDIDATES: &[&str] = &[
         "/run/systemd/resolve/resolv.conf",
@@ -693,7 +790,11 @@ mod tests {
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let revision = Arc::new(
-            PolicyRevision::parse("version: 1\nrules: [\"FINAL,DIRECT\"]\n", dir.path()).unwrap(),
+            PolicyRevision::parse(
+                "version: 1\ndns:\n  direct: [1.1.1.1]\nrules: [\"FINAL,DIRECT\"]\n",
+                dir.path(),
+            )
+            .unwrap(),
         );
 
         let runtime =
@@ -737,7 +838,7 @@ mod tests {
         let revision = Arc::new(
             PolicyRevision::parse(
                 format!(
-                    "version: 1\nrules: [\"DOMAIN,{}.invalid,DIRECT\", \"FINAL,DIRECT\"]\n",
+                    "version: 1\ndns:\n  direct: [1.1.1.1]\nrules: [\"DOMAIN,{}.invalid,DIRECT\", \"FINAL,DIRECT\"]\n",
                     uuid::Uuid::from_u128(0x8ee5_6f6a_5db0_4f71_a8f0_3a53_7cb4_88e2)
                 ),
                 dir.path(),
@@ -793,6 +894,45 @@ mod tests {
         assert!(parse_system_dns_servers("nameserver 127.0.0.53\nnameserver ::1\n").is_err());
         assert!(parse_system_dns_servers("nameserver fe80::1\n").is_err());
         assert!(parse_system_dns_servers("search example.test\n").is_err());
+    }
+
+    #[test]
+    fn macos_system_dns_uses_only_the_selected_scoped_interface() {
+        // Apple scutil exposes supplemental VPN resolvers before the physical
+        // service. Policy bootstrap must follow the explicitly selected
+        // underlay, never the first global/supplemental resolver.
+        let fixture = r#"
+DNS configuration
+
+resolver #1
+  nameserver[0] : 100.100.100.100
+  if_index : 23 (utun4)
+  flags    : Supplemental, Request A records
+
+resolver #2
+  nameserver[0] : 9.9.9.9
+
+DNS configuration (for scoped queries)
+
+resolver #1
+  nameserver[0] : 223.5.5.5
+  nameserver[1] : 2001:db8::53
+  if_index : 17 (en0)
+  flags    : Scoped, Request A records, Request AAAA records
+
+resolver #2
+  nameserver[0] : 100.100.100.100
+  if_index : 23 (utun4)
+  flags    : Scoped, Request A records
+"#;
+        assert_eq!(
+            parse_macos_scoped_dns_servers(fixture, "en0").unwrap(),
+            vec![
+                "223.5.5.5".parse::<std::net::IpAddr>().unwrap(),
+                "2001:db8::53".parse::<std::net::IpAddr>().unwrap()
+            ]
+        );
+        assert!(parse_macos_scoped_dns_servers(fixture, "en7").is_err());
     }
 
     #[test]

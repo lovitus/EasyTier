@@ -16,7 +16,7 @@ use crate::common::ifcfg::netlink::{
     NetlinkIfConfiger, replace_netlink_route, send_netlink_req_and_wait_one_resp,
 };
 
-use super::PolicyUnderlayTransition;
+use super::{PolicyBackendNetwork, PolicyUnderlayTransition};
 
 const POLICY_TABLE: u32 = 52_000;
 // Stay ahead of the kernel main/default rules while avoiding the common low
@@ -31,7 +31,7 @@ pub(crate) struct PolicyRoutingGuard {
     outbound_interface: String,
     outbound_index: u32,
     legacy_tun_index: u32,
-    leaf_tun_interface: Option<String>,
+    backend_tun_interface: Option<String>,
     enable_ipv6: bool,
     has_v4_bypass: bool,
     has_v6_bypass: bool,
@@ -94,7 +94,7 @@ impl PolicyRoutingGuard {
             outbound_interface: outbound_interface.to_owned(),
             outbound_index,
             legacy_tun_index: tun_index,
-            leaf_tun_interface: None,
+            backend_tun_interface: None,
             enable_ipv6,
             has_v4_bypass: false,
             has_v6_bypass: false,
@@ -155,22 +155,23 @@ impl PolicyRoutingGuard {
         self.has_v4_bypass
     }
 
-    /// Atomically switches only the policy capture endpoint. Leaf never owns
-    /// global routes; the original EasyTier TUN remains installed as a
-    /// lower-priority fail-closed fallback for the whole candidate lifetime.
-    pub(crate) fn select_leaf_tun_interface(
+    /// Atomically switches only the policy capture endpoint. A backend never
+    /// owns the EasyTier process's global routes; the original EasyTier TUN
+    /// remains a lower-priority fail-closed fallback for the candidate.
+    pub(crate) fn activate_backend(
         &mut self,
-        interface: Option<&str>,
+        network: &PolicyBackendNetwork,
     ) -> anyhow::Result<()> {
+        let interface = network.capture_interface.as_deref();
         if let Some(interface) = interface {
             NetlinkIfConfiger::get_interface_index(interface).map_err(|error| {
-                anyhow::anyhow!("Leaf-owned policy TUN {interface} is unavailable: {error}")
+                anyhow::anyhow!("policy backend TUN {interface} is unavailable: {error}")
             })?;
         }
-        let previous = self.leaf_tun_interface.clone();
-        self.leaf_tun_interface = interface.map(str::to_owned);
+        let previous = self.backend_tun_interface.clone();
+        self.backend_tun_interface = interface.map(str::to_owned);
         if let Err(error) = self.refresh() {
-            self.leaf_tun_interface = previous;
+            self.backend_tun_interface = previous;
             let _ = self.refresh();
             return Err(error);
         }
@@ -178,11 +179,11 @@ impl PolicyRoutingGuard {
     }
 
     fn policy_boundary_routes(&self) -> Vec<RouteMessage> {
-        let leaf_tun_index = self
-            .leaf_tun_interface
+        let backend_tun_index = self
+            .backend_tun_interface
             .as_deref()
             .and_then(|interface| NetlinkIfConfiger::get_interface_index(interface).ok());
-        policy_boundary_routes(self.legacy_tun_index, leaf_tun_index, self.enable_ipv6)
+        policy_boundary_routes(self.legacy_tun_index, backend_tun_index, self.enable_ipv6)
     }
 
     fn fail_closed_refresh<T>(&mut self, error: anyhow::Error) -> anyhow::Result<T> {
@@ -256,9 +257,9 @@ impl PolicyRoutingGuard {
             );
         }
         // Keep capture and a terminal private-table route installed for every
-        // enabled family. If the physical default disappears, marked Leaf and
-        // EasyTier sockets must fail closed instead of falling through to the
-        // main table or bypassing policy during the transition.
+        // enabled family. If the physical default disappears, marked backend
+        // and EasyTier sockets must fail closed instead of falling through to
+        // the main table or bypassing policy during the transition.
         desired_routes.extend(self.policy_boundary_routes());
 
         let mut desired_rules = addresses
@@ -539,10 +540,10 @@ fn fail_closed_route(family: AddressFamily) -> RouteMessage {
 
 fn policy_boundary_routes(
     legacy_tun_index: u32,
-    leaf_tun_index: Option<u32>,
+    backend_tun_index: Option<u32>,
     enable_ipv6: bool,
 ) -> Vec<RouteMessage> {
-    let primary_tun_index = leaf_tun_index.unwrap_or(legacy_tun_index);
+    let primary_tun_index = backend_tun_index.unwrap_or(legacy_tun_index);
     let mut routes = vec![
         fail_closed_route(AddressFamily::Inet),
         capture_route(
@@ -556,7 +557,7 @@ fn policy_boundary_routes(
             POLICY_PRIMARY_CAPTURE_METRIC,
         ),
     ];
-    if leaf_tun_index.is_some() {
+    if backend_tun_index.is_some() {
         routes.extend([
             capture_route(
                 IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -584,7 +585,7 @@ fn policy_boundary_routes(
                 POLICY_PRIMARY_CAPTURE_METRIC,
             ),
         ]);
-        if leaf_tun_index.is_some() {
+        if backend_tun_index.is_some() {
             routes.extend([
                 capture_route(
                     IpAddr::V6(Ipv6Addr::UNSPECIFIED),
@@ -835,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn leaf_owned_capture_keeps_the_legacy_tun_as_lower_priority_fallback() {
+    fn backend_owned_capture_keeps_the_legacy_tun_as_lower_priority_fallback() {
         let routes = policy_boundary_routes(7, Some(11), true);
         assert_eq!(routes.len(), 10);
         assert_eq!(

@@ -17,6 +17,15 @@ type PolicyForwardingContext = (
     Arc<AtomicU64>,
 );
 
+#[cfg(all(
+    feature = "leaf-policy-proxy",
+    any(
+        target_os = "linux",
+        all(target_os = "macos", not(feature = "macos-ne"))
+    )
+))]
+const LEGACY_LEAF_DNS_CAPTURE_ADDRESS: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1));
+
 use crate::{
     common::{
         config::NicBackend,
@@ -112,7 +121,7 @@ struct PolicyActiveRuntime {
         target_os = "linux",
         all(target_os = "macos", not(feature = "macos-ne"))
     ))]
-    leaf_tun_interface: Option<String>,
+    backend_network: crate::policy_proxy::PolicyBackendNetwork,
 }
 
 #[cfg(all(feature = "leaf-policy-windows", target_os = "windows"))]
@@ -2286,11 +2295,16 @@ impl NicCtx {
             )
             .await?,
         );
-        let dns_servers = match dns_servers {
-            Some(servers) => servers,
-            None => Arc::<[IpAddr]>::from(
-                easytier_policy::system_dns_servers().map_err(anyhow::Error::msg)?,
+        let needs_platform_dns = easytier_policy::requires_platform_dns(&revision.document);
+        let dns_servers = match dns_servers
+            .filter(|servers| !needs_platform_dns || !servers.is_empty())
+        {
+            Some(servers) if needs_platform_dns => servers,
+            _ if needs_platform_dns => Arc::<[IpAddr]>::from(
+                easytier_policy::system_dns_servers_for_interface(Some(&config.outbound_interface))
+                    .map_err(anyhow::Error::msg)?,
             ),
+            _ => Arc::from([]),
         };
         #[cfg(target_os = "linux")]
         let leaf_owned_tun = config
@@ -2314,7 +2328,10 @@ impl NicCtx {
         .map_err(|error| anyhow::anyhow!(error))?;
         let bridge = runtime.bridge();
         Ok(PolicyActiveRuntime {
-            leaf_tun_interface: runtime.owned_tun_interface().map(str::to_owned),
+            backend_network: crate::policy_proxy::PolicyBackendNetwork {
+                capture_interface: runtime.owned_tun_interface().map(str::to_owned),
+                dns_capture_address: LEGACY_LEAF_DNS_CAPTURE_ADDRESS,
+            },
             runtime: runtime as Arc<dyn PolicyRuntime>,
             bridge,
             mesh_bridges,
@@ -2371,7 +2388,7 @@ impl NicCtx {
             let route_result = routing
                 .lock()
                 .await
-                .select_leaf_tun_interface(candidate.leaf_tun_interface.as_deref());
+                .activate_backend(&candidate.backend_network);
             match route_result {
                 Ok(()) => return Ok(candidate),
                 Err(error) => {
@@ -2495,7 +2512,7 @@ impl NicCtx {
             let mut dormant = !initial_active
                 && schedule_policy_runtime_restart(&mut restart_budget, &mut next_restart);
             let mut last_route_refresh = tokio::time::Instant::now();
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let mut last_dns_refresh = tokio::time::Instant::now();
             let mut last_mesh_endpoints: Option<
                 BTreeMap<String, crate::policy_proxy::MeshProxyTarget>,
@@ -2622,10 +2639,15 @@ impl NicCtx {
                     }
                 }
 
-                #[cfg(target_os = "linux")]
-                if meaningful_event || last_dns_refresh.elapsed() >= Duration::from_secs(2) {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                if easytier_policy::requires_platform_dns(&revision.document)
+                    && (meaningful_event
+                        || last_dns_refresh.elapsed() >= Duration::from_secs(5))
+                {
                     last_dns_refresh = tokio::time::Instant::now();
-                    let dns_result = easytier_policy::system_dns_servers();
+                    let dns_result = easytier_policy::system_dns_servers_for_interface(Some(
+                        &config.outbound_interface,
+                    ));
                     let dns_error = dns_result.as_ref().err().cloned();
                     match dns_monitor.observe(dns_result.ok()) {
                         PolicyDnsTransition::Unchanged | PolicyDnsTransition::Pending => {}

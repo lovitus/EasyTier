@@ -112,7 +112,7 @@ pub fn compile_leaf_config_with_options(
     dns_servers: &[IpAddr],
     options: LeafConfigOptions,
 ) -> Result<String, LeafConfigError> {
-    if dns_servers.is_empty() {
+    if requires_platform_dns(&revision.document) && dns_servers.is_empty() {
         return Err(LeafConfigError::NoDnsServers);
     }
     verify_revision_rule_sets(revision, base_dir)?;
@@ -291,6 +291,15 @@ pub fn compile_leaf_config_with_options(
     });
     serde_json::to_string_pretty(&config)
         .map_err(|error| LeafConfigError::Serialize(error.to_string()))
+}
+
+pub fn requires_platform_dns(document: &crate::PolicyDocument) -> bool {
+    document.dns.direct.is_empty()
+        || document
+            .dns
+            .direct
+            .iter()
+            .any(|server| server.eq_ignore_ascii_case("system"))
 }
 
 fn compile_dns_servers(
@@ -1216,6 +1225,49 @@ rules: ["MATCH,DIRECT"]
             config["inbounds"][0]["settings"]["fakeDnsIpv6Range"],
             crate::DEFAULT_FAKE_DNS_IPV6_RANGE
         );
+    }
+
+    #[test]
+    fn proxy_domain_uses_leaf_fake_ip_and_proxy_doh_without_system_dns() {
+        // Pinned Leaf 682d1dc app/dns/client.rs::query_route_for_host selects
+        // the non-direct resolver set from the first matching outbound rule.
+        // app/fake_dns.rs::generate_fake_response returns FakeIP before any
+        // upstream lookup, matching Mihomo dns/middleware.go::withFakeIP.
+        let source = r#"
+version: 1
+dns:
+  direct: [223.5.5.5, 119.29.29.29]
+  proxy: ["doh:cloudflare-dns.com@1.1.1.1"]
+proxies:
+  proxy:
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    udp: true
+rules:
+  - DOMAIN-SUFFIX,google.com,proxy
+  - MATCH,DIRECT
+"#;
+        let revision = PolicyRevision::parse(source, Path::new(".")).unwrap();
+        let config = compile_leaf_config(&revision, 7, Path::new("."), &Unresolved, &[]).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+
+        assert_eq!(
+            config["dns"]["servers"],
+            serde_json::json!([
+                "direct:223.5.5.5",
+                "direct:119.29.29.29",
+                "doh:cloudflare-dns.com@1.1.1.1"
+            ])
+        );
+        assert_eq!(config["inbounds"][0]["settings"]["fakeDnsInclude"][0], "*");
+        assert_eq!(config["router"]["domainResolve"], false);
+        assert_eq!(
+            config["router"]["rules"][0]["domainSuffix"][0],
+            "google.com"
+        );
+        assert_eq!(config["router"]["rules"][0]["target"], "proxy");
+        assert!(!config.to_string().to_ascii_lowercase().contains("system"));
     }
 
     #[test]

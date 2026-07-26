@@ -35,9 +35,11 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   policy_proxy::macos_routing_tests::tests
   policy_proxy::mesh_socks_bridge::tests::route_snapshot_updates_and_disables_only_the_changed_actor
   policy_proxy::mesh_udp_relay::tests
-  policy_proxy::policy_routing::tests::leaf_owned_capture_keeps_the_legacy_tun_as_lower_priority_fallback
+  policy_proxy::policy_routing::tests::backend_owned_capture_keeps_the_legacy_tun_as_lower_priority_fallback
   policy_proxy::tests::resolves_inline_instance_config_without_persisting_generated_state
   policy_rule_data::tests
+  tunnel::common::tests::interface_index_cache_refreshes_on_event_and_five_second_fallback
+  tunnel::common::tests::interface_index_cache_drops_stale_entry_when_event_refresh_fails
   instance::virtual_nic::tests::leaf_owned_tun_selection_is_default_off_and_backend_bounded
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
   instance::instance::tests::socks_egress_uses_the_configured_linux_policy_mark
@@ -70,12 +72,14 @@ readonly -a DEFAULT_POLICY_TEST_FILTERS=(
   config::tests::validates_custom_ipv6_fake_dns_range
   config::tests::port_range_matches_mihomo_single_and_dash_syntax
   leaf_config::tests::explicit_dns_sets_replace_platform_direct_and_keep_proxy_separate
+  leaf_config::tests::proxy_domain_uses_leaf_fake_ip_and_proxy_doh_without_system_dns
   leaf_config::tests::expands_system_dns_to_captured_platform_servers_for_proxy_bootstrap
   leaf_config::tests::preserves_unresolved_domain_contract_for_direct_socks_and_fallback
   leaf_config::tests::leaf_owned_tun_is_explicit_and_legacy_fd_mode_remains_unchanged
   leaf_config::tests::locked_leaf_preserves_explicit_packet_information_presence
   packet::unix_bridge::tests::macos_enobufs_is_retryable_without_hiding_permanent_errors
   leaf_process::tests::linux_owned_tun_readiness_requires_interface_up_flag
+  leaf_process::tests::macos_system_dns_uses_only_the_selected_scoped_interface
   leaf_process::tests::owned_tun_identity_is_bounded_unique_and_outside_default_fake_ip
   leaf_process::tests::starts_worker_without_retaining_private_config_and_stops_it
   geodata::tests

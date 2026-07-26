@@ -2,12 +2,19 @@ use bon::builder;
 use futures::{Future, Sink, Stream, stream::FuturesUnordered};
 use network_interface::NetworkInterfaceConfig as _;
 use pin_project_lite::pin_project;
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+use std::sync::OnceLock;
 use std::{
     any::Any,
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Poll, ready},
+};
+#[cfg(any(test, target_os = "ios", target_os = "macos"))]
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -24,6 +31,108 @@ use tokio::net::{TcpListener, TcpSocket, UdpSocket};
 use tokio_stream::StreamExt;
 use tokio_util::io::poll_write_buf;
 use zerocopy::{AsBytes as _, FromBytes as _};
+
+#[cfg(any(test, target_os = "ios", target_os = "macos"))]
+const INTERFACE_INDEX_CACHE_TTL: Duration = Duration::from_secs(5);
+
+#[cfg(any(test, target_os = "ios", target_os = "macos"))]
+#[derive(Debug, Clone, Copy)]
+struct CachedInterfaceIndex {
+    index: std::num::NonZeroU32,
+    refreshed_at: Instant,
+}
+
+#[cfg(any(test, target_os = "ios", target_os = "macos"))]
+#[derive(Debug, Default)]
+struct InterfaceIndexCache {
+    entries: HashMap<String, CachedInterfaceIndex>,
+}
+
+#[cfg(any(test, target_os = "ios", target_os = "macos"))]
+impl InterfaceIndexCache {
+    fn resolve_with(
+        &mut self,
+        interface: &str,
+        now: Instant,
+        resolver: impl FnOnce(&str) -> std::io::Result<std::num::NonZeroU32>,
+    ) -> std::io::Result<std::num::NonZeroU32> {
+        if let Some(entry) = self.entries.get(interface)
+            && now.duration_since(entry.refreshed_at) < INTERFACE_INDEX_CACHE_TTL
+        {
+            return Ok(entry.index);
+        }
+        let index = resolver(interface)?;
+        self.entries.insert(
+            interface.to_owned(),
+            CachedInterfaceIndex {
+                index,
+                refreshed_at: now,
+            },
+        );
+        Ok(index)
+    }
+
+    fn refresh_with(
+        &mut self,
+        now: Instant,
+        mut resolver: impl FnMut(&str) -> std::io::Result<std::num::NonZeroU32>,
+    ) {
+        let names = self.entries.keys().cloned().collect::<Vec<_>>();
+        for name in names {
+            match resolver(&name) {
+                Ok(index) => {
+                    self.entries.insert(
+                        name,
+                        CachedInterfaceIndex {
+                            index,
+                            refreshed_at: now,
+                        },
+                    );
+                }
+                Err(_) => {
+                    self.entries.remove(&name);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn interface_index_cache() -> &'static Mutex<InterfaceIndexCache> {
+    static CACHE: OnceLock<Mutex<InterfaceIndexCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(InterfaceIndexCache::default()))
+}
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn resolve_interface_index(interface: &str) -> std::io::Result<std::num::NonZeroU32> {
+    let interface = std::ffi::CString::new(interface).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "bind device contains a NUL byte",
+        )
+    })?;
+    let index = unsafe { nix::libc::if_nametoindex(interface.as_ptr()) };
+    std::num::NonZeroU32::new(index).ok_or_else(std::io::Error::last_os_error)
+}
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn cached_interface_index(interface: &str) -> std::io::Result<std::num::NonZeroU32> {
+    interface_index_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .resolve_with(interface, Instant::now(), resolve_interface_index)
+}
+
+/// Refresh cached Darwin interface indices after an observed network change.
+///
+/// The five-second lookup TTL remains a fallback for missed platform events.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+pub(crate) fn refresh_interface_index_cache() {
+    interface_index_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .refresh_with(Instant::now(), resolve_interface_index);
+}
 
 pub struct TunnelWrapper<R, W> {
     reader: Arc<Mutex<Option<R>>>,
@@ -595,15 +704,7 @@ fn setup_socket2_ext(
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     if let Some(dev_name) = bind_dev {
         // use IP_BOUND_IF to bind device
-        let dev_name_c = std::ffi::CString::new(dev_name.as_str()).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "bind device contains a NUL byte",
-            )
-        })?;
-        let dev_idx = unsafe { nix::libc::if_nametoindex(dev_name_c.as_ptr()) };
-        let dev_idx =
-            std::num::NonZeroU32::new(dev_idx).ok_or_else(std::io::Error::last_os_error)?;
+        let dev_idx = cached_interface_index(&dev_name)?;
         tracing::trace!(?dev_idx, ?dev_name, "bind device");
         if bind_addr.is_ipv4() {
             socket2_socket.bind_device_by_index_v4(Some(dev_idx))?;
@@ -744,6 +845,95 @@ pub mod tests {
         common::netns::NetNS,
         tunnel::{TunnelConnector, TunnelListener, packet_def::ZCPacket},
     };
+
+    #[test]
+    fn interface_index_cache_refreshes_on_event_and_five_second_fallback() {
+        use std::{
+            cell::Cell,
+            io,
+            num::NonZeroU32,
+            time::{Duration, Instant},
+        };
+
+        let mut cache = super::InterfaceIndexCache::default();
+        let started = Instant::now();
+        let calls = Cell::new(0);
+
+        assert_eq!(
+            cache
+                .resolve_with("en0", started, |_: &str| {
+                    calls.set(calls.get() + 1);
+                    Ok(NonZeroU32::new(calls.get()).unwrap())
+                })
+                .unwrap()
+                .get(),
+            1
+        );
+        assert_eq!(
+            cache
+                .resolve_with("en0", started + Duration::from_secs(4), |_: &str| {
+                    calls.set(calls.get() + 1);
+                    Ok(NonZeroU32::new(calls.get()).unwrap())
+                })
+                .unwrap()
+                .get(),
+            1
+        );
+        assert_eq!(calls.get(), 1);
+
+        cache.refresh_with(started + Duration::from_secs(4), |_: &str| {
+            calls.set(calls.get() + 1);
+            Ok(NonZeroU32::new(calls.get()).unwrap())
+        });
+        assert_eq!(
+            cache
+                .resolve_with(
+                    "en0",
+                    started + Duration::from_secs(4),
+                    |_| -> io::Result<NonZeroU32> { unreachable!() },
+                )
+                .unwrap()
+                .get(),
+            2
+        );
+
+        assert_eq!(
+            cache
+                .resolve_with("en0", started + Duration::from_secs(9), |_: &str| {
+                    calls.set(calls.get() + 1);
+                    Ok(NonZeroU32::new(calls.get()).unwrap())
+                })
+                .unwrap()
+                .get(),
+            3
+        );
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn interface_index_cache_drops_stale_entry_when_event_refresh_fails() {
+        use std::{
+            io,
+            num::NonZeroU32,
+            time::{Duration, Instant},
+        };
+
+        let mut cache = super::InterfaceIndexCache::default();
+        let started = Instant::now();
+        cache
+            .resolve_with("en0", started, |_| Ok(NonZeroU32::new(7).unwrap()))
+            .unwrap();
+        cache.refresh_with(started + Duration::from_secs(1), |_| {
+            Err(io::Error::from_raw_os_error(nix::libc::ENXIO))
+        });
+
+        let error = cache
+            .resolve_with("en0", started + Duration::from_secs(1), |_| {
+                Err(io::Error::from_raw_os_error(nix::libc::ENXIO))
+            })
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(nix::libc::ENXIO));
+    }
 
     #[cfg(test)]
     use crate::tunnel::{

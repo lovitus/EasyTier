@@ -678,6 +678,16 @@ impl GlobalCtx {
     }
 
     pub fn issue_event(&self, event: GlobalCtxEvent) {
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
+        if matches!(
+            event,
+            GlobalCtxEvent::DhcpIpv4Changed(_, _)
+                | GlobalCtxEvent::DhcpIpv4Conflicted(_)
+                | GlobalCtxEvent::PublicIpv6Changed(_, _)
+                | GlobalCtxEvent::ConfigPatched(_)
+        ) {
+            crate::tunnel::common::refresh_interface_index_cache();
+        }
         if let Err(e) = self.event_bus.send(event.clone()) {
             tracing::warn!(
                 "Failed to send event: {:?}, error: {:?}, receiver count: {}",

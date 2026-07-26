@@ -1,15 +1,26 @@
 use std::{
     ffi::CString,
+    fs::{self, OpenOptions},
+    io::Write as _,
+    net::IpAddr,
+    os::{
+        fd::AsRawFd as _,
+        unix::{fs::OpenOptionsExt as _, process::CommandExt as _},
+    },
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
 use anyhow::Context as _;
 use nix::libc;
 
-use super::PolicyUnderlayTransition;
+use super::{PolicyBackendNetwork, PolicyUnderlayTransition};
 
 const ROUTE_PATH: &str = "/sbin/route";
 const NETSTAT_PATH: &str = "/usr/sbin/netstat";
+const POLICY_DNS_RESOLVER_PATH: &str = "/etc/resolver/easytier-policy";
+const POLICY_DNS_TARGET_PREFIX: &str = "/var/run/easytier-policy-dns-";
+const POLICY_DNS_LOCK_PATH: &str = "/var/run/easytier-policy-dns.lock";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RouteSpec {
@@ -58,6 +69,203 @@ pub(crate) struct PolicyRoutingGuard {
     installed: Vec<RouteSpec>,
     scoped_defaults: Vec<InstalledScopedDefault>,
     has_v4_underlay: bool,
+    dns_hijack: Option<PolicyDnsHijackGuard>,
+}
+
+struct PolicyDnsHijackGuard {
+    capture_address: IpAddr,
+    resolver_path: PathBuf,
+    target_path: PathBuf,
+    cleanup: std::process::Child,
+    _lock: fs::File,
+}
+
+impl PolicyDnsHijackGuard {
+    fn install(capture_address: IpAddr) -> anyhow::Result<Self> {
+        let resolver_path = PathBuf::from(POLICY_DNS_RESOLVER_PATH);
+        let target_path =
+            PathBuf::from(format!("{POLICY_DNS_TARGET_PREFIX}{}", std::process::id()));
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .open(POLICY_DNS_LOCK_PATH)
+            .context("failed to open macOS policy DNS ownership lock")?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("macOS policy DNS is already owned by another process");
+        }
+        fs::create_dir_all(
+            resolver_path
+                .parent()
+                .expect("policy resolver path has a parent"),
+        )
+        .context("failed to create /etc/resolver")?;
+        remove_stale_owned_resolver(&resolver_path)?;
+        let _ = fs::remove_file(&target_path);
+
+        // Start the pipe-owned cleanup before publishing either filesystem
+        // entry. SIGKILL closes the pipe and removes any partially installed
+        // resolver; a reboot clears the /var/run target and leaves at most an
+        // inert dangling symlink that the next guarded start removes.
+        let mut cleanup = spawn_policy_dns_cleanup(&resolver_path, &target_path)?;
+        let install_result = (|| -> anyhow::Result<()> {
+            let mut target = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .open(&target_path)
+                .with_context(|| {
+                    format!(
+                        "failed to create temporary policy resolver {}",
+                        target_path.display()
+                    )
+                })?;
+            writeln!(target, "{}", policy_dns_resolver_contents(capture_address))?;
+            target.sync_all()?;
+            std::os::unix::fs::symlink(&target_path, &resolver_path)
+                .context("failed to install temporary macOS policy resolver")
+        })();
+        if let Err(error) = install_result {
+            drop(cleanup.stdin.take());
+            let _ = cleanup.wait();
+            return Err(error);
+        }
+        flush_macos_dns_cache();
+        Ok(Self {
+            capture_address,
+            resolver_path,
+            target_path,
+            cleanup,
+            _lock: lock,
+        })
+    }
+
+    fn update_capture_address(&mut self, capture_address: IpAddr) -> anyhow::Result<()> {
+        replace_policy_dns_target(&self.target_path, capture_address)?;
+        self.capture_address = capture_address;
+        flush_macos_dns_cache();
+        Ok(())
+    }
+
+    fn remove(&mut self) {
+        drop(self.cleanup.stdin.take());
+        let _ = self.cleanup.wait();
+        if resolver_points_to(&self.resolver_path, &self.target_path) {
+            let _ = fs::remove_file(&self.resolver_path);
+        }
+        let _ = fs::remove_file(&self.target_path);
+        flush_macos_dns_cache();
+    }
+}
+
+fn spawn_policy_dns_cleanup(
+    resolver_path: &Path,
+    target_path: &Path,
+) -> anyhow::Result<std::process::Child> {
+    let mut cleanup = Command::new("/bin/sh");
+    cleanup
+        .arg("-c")
+        .arg(
+            "IFS= read -r _ || true; if [ \"$(/usr/bin/readlink \"$1\" 2>/dev/null)\" = \"$2\" ]; then rm -f -- \"$1\"; fi; rm -f -- \"$2\"; /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true",
+        )
+        .arg("easytier-policy-dns-cleanup")
+        .arg(resolver_path)
+        .arg(target_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    unsafe {
+        cleanup.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    cleanup
+        .spawn()
+        .context("failed to start macOS policy DNS cleanup guard")
+}
+
+impl Drop for PolicyDnsHijackGuard {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
+fn resolver_points_to(resolver_path: &Path, target_path: &Path) -> bool {
+    fs::read_link(resolver_path).is_ok_and(|candidate| candidate == target_path)
+}
+
+fn replace_policy_dns_target(target_path: &Path, capture_address: IpAddr) -> anyhow::Result<()> {
+    let staging_path = target_path.with_extension("new");
+    let _ = fs::remove_file(&staging_path);
+    let update_result = (|| -> anyhow::Result<()> {
+        let mut staging = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(&staging_path)
+            .with_context(|| {
+                format!(
+                    "failed to create staged policy resolver {}",
+                    staging_path.display()
+                )
+            })?;
+        writeln!(staging, "{}", policy_dns_resolver_contents(capture_address))?;
+        staging.sync_all()?;
+        fs::rename(&staging_path, target_path)
+            .context("failed to atomically replace macOS policy resolver")
+    })();
+    if let Err(error) = update_result {
+        let _ = fs::remove_file(&staging_path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn remove_stale_owned_resolver(resolver_path: &Path) -> anyhow::Result<()> {
+    match fs::symlink_metadata(resolver_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let target = fs::read_link(resolver_path)?;
+            if !target
+                .to_string_lossy()
+                .starts_with(POLICY_DNS_TARGET_PREFIX)
+            {
+                anyhow::bail!(
+                    "refusing to replace non-EasyTier resolver symlink {} -> {}",
+                    resolver_path.display(),
+                    target.display()
+                );
+            }
+            fs::remove_file(resolver_path)?;
+            let _ = fs::remove_file(target);
+            Ok(())
+        }
+        Ok(_) => anyhow::bail!(
+            "refusing to replace existing resolver {}",
+            resolver_path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn flush_macos_dns_cache() {
+    let _ = Command::new("/usr/bin/killall")
+        .args(["-HUP", "mDNSResponder"])
+        .status();
+}
+
+fn policy_dns_resolver_contents(capture_address: IpAddr) -> String {
+    // The root-domain resolver has precedence over supplemental VPN DNS such
+    // as Tailscale. The selected backend owns the address and its DNS handling;
+    // Mihomo hijacks TCP and UDP port 53, while deprecated Leaf retains its
+    // existing UDP FakeDNS compatibility path.
+    format!("domain .\nnameserver {capture_address}\nsearch_order 1")
 }
 
 impl PolicyRoutingGuard {
@@ -93,6 +301,7 @@ impl PolicyRoutingGuard {
             installed: Vec::new(),
             scoped_defaults: Vec::new(),
             has_v4_underlay: false,
+            dns_hijack: None,
         };
         if let Err(error) = guard.reconcile_scoped_defaults(&defaults.physical, &defaults.scoped) {
             guard.remove_all();
@@ -154,12 +363,24 @@ impl PolicyRoutingGuard {
         self.has_v4_underlay
     }
 
-    pub(crate) fn select_leaf_tun_interface(
+    pub(crate) fn activate_backend(
         &mut self,
-        interface: Option<&str>,
+        network: &PolicyBackendNetwork,
     ) -> anyhow::Result<()> {
-        if interface.is_some() {
-            anyhow::bail!("Leaf-owned policy TUN is unsupported on macOS");
+        if network.capture_interface.is_some() {
+            anyhow::bail!("backend-owned policy TUN is unsupported on macOS");
+        }
+        if self
+            .dns_hijack
+            .as_ref()
+            .is_some_and(|guard| guard.capture_address == network.dns_capture_address)
+        {
+            return Ok(());
+        }
+        if let Some(guard) = self.dns_hijack.as_mut() {
+            guard.update_capture_address(network.dns_capture_address)?;
+        } else {
+            self.dns_hijack = Some(PolicyDnsHijackGuard::install(network.dns_capture_address)?);
         }
         Ok(())
     }
@@ -289,6 +510,7 @@ impl PolicyRoutingGuard {
     }
 
     fn remove_all(&mut self) {
+        self.dns_hijack.take();
         self.has_v4_underlay = false;
         for route in self.installed.drain(..).rev() {
             if let Err(error) = delete_capture_route(&self.tun_interface, &route) {
@@ -782,5 +1004,49 @@ default            link#23            UCSIg               utun4
             classify_underlay_transition(false, false, false),
             PolicyUnderlayTransition::Unchanged
         );
+    }
+
+    #[test]
+    fn policy_dns_resolver_uses_the_backend_declared_capture_address() {
+        let capture_address = "198.18.0.1".parse().unwrap();
+        assert_eq!(
+            policy_dns_resolver_contents(capture_address),
+            "domain .\nnameserver 198.18.0.1\nsearch_order 1"
+        );
+        assert!(!policy_dns_resolver_contents(capture_address).contains("system"));
+    }
+
+    #[test]
+    fn stale_cleanup_only_removes_easytier_owned_resolver_symlink() {
+        let directory = tempfile::tempdir().unwrap();
+        let resolver = directory.path().join("resolver");
+        let owned_target = PathBuf::from(format!("{POLICY_DNS_TARGET_PREFIX}test-nonexistent"));
+        std::os::unix::fs::symlink(&owned_target, &resolver).unwrap();
+        remove_stale_owned_resolver(&resolver).unwrap();
+        assert!(!resolver.exists());
+
+        let foreign = directory.path().join("foreign");
+        std::os::unix::fs::symlink("/var/run/foreign-dns", &foreign).unwrap();
+        assert!(remove_stale_owned_resolver(&foreign).is_err());
+        assert!(fs::symlink_metadata(&foreign).is_ok());
+    }
+
+    #[test]
+    fn policy_dns_capture_address_replacement_is_atomic_for_the_published_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("resolver-target");
+        fs::write(
+            &target,
+            policy_dns_resolver_contents("198.18.0.1".parse().unwrap()),
+        )
+        .unwrap();
+
+        replace_policy_dns_target(&target, "198.19.0.1".parse().unwrap()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "domain .\nnameserver 198.19.0.1\nsearch_order 1\n"
+        );
+        assert!(!target.with_extension("new").exists());
     }
 }

@@ -231,8 +231,8 @@ Required compatibility:
 | --- | --- |
 | No policy configuration | `off` |
 | Legacy `enable_policy_proxy = false` | `off` |
-| Legacy `enable_policy_proxy = true` with no backend | `leaf` |
-| Explicit `backend = "leaf"` | `leaf` |
+| Legacy `enable_policy_proxy = true` with no backend | `leaf` (deprecated compatibility) |
+| Explicit `backend = "leaf"` | `leaf` (deprecated compatibility) |
 | Explicit `backend = "mihomo"` | `mihomo` |
 | Explicit backend plus a conflicting legacy boolean | Explicit backend wins |
 
@@ -242,6 +242,11 @@ boolean to the effective backend when writing current-format configuration.
 
 HEV is not selected by this enum. HEV belongs to EasyTier mesh and starts for
 every supported EasyTier instance regardless of `off`, `mihomo`, or `leaf`.
+
+The selector is a closed enum, not a plugin registry. Do not add dynamic
+backend discovery, arbitrary backend traits, or a generic third-party process
+adapter. Shared code is limited to platform route/DNS ownership and the small
+ready-runtime network description consumed by that platform code.
 
 ## 4. HEV becomes an independent EasyTier service
 
@@ -424,6 +429,49 @@ Startup must reject, before publishing `running`:
 
 No conflict is resolved by deleting another process's interface, route, rule, or
 firewall state.
+
+### 6.4 DNS ownership and backend boundary
+
+DNS policy remains backend-owned:
+
+| Backend | DNS behavior |
+| --- | --- |
+| `off` | Install no EasyTier policy resolver, DNS route, or capture state |
+| `mihomo` | Mihomo owns DNS configuration, FakeIP, cache, rule selection, DoH/DoT, and TUN DNS hijack |
+| `leaf` | Legacy Leaf owns its existing DNS configuration and FakeDNS behavior |
+
+EasyTier owns only the platform transaction that directs host resolver traffic
+to the selected ready backend and removes that exact state on stop or failure.
+The backend publishes two bounded runtime values:
+
+```text
+capture TUN interface (optional where the legacy EasyTier TUN remains in use)
+DNS capture address
+```
+
+The macOS resolver guard must consume the published address; it must not
+hard-code Mihomo or Leaf configuration. Linux route selection consumes only the
+published capture interface. Neither shared path may parse, translate, or
+merge backend DNS configuration.
+
+Pinned reference semantics:
+
+- Mihomo `config/config.go` defaults TUN `DNSHijack` to `0.0.0.0:53`.
+- Mihomo `listener/sing_tun/server.go` parses the declared hijack addresses and
+  registers the TUN DNS server addresses.
+- Mihomo `listener/sing_tun/dns.go::ShouldHijackDns`, `NewConnection`, and
+  `NewPacket` hijack both TCP and UDP port 53 before normal forwarding.
+- Locked legacy Leaf
+  `682d1dc43585a703c993e8875fe4e937b1038733`,
+  `leaf/src/proxy/tun/inbound.rs` intercepts UDP port 53 for FakeDNS. Leaf TCP,
+  proxy-resolver, and fallback limitations remain legacy-backend concerns and
+  must never leak into the Mihomo branch.
+
+Backend switching is transactional: remove the previous backend's exact
+resolver state, prove the new backend and its DNS capture path ready, then
+publish the new backend as active. A failed switch must follow the configured
+`restore-network` or `fail-closed` policy and must never silently select the
+other backend.
 
 ## 7. Mandatory anti-loop protection
 

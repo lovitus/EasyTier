@@ -36,11 +36,12 @@ pub use geodata::{
 pub use inprocess::{InProcessLeafFactory, InProcessLeafRuntime};
 pub use leaf_config::{
     LeafConfigError, LeafConfigOptions, LeafOwnedTunConfig, MeshServerResolver, ResolvedMeshServer,
-    compile_leaf_config, compile_leaf_config_with_options,
+    compile_leaf_config, compile_leaf_config_with_options, requires_platform_dns,
 };
 #[cfg(any(unix, windows))]
 pub use leaf_process::{
     LeafProcessFactory, LeafProcessRuntime, next_leaf_owned_tun_config, system_dns_servers,
+    system_dns_servers_for_interface,
 };
 #[cfg(unix)]
 pub use packet::{LeafPacketBridge, LeafPacketEndpoint};

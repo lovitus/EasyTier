@@ -1,4 +1,5 @@
 use std::{
+    net::IpAddr,
     path::{Path, PathBuf},
     sync::{
         OnceLock,
@@ -34,6 +35,15 @@ pub(crate) enum PolicyUnderlayTransition {
     IdentityChanged,
     Lost,
     Recovered,
+}
+
+/// Network resources published by a ready Mihomo or legacy Leaf runtime.
+/// Platform routing consumes this narrow contract without depending on either
+/// backend's configuration or process lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PolicyBackendNetwork {
+    pub(crate) capture_interface: Option<String>,
+    pub(crate) dns_capture_address: IpAddr,
 }
 
 #[cfg(all(target_os = "macos", not(feature = "macos-ne")))]
