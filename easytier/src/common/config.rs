@@ -349,6 +349,18 @@ pub trait ConfigLoader: Send + Sync {
     fn dump(&self) -> String;
 }
 
+pub fn parse_ipv6_inet(value: &str) -> anyhow::Result<cidr::Ipv6Inet> {
+    let parsed = value
+        .parse::<cidr::Ipv6Inet>()
+        .with_context(|| format!("invalid IPv6 address {value:?}"))?;
+    if value.contains('/') {
+        return Ok(parsed);
+    }
+    cidr::Ipv6Inet::new(parsed.address(), 64)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("failed to apply the default /64 prefix to {value:?}"))
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum NicBackend {
     #[default]
@@ -992,6 +1004,13 @@ impl TomlConfigLoader {
     }
 
     fn new_from_config(mut config: Config) -> Result<Self, anyhow::Error> {
+        if let Some(ipv6) = config.ipv6.as_deref() {
+            config.ipv6 = Some(
+                parse_ipv6_inet(ipv6)
+                    .context("failed to parse ipv6")?
+                    .to_string(),
+            );
+        }
         if let Some(policy_proxy) = config.policy_proxy.as_ref() {
             policy_proxy
                 .validate_envelope()
@@ -2409,6 +2428,24 @@ source = "user"
         assert!(loaded.get_ipv6_public_addr_provider());
         assert!(loaded.get_ipv6_public_addr_auto());
         assert_eq!(loaded.get_ipv6_public_addr_prefix(), Some(prefix));
+    }
+
+    #[test]
+    fn ipv6_address_defaults_to_64_without_overriding_explicit_prefixes() {
+        let bare = TomlConfigLoader::new_from_str("ipv6 = \"fd12:3456::80\"\n").unwrap();
+        assert_eq!(bare.get_ipv6(), Some("fd12:3456::80/64".parse().unwrap()));
+        assert!(bare.dump().contains("ipv6 = \"fd12:3456::80/64\""));
+
+        let explicit = TomlConfigLoader::new_from_str("ipv6 = \"fd12:3456::80/128\"\n").unwrap();
+        assert_eq!(
+            explicit.get_ipv6(),
+            Some("fd12:3456::80/128".parse().unwrap())
+        );
+
+        let error = TomlConfigLoader::new_from_str("ipv6 = \"not-an-ipv6-address\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("failed to parse ipv6"));
     }
 
     #[tokio::test]

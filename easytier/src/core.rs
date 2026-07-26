@@ -7,7 +7,7 @@ use crate::{
             ConfigFileControl, ConfigLoader, ConsoleLoggerConfig, EncryptionAlgorithm,
             FileLoggerConfig, LoggingConfigLoader, NetworkIdentity, NicBackend, PeerConfig,
             PortForwardConfig, TomlConfigLoader, VpnPortalConfig, load_config_from_file,
-            parse_mapped_listener_urls, process_secure_mode_cfg,
+            parse_ipv6_inet, parse_mapped_listener_urls, process_secure_mode_cfg,
         },
         constants::EASYTIER_VERSION,
         log,
@@ -1077,9 +1077,10 @@ impl NetworkOptions {
         }
 
         if let Some(ipv6) = &self.ipv6 {
-            cfg.set_ipv6(Some(ipv6.parse().with_context(|| {
-                format!("failed to parse ipv6 address: {}", ipv6)
-            })?))
+            cfg.set_ipv6(Some(
+                parse_ipv6_inet(ipv6)
+                    .with_context(|| format!("failed to parse ipv6 address: {ipv6}"))?,
+            ))
         }
 
         if let Some(enabled) = self.ipv6_public_addr_provider {
@@ -2134,6 +2135,23 @@ enabled = true
         assert_eq!(identity.network_secret, None);
         assert_eq!(identity.network_secret_digest, None);
         assert_eq!(cfg.get_hostname(), "override-host");
+    }
+
+    #[test]
+    fn cli_ipv6_defaults_to_64_and_preserves_explicit_128() {
+        for (input, expected) in [
+            ("fd12:3456::80", "fd12:3456::80/64"),
+            ("fd12:3456::80/128", "fd12:3456::80/128"),
+        ] {
+            let config = TomlConfigLoader::default();
+            NetworkOptions {
+                ipv6: Some(input.to_owned()),
+                ..Default::default()
+            }
+            .merge_into(&config)
+            .unwrap();
+            assert_eq!(config.get_ipv6(), Some(expected.parse().unwrap()));
+        }
     }
 
     #[test]

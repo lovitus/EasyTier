@@ -1,65 +1,73 @@
 {
   "schema_version": 1,
-  "repository": "https://github.com/go-gost/gost",
-  "version": "3.2.6",
-  "tag": "v3.2.6",
+  "repository": "https://github.com/lovitus/gust",
+  "version": "3.2.9-easytier.1",
+  "tag": "v3.2.9-easytier.1",
   "license": "MIT",
   "targets": {
     "x86_64-unknown-linux-musl": {
-      "asset": "gost_3.2.6_linux_amd64.tar.gz",
-      "asset_sha256": "b39037b0380ea001fb3c0c28441c2e10bfc694f90682739a65b53e55dce5238b",
+      "asset": "gost-linux-amd64-3.2.9-easytier.1.tar.gz",
+      "asset_sha256": "32f7eab3cb80128644d8d5dd090222f39cb4e8f16bad4c39b9bf425f3cd5d336",
       "archive": "tar.gz",
       "binary_format": "elf",
-      "machine": 62
+      "machine": 62,
+      "binary": "gost-linux-amd64"
     },
     "aarch64-unknown-linux-musl": {
-      "asset": "gost_3.2.6_linux_arm64.tar.gz",
-      "asset_sha256": "f674c8f4a033dc1dfd4f0d5e9602fbe5b0d0f81307bf3794f44b5b5d6d622eae",
+      "asset": "gost-linux-arm64-3.2.9-easytier.1.tar.gz",
+      "asset_sha256": "40e6ae0ffa562f9ed0f333df1f7ca9ecbeff8576cfeda01ded99fe4bb668ff62",
       "archive": "tar.gz",
       "binary_format": "elf",
-      "machine": 183
+      "machine": 183,
+      "binary": "gost-linux-arm64"
     },
     "x86_64-unknown-freebsd": {
-      "asset": "gost_3.2.6_freebsd_amd64.tar.gz",
-      "asset_sha256": "ae5797cd227097769c4c71ad71bc3b51c870260b9dcce126cd8f1048695b9b01",
+      "asset": "gost-freebsd-amd64-3.2.9-easytier.1.tar.gz",
+      "asset_sha256": "de29c114ba154e45f02a1ead2e415f5d33e39980a2d5ce9a2813634fe16a9bef",
       "archive": "tar.gz",
       "binary_format": "elf",
-      "machine": 62
+      "machine": 62,
+      "binary": "gost-freebsd-amd64"
     },
     "x86_64-apple-darwin": {
-      "asset": "gost_3.2.6_darwin_amd64.tar.gz",
-      "asset_sha256": "0892485bd94e37b67a1f1d0d2372ed12d7dc0f1bc763d56177a0c0ee734855e6",
+      "asset": "gost-darwin-amd64-3.2.9-easytier.1.tar.gz",
+      "asset_sha256": "5e10f670c491616631c53f257470c07c1e714e8dbc33d21fda46f0abfef2df63",
       "archive": "tar.gz",
       "binary_format": "macho",
-      "machine": 16777223
+      "machine": 16777223,
+      "binary": "gost-darwin-amd64"
     },
     "aarch64-apple-darwin": {
-      "asset": "gost_3.2.6_darwin_arm64.tar.gz",
-      "asset_sha256": "e54f6c22e81c00650adfbbb23317c74a4dca9b9b73fa28cfa150f5559cc3ff2e",
+      "asset": "gost-darwin-arm64-3.2.9-easytier.1.tar.gz",
+      "asset_sha256": "dda7515d1418f52bdbe90c45e7b7c9355d9587d974e8645b0b3e34e16209410e",
       "archive": "tar.gz",
       "binary_format": "macho",
-      "machine": 16777228
+      "machine": 16777228,
+      "binary": "gost-darwin-arm64"
     },
     "x86_64-pc-windows-msvc": {
-      "asset": "gost_3.2.6_windows_amd64.zip",
-      "asset_sha256": "32f4edf3d94b622e67f1979f6f5de82dac62abc0977772cf96215dd199ef7e7b",
+      "asset": "gost-windows-amd64-3.2.9-easytier.1.zip",
+      "asset_sha256": "81b81c46439369677590c9a36d0b0ff05394c0b14c3c8c5e3ab15e6b864f31a9",
       "archive": "zip",
       "binary_format": "pe",
-      "machine": 34404
+      "machine": 34404,
+      "binary": "gost-windows-amd64.exe"
     },
     "i686-pc-windows-msvc": {
-      "asset": "gost_3.2.6_windows_386.zip",
-      "asset_sha256": "4f64ecf0c2b13548010d00ddbe0be616381e8cee4c3bb3947945a0f14407b28f",
+      "asset": "gost-windows-386-3.2.9-easytier.1.zip",
+      "asset_sha256": "5a1997f7100b6e84093baed0fd9af4ce799ae0e0b557000ea5c1d7d6d051d947",
       "archive": "zip",
       "binary_format": "pe",
-      "machine": 332
+      "machine": 332,
+      "binary": "gost-windows-386.exe"
     },
     "aarch64-pc-windows-msvc": {
-      "asset": "gost_3.2.6_windows_arm64.zip",
-      "asset_sha256": "81143c15707bab497112da654873ca590efa69fa9e1aea65ad59adb7d26f246e",
+      "asset": "gost-windows-arm64-3.2.9-easytier.1.zip",
+      "asset_sha256": "fff18968b95475c01b6c9f49b912048c7fab4f73e1954cc013849de650f3f70c",
       "archive": "zip",
       "binary_format": "pe",
-      "machine": 43620
+      "machine": 43620,
+      "binary": "gost-windows-arm64.exe"
     }
   }
 }

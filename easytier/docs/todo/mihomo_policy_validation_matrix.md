@@ -14,8 +14,9 @@
 >
 # Mihomo policy backend validation matrix
 
-Status: FINAL EXACT CANDIDATE `08fb17d3` PASSED REMOTE PREFLIGHT, LINUX,
-ANDROID WORKFLOW, AND MACOS WORKFLOW GATES; REMAINING RUNTIME MATRIX PENDING
+Status: FINAL EXACT CANDIDATE `08fb17d3` PASSED REMOTE PREFLIGHT, WORKFLOW,
+PHYSICAL ANDROID, LINUX, AND PARTIAL MACOS RUNTIME GATES; IPV6 ROUTE AND
+MESH-CHAIN SOCKS UDP FAILURES REMAIN OPEN
 
 This matrix validates the optional desktop/Unix Mihomo policy backend without
 changing Mihomo proxy, provider, group, rule, or `dialer-proxy` semantics.
@@ -89,7 +90,7 @@ propagation and therefore does not satisfy the current dispatch gate.
 | macOS candidate `26ae1ff1` implementation/build | PASS | Quinn truncation, resolver 10/10, interface cache, scoped DNS, GUI build, and all six executable signatures passed. |
 | macOS candidate `26ae1ff1` final verifier | FAIL | Verifier assumed resources were flattened at Contents/Resources root; formal GUI uses recursive lookup. Focused workflow now matches formal semantics; old run produced no accepted artifact. |
 | Final Linux profiling candidate `08fb17d3` | PASS | Workflow 30191697425 passed. Artifact 8629000180 passed outer, inner, and Mihomo-specific checksums and identifies the exact SHA, run, toolchain, target, and HEV pin. |
-| Final Android policy candidate `08fb17d3` | PASS | Workflow 30191697411 passed compilation, unit tests, APK packaging, and captured-UID probe packaging. Physical-device validation remains pending and is not implied by this row. |
+| Final Android policy candidate `08fb17d3` | PASS | Workflow 30191697411 passed compilation, unit tests, APK packaging, and captured-UID probe packaging. The exact APK was subsequently upgraded in place on a physical arm64 Android 15 device and passed captured-UID DIRECT, policy TLS, Wi-Fi outage/recovery, configuration retention, stop/start, and cleanup checks. |
 | Final macOS policy and Quinn workflow tests | PASS | Workflow 30191701843 passed truncated-datagram, resolver ownership, interface-cache, scoped-DNS, GUI build, recursive sidecar discovery, and signature checks for the exact SHA. |
 | Final Linux package completeness | PASS | Bundle contains Core, CLI, Leaf, HEV, GOST, Mihomo, perf tools, manifests, source/license notices, checksums, and build metadata. |
 | CentOS 7 executable compatibility | PASS | Exact artifact checksums and startup passed on `.37` and `.38`; GOST SOCKS5 TCP and Mihomo DIRECT each delivered a real cross-host HTTP response and were cleaned up. |
@@ -103,9 +104,12 @@ propagation and therefore does not satisfy the current dispatch gate.
 | Diff whitespace and private candidate data | PASS | `git diff --check` passed; changed and untracked content contains none of the maintainer-only host or credential patterns. |
 | Immutable candidate SHA and artifacts | PASS | Final candidate is `08fb17d3bddd05bd5ba4ded02ae1d93103c4c2d6`; Linux 30191697425, Android 30191697411, and macOS 30191701843 all completed successfully for that SHA. |
 
-Installed macOS runtime, physical Android, Windows, public dual-stack,
-performance/resource, and other Unix runtime rows remain `PENDING`. The
-successful workflows and CentOS smoke must not be promoted to those rows.
+Physical Android, CentOS 7, public dual-stack, relay, performance/resource,
+Linux Core-managed Mihomo, and macOS packaged-GOST runtime evidence is recorded
+in
+[`mihomo_policy_exact_candidate_runtime_08fb17d3.md`](mihomo_policy_exact_candidate_runtime_08fb17d3.md).
+Installed macOS GUI-managed policy runtime, Windows, and other Unix runtime rows
+remain `PENDING`. Workflow success must not be promoted to those rows.
 
 ## Safety abort conditions
 

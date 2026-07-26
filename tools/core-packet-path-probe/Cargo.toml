@@ -1,0 +1,11 @@
+[package]
+name = "core-packet-path-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tokio = { version = "1.45", features = ["macros", "rt", "sync"] }
+tun-rs = { version = "=2.8.7", default-features = false }
+
+[workspace]

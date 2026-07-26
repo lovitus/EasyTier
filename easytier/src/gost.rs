@@ -16,6 +16,7 @@ use crate::managed_child::{ManagedChild, configure_command};
 
 pub const DEFAULT_PORT_CANDIDATES: [u16; 3] = [11080, 11081, 11082];
 const UDP_BUFFER_SIZE: usize = 65_535;
+const UDP_SOURCE_CHECK: &str = "first-packet";
 const UDP_READINESS_PAYLOAD_SIZE: usize = 8 * 1024;
 const READINESS_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -88,9 +89,7 @@ impl GostRuntime {
             // This exact 65,535-byte value is the qualified project baseline:
             // policy_proxy_validation_2026_07_13.md rejects the prior 4 MiB
             // experiment and records bounded 20/50/100 Mbit/s behavior here.
-            .arg(format!(
-                "socks5://{endpoint}?udp=true&udpBufferSize={UDP_BUFFER_SIZE}"
-            ))
+            .arg(gost_listener_url(endpoint))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -125,6 +124,12 @@ impl GostRuntime {
         self.process.terminate(Duration::from_secs(3)).await;
         Ok(())
     }
+}
+
+fn gost_listener_url(endpoint: SocketAddr) -> String {
+    format!(
+        "socks5://{endpoint}?udp=true&udpBufferSize={UDP_BUFFER_SIZE}&udpSourceCheck={UDP_SOURCE_CHECK}"
+    )
 }
 
 impl Drop for GostRuntime {
@@ -325,5 +330,15 @@ mod tests {
     fn socks5_udp_payload_rejects_fragmented_and_truncated_packets() {
         assert!(socks5_udp_payload(&[0, 0, 1, 1, 0, 0, 0, 0, 0, 53]).is_err());
         assert!(socks5_udp_payload(&[0, 0, 0, 4]).is_err());
+    }
+
+    #[test]
+    fn managed_gost_uses_bounded_udp_and_first_packet_source_pinning() {
+        let listener = gost_listener_url(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            DEFAULT_PORT_CANDIDATES[0],
+        ));
+        assert!(listener.contains("udpBufferSize=65535"));
+        assert!(listener.contains("udpSourceCheck=first-packet"));
     }
 }

@@ -89,7 +89,10 @@ if mode == "fetch":
     if digest(archive) != entry["asset_sha256"]:
         raise SystemExit("GOST release archive SHA-256 mismatch")
 
-    wanted = "gost.exe" if entry["binary_format"] == "pe" else "gost"
+    wanted = entry.get(
+        "binary",
+        "gost.exe" if entry["binary_format"] == "pe" else "gost",
+    )
     if entry["archive"] == "tar.gz":
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as package:
             matches = [
