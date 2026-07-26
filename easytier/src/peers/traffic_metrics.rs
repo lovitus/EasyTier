@@ -87,10 +87,10 @@ enum CachedPeerTrafficCounters {
 }
 
 impl CachedPeerTrafficCounters {
-    fn counters(&self) -> TrafficCounters {
+    fn counters(&self) -> &TrafficCounters {
         match self {
             CachedPeerTrafficCounters::Unknown(counters)
-            | CachedPeerTrafficCounters::Resolved(counters) => counters.clone(),
+            | CachedPeerTrafficCounters::Resolved(counters) => counters,
         }
     }
 
@@ -166,7 +166,7 @@ impl LogicalTrafficMetrics {
         match self.per_peer.entry(peer_id) {
             dashmap::Entry::Occupied(mut entry) => {
                 if entry.get().is_resolved() || resolved_instance_id.is_none() {
-                    return entry.get().counters();
+                    return entry.get().counters().clone();
                 }
                 let counters = self.build_peer_counters(resolved_instance_id.unwrap());
                 entry.insert(CachedPeerTrafficCounters::Resolved(counters.clone()));

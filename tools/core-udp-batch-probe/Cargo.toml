@@ -1,0 +1,12 @@
+[package]
+name = "core-udp-batch-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+libc = "0.2"
+quanta = "0.12.6"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+
+[workspace]
