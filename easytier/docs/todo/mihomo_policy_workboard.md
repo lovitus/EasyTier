@@ -14,8 +14,8 @@
 >
 # Mihomo Policy Backend Workboard
 
-**Status:** FINAL COMBINED SOURCE PREFLIGHT PASSED; CANDIDATE ASSEMBLED LOCALLY
-AND PLATFORM EVIDENCE PENDING
+**Status:** FINAL COMBINED CANDIDATE `08fb17d3` PASSED `.160`, LINUX, ANDROID
+WORKFLOW, AND MACOS WORKFLOW GATES; REMAINING RUNTIME MATRIX PENDING
 
 **Design source:** `docs/todo/mihomo_desktop_unix_policy_backend.md`
 
@@ -34,8 +34,7 @@ truncated-datagram fix and macOS scoped-DNS/resolver/interface updates; these
 required one final combined `.160` gate plus the focused macOS workflow. The
 combined `.160` gate passed: the main locked no-run completed in 4m25s, all
 focused filters passed with three-node in 3.08s, and vendored `quinn-udp`
-compiled in 4.49s and passed 8/8 integration tests. The focused macOS workflow
-and immutable artifacts remain pending.
+compiled in 4.49s and passed 8/8 integration tests.
 
 The first exact-SHA workflow dispatch (`5e1f7480`) exposed a missing
 `happy-dom` root override in `pnpm-lock.yaml`; Android and macOS stopped during
@@ -71,15 +70,27 @@ it assumed Tauri flattened resources. The focused verifier now uses the formal
 GUI workflow's recursive resource lookup. Both packaging corrections require
 one final exact-SHA workflow set.
 
+The final exact candidate
+`08fb17d3bddd05bd5ba4ded02ae1d93103c4c2d6` closed those corrections. Linux
+profiling run `30191697425`, Android candidate run `30191697411`, and macOS
+ARM64 run `30191701843` all passed. Linux artifact `8629000180` passed outer,
+inner, and Mihomo-specific checksums and contains the complete EasyTier,
+Leaf/HEV, GOST, Mihomo, metadata, compliance, and profiling payload. The exact
+archive also started on both CentOS 7 compatibility hosts; real GOST SOCKS5 TCP
+and Mihomo DIRECT cross-host transfers passed and all temporary listeners were
+removed. Physical Android, installed macOS runtime, Windows/FreeBSD,
+public-dual-stack, performance, and long lifecycle/resource evidence remain
+open.
+
 ## Current parallel lanes
 
 | Lane | Objective | Write scope | Status |
 | --- | --- | --- | --- |
-| GOST neutral entry | Run one Core-owned desktop neutral SOCKS service independently of Leaf | Cargo features, GOST owner, guardian, instance-manager lifecycle | Implemented; final `.160` passed, real GOST evidence pending |
-| Mihomo runtime | Add backend enum, immutable minimal overlay, supervisor, and status | Rust config/Core/API modules | Implemented; historical focused evidence retained, current batch gate pending |
-| Packaging | Resolve, verify, and package one latest-stable official Mihomo release per workflow | Resources, scripts, workflows, Tauri bundle config | Implemented; historical acquisition evidence retained, current complete target audit pending |
-| Platform safety | Prove underlay bypass, GOST mesh routing, guardian cleanup, and no storm | Platform adapters and immutable-artifact validation | Earlier Linux TUN evidence retained; current GOST and non-Linux evidence pending |
-| Darwin network fixes | Stop Quinn truncated-datagram receive spin and make scoped DNS/interface changes recoverable | Vendored quinn-udp, macOS resolver guard, scoped DNS parser, interface-index cache | Implemented; `.160` passed, macOS workflow pending |
+| GOST neutral entry | Run one Core-owned desktop neutral SOCKS service independently of Leaf | Cargo features, GOST owner, guardian, instance-manager lifecycle | Implemented; `.160`, packaging, CentOS startup, and real TCP relay passed; full UDP/lifecycle matrix pending |
+| Mihomo runtime | Add backend enum, immutable minimal overlay, supervisor, and status | Rust config/Core/API modules | Implemented; `.160`, workflows, packaging, and CentOS DIRECT smoke passed |
+| Packaging | Resolve, verify, and package one latest-stable official Mihomo release per workflow | Resources, scripts, workflows, Tauri bundle config | Linux and macOS exact-SHA workflow packaging passed; other declared targets remain pending |
+| Platform safety | Prove underlay bypass, GOST mesh routing, guardian cleanup, and no storm | Platform adapters and immutable-artifact validation | Earlier Linux TUN evidence plus current CentOS sidecar smoke retained; full immutable runtime matrix pending |
+| Darwin network fixes | Stop Quinn truncated-datagram receive spin and make scoped DNS/interface changes recoverable | Vendored quinn-udp, macOS resolver guard, scoped DNS parser, interface-index cache | `.160` Linux integration and exact-SHA macOS workflow passed; installed-runtime evidence pending |
 
 ## Non-negotiable implementation checks
 

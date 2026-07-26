@@ -14,8 +14,8 @@
 >
 # Mihomo desktop/Unix policy backend candidate manifest
 
-Status: FINAL COMBINED SOURCE PREFLIGHT AND ANDROID CFG PASSED; PACKAGING
-WORKFLOW REVALIDATION PENDING; IMMUTABLE CANDIDATE NOT YET DISPATCHED
+Status: FINAL EXACT CANDIDATE `08fb17d3` PASSED REMOTE PREFLIGHT, LINUX,
+ANDROID WORKFLOW, AND MACOS WORKFLOW GATES; REMAINING RUNTIME MATRIX PENDING
 
 This is a pre-build manifest. Build IDs, workflow run IDs, measurements, and
 post-build results belong in the validation matrix keyed to the immutable SHA.
@@ -334,3 +334,46 @@ when shared protocol/config code changes.
 - Remote builder evidence is absent or stale for the source snapshot being
   dispatched.
 - Known same-area implementation remains outside the batch.
+
+## Final exact candidate evidence
+
+The complete mixed implementation snapshot is
+`08fb17d3bddd05bd5ba4ded02ae1d93103c4c2d6`. It contains the Mihomo backend,
+neutral GOST mesh entry, Darwin Quinn fix, macOS DNS/interface fixes, frontend
+changes, packaging, tests, and audit updates as one immutable candidate.
+
+- Linux profiling workflow
+  [`30191697425`](https://github.com/lovitus/EasyTier/actions/runs/30191697425)
+  passed for the exact SHA.
+- Android policy candidate workflow
+  [`30191697411`](https://github.com/lovitus/EasyTier/actions/runs/30191697411)
+  passed for the exact SHA. This is compile, unit-test, APK, and captured-UID
+  probe packaging evidence; it is not physical-device evidence.
+- macOS ARM64 workflow
+  [`30191701843`](https://github.com/lovitus/EasyTier/actions/runs/30191701843)
+  passed for the exact SHA, including Quinn truncated-datagram tests, resolver
+  ownership, interface cache, scoped DNS, GUI build, recursive sidecar
+  discovery, and signature checks.
+- Linux artifact `8629000180` is 152,828,490 bytes. The downloaded tarball
+  SHA-256 is
+  `97d922f61f64ceee55f3b99b8530c63974c311209d1c7092f6ce83c4d4360fb9`.
+  Outer, inner, and Mihomo-specific checksum files all passed.
+- `BUILD_INFO.txt` identifies the exact SHA, run `30191697425`, Rust 1.95,
+  `x86_64-unknown-linux-musl`, and HEV
+  `97e74f1068bd924e740032382cdc94ca83741ae6`.
+- The bundle contains EasyTier Core/CLI, Leaf, HEV, GOST, Mihomo, perf tools,
+  manifests, source/license notices, and build metadata. Rust executables are
+  static PIE with symbols and Build IDs; GOST and Mihomo are static ELF
+  executables. Mihomo is verified as upstream `v1.19.29`, source commit
+  `e26714a181ac0e2fa803453c0a8e9a9ce94e31cb`.
+- The exact archive passed checksum and startup compatibility checks on both
+  CentOS 7 hosts `192.168.1.37` and `192.168.1.38`. EasyTier reported
+  `3.0.5-08fb17d3`, GOST reported `v3.2.6`, and Mihomo reported `v1.19.29`.
+- A real GOST SOCKS5 TCP session on `.37` delivered an HTTP response from
+  `.38`. A separate Mihomo `MATCH,DIRECT` session delivered the same cross-host
+  response. Both listeners and test servers were removed afterward.
+
+This closes the combined source, builder, workflow, packaging, CentOS
+compatibility, and basic sidecar data-plane gates. It does not close physical
+Android, installed macOS lifecycle, Windows, FreeBSD, public dual-stack,
+mesh-chain, UDP-through-GOST, performance, or long lifecycle/resource gates.

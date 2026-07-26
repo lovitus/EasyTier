@@ -14,8 +14,8 @@
 >
 # Mihomo policy backend validation matrix
 
-Status: FINAL COMBINED SOURCE PREFLIGHT AND ANDROID CFG PASSED; PACKAGING
-WORKFLOW REVALIDATION PENDING; IMMUTABLE ARTIFACT MATRIX PENDING
+Status: FINAL EXACT CANDIDATE `08fb17d3` PASSED REMOTE PREFLIGHT, LINUX,
+ANDROID WORKFLOW, AND MACOS WORKFLOW GATES; REMAINING RUNTIME MATRIX PENDING
 
 This matrix validates the optional desktop/Unix Mihomo policy backend without
 changing Mihomo proxy, provider, group, rule, or `dialer-proxy` semantics.
@@ -88,7 +88,11 @@ propagation and therefore does not satisfy the current dispatch gate.
 | Linux candidate `26ae1ff1` package completeness | FAIL | Profiling bundle omitted easytier-mihomo and its metadata, so it cannot validate the implemented backend. Packaging now includes the verified runtime and compliance/build metadata; old artifact rejected. |
 | macOS candidate `26ae1ff1` implementation/build | PASS | Quinn truncation, resolver 10/10, interface cache, scoped DNS, GUI build, and all six executable signatures passed. |
 | macOS candidate `26ae1ff1` final verifier | FAIL | Verifier assumed resources were flattened at Contents/Resources root; formal GUI uses recursive lookup. Focused workflow now matches formal semantics; old run produced no accepted artifact. |
-| Final macOS policy and Quinn workflow tests | PENDING | Must compile the exact final tree on macOS and run truncated-datagram, resolver ownership, scoped-DNS, and interface-cache tests. |
+| Final Linux profiling candidate `08fb17d3` | PASS | Workflow 30191697425 passed. Artifact 8629000180 passed outer, inner, and Mihomo-specific checksums and identifies the exact SHA, run, toolchain, target, and HEV pin. |
+| Final Android policy candidate `08fb17d3` | PASS | Workflow 30191697411 passed compilation, unit tests, APK packaging, and captured-UID probe packaging. Physical-device validation remains pending and is not implied by this row. |
+| Final macOS policy and Quinn workflow tests | PASS | Workflow 30191701843 passed truncated-datagram, resolver ownership, interface-cache, scoped-DNS, GUI build, recursive sidecar discovery, and signature checks for the exact SHA. |
+| Final Linux package completeness | PASS | Bundle contains Core, CLI, Leaf, HEV, GOST, Mihomo, perf tools, manifests, source/license notices, checksums, and build metadata. |
+| CentOS 7 executable compatibility | PASS | Exact artifact checksums and startup passed on `.37` and `.38`; GOST SOCKS5 TCP and Mihomo DIRECT each delivered a real cross-host HTTP response and were cleaned up. |
 | Current focused frontend tests | PASS | Policy runtime/editor/document tests passed 35/35 and RemoteManagement tests passed 20/20. |
 | Current clean-output frontend builds | PASS | frontend-lib, Web, VPN plugin, and GUI production builds returned success after generated output was removed and recreated; GUI consumed the refreshed API and VPN declarations. |
 | Current three-node regression | PASS | Exact default-drop ACL case completed in 3.07 seconds after the guardian fallback change. |
@@ -97,10 +101,11 @@ propagation and therefore does not satisfy the current dispatch gate.
 | Current sidecar acquisition | PASS | Latest-stable Mihomo `v1.19.29` and pinned GOST `v3.2.6` Linux x86_64 archives, digests, ELF machines, static binaries, generated metadata, and independent verify modes passed. |
 | Current script/workflow syntax | PASS | Changed shell scripts passed `bash -n`; all six changed workflows passed `actionlint`. |
 | Diff whitespace and private candidate data | PASS | `git diff --check` passed; changed and untracked content contains none of the maintainer-only host or credential patterns. |
-| Immutable candidate SHA and artifacts | PENDING | Local logical commits exist, but no final combined candidate has been dispatched or produced artifacts. |
+| Immutable candidate SHA and artifacts | PASS | Final candidate is `08fb17d3bddd05bd5ba4ded02ae1d93103c4c2d6`; Linux 30191697425, Android 30191697411, and macOS 30191701843 all completed successfully for that SHA. |
 
-macOS, Windows, release-host Linux, public dual-stack, and other Unix rows
-remain `PENDING` until exact immutable artifacts exist.
+Installed macOS runtime, physical Android, Windows, public dual-stack,
+performance/resource, and other Unix runtime rows remain `PENDING`. The
+successful workflows and CentOS smoke must not be promoted to those rows.
 
 ## Safety abort conditions
 
