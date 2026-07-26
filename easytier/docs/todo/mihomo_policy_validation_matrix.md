@@ -14,8 +14,8 @@
 >
 # Mihomo policy backend validation matrix
 
-Status: FINAL REVIEW HARDENING PASSED SOURCE PREFLIGHT; IMMUTABLE ARTIFACT
-MATRIX PENDING
+Status: FINAL COMBINED SOURCE PREFLIGHT PASSED; IMMUTABLE ARTIFACT MATRIX
+PENDING
 
 This matrix validates the optional desktop/Unix Mihomo policy backend without
 changing Mihomo proxy, provider, group, rule, or `dialer-proxy` semantics.
@@ -74,7 +74,9 @@ propagation and therefore does not satisfy the current dispatch gate.
 | Pre-containment `.160` locked Rust no-run | SUPERSEDED | Exact EasyTier, policy, SOCKS-egress, and netstack library test binaries compiled before the shared sidecar-containment fixes. |
 | Pre-guardian-fallback locked Rust no-run and focused tests | SUPERSEDED | Warning-free `.160` incremental compile completed in 41.29 seconds and all configured filters passed before the guardian lookup fallback changed Rust source. |
 | Pre-final-review locked Rust no-run and focused tests | SUPERSEDED | Warning-free `.160` locked no-run completed in 47.55 seconds; the final readiness, validation-child, socket-path, retry, round-trip, GUI-status, and workflow-filter hardening changed source afterward. |
-| Current locked Rust no-run and focused tests | PASS | Warning-free `.160` locked no-run completed in 59.28 seconds; all configured filters passed, including 11 Mihomo tests, explicit backend round-trip, guardian/GOST/netstack coverage, and the three-node case in 3.08 seconds. |
+| Pre-combination locked Rust no-run and focused tests | SUPERSEDED | Warning-free `.160` locked no-run completed in 59.28 seconds; all configured filters passed, but the later Quinn and macOS DNS/interface commits changed Rust source. |
+| Final combined locked Rust/quinn-udp no-run and focused tests | PASS | Exact combined snapshot: EasyTier/policy/SOCKS/netstack locked no-run completed in 4m25s; all configured filters passed, three-node completed in 3.08s; vendored quinn-udp compiled in 4.49s and passed 8/8 integration tests. |
+| Final macOS policy and Quinn workflow tests | PENDING | Must compile the exact final tree on macOS and run truncated-datagram, resolver ownership, scoped-DNS, and interface-cache tests. |
 | Current focused frontend tests | PASS | Policy runtime/editor/document tests passed 35/35 and RemoteManagement tests passed 20/20. |
 | Current clean-output frontend builds | PASS | frontend-lib, Web, VPN plugin, and GUI production builds returned success after generated output was removed and recreated; GUI consumed the refreshed API and VPN declarations. |
 | Current three-node regression | PASS | Exact default-drop ACL case completed in 3.07 seconds after the guardian fallback change. |
@@ -83,7 +85,7 @@ propagation and therefore does not satisfy the current dispatch gate.
 | Current sidecar acquisition | PASS | Latest-stable Mihomo `v1.19.29` and pinned GOST `v3.2.6` Linux x86_64 archives, digests, ELF machines, static binaries, generated metadata, and independent verify modes passed. |
 | Current script/workflow syntax | PASS | Changed shell scripts passed `bash -n`; all six changed workflows passed `actionlint`. |
 | Diff whitespace and private candidate data | PASS | `git diff --check` passed; changed and untracked content contains none of the maintainer-only host or credential patterns. |
-| Immutable candidate SHA and artifacts | PENDING | No candidate has been committed or dispatched. |
+| Immutable candidate SHA and artifacts | PENDING | Local logical commits exist, but no final combined candidate has been dispatched or produced artifacts. |
 
 macOS, Windows, release-host Linux, public dual-stack, and other Unix rows
 remain `PENDING` until exact immutable artifacts exist.

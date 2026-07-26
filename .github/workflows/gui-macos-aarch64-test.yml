@@ -54,6 +54,23 @@ jobs:
             truncated_datagram_does_not_spin_after_eagain -- \
             --exact --nocapture
 
+      - name: Test macOS policy DNS and interface handling
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          cargo test --locked --target "$GUI_TARGET" \
+            --package easytier --lib --features leaf-policy-proxy \
+            policy_proxy::macos_routing::tests -- \
+            --nocapture --test-threads 1
+          cargo test --locked --target "$GUI_TARGET" \
+            --package easytier --lib --features leaf-policy-proxy \
+            tunnel::common::tests::interface_index_cache -- \
+            --nocapture --test-threads 1
+          cargo test --locked --target "$GUI_TARGET" \
+            --package easytier-policy --lib \
+            leaf_process::tests::macos_system_dns_uses_only_the_selected_scoped_interface -- \
+            --exact --nocapture --test-threads 1
+
       - name: Build policy sidecars
         env:
           HEV_SERVER_COMMIT: 97e74f1068bd924e740032382cdc94ca83741ae6

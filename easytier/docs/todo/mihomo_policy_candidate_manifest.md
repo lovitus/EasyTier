@@ -14,8 +14,8 @@
 >
 # Mihomo desktop/Unix policy backend candidate manifest
 
-Status: FINAL REVIEW HARDENING PASSED SOURCE PREFLIGHT; IMMUTABLE CANDIDATE
-NOT YET DISPATCHED
+Status: FINAL COMBINED SOURCE PREFLIGHT PASSED; IMMUTABLE CANDIDATE NOT YET
+DISPATCHED
 
 This is a pre-build manifest. Build IDs, workflow run IDs, measurements, and
 post-build results belong in the validation matrix keyed to the immutable SHA.
@@ -46,6 +46,12 @@ post-build results belong in the validation matrix keyed to the immutable SHA.
   desktop/Unix artifact.
 - Expose backend, source path, runtime state, selected GOST port, error, and
   restart count through Core API and GUI.
+- Vendor the exact locked `quinn-udp 0.5.15` source with a Darwin-only
+  truncated-datagram receive-loop fix; preserve Quinn's standard runtime.
+- On macOS, select only DNS servers scoped to the chosen underlay interface,
+  atomically install an EasyTier-owned root resolver for the active legacy
+  Leaf backend, and refresh cached Darwin interface indices after network
+  changes with a five-second fallback TTL.
 
 ## Required source audit before preflight
 
@@ -101,14 +107,16 @@ short enough for Darwin/FreeBSD, stable operation restores retry budgets, and
 explicit Mihomo selection never sets the legacy Leaf boolean. These
 build-affecting changes supersede the preceding source preflight.
 
-The final `.160` gate completed a warning-free locked no-run build in 59.28
+The pre-combination `.160` gate completed a warning-free locked no-run build in 59.28
 seconds. All configured focused filters passed, including 11 Mihomo tests,
 explicit Mihomo backend round-trip, guardian lookup, GOST readiness, netstack,
 and the three-node regression in 3.08 seconds. Frontend focused tests passed
 55/55. Clean-output frontend-lib, Web, VPN plugin, and GUI production builds
 all returned success; build scripts now remove only their generated output
 directories before regeneration so stale declarations cannot make runner
-results cache-dependent.
+results cache-dependent. The subsequent vendored Quinn and macOS DNS/interface
+commits invalidate that Rust/source evidence for dispatch; frontend evidence
+remains applicable because those commits do not change frontend inputs.
 
 ## Superseded mutable-source preflight evidence
 
@@ -203,7 +211,19 @@ workflow, release-artifact, GOST readiness, or guardian-lifecycle evidence.
 
 ## Required current pre-candidate evidence
 
+The final combined `.160` preflight completed on 2026-07-26. The locked
+EasyTier, policy, SOCKS-egress, and netstack no-run build completed in 4 minutes
+25 seconds; all configured focused filters passed, including the three-node
+regression in 3.08 seconds. The independently selected vendored `quinn-udp`
+integration target compiled in 4.49 seconds and passed all 8 Linux integration
+tests. macOS-only resolver ownership and Darwin truncated-datagram execution
+remain assigned to the exact-SHA macOS workflow.
+
 - `.160` locked no-run build for the complete current snapshot.
+- `.160` locked no-run plus complete integration-test execution for the
+  vendored `quinn-udp` target.
+- Focused scoped-DNS parsing, atomic resolver replacement, and Darwin interface
+  cache tests; macOS-only resolver ownership tests run in the macOS workflow.
 - Focused tests for effective-backend validation dispatch, Android explicit
   Leaf selection, GOST UDP packet parsing, neutral-entry status, lifecycle,
   restart, and guardian cleanup.

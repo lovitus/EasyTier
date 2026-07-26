@@ -14,7 +14,7 @@
 >
 # Mihomo Policy Backend Workboard
 
-**Status:** FINAL REVIEW HARDENING PASSED SOURCE PREFLIGHT; CANDIDATE ASSEMBLY
+**Status:** FINAL COMBINED SOURCE PREFLIGHT PASSED; CANDIDATE ASSEMBLED LOCALLY
 AND PLATFORM EVIDENCE PENDING
 
 **Design source:** `docs/todo/mihomo_desktop_unix_policy_backend.md`
@@ -26,10 +26,16 @@ issues. The guardian lookup fallback snapshot passed a warning-free `.160`
 locked no-run in 47.55 seconds. Final review then found and fixed bounded
 controller/validator I/O, short Unix controller paths, stable retry recovery,
 explicit-backend round-trip, remote GUI state/capability, and workflow path
-filter issues. The final `.160` rerun passed a warning-free 59.28-second locked
-no-run build, every configured focused filter, 55 frontend tests, and
-clean-output frontend-lib, Web, VPN plugin, and GUI production builds. No
-immutable candidate SHA or workflow artifact exists.
+filter issues. The pre-combination `.160` rerun passed a warning-free
+59.28-second locked no-run build, every configured focused filter, 55 frontend
+tests, and clean-output frontend-lib, Web, VPN plugin, and GUI production
+builds. The assembled tree now also includes the isolated Darwin `quinn-udp`
+truncated-datagram fix and macOS scoped-DNS/resolver/interface updates; these
+required one final combined `.160` gate plus the focused macOS workflow. The
+combined `.160` gate passed: the main locked no-run completed in 4m25s, all
+focused filters passed with three-node in 3.08s, and vendored `quinn-udp`
+compiled in 4.49s and passed 8/8 integration tests. The focused macOS workflow
+and immutable artifacts remain pending.
 
 ## Current parallel lanes
 
@@ -39,6 +45,7 @@ immutable candidate SHA or workflow artifact exists.
 | Mihomo runtime | Add backend enum, immutable minimal overlay, supervisor, and status | Rust config/Core/API modules | Implemented; historical focused evidence retained, current batch gate pending |
 | Packaging | Resolve, verify, and package one latest-stable official Mihomo release per workflow | Resources, scripts, workflows, Tauri bundle config | Implemented; historical acquisition evidence retained, current complete target audit pending |
 | Platform safety | Prove underlay bypass, GOST mesh routing, guardian cleanup, and no storm | Platform adapters and immutable-artifact validation | Earlier Linux TUN evidence retained; current GOST and non-Linux evidence pending |
+| Darwin network fixes | Stop Quinn truncated-datagram receive spin and make scoped DNS/interface changes recoverable | Vendored quinn-udp, macOS resolver guard, scoped DNS parser, interface-index cache | Implemented; `.160` passed, macOS workflow pending |
 
 ## Non-negotiable implementation checks
 

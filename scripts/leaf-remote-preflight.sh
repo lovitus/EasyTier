@@ -10,6 +10,8 @@ readonly BUILD_TIMEOUT="${BUILD_TIMEOUT:-1800}"
 readonly TEST_TIMEOUT="${TEST_TIMEOUT:-300}"
 readonly BUILD_LOG="/tmp/easytier_leaf_preflight_build.log"
 readonly TEST_LOG="/tmp/easytier_leaf_preflight_test.log"
+readonly QUINN_BUILD_LOG="/tmp/easytier_quinn_udp_preflight_build.log"
+readonly QUINN_TEST_LOG="/tmp/easytier_quinn_udp_preflight_test.log"
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
@@ -159,10 +161,29 @@ run_no_run_build() {
   fi
 }
 
+run_quinn_no_run_build() {
+  local exit_code=0
+  ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890 CARGO_NET_GIT_FETCH_WITH_CLI=true CARGO_BUILD_JOBS=\$(nproc) CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=1 timeout $BUILD_TIMEOUT cargo test --locked --no-run --package quinn-udp --test tests > $QUINN_BUILD_LOG 2>&1; code=\$?; echo EXIT_CODE=\$code; exit \$code'" \
+    || exit_code=$?
+
+  ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER tail -50 $QUINN_BUILD_LOG"
+  if ((exit_code != 0)); then
+    printf 'Remote quinn-udp no-run build failed with exit code %d.\n' "$exit_code" >&2
+    exit "$exit_code"
+  fi
+}
+
 resolve_test_binary() {
   local binary_prefix="$1"
   ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
     "docker exec $BUILDER_CONTAINER bash -c \"awk '/Executable unittests src\\/lib.rs/ && /\\/deps\\/$binary_prefix-/ { line=\\\$0 } END { if (line == \\\"\\\") exit 1; sub(/^.*\\\\(/, \\\"\\\", line); sub(/\\\\).*$/, \\\"\\\", line); print \\\"$REMOTE_WORKSPACE/\\\" line }' $BUILD_LOG\""
+}
+
+resolve_quinn_test_binary() {
+  ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER bash -c \"awk '/Executable tests\\/tests.rs/ && /\\/deps\\/tests-/ { line=\\\$0 } END { if (line == \\\"\\\") exit 1; sub(/^.*\\\\(/, \\\"\\\", line); sub(/\\\\).*$/, \\\"\\\", line); print \\\"$REMOTE_WORKSPACE/\\\" line }' $QUINN_BUILD_LOG\""
 }
 
 run_focused_tests() {
@@ -198,20 +219,39 @@ run_focused_tests() {
   fi
 }
 
+run_complete_test_binary() {
+  local test_binary="$1"
+  local exit_code=0
+  ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER bash -c 'timeout $TEST_TIMEOUT $test_binary --nocapture --test-threads 1 > $QUINN_TEST_LOG 2>&1'" \
+    || exit_code=$?
+  ssh "${SSH_OPTIONS[@]}" "$BUILDER_HOST" \
+    "docker exec $BUILDER_CONTAINER tail -100 $QUINN_TEST_LOG"
+  if ((exit_code != 0)); then
+    printf 'quinn-udp test suite failed with exit code %d.\n' "$exit_code" >&2
+    exit "$exit_code"
+  fi
+}
+
 sync_snapshot
 check_builder_idle
 run_no_run_build
+check_builder_idle
+run_quinn_no_run_build
 EASYTIER_TEST_BINARY="$(resolve_test_binary easytier)"
 POLICY_TEST_BINARY="$(resolve_test_binary easytier_policy)"
 SOCKS_EGRESS_TEST_BINARY="$(resolve_test_binary easytier_socks_egress)"
 NETSTACK_TEST_BINARY="$(resolve_test_binary netstack_smoltcp)"
-readonly EASYTIER_TEST_BINARY POLICY_TEST_BINARY SOCKS_EGRESS_TEST_BINARY NETSTACK_TEST_BINARY
+QUINN_TEST_BINARY="$(resolve_quinn_test_binary)"
+readonly EASYTIER_TEST_BINARY POLICY_TEST_BINARY SOCKS_EGRESS_TEST_BINARY NETSTACK_TEST_BINARY QUINN_TEST_BINARY
 printf 'Using exact EasyTier library test binary: %s\n' "$EASYTIER_TEST_BINARY"
 printf 'Using exact policy library test binary: %s\n' "$POLICY_TEST_BINARY"
 printf 'Using exact SOCKS egress library test binary: %s\n' "$SOCKS_EGRESS_TEST_BINARY"
 printf 'Using exact netstack library test binary: %s\n' "$NETSTACK_TEST_BINARY"
+printf 'Using exact quinn-udp integration test binary: %s\n' "$QUINN_TEST_BINARY"
 run_focused_tests "$EASYTIER_TEST_BINARY" reset "${DEFAULT_EASYTIER_TEST_FILTERS[@]}" "$@"
 run_focused_tests "$SOCKS_EGRESS_TEST_BINARY" append "${DEFAULT_SOCKS_EGRESS_TEST_FILTERS[@]}"
 run_focused_tests "$NETSTACK_TEST_BINARY" append "${DEFAULT_NETSTACK_TEST_FILTERS[@]}"
 run_focused_tests "$POLICY_TEST_BINARY" append "${DEFAULT_POLICY_TEST_FILTERS[@]}"
+run_complete_test_binary "$QUINN_TEST_BINARY"
 printf 'Leaf/HEV remote preflight passed. GitHub release artifacts were not built.\n'
