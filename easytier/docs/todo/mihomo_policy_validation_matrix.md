@@ -14,8 +14,8 @@
 >
 # Mihomo policy backend validation matrix
 
-Status: FINAL COMBINED SOURCE PREFLIGHT PASSED; IMMUTABLE ARTIFACT MATRIX
-PENDING
+Status: FINAL COMBINED SOURCE PREFLIGHT PASSED; ANDROID CFG REVALIDATION
+PENDING; IMMUTABLE ARTIFACT MATRIX PENDING
 
 This matrix validates the optional desktop/Unix Mihomo policy backend without
 changing Mihomo proxy, provider, group, rule, or `dialer-proxy` semantics.
@@ -78,6 +78,8 @@ propagation and therefore does not satisfy the current dispatch gate.
 | Final combined locked Rust/quinn-udp no-run and focused tests | PASS | Exact combined snapshot: EasyTier/policy/SOCKS/netstack locked no-run completed in 4m25s; all configured filters passed, three-node completed in 3.08s; vendored quinn-udp compiled in 4.49s and passed 8/8 integration tests. |
 | First combined workflow dispatch `5e1f7480` | FAIL | Android and macOS stopped in frozen pnpm install because the lockfile omitted the root happy-dom override; Linux was cancelled after the SHA became invalid. No platform compilation or artifact from these runs is accepted. |
 | Corrected final frontend gate | PASS | `.160` frozen install passed; policy/editor/runtime/remote-management tests passed 51/51; frontend-lib, Web, VPN-plugin, and GUI production builds passed in dependency order. |
+| Second combined workflow dispatch `4fd25fb3` | FAIL | Android found a cfg-only Result formatting compile error after frozen install; Linux and macOS were cancelled because the SHA became obsolete. No artifact is accepted. |
+| `.160` Android cfg diagnostic | BLOCKED | Installed armv7 Rust target reached `ring`, then stopped because the builder has no `arm-linux-androideabi-clang`; it did not reach EasyTier. Final Android workflow remains mandatory. |
 | Final macOS policy and Quinn workflow tests | PENDING | Must compile the exact final tree on macOS and run truncated-datagram, resolver ownership, scoped-DNS, and interface-cache tests. |
 | Current focused frontend tests | PASS | Policy runtime/editor/document tests passed 35/35 and RemoteManagement tests passed 20/20. |
 | Current clean-output frontend builds | PASS | frontend-lib, Web, VPN plugin, and GUI production builds returned success after generated output was removed and recreated; GUI consumed the refreshed API and VPN declarations. |

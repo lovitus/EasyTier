@@ -373,9 +373,13 @@ async fn start_core_mesh_entry_guard(
             if runtime_cancel.is_cancelled() {
                 return;
             }
+            let exit_reason = match result {
+                Ok(()) => "Android mesh entry exited unexpectedly".to_owned(),
+                Err(error) => format!("{error:#}"),
+            };
             with_mesh_entry_status(&task_status, |status| {
                 status.state = NeutralMeshEntryState::Backoff;
-                status.last_error = Some(format!("{result:#}"));
+                status.last_error = Some(exit_reason);
             });
 
             let mut delay = Duration::from_secs(1);

@@ -45,6 +45,14 @@ The `.160` frontend lane then passed frozen install, all 51 focused tests, and
 all four dependency-order production builds. The release audit now compares
 root and lockfile pnpm overrides before dispatch.
 
+The next dispatch (`4fd25fb3`) passed frozen install and reached Android Rust
+compilation, which exposed a target-only diagnostic formatting error in the
+neutral mesh-entry restart task. The implementation now handles `Ok(())` and
+`Err(error)` explicitly. Linux and macOS for the obsolete SHA were cancelled.
+The `.160` armv7 diagnostic was blocked in `ring` by the builder's missing
+Android clang before EasyTier compiled, so the final Android workflow remains
+the required target evidence.
+
 ## Current parallel lanes
 
 | Lane | Objective | Write scope | Status |

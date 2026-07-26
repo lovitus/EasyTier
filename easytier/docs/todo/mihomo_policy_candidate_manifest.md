@@ -14,8 +14,8 @@
 >
 # Mihomo desktop/Unix policy backend candidate manifest
 
-Status: FINAL COMBINED SOURCE PREFLIGHT PASSED; IMMUTABLE CANDIDATE NOT YET
-DISPATCHED
+Status: FINAL COMBINED SOURCE PREFLIGHT PASSED; ANDROID CFG REVALIDATION
+PENDING; IMMUTABLE CANDIDATE NOT YET DISPATCHED
 
 This is a pre-build manifest. Build IDs, workflow run IDs, measurements, and
 post-build results belong in the validation matrix keyed to the immutable SHA.
@@ -228,6 +228,16 @@ explicit-Mihomo frontend assertion now expects the normalized legacy boolean,
 and `.160` passed frozen install, all 51 focused frontend tests, frontend-lib,
 Web, VPN-plugin, and GUI production builds. The release audit now rejects any
 future root/lockfile override mismatch.
+
+The corrected dispatch at `4fd25fb3cb69f750e4b92298a532db8862d683ad`
+passed the frozen-install boundary, then Android exposed a target-only compile
+error in the neutral mesh-entry restart diagnostic: a `Result<(), Error>` was
+formatted as `Display`. The code now distinguishes an unexpected successful
+exit from an error and records either a bounded literal or the error chain.
+Linux and macOS runs for that obsolete SHA were cancelled. A focused `.160`
+armv7 Android check was attempted but stopped in `ring` before EasyTier because
+the builder lacks `arm-linux-androideabi-clang`; the exact-SHA Android workflow
+is therefore the required compile evidence for this target-only branch.
 
 - `.160` locked no-run build for the complete current snapshot.
 - `.160` locked no-run plus complete integration-test execution for the
