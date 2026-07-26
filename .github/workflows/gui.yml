@@ -279,6 +279,8 @@ jobs:
 
       - name: Verify bundled policy sidecars
         if: contains(matrix.GUI_TARGET, 'darwin') || contains(matrix.GUI_TARGET, 'linux')
+        env:
+          MIHOMO_RELEASE_MANIFEST: ${{ github.workspace }}/target/mihomo-release/mihomo-release-manifest.json
         run: |
           set -euo pipefail
           if [[ "$GUI_TARGET" == *darwin* ]]; then

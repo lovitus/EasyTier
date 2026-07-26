@@ -174,6 +174,8 @@ jobs:
           args: --verbose --target ${{ env.GUI_TARGET }}
 
       - name: Verify signed policy sidecars
+        env:
+          MIHOMO_RELEASE_MANIFEST: ${{ github.workspace }}/target/mihomo-release-manifest.json
         run: |
           set -euo pipefail
           app_dir=$(find "target/$GUI_TARGET/release/bundle/macos" -maxdepth 1 -type d -name '*.app' -print -quit)
