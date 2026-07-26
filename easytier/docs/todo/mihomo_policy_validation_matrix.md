@@ -14,8 +14,8 @@
 >
 # Mihomo policy backend validation matrix
 
-Status: FINAL COMBINED SOURCE PREFLIGHT PASSED; ANDROID CFG REVALIDATION
-PENDING; IMMUTABLE ARTIFACT MATRIX PENDING
+Status: FINAL COMBINED SOURCE PREFLIGHT AND ANDROID CFG PASSED; MACOS WORKFLOW
+REVALIDATION PENDING; IMMUTABLE ARTIFACT MATRIX PENDING
 
 This matrix validates the optional desktop/Unix Mihomo policy backend without
 changing Mihomo proxy, provider, group, rule, or `dialer-proxy` semantics.
@@ -80,6 +80,9 @@ propagation and therefore does not satisfy the current dispatch gate.
 | Corrected final frontend gate | PASS | `.160` frozen install passed; policy/editor/runtime/remote-management tests passed 51/51; frontend-lib, Web, VPN-plugin, and GUI production builds passed in dependency order. |
 | Second combined workflow dispatch `4fd25fb3` | FAIL | Android found a cfg-only Result formatting compile error after frozen install; Linux and macOS were cancelled because the SHA became obsolete. No artifact is accepted. |
 | `.160` Android cfg diagnostic | BLOCKED | Installed armv7 Rust target reached `ring`, then stopped because the builder has no `arm-linux-androideabi-clang`; it did not reach EasyTier. Final Android workflow remains mandatory. |
+| Android candidate `bdb8c3d0` | PASS | Workflow 30190085529 completed successfully, including the cfg(android) neutral mesh-entry branch that failed in the prior SHA. |
+| macOS candidate `bdb8c3d0` | FAIL | Resolver ownership/route suite passed 10/10; the combined step then hit its 10-minute aggregate timeout during the next Cargo invocation. Tests are split into separate bounded steps for revalidation. |
+| Linux candidate `bdb8c3d0` | CANCELLED | Cancelled after the macOS workflow definition required a tracked correction; no artifact is accepted. |
 | Final macOS policy and Quinn workflow tests | PENDING | Must compile the exact final tree on macOS and run truncated-datagram, resolver ownership, scoped-DNS, and interface-cache tests. |
 | Current focused frontend tests | PASS | Policy runtime/editor/document tests passed 35/35 and RemoteManagement tests passed 20/20. |
 | Current clean-output frontend builds | PASS | frontend-lib, Web, VPN plugin, and GUI production builds returned success after generated output was removed and recreated; GUI consumed the refreshed API and VPN declarations. |

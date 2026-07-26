@@ -54,7 +54,7 @@ jobs:
             truncated_datagram_does_not_spin_after_eagain -- \
             --exact --nocapture
 
-      - name: Test macOS policy DNS and interface handling
+      - name: Test macOS policy resolver ownership
         timeout-minutes: 10
         run: |
           set -euo pipefail
@@ -62,10 +62,20 @@ jobs:
             --package easytier --lib --features leaf-policy-proxy \
             policy_proxy::macos_routing::tests -- \
             --nocapture --test-threads 1
+
+      - name: Test macOS interface cache
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
           cargo test --locked --target "$GUI_TARGET" \
             --package easytier --lib --features leaf-policy-proxy \
             tunnel::common::tests::interface_index_cache -- \
             --nocapture --test-threads 1
+
+      - name: Test macOS scoped DNS selection
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
           cargo test --locked --target "$GUI_TARGET" \
             --package easytier-policy --lib \
             leaf_process::tests::macos_system_dns_uses_only_the_selected_scoped_interface -- \

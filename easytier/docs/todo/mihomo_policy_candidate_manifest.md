@@ -14,8 +14,8 @@
 >
 # Mihomo desktop/Unix policy backend candidate manifest
 
-Status: FINAL COMBINED SOURCE PREFLIGHT PASSED; ANDROID CFG REVALIDATION
-PENDING; IMMUTABLE CANDIDATE NOT YET DISPATCHED
+Status: FINAL COMBINED SOURCE PREFLIGHT AND ANDROID CFG PASSED; MACOS WORKFLOW
+REVALIDATION PENDING; IMMUTABLE CANDIDATE NOT YET DISPATCHED
 
 This is a pre-build manifest. Build IDs, workflow run IDs, measurements, and
 post-build results belong in the validation matrix keyed to the immutable SHA.
@@ -238,6 +238,15 @@ Linux and macOS runs for that obsolete SHA were cancelled. A focused `.160`
 armv7 Android check was attempted but stopped in `ring` before EasyTier because
 the builder lacks `arm-linux-androideabi-clang`; the exact-SHA Android workflow
 is therefore the required compile evidence for this target-only branch.
+
+Android workflow
+[`30190085529`](https://github.com/lovitus/EasyTier/actions/runs/30190085529)
+then completed successfully for `bdb8c3d0`, closing that target-only compile
+gate. The same-SHA macOS run compiled and passed all 10 resolver ownership and
+route tests, but its single 10-minute step timed out while recompiling for the
+next filter. The workflow now gives resolver ownership, interface cache, and
+scoped-DNS selection separate bounded steps. Linux for the superseded workflow
+layout was cancelled before artifact publication.
 
 - `.160` locked no-run build for the complete current snapshot.
 - `.160` locked no-run plus complete integration-test execution for the

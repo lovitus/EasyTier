@@ -53,6 +53,13 @@ The `.160` armv7 diagnostic was blocked in `ring` by the builder's missing
 Android clang before EasyTier compiled, so the final Android workflow remains
 the required target evidence.
 
+Android workflow `30190085529` subsequently passed for `bdb8c3d0`, closing the
+target-only compile gate. The matching macOS run compiled and passed the 10
+resolver ownership/route tests, then exceeded one aggregate 10-minute timeout
+while recompiling for the interface-cache filter. Those three test groups now
+use separate bounded workflow steps. Linux for that superseded workflow layout
+was cancelled before artifact publication.
+
 ## Current parallel lanes
 
 | Lane | Objective | Write scope | Status |
