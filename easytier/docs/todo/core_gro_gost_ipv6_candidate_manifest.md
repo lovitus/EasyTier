@@ -1,8 +1,15 @@
 # Core GRO, GOST, and IPv6 candidate manifest
 
-Status: PRE-BUILD GATE PASSED; IMMUTABLE PROFILING CANDIDATE PENDING
+Status: GRO PRODUCTION OPTIMIZATION REJECTED; IPV6 AND GOST FIXES RETAINED
 
 Date: 2026-07-26
+
+The immutable profiling candidate was
+`49682dbdf864749f7a17eab8e1ab14ad30bb718f`, workflow
+`30200437716`. The workflow passed, but public dual-stack runtime validation
+rejected the Linux GRO scratch change. The next candidate must remove only that
+production optimization and retain the independently tested IPv6 and GOST
+fixes.
 
 ## Baseline and scope
 
@@ -124,6 +131,47 @@ Acceptance requires:
 If the optimized artifact does not satisfy those conditions, revert only the
 GRO scratch optimization. The independent IPv6 and pinned GOST fixes remain
 separately reviewable and testable.
+
+## Runtime result and disposition
+
+The public pair was healthy immediately before the comparison:
+
+- raw IPv4: 7,773.3 Mbit/s;
+- raw IPv6: 7,482.2 Mbit/s;
+- raw IPv4 recheck during the candidate regression: 7,779.6 Mbit/s.
+
+Exact `08fb17d3` baseline, three ten-second runs per direction:
+
+- public host 2 to public host 3:
+  76.8, 336.5, and 336.6 Mbit/s; median 336.5 Mbit/s. The first run was a
+  path-warmup outlier and was not used to inflate the candidate comparison.
+- public host 3 to public host 2:
+  308.0, 320.0, and 302.1 Mbit/s; median 308.0 Mbit/s.
+
+Exact `49682dbd` candidate:
+
+- public host 2 to public host 3:
+  168.5, 163.8, and 158.3 Mbit/s; median 163.8 Mbit/s.
+- public host 3 to public host 2:
+  297.1, 302.4, and 343.4 Mbit/s; median 302.4 Mbit/s.
+- an additional first-direction candidate run was 176.7 Mbit/s.
+
+An A/B/A confirmation switched the same hosts, ports, virtual addresses,
+unencrypted mesh, and enabled KCP/QUIC settings back to `08fb17d3`. The
+first-direction results recovered to 276.7, 352.5, and 337.1 Mbit/s; median
+337.1 Mbit/s.
+
+The candidate therefore caused an approximately 51% median regression in the
+direction whose receiver used the expanded GRO scratch while leaving the
+reverse control direction almost unchanged. Raw networking remained above
+7.7 Gbit/s. This is sufficient causal evidence to reject the production
+change; no additional workflow or platform rollout is justified for that
+implementation.
+
+The standalone probe remains useful as a failed-assumption record: increasing
+buffer capacity allowed larger legal GRO frames in isolation, but that
+mechanism did not improve the real Core/kernel path and materially reduced
+throughput on the tested Linux receiver.
 
 ## Core optimization boundary during the build
 
