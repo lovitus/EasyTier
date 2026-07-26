@@ -282,7 +282,11 @@ jobs:
         if: contains(matrix.TARGET, 'apple-darwin') || matrix.TARGET == 'x86_64-unknown-freebsd'
         run: |
           set -euo pipefail
-          cargo build --locked --release --target "$TARGET" \
+          build_command=build
+          if [[ "$TARGET" == 'x86_64-unknown-freebsd' ]]; then
+            build_command=zigbuild
+          fi
+          cargo "$build_command" --locked --release --target "$TARGET" \
             --package easytier-socks-egress --bin easytier-gost-guardian
           test -x "target/$TARGET/release/easytier-gost-guardian"
 
