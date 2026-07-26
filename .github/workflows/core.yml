@@ -433,7 +433,7 @@ jobs:
           do
             binary="target/$TARGET/release/$executable"
             test -x "$binary"
-            codesign --force --sign - "$binary"
+            codesign --force --sign - --options runtime "$binary"
             codesign --verify --strict --verbose=2 "$binary"
           done
           bash scripts/fetch-gost-release.sh record-distributed "$TARGET" \
@@ -442,6 +442,14 @@ jobs:
           bash scripts/fetch-gost-release.sh verify "$TARGET" \
             "target/$TARGET/release/easytier-gost" \
             "target/$TARGET/release/easytier-gost.manifest.json"
+          if [[ "$POLICY_RELEASE" == "true" ]]; then
+            bash scripts/fetch-mihomo-release.sh record-distributed "$TARGET" \
+              "target/$TARGET/release/easytier-mihomo" \
+              "target/$TARGET/release/easytier-mihomo.manifest.json"
+            bash scripts/fetch-mihomo-release.sh verify "$TARGET" \
+              "target/$TARGET/release/easytier-mihomo" \
+              "target/$TARGET/release/easytier-mihomo.manifest.json"
+          fi
 
       - name: Compress
         run: |

@@ -6,6 +6,7 @@ usage() {
   echo "usage: $0 resolve-latest OUTPUT_MANIFEST" >&2
   echo "usage: $0 fetch TARGET OUTPUT METADATA_OUTPUT" >&2
   echo "       $0 verify TARGET BINARY METADATA" >&2
+  echo "       $0 record-distributed TARGET BINARY METADATA" >&2
   echo "       $0 fetch-source OUTPUT_DIRECTORY" >&2
   exit 2
 }
@@ -17,7 +18,7 @@ case "$mode" in
     [[ $# -eq 2 ]] || usage
     resolved_manifest_output=$2
     ;;
-  fetch|verify)
+  fetch|verify|record-distributed)
     [[ $# -eq 4 ]] || usage
     target=$2
     binary_path=$3
@@ -316,11 +317,38 @@ verify_metadata() {
   expected_binary_sha256="$(jq -r '.binary_sha256' "$metadata_path")"
   [[ "$expected_binary_sha256" =~ ^[0-9a-f]{64}$ ]]
   actual_binary_sha256="$(sha256_file "$binary_path")"
-  [[ "$actual_binary_sha256" == "$expected_binary_sha256" ]] || {
-    echo "Mihomo binary SHA-256 mismatch for $binary_path" >&2
-    exit 1
-  }
   verify_executable "$binary_path"
+
+  if [[ "$mode" == "record-distributed" ]]; then
+    if [[ "$binary_format" != "macho" || "$target" != *apple-darwin ]]; then
+      echo "record-distributed is restricted to Apple Mach-O Mihomo binaries" >&2
+      exit 1
+    fi
+    if [[ "$actual_binary_sha256" == "$expected_binary_sha256" ]]; then
+      echo "Mihomo distributed binary was not transformed by codesign" >&2
+      exit 1
+    fi
+    metadata_tmp="$(mktemp "$(dirname "$metadata_path")/.mihomo-metadata.XXXXXX")"
+    jq \
+      --arg transform apple-codesign-ad-hoc-runtime \
+      --arg digest "$actual_binary_sha256" \
+      '.distribution_transform = $transform | .distributed_binary_sha256 = $digest' \
+      "$metadata_path" > "$metadata_tmp"
+    chmod 0644 "$metadata_tmp"
+    mv "$metadata_tmp" "$metadata_path"
+  elif [[ "$actual_binary_sha256" != "$expected_binary_sha256" ]]; then
+    distributed_binary_sha256="$(jq -r '.distributed_binary_sha256 // empty' "$metadata_path")"
+    distribution_transform="$(jq -r '.distribution_transform // empty' "$metadata_path")"
+    if [[
+      "$binary_format" != "macho" ||
+      "$target" != *apple-darwin ||
+      "$distribution_transform" != "apple-codesign-ad-hoc-runtime" ||
+      "$distributed_binary_sha256" != "$actual_binary_sha256"
+    ]]; then
+      echo "Mihomo binary SHA-256 mismatch for $binary_path" >&2
+      exit 1
+    fi
+  fi
 }
 
 write_distribution_metadata() {
@@ -354,9 +382,12 @@ EOF
     > "$output_dir/MIHOMO_SHA256SUMS.txt"
 }
 
-if [[ "$mode" == "verify" ]]; then
+if [[ "$mode" == "verify" || "$mode" == "record-distributed" ]]; then
   test -f "$binary_path"
   verify_metadata
+  if [[ "$mode" == "record-distributed" ]]; then
+    write_distribution_metadata
+  fi
   exit 0
 fi
 

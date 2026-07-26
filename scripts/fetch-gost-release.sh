@@ -173,19 +173,20 @@ else:
             )
         if actual_digest == source_digest:
             raise SystemExit("GOST distributed binary was not transformed by codesign")
-        metadata["distribution_transform"] = "apple-codesign-ad-hoc"
+        metadata["distribution_transform"] = "apple-codesign-ad-hoc-runtime"
         metadata["distributed_binary_sha256"] = actual_digest
         with tempfile.NamedTemporaryFile(
             dir=metadata_path.parent, mode="w", delete=False
         ) as temporary:
             temporary.write(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
             temporary_path = pathlib.Path(temporary.name)
+        temporary_path.chmod(0o644)
         temporary_path.replace(metadata_path)
     elif actual_digest != source_digest:
         if (
             entry["binary_format"] != "macho"
             or "apple-darwin" not in target
-            or metadata.get("distribution_transform") != "apple-codesign-ad-hoc"
+            or metadata.get("distribution_transform") != "apple-codesign-ad-hoc-runtime"
             or metadata.get("distributed_binary_sha256") != actual_digest
         ):
             raise SystemExit("GOST binary SHA-256 mismatch")

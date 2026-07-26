@@ -123,16 +123,40 @@ jobs:
           bash scripts/fetch-gost-release.sh fetch "$GUI_TARGET" \
             "easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET" \
             "easytier-gui/src-tauri/binaries/easytier-gost.manifest.json"
-          codesign --force --sign - \
-            "easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET"
+          gost_binary="easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET"
+          mihomo_binary="easytier-gui/src-tauri/binaries/easytier-mihomo-$GUI_TARGET"
+          normalized_dir="$RUNNER_TEMP/easytier-tauri-sidecars"
+          mkdir -p "$normalized_dir"
+          normalize_tauri_sidecar() {
+            local source_binary=$1
+            local final_name=$2
+            local normalized_binary="$normalized_dir/$final_name"
+            cp "$source_binary" "$normalized_binary"
+            # Tauri renames sidecars before signing. Sign twice under that final
+            # name so its own identical signing pass is byte-for-byte stable.
+            codesign --force --sign - --options runtime "$normalized_binary"
+            codesign --force --sign - --options runtime "$normalized_binary"
+            cp "$normalized_binary" "$source_binary"
+          }
+          normalize_tauri_sidecar "$gost_binary" easytier-gost
+          normalize_tauri_sidecar "$mihomo_binary" easytier-mihomo
           codesign --verify --strict --verbose=2 \
-            "easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET"
+            "$gost_binary"
           bash scripts/fetch-gost-release.sh record-distributed "$GUI_TARGET" \
-            "easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET" \
+            "$gost_binary" \
             "easytier-gui/src-tauri/binaries/easytier-gost.manifest.json"
           bash scripts/fetch-gost-release.sh verify "$GUI_TARGET" \
-            "easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET" \
+            "$gost_binary" \
             "easytier-gui/src-tauri/binaries/easytier-gost.manifest.json"
+          codesign --verify --strict --verbose=2 \
+            "$mihomo_binary"
+          MIHOMO_DISTRIBUTED_BINARY_NAME=easytier-mihomo \
+            bash scripts/fetch-mihomo-release.sh record-distributed "$GUI_TARGET" \
+              "$mihomo_binary" \
+              "easytier-gui/src-tauri/binaries/easytier-mihomo-manifest.json"
+          bash scripts/fetch-mihomo-release.sh verify "$GUI_TARGET" \
+            "$mihomo_binary" \
+            "easytier-gui/src-tauri/binaries/easytier-mihomo-manifest.json"
           cp easytier/resources/gost/LICENSE \
             easytier-gui/src-tauri/binaries/GOST_LICENSE.txt
           cp easytier/resources/gost/SOURCE.md \
@@ -182,6 +206,13 @@ jobs:
           test -n "$gost_metadata"
           bash scripts/fetch-gost-release.sh verify "$GUI_TARGET" \
             "$app_dir/Contents/MacOS/easytier-gost" "$gost_metadata"
+          mihomo_metadata=$(
+            find "$app_dir/Contents/Resources" -type f \
+              -name easytier-mihomo-manifest.json -print -quit
+          )
+          test -n "$mihomo_metadata"
+          bash scripts/fetch-mihomo-release.sh verify "$GUI_TARGET" \
+            "$app_dir/Contents/MacOS/easytier-mihomo" "$mihomo_metadata"
           codesign --verify --deep --strict --verbose=2 "$app_dir"
 
       - name: Collect artifact
