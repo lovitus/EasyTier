@@ -112,6 +112,121 @@ do
   fi
 done
 
+mihomo_manifest="easytier/resources/mihomo/manifest.json"
+if ! jq -e '
+  .schema_version == 2 and
+  .release_policy.channel == "latest-stable" and
+  .release_policy.reject_draft == true and
+  .release_policy.reject_prerelease == true and
+  (has("version") | not) and
+  (has("tag") | not) and
+  (has("source_distribution") | not) and
+  [.targets[] | select(.status == "supported")] as $supported |
+  ($supported | length) == 9 and
+  all($supported[];
+    (.asset_template | contains("{version}")) and
+    (has("asset") | not) and
+    (has("asset_sha256") | not) and
+    (.archive == "gzip" or .archive == "zip") and
+    (.binary_format == "elf" or .binary_format == "macho" or .binary_format == "pe"))
+' "$mihomo_manifest" >/dev/null; then
+  fail "Mihomo latest-stable mapping template is incomplete or contains a fixed release"
+fi
+for unresolved_target in \
+  loongarch64-unknown-linux-musl \
+  armv7-unknown-linux-musleabihf \
+  armv7-unknown-linux-musleabi \
+  arm-unknown-linux-musleabihf \
+  arm-unknown-linux-musleabi \
+  mips-unknown-linux-musl \
+  mipsel-unknown-linux-musl
+do
+  if [[ "$(jq -r --arg target "$unresolved_target" '.targets[$target].status' "$mihomo_manifest")" != "needs_review" ]]; then
+    fail "unproven Mihomo target is not marked needs_review: $unresolved_target"
+  fi
+done
+for packaging_file in \
+  .github/workflows/core.yml \
+  .github/workflows/gui.yml \
+  .github/workflows/gui-macos-aarch64-test.yml
+do
+  if ! rg -q 'fetch-mihomo-release\.sh resolve-latest' "$packaging_file"; then
+    fail "latest-stable Mihomo resolution is missing from $packaging_file"
+  fi
+done
+if ! rg -q 'Mihomo version drift' .github/workflows/release.yml ||
+   ! rg -q 'MIHOMO_RELEASE_MANIFEST-\$\{gui_target\}\.json' \
+     .github/workflows/release.yml; then
+  fail "Release does not compare exact Core and GUI Mihomo manifests"
+fi
+if ! rg -q 'easytier-mihomo' .github/workflows/test.yml ||
+   ! rg -q 'easytier-gost' .github/workflows/test.yml; then
+  fail "Test workflow does not provide the Mihomo/GOST externalBin fixtures"
+fi
+for tauri_config in \
+  easytier-gui/src-tauri/tauri.linux.conf.json \
+  easytier-gui/src-tauri/tauri.macos.conf.json \
+  easytier-gui/src-tauri/tauri.windows.conf.json
+do
+  if ! jq -e '.bundle.externalBin | index("binaries/easytier-mihomo") != null' \
+    "$tauri_config" >/dev/null
+  then
+    fail "$tauri_config does not bundle pinned Mihomo"
+  fi
+  if ! jq -e '.bundle.externalBin | index("binaries/easytier-gost") != null' \
+    "$tauri_config" >/dev/null
+  then
+    fail "$tauri_config does not bundle pinned GOST"
+  fi
+  for required_resource in \
+    binaries/easytier-mihomo-manifest.json \
+    binaries/MIHOMO_LICENSE.txt \
+    binaries/MIHOMO_SOURCE.md \
+    binaries/MIHOMO_SHA256SUMS.txt \
+    binaries/MIHOMO_BUILD_INFO.txt \
+    binaries/easytier-gost.manifest.json \
+    binaries/GOST_LICENSE.txt \
+    binaries/GOST_SOURCE.md
+  do
+    if ! jq -e --arg resource "$required_resource" \
+      '.bundle.resources | index($resource) != null' "$tauri_config" >/dev/null
+    then
+      fail "$tauri_config does not bundle $required_resource"
+    fi
+  done
+done
+for required_gost_file in \
+  easytier/resources/gost/manifest.json \
+  easytier/resources/gost/LICENSE \
+  easytier/resources/gost/SOURCE.md \
+  scripts/fetch-gost-release.sh
+do
+  test -f "$required_gost_file" || fail "missing pinned GOST input: $required_gost_file"
+done
+for packaging_file in \
+  .github/workflows/core.yml \
+  .github/workflows/gui.yml \
+  .github/workflows/gui-macos-aarch64-test.yml \
+  .github/workflows/release.yml
+do
+  if ! rg -q 'easytier-gost' "$packaging_file"; then
+    fail "pinned GOST packaging is missing from $packaging_file"
+  fi
+done
+for required_release_source in \
+  fetch-source \
+  'mihomo-\{tag\}-source\.tar\.gz' \
+  'mihomo-\{tag\}-vendor\.tar\.gz' \
+  MIHOMO_SOURCE_SHA256SUMS.txt \
+  MIHOMO_UNSUPPORTED.txt
+do
+  if ! rg -q "$required_release_source" .github/workflows/release.yml \
+    scripts/fetch-mihomo-release.sh easytier/resources/mihomo
+  then
+    fail "Mihomo release/source audit marker is missing: $required_release_source"
+  fi
+done
+
 if ! rg -q 'FEATURES="\$FEATURES,leaf-policy-proxy"' .github/workflows/core.yml; then
   fail "formal Core workflow does not enable leaf-policy-proxy for policy targets"
 fi
@@ -124,7 +239,8 @@ for sidecar in easytier-leaf-worker easytier-hev-socks-egress; do
   fi
   for tauri_config in \
     easytier-gui/src-tauri/tauri.linux.conf.json \
-    easytier-gui/src-tauri/tauri.macos.conf.json
+    easytier-gui/src-tauri/tauri.macos.conf.json \
+    easytier-gui/src-tauri/tauri.windows.conf.json
   do
     if ! jq -e --arg sidecar "binaries/$sidecar" \
       '.bundle.externalBin | index($sidecar) != null' "$tauri_config" >/dev/null
@@ -132,6 +248,48 @@ for sidecar in easytier-leaf-worker easytier-hev-socks-egress; do
       fail "$tauri_config does not bundle $sidecar"
     fi
   done
+done
+for packaging_file in \
+  .github/workflows/core.yml \
+  .github/workflows/gui.yml \
+  .github/workflows/release.yml
+do
+  if ! rg -q 'SOCKS_EGRESS_BUILD_INFO\.txt' "$packaging_file"; then
+    fail "SOCKS egress backend metadata is missing from $packaging_file"
+  fi
+done
+if ! rg -q 'backend="leaf-portable"' .github/workflows/core.yml ||
+   ! rg -q 'backend="leaf-portable"' .github/workflows/gui.yml; then
+  fail "Windows portable SOCKS backend is not explicitly identified"
+fi
+if ! rg -q 'easytier-hev-socks-egress\.exe' .github/workflows/gui.yml ||
+   ! rg -q 'socks-egress machine mismatch' .github/workflows/release.yml; then
+  fail "Windows portable SOCKS egress target or architecture verification is incomplete"
+fi
+if ! rg -q 'easytier-gost-guardian' .github/workflows/core.yml ||
+   ! rg -q 'easytier-gost-guardian' .github/workflows/gui.yml ||
+   ! rg -q 'easytier-gost-guardian' .github/workflows/gui-macos-aarch64-test.yml ||
+   ! rg -q 'easytier-gost-guardian' .github/workflows/release.yml ||
+   ! jq -e '.bundle.externalBin | index("binaries/easytier-gost-guardian") != null' \
+     easytier-gui/src-tauri/tauri.macos.conf.json >/dev/null
+then
+  fail "macOS/FreeBSD GOST parent guardian is not packaged consistently"
+fi
+if ! rg -q 'Sign and verify macOS release executables' .github/workflows/core.yml ||
+   ! rg -q 'Verify bundled policy sidecars' .github/workflows/gui.yml ||
+   ! rg -q 'Verify signed policy sidecars' .github/workflows/gui-macos-aarch64-test.yml; then
+  fail "macOS SOCKS egress signature verification is not enforced"
+fi
+for tauri_config in \
+  easytier-gui/src-tauri/tauri.linux.conf.json \
+  easytier-gui/src-tauri/tauri.macos.conf.json \
+  easytier-gui/src-tauri/tauri.windows.conf.json
+do
+  if ! jq -e '.bundle.resources | index("binaries/SOCKS_EGRESS_BUILD_INFO.txt") != null' \
+    "$tauri_config" >/dev/null
+  then
+    fail "$tauri_config does not bundle SOCKS egress backend metadata"
+  fi
 done
 if ! rg -q "cfg\(any\(target_os = \"linux\", target_os = \"macos\"\)\)" \
   easytier-gui/src-tauri/Cargo.toml
@@ -150,8 +308,7 @@ versions=(
   "$(jq -r .version easytier-gui/package.json)"
   "$(jq -r .version easytier-gui/src-tauri/tauri.conf.json)"
 )
-expected_version=2.6.10
-if [[ "$phase" != "--source" ]]; then expected_version=3.0.5; fi
+expected_version=3.0.5
 for version in "${versions[@]}"; do
   if [[ "$version" != "$expected_version" ]]; then
     fail "version $version differs from expected $expected_version for $phase"

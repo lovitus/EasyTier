@@ -115,6 +115,8 @@ message NetworkConfig {
   optional string policy_outbound_interface = 78;
   optional string policy_leaf_executable = 79;
   optional bool policy_leaf_tun_fast_path = 80;
+  optional string policy_proxy_backend = 81;
+  optional string policy_mihomo_executable = 82;
 }
 
 message PortForwardConfig {
@@ -148,6 +150,27 @@ message NetworkInstanceRunningInfo {
   peer_rpc.RouteForeignNetworkSummary foreign_network_summary = 9;
   repeated api.instance.TcpProxyEntry proxy_failover_entries = 10;
   optional bool policy_runtime_running = 11;
+  optional MihomoProcessStatus mihomo_status = 12;
+  optional NeutralMeshEntryStatus neutral_mesh_entry_status = 13;
+}
+
+message MihomoProcessStatus {
+  string state = 1;
+  optional uint32 pid = 2;
+  uint32 restart_count = 3;
+  optional string last_exit = 4;
+  optional string last_error = 5;
+  optional string owner_instance_id = 6;
+}
+
+message NeutralMeshEntryStatus {
+  string state = 1;
+  optional string endpoint = 2;
+  optional uint32 selected_port = 3;
+  string backend = 4;
+  uint32 core_leases = 5;
+  uint32 restart_count = 6;
+  optional string last_error = 7;
 }
 
 message NetworkInstanceRunningInfoMap {

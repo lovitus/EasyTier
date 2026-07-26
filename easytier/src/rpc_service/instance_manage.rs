@@ -2,7 +2,8 @@ use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     common::config::{
-        ConfigFileControl, ConfigFilePermission, ConfigLoader, ConfigSource, TomlConfigLoader,
+        ConfigFileControl, ConfigFilePermission, ConfigLoader, ConfigSource, PolicyProxyBackend,
+        TomlConfigLoader,
     },
     instance_manager::NetworkInstanceManager,
     proto::{
@@ -40,12 +41,19 @@ pub struct InstanceManageRpcService {
 fn validate_policy_config(
     config: &dyn ConfigLoader,
 ) -> anyhow::Result<Vec<PolicyConfigDiagnostic>> {
-    let Some(policy) = config
-        .get_policy_proxy_config()
-        .filter(|policy| policy.enabled)
-    else {
+    let Some(policy) = config.get_policy_proxy_config() else {
         return Ok(Vec::new());
     };
+    match policy.effective_backend() {
+        PolicyProxyBackend::Off | PolicyProxyBackend::Mihomo => {
+            // Mihomo parity reference:
+            // mihomo-rev/config/config.go::{Parse,UnmarshalRawConfig,ParseRawConfig}
+            // owns Mihomo YAML parsing. Feeding that document to Leaf's
+            // resolver changes accepted syntax and can reject valid configs.
+            return Ok(Vec::new());
+        }
+        PolicyProxyBackend::Leaf => {}
+    }
     let resolved = crate::policy_proxy::resolve_document(&policy)?;
     Ok(
         easytier_policy::report_for_policy_revision(&resolved.revision)
@@ -69,11 +77,10 @@ fn validate_policy_config(
 fn validate_policy_config(
     config: &dyn ConfigLoader,
 ) -> anyhow::Result<Vec<PolicyConfigDiagnostic>> {
-    if config
-        .get_policy_proxy_config()
-        .is_some_and(|policy| policy.enabled)
+    if let Some(policy) = config.get_policy_proxy_config()
+        && policy.is_leaf_enabled()
     {
-        anyhow::bail!("policy proxy support is not compiled for this target");
+        anyhow::bail!("Leaf policy proxy support is not compiled for this target");
     }
     Ok(Vec::new())
 }
@@ -1501,5 +1508,26 @@ mod tests {
             HashSet::from([existing_id])
         );
         assert!(hooks.removed_ids.lock().unwrap().is_empty());
+    }
+
+    #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
+    #[test]
+    fn mihomo_policy_yaml_is_not_validated_by_the_leaf_parser() {
+        let config = TomlConfigLoader::new_from_str(
+            r#"
+[policy_proxy]
+backend = "mihomo"
+config_inline = '''
+mixed-port: 7890
+proxies: []
+proxy-groups: []
+rules:
+  - MATCH,DIRECT
+'''
+"#,
+        )
+        .unwrap();
+
+        assert!(validate_policy_config(&config).unwrap().is_empty());
     }
 }

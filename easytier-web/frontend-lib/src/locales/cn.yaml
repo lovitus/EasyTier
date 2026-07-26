@@ -196,6 +196,25 @@ underlay_exclude_cidrs: 排除通告/直连候选网段
 underlay_exclude_cidrs_help: 追加到内置 guard 的用户 CIDR 列表，逗号分隔。编辑只替换用户列表；清空后仍保留内置 fake-IP 网段和 EasyTier 运行态虚拟地址过滤。
 enable_policy_proxy: 启用策略路由
 enable_policy_proxy_help: 使用可选 Leaf 策略引擎透明处理非 Mesh 流量；Mesh 路由和 Peer 端点始终保留原 EasyTier 数据路径。
+policy_proxy_backend: 策略后端
+policy_proxy_backend_help: 关闭会停用策略路由；Mihomo 原样使用指定配置；Leaf 仅为旧配置兼容保留。
+policy_backend_off: 关闭
+policy_backend_mihomo: Mihomo
+policy_backend_leaf_deprecated: Leaf（已弃用）
+policy_leaf_deprecated_notice: Leaf 策略路由已经弃用，仅为兼容现有配置保留。
+policy_mihomo_native_config_notice: EasyTier 只管理 Mihomo 配置来源路径和运行生命周期，不解析或改写代理、组、规则及订阅。
+policy_mihomo_config_path_example: "示例：/etc/easytier/mihomo.yaml"
+policy_mihomo_config_path_required: Mihomo 必须配置一个可读取的配置文件路径。
+policy_runtime_status: 运行状态
+policy_runtime_running: 运行中
+policy_runtime_stopped: 已停止
+policy_runtime_pid: 进程 ID
+policy_runtime_restart_count: 重启次数
+policy_mesh_entry: Mesh SOCKS 入口
+policy_mesh_entry_error: Mesh SOCKS 入口错误
+policy_instance_error: 实例错误
+edit_policy_config: 编辑策略配置
+view_policy_config: 查看策略配置
 policy_leaf_tun_fast_path: Leaf 自有策略 TUN（实验性）
 policy_leaf_tun_fast_path_help: 仅用于 Linux TUN 模式，移除策略流量中的 EasyTier 到 Leaf 包桥接。默认关闭，不支持或启动失败时回退原路径。
 policy_config_file: 策略文件

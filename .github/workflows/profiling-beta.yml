@@ -74,6 +74,16 @@ jobs:
           echo "HEV_EGRESS_BINARY=$hev_bin/easytier-hev-socks-egress" >> "$GITHUB_ENV"
           echo "HEV_SERVER_COMMIT=$HEV_SERVER_COMMIT" >> "$GITHUB_ENV"
 
+      - name: Fetch pinned GOST mesh entry
+        run: |
+          set -euo pipefail
+          gost_bin="$RUNNER_TEMP/gost-bin"
+          mkdir -p "$gost_bin"
+          bash scripts/fetch-gost-release.sh fetch "$TARGET" \
+            "$gost_bin/easytier-gost" \
+            "$gost_bin/easytier-gost.manifest.json"
+          echo "GOST_RUNTIME_DIR=$gost_bin" >> "$GITHUB_ENV"
+
       - name: Build profiling-only isolated performance probe
         run: |
           set -euo pipefail
@@ -200,6 +210,10 @@ jobs:
           cp "target/$TARGET/release/easytier-cli" "staging/$bundle/"
           cp "target/$TARGET/release/easytier-leaf-worker" "staging/$bundle/"
           cp "$HEV_EGRESS_BINARY" "staging/$bundle/"
+          cp "$GOST_RUNTIME_DIR/easytier-gost" \
+            "$GOST_RUNTIME_DIR/easytier-gost.manifest.json" "staging/$bundle/"
+          cp easytier/resources/gost/LICENSE "staging/$bundle/GOST_LICENSE.txt"
+          cp easytier/resources/gost/SOURCE.md "staging/$bundle/GOST_SOURCE.md"
           install -m 0755 "$SELFTEST_PROBE" "staging/$bundle/easytier-perf-probe"
           install -m 0755 scripts/leaf-perf-selftest.sh \
             "staging/$bundle/leaf-perf-selftest.sh"
@@ -231,6 +245,7 @@ jobs:
               easytier-cli
               easytier-leaf-worker
               easytier-hev-socks-egress
+              easytier-gost
               easytier-perf-probe
               leaf-perf-selftest.sh
               mesh-perf-selftest.sh

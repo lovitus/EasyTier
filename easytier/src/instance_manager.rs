@@ -1,17 +1,34 @@
 #[cfg(feature = "ffi-dataplane")]
 use crate::launcher::{DataPlaneTcpListener, DataPlaneTcpStream, DataPlaneUdpSocket};
+use anyhow::Context as _;
 use dashmap::DashMap;
 use std::fmt::{Display, Formatter};
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, OnceLock, mpsc as std_mpsc},
+    thread,
+    time::Duration,
+};
+#[cfg(feature = "mesh-socks-egress")]
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
+
+#[cfg(all(feature = "mesh-socks-egress", not(mobile)))]
+#[path = "gost.rs"]
+mod gost;
 
 use crate::{
     common::{
-        config::{ConfigFileControl, ConfigLoader, ConfigSource, NicBackend, TomlConfigLoader},
+        config::{
+            ConfigFileControl, ConfigLoader, ConfigSource, NicBackend, PolicyProxyConfig,
+            TomlConfigLoader,
+        },
         global_ctx::{EventBusSubscriber, GlobalCtxEvent},
         log,
     },
     launcher::{NetworkInstance, NetworkInstanceRunningInfo},
+    mihomo::{MihomoConfigSource, MihomoCoreOwner, MihomoCoreStartRequest, MihomoCoreStatus},
     proto::{self},
     rpc_service::InstanceRpcService,
 };
@@ -20,7 +37,7 @@ use crate::{
 fn ensure_policy_socket_mark(config: &TomlConfigLoader) -> anyhow::Result<Option<u32>> {
     if !config
         .get_policy_proxy_config()
-        .is_some_and(|policy| policy.enabled)
+        .is_some_and(|policy| policy.is_leaf_enabled())
     {
         return Ok(None);
     }
@@ -33,6 +50,620 @@ fn ensure_policy_socket_mark(config: &TomlConfigLoader) -> anyhow::Result<Option
     }
     config.set_flags(flags);
     Ok(Some(mark))
+}
+
+fn build_mihomo_start_request(
+    config: &TomlConfigLoader,
+    policy: PolicyProxyConfig,
+) -> anyhow::Result<MihomoCoreStartRequest> {
+    let resolved_file = policy.resolved_config_file();
+    let home_dir = if let Some(path) = resolved_file.as_ref() {
+        path.parent()
+            .ok_or_else(|| anyhow::anyhow!("Mihomo source config has no parent directory"))?
+            .to_owned()
+    } else {
+        policy
+            .source_dir
+            .clone()
+            .unwrap_or(std::env::current_dir().context("failed to resolve Mihomo source home")?)
+    };
+    let source = if let Some(path) = resolved_file {
+        MihomoConfigSource::File(path)
+    } else if let Some(contents) = policy.config_inline {
+        MihomoConfigSource::Inline {
+            label: format!("network {} inline Mihomo config", config.get_id()),
+            contents: contents.into(),
+        }
+    } else {
+        anyhow::bail!("Mihomo policy backend requires config_file or config_inline");
+    };
+
+    let executable = resolve_mihomo_executable(policy.mihomo_executable.as_deref())?;
+    let mut route_exclude_addresses = BTreeMap::<String, ()>::new();
+    if let Some(ipv4) = config.get_ipv4() {
+        route_exclude_addresses.insert(ipv4.network().to_string(), ());
+    }
+    if let Some(ipv6) = config.get_ipv6() {
+        route_exclude_addresses.insert(ipv6.network().to_string(), ());
+    }
+    let instance_id = config.get_id();
+    let compact_id = instance_id.simple().to_string();
+    Ok(MihomoCoreStartRequest {
+        instance_id,
+        executable,
+        source,
+        home_dir,
+        tun_device: format!("etm{}", &compact_id[..8]),
+        route_exclude_addresses: route_exclude_addresses.into_keys().collect(),
+    })
+}
+
+fn resolve_mihomo_executable(configured: Option<&std::path::Path>) -> anyhow::Result<PathBuf> {
+    let current_executable =
+        std::env::current_exe().context("failed to locate easytier-core executable")?;
+    let directory = current_executable
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("easytier-core executable has no parent directory"))?;
+    let default_name = if cfg!(windows) {
+        "easytier-mihomo.exe"
+    } else {
+        "easytier-mihomo"
+    };
+    Ok(match configured {
+        Some(path) if path.is_absolute() => path.to_owned(),
+        Some(path) => directory.join(path),
+        None => directory.join(default_name),
+    })
+}
+
+fn mihomo_status_proto(
+    status: &MihomoCoreStatus,
+) -> crate::proto::api::manage::MihomoProcessStatus {
+    crate::proto::api::manage::MihomoProcessStatus {
+        state: status.process.state.as_str().to_owned(),
+        pid: status.process.pid,
+        restart_count: status.process.restart_count,
+        last_exit: status.process.last_exit.clone(),
+        last_error: status.process.last_error.clone(),
+        owner_instance_id: status
+            .owner_instance_id
+            .map(|instance_id| instance_id.to_string()),
+    }
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeutralMeshEntryState {
+    Unsupported,
+    Starting,
+    Running,
+    Backoff,
+    Stopping,
+    Stopped,
+    Failed,
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+impl NeutralMeshEntryState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Backoff => "backoff",
+            Self::Stopping => "stopping",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+#[derive(Debug, Clone)]
+pub struct NeutralMeshEntryStatus {
+    pub state: NeutralMeshEntryState,
+    pub endpoint: Option<std::net::SocketAddr>,
+    pub selected_port: Option<u16>,
+    pub backend: String,
+    pub core_leases: u32,
+    pub restart_count: u32,
+    pub last_error: Option<String>,
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+impl Default for NeutralMeshEntryStatus {
+    fn default() -> Self {
+        let supported = neutral_mesh_entry_supported_on_current_target();
+        Self {
+            state: if supported {
+                NeutralMeshEntryState::Stopped
+            } else {
+                NeutralMeshEntryState::Unsupported
+            },
+            endpoint: None,
+            selected_port: None,
+            backend: if !supported {
+                "unsupported".to_owned()
+            } else if cfg!(mobile) {
+                easytier_socks_egress::managed_backend_name().to_owned()
+            } else {
+                "gost".to_owned()
+            },
+            core_leases: 0,
+            restart_count: 0,
+            last_error: None,
+        }
+    }
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+const fn neutral_mesh_entry_supported_on_current_target() -> bool {
+    cfg!(target_os = "android")
+        || cfg!(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))
+        || cfg!(all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))
+        || cfg!(all(
+            target_os = "windows",
+            any(
+                target_arch = "x86_64",
+                target_arch = "x86",
+                target_arch = "aarch64"
+            )
+        ))
+        || cfg!(all(target_os = "freebsd", target_arch = "x86_64"))
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+impl NeutralMeshEntryStatus {
+    fn into_proto(self) -> crate::proto::api::manage::NeutralMeshEntryStatus {
+        crate::proto::api::manage::NeutralMeshEntryStatus {
+            state: self.state.as_str().to_owned(),
+            endpoint: self.endpoint.map(|endpoint| endpoint.to_string()),
+            selected_port: self.selected_port.map(u32::from),
+            backend: self.backend,
+            core_leases: self.core_leases,
+            restart_count: self.restart_count,
+            last_error: self.last_error,
+        }
+    }
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+fn neutral_mesh_entry_acquire_starts_owner(current_leases: u32) -> bool {
+    current_leases == 0
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+fn neutral_mesh_entry_release_stops_owner(remaining_leases: u32) -> bool {
+    remaining_leases == 0
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+fn with_mesh_entry_status(
+    status: &Arc<std::sync::RwLock<NeutralMeshEntryStatus>>,
+    update: impl FnOnce(&mut NeutralMeshEntryStatus),
+) {
+    let mut status = status
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    update(&mut status);
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+struct CoreMeshEntryGuard {
+    endpoint: std::net::SocketAddr,
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+impl CoreMeshEntryGuard {
+    async fn shutdown(self) {
+        self.cancel.cancel();
+        let mut task = self.task;
+        if tokio::time::timeout(Duration::from_secs(5), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+#[cfg(all(feature = "mesh-socks-egress", not(mobile)))]
+async fn start_core_mesh_entry_guard(
+    status: Arc<std::sync::RwLock<NeutralMeshEntryStatus>>,
+) -> anyhow::Result<CoreMeshEntryGuard> {
+    let executable_name = format!("easytier-gost{}", std::env::consts::EXE_SUFFIX);
+    let executable = std::env::current_exe()
+        .context("failed to resolve EasyTier executable for Core mesh entry")?
+        .parent()
+        .context("EasyTier executable has no parent directory")?
+        .join(executable_name);
+    if !executable.is_file() {
+        anyhow::bail!(
+            "managed GOST mesh-entry is missing: {}",
+            executable.display()
+        );
+    }
+
+    let mut process_config = gost::GostProcessConfig::new(executable);
+    let runtime = gost::GostRuntime::start(process_config.clone()).await?;
+    let endpoint = runtime.endpoint();
+    process_config.port_candidates = vec![endpoint.port()];
+    let cancel = CancellationToken::new();
+    let runtime_cancel = cancel.clone();
+    let task_status = status.clone();
+    let task = tokio::spawn(async move {
+        let mut runtime = runtime;
+        let mut delay = Duration::from_secs(1);
+        let mut running_since = tokio::time::Instant::now();
+        loop {
+            let result = runtime.run_until_cancel(runtime_cancel.clone()).await;
+            if runtime_cancel.is_cancelled() {
+                return;
+            }
+            with_mesh_entry_status(&task_status, |status| {
+                status.state = NeutralMeshEntryState::Backoff;
+                status.last_error = Some(match &result {
+                    Ok(()) => "neutral mesh-entry exited unexpectedly".to_owned(),
+                    Err(error) => format!("{error:#}"),
+                });
+            });
+
+            if running_since.elapsed() >= Duration::from_secs(60) {
+                delay = Duration::from_secs(1);
+            }
+            loop {
+                tokio::select! {
+                    _ = runtime_cancel.cancelled() => return,
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                match gost::GostRuntime::start(process_config.clone()).await {
+                    Ok(restarted) => {
+                        runtime = restarted;
+                        running_since = tokio::time::Instant::now();
+                        with_mesh_entry_status(&task_status, |status| {
+                            status.state = NeutralMeshEntryState::Running;
+                            status.restart_count = status.restart_count.saturating_add(1);
+                            status.last_error = None;
+                        });
+                        delay = delay.saturating_mul(2).min(Duration::from_secs(30));
+                        break;
+                    }
+                    Err(error) => {
+                        with_mesh_entry_status(&task_status, |status| {
+                            status.state = NeutralMeshEntryState::Backoff;
+                            status.last_error = Some(format!("{error:#}"));
+                        });
+                        delay = delay.saturating_mul(2).min(Duration::from_secs(30));
+                    }
+                }
+            }
+        }
+    });
+    Ok(CoreMeshEntryGuard {
+        endpoint,
+        cancel,
+        task,
+    })
+}
+
+#[cfg(all(feature = "mesh-socks-egress", mobile, target_os = "android"))]
+async fn start_core_mesh_entry_guard(
+    status: Arc<std::sync::RwLock<NeutralMeshEntryStatus>>,
+) -> anyhow::Result<CoreMeshEntryGuard> {
+    let mut server = easytier_socks_egress::SocksEgressConfig::mesh_entry();
+    let runtime = easytier_socks_egress::InProcessRuntime::start(server.clone()).await?;
+    let endpoint = runtime.endpoint();
+    server.port_candidates = vec![endpoint.port()];
+    let cancel = CancellationToken::new();
+    let runtime_cancel = cancel.clone();
+    let task_status = status.clone();
+    let task = tokio::spawn(async move {
+        let mut runtime = runtime;
+        loop {
+            let result = runtime.run_until_cancel(runtime_cancel.clone()).await;
+            if runtime_cancel.is_cancelled() {
+                return;
+            }
+            with_mesh_entry_status(&task_status, |status| {
+                status.state = NeutralMeshEntryState::Backoff;
+                status.last_error = Some(format!("{result:#}"));
+            });
+
+            let mut delay = Duration::from_secs(1);
+            loop {
+                tokio::select! {
+                    _ = runtime_cancel.cancelled() => return,
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                match easytier_socks_egress::InProcessRuntime::start(server.clone()).await {
+                    Ok(restarted) => {
+                        runtime = restarted;
+                        with_mesh_entry_status(&task_status, |status| {
+                            status.state = NeutralMeshEntryState::Running;
+                            status.restart_count = status.restart_count.saturating_add(1);
+                            status.last_error = None;
+                        });
+                        break;
+                    }
+                    Err(error) => {
+                        with_mesh_entry_status(&task_status, |status| {
+                            status.state = NeutralMeshEntryState::Backoff;
+                            status.last_error = Some(format!("{error:#}"));
+                        });
+                        delay = delay.saturating_mul(2).min(Duration::from_secs(30));
+                    }
+                }
+            }
+        }
+    });
+    Ok(CoreMeshEntryGuard {
+        endpoint,
+        cancel,
+        task,
+    })
+}
+
+#[cfg(all(feature = "mesh-socks-egress", mobile, not(target_os = "android")))]
+async fn start_core_mesh_entry_guard(
+    _status: Arc<std::sync::RwLock<NeutralMeshEntryStatus>>,
+) -> anyhow::Result<CoreMeshEntryGuard> {
+    anyhow::bail!("neutral mesh-entry is unsupported on this mobile host")
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+enum CoreMeshEntryCommand {
+    Acquire {
+        response: std_mpsc::SyncSender<anyhow::Result<()>>,
+    },
+    Release {
+        response: std_mpsc::SyncSender<()>,
+    },
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+pub struct CoreMeshEntryHandle {
+    status: Arc<std::sync::RwLock<NeutralMeshEntryStatus>>,
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+impl CoreMeshEntryHandle {
+    pub fn global() -> Arc<Self> {
+        core_mesh_entry_owner().handle.clone()
+    }
+
+    pub fn status(&self) -> NeutralMeshEntryStatus {
+        self.status
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn endpoint(&self) -> anyhow::Result<std::net::SocketAddr> {
+        let status = self.status();
+        if status.state != NeutralMeshEntryState::Running {
+            anyhow::bail!(
+                "neutral mesh-entry is not running: state={} error={}",
+                status.state.as_str(),
+                status.last_error.as_deref().unwrap_or("none")
+            );
+        }
+        status
+            .endpoint
+            .ok_or_else(|| anyhow::anyhow!("neutral mesh-entry has no published endpoint"))
+    }
+}
+
+#[cfg(all(feature = "mesh-socks-egress", feature = "leaf-policy-proxy"))]
+#[async_trait::async_trait]
+impl crate::policy_proxy::LocalSocksEndpointProvider for CoreMeshEntryHandle {
+    async fn endpoint(&self) -> anyhow::Result<std::net::SocketAddr> {
+        CoreMeshEntryHandle::endpoint(self)
+    }
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+struct CoreMeshEntryOwner {
+    commands: tokio::sync::mpsc::UnboundedSender<CoreMeshEntryCommand>,
+    handle: Arc<CoreMeshEntryHandle>,
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+fn core_mesh_entry_owner() -> &'static CoreMeshEntryOwner {
+    static OWNER: OnceLock<CoreMeshEntryOwner> = OnceLock::new();
+    OWNER.get_or_init(|| {
+        let status = Arc::new(std::sync::RwLock::new(NeutralMeshEntryStatus::default()));
+        let handle = Arc::new(CoreMeshEntryHandle {
+            status: status.clone(),
+        });
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let _ = thread::Builder::new()
+            .name("easytier-mesh-entry-owner".to_owned())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        with_mesh_entry_status(&status, |status| {
+                            status.state = NeutralMeshEntryState::Failed;
+                            status.last_error = Some(format!(
+                                "failed to create neutral mesh-entry runtime: {error}"
+                            ));
+                        });
+                        return;
+                    }
+                };
+                runtime.block_on(core_mesh_entry_owner_loop(receiver, status));
+            });
+        CoreMeshEntryOwner { commands, handle }
+    })
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+async fn core_mesh_entry_owner_loop(
+    mut commands: tokio::sync::mpsc::UnboundedReceiver<CoreMeshEntryCommand>,
+    status: Arc<std::sync::RwLock<NeutralMeshEntryStatus>>,
+) {
+    let mut leases = 0_u32;
+    let mut guard: Option<CoreMeshEntryGuard> = None;
+    while let Some(command) = commands.recv().await {
+        match command {
+            CoreMeshEntryCommand::Acquire { response } => {
+                let started_owner = neutral_mesh_entry_acquire_starts_owner(leases);
+                if started_owner {
+                    with_mesh_entry_status(&status, |status| {
+                        status.state = NeutralMeshEntryState::Starting;
+                        status.last_error = None;
+                    });
+                    match start_core_mesh_entry_guard(status.clone()).await {
+                        Ok(started) => {
+                            with_mesh_entry_status(&status, |status| {
+                                status.state = NeutralMeshEntryState::Running;
+                                status.endpoint = Some(started.endpoint);
+                                status.selected_port = Some(started.endpoint.port());
+                            });
+                            guard = Some(started);
+                        }
+                        Err(error) => {
+                            with_mesh_entry_status(&status, |status| {
+                                status.state = NeutralMeshEntryState::Failed;
+                                status.endpoint = None;
+                                status.selected_port = None;
+                                status.last_error = Some(format!("{error:#}"));
+                            });
+                            let _ = response.send(Err(error));
+                            continue;
+                        }
+                    }
+                }
+                if response.send(Ok(())).is_err() {
+                    if started_owner && let Some(owned) = guard.take() {
+                        with_mesh_entry_status(&status, |status| {
+                            status.state = NeutralMeshEntryState::Stopping
+                        });
+                        owned.shutdown().await;
+                        with_mesh_entry_status(&status, |status| {
+                            status.state = NeutralMeshEntryState::Stopped;
+                            status.endpoint = None;
+                            status.selected_port = None;
+                        });
+                    }
+                    continue;
+                }
+                leases = leases.saturating_add(1);
+                with_mesh_entry_status(&status, |status| status.core_leases = leases);
+            }
+            CoreMeshEntryCommand::Release { response } => {
+                leases = leases.saturating_sub(1);
+                with_mesh_entry_status(&status, |status| status.core_leases = leases);
+                if neutral_mesh_entry_release_stops_owner(leases)
+                    && let Some(owned) = guard.take()
+                {
+                    with_mesh_entry_status(&status, |status| {
+                        status.state = NeutralMeshEntryState::Stopping
+                    });
+                    owned.shutdown().await;
+                    with_mesh_entry_status(&status, |status| {
+                        status.state = NeutralMeshEntryState::Stopped;
+                        status.endpoint = None;
+                        status.selected_port = None;
+                    });
+                }
+                let _ = response.send(());
+            }
+        }
+    }
+    if let Some(owned) = guard {
+        owned.shutdown().await;
+    }
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+struct CoreMeshEntryLease {
+    commands: tokio::sync::mpsc::UnboundedSender<CoreMeshEntryCommand>,
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+impl CoreMeshEntryLease {
+    fn acquire() -> anyhow::Result<Self> {
+        let owner = core_mesh_entry_owner();
+        // A rendezvous channel prevents late startup from publishing a lease
+        // after recv_timeout has dropped the only receiver.
+        let (response, result) = std_mpsc::sync_channel(0);
+        owner
+            .commands
+            .send(CoreMeshEntryCommand::Acquire { response })
+            .map_err(|_| anyhow::anyhow!("neutral mesh-entry owner is unavailable"))?;
+        result
+            .recv_timeout(Duration::from_secs(15))
+            .map_err(|_| anyhow::anyhow!("neutral mesh-entry startup timed out"))??;
+        Ok(Self {
+            commands: owner.commands.clone(),
+        })
+    }
+}
+
+#[cfg(feature = "mesh-socks-egress")]
+impl Drop for CoreMeshEntryLease {
+    fn drop(&mut self) {
+        let (response, stopped) = std_mpsc::sync_channel(1);
+        if self
+            .commands
+            .send(CoreMeshEntryCommand::Release { response })
+            .is_ok()
+        {
+            let _ = stopped.recv_timeout(Duration::from_secs(6));
+        }
+    }
+}
+
+#[cfg(test)]
+mod mihomo_request_tests {
+    use super::*;
+    use crate::common::config::{PolicyProxyBackend, PolicyProxyConfig};
+
+    #[test]
+    fn core_request_uses_mesh_cidrs_source_home_and_unique_tun_name() {
+        let config = TomlConfigLoader::default();
+        let instance_id = uuid::Uuid::new_v4();
+        config.set_id(instance_id);
+        config.set_ipv4(Some("10.44.0.80/24".parse().unwrap()));
+        config.set_ipv6(Some("fd00:44::80/64".parse().unwrap()));
+        let source_home = tempfile::tempdir().unwrap();
+        let policy = PolicyProxyConfig {
+            backend: Some(PolicyProxyBackend::Mihomo),
+            config_inline: Some("rules: []\n".to_owned()),
+            mihomo_executable: Some("easytier-mihomo".into()),
+            source_dir: Some(source_home.path().to_owned()),
+            ..Default::default()
+        };
+
+        let request = build_mihomo_start_request(&config, policy).unwrap();
+        assert_eq!(request.instance_id, instance_id);
+        assert_eq!(request.home_dir, source_home.path());
+        assert_eq!(request.tun_device.len(), 11);
+        assert!(request.tun_device.starts_with("etm"));
+        assert!(
+            request
+                .route_exclude_addresses
+                .contains(&"10.44.0.0/24".to_owned())
+        );
+        assert!(
+            request
+                .route_exclude_addresses
+                .contains(&"fd00:44::/64".to_owned())
+        );
+    }
 }
 
 pub(crate) struct DaemonGuard {
@@ -54,6 +685,9 @@ pub struct NetworkInstanceManager {
     config_dir: Option<PathBuf>,
     guard_counter: Arc<()>,
     remote_mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    mihomo_owner: Arc<MihomoCoreOwner>,
+    #[cfg(feature = "mesh-socks-egress")]
+    _mesh_entry_lease: Option<CoreMeshEntryLease>,
     nic_backend: NicBackend,
 }
 
@@ -65,6 +699,19 @@ impl Default for NetworkInstanceManager {
 
 impl NetworkInstanceManager {
     pub fn new() -> Self {
+        #[cfg(feature = "mesh-socks-egress")]
+        let mesh_entry_lease = if neutral_mesh_entry_supported_on_current_target() {
+            match CoreMeshEntryLease::acquire() {
+                Ok(lease) => Some(lease),
+                Err(error) => {
+                    log::error!("failed to start Core-owned neutral mesh entry: {error:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         NetworkInstanceManager {
             instance_map: Arc::new(DashMap::new()),
             instance_stop_tasks: Arc::new(DashMap::new()),
@@ -73,6 +720,9 @@ impl NetworkInstanceManager {
             config_dir: None,
             guard_counter: Arc::new(()),
             remote_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            mihomo_owner: MihomoCoreOwner::global(),
+            #[cfg(feature = "mesh-socks-egress")]
+            _mesh_entry_lease: mesh_entry_lease,
             nic_backend: NicBackend::Tun,
         }
     }
@@ -108,6 +758,7 @@ impl NetworkInstanceManager {
         let instance_map = self.instance_map.clone();
         let instance_stop_tasks = self.instance_stop_tasks.clone();
         let instance_error_messages = self.instance_error_messages.clone();
+        let mihomo_owner = self.mihomo_owner.clone();
 
         let stop_check_notifier = self.stop_check_notifier.clone();
         self.instance_stop_tasks.insert(
@@ -124,6 +775,9 @@ impl NetworkInstanceManager {
                 {
                     log::error!(%error, "instance {} stopped", instance_id);
                     instance_error_messages.insert(instance_id, error);
+                }
+                if let Err(error) = mihomo_owner.stop(instance_id) {
+                    log::error!(%error, "failed to stop Mihomo owner for instance {}", instance_id);
                 }
                 stop_check_notifier.notify_one();
                 instance_stop_tasks.remove(&instance_id);
@@ -144,22 +798,16 @@ impl NetworkInstanceManager {
         if let Some(mark) = ensure_policy_socket_mark(&cfg)? {
             crate::common::dns::set_control_plane_socket_mark(Some(mark));
         }
-        if cfg
-            .get_policy_proxy_config()
-            .is_some_and(|policy| policy.enabled)
-            && !cfg!(any(
-                all(feature = "leaf-policy-proxy", target_os = "linux"),
-                all(
-                    feature = "leaf-policy-proxy",
-                    target_os = "macos",
-                    not(feature = "macos-ne")
-                ),
-                all(feature = "leaf-policy-mobile", target_os = "android"),
-                all(feature = "leaf-policy-windows", target_os = "windows")
-            ))
-        {
-            anyhow::bail!("policy_proxy is enabled but this build has no supported policy runtime");
-        }
+        let mihomo_request = if let Some(policy) = cfg.get_policy_proxy_config() {
+            policy.validate_runtime_support()?;
+            if policy.is_mihomo_enabled() {
+                Some(build_mihomo_start_request(&cfg, policy)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         if cfg.get_flags().no_tun && self.nic_backend != NicBackend::Tun {
             anyhow::bail!("--no-tun conflicts with --nic-backend veth/auto");
         }
@@ -167,13 +815,25 @@ impl NetworkInstanceManager {
         if self.instance_map.contains_key(&instance_id) {
             anyhow::bail!("instance {} already exists", instance_id);
         }
+        if mihomo_request.is_some() && !watch_event {
+            anyhow::bail!(
+                "Mihomo policy instances require lifecycle watching so Core can guarantee cleanup"
+            );
+        }
 
         let mut instance = NetworkInstance::new(cfg, config_file_control);
         instance.start()?;
+        if let Some(request) = mihomo_request {
+            self.mihomo_owner.start(request)?;
+        }
 
         self.instance_map.insert(instance_id, instance);
         if watch_event {
-            self.start_instance_task(instance_id)?;
+            if let Err(error) = self.start_instance_task(instance_id) {
+                self.instance_map.remove(&instance_id);
+                let _ = self.mihomo_owner.stop(instance_id);
+                return Err(error);
+            }
         }
         Ok(instance_id)
     }
@@ -182,6 +842,11 @@ impl NetworkInstanceManager {
         &self,
         instance_ids: Vec<uuid::Uuid>,
     ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
+        for instance_id in self.list_network_instance_ids() {
+            if !instance_ids.contains(&instance_id) {
+                self.mihomo_owner.stop(instance_id)?;
+            }
+        }
         self.instance_map.retain(|k, _| instance_ids.contains(k));
         self.instance_map.shrink_to_fit();
         self.instance_error_messages
@@ -194,6 +859,9 @@ impl NetworkInstanceManager {
         &self,
         instance_ids: Vec<uuid::Uuid>,
     ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
+        for instance_id in &instance_ids {
+            self.mihomo_owner.stop(*instance_id)?;
+        }
         self.instance_map.retain(|k, _| !instance_ids.contains(k));
         self.instance_map.shrink_to_fit();
         self.instance_error_messages
@@ -219,6 +887,16 @@ impl NetworkInstanceManager {
                     ..Default::default()
                 },
             );
+        }
+        let mihomo = self.mihomo_owner.status().await;
+        if let Some(owner) = mihomo.owner_instance_id
+            && let Some(info) = ret.get_mut(&owner)
+        {
+            info.mihomo_status = Some(mihomo_status_proto(&mihomo));
+        }
+        let neutral_mesh_entry_status = self.get_neutral_mesh_entry_status();
+        for info in ret.values_mut() {
+            info.neutral_mesh_entry_status = Some(neutral_mesh_entry_status.clone());
         }
         Ok(ret)
     }
@@ -289,14 +967,50 @@ impl NetworkInstanceManager {
         if let Some(err_msg) = self.instance_error_messages.get(instance_id) {
             return Some(NetworkInstanceRunningInfo {
                 error_msg: Some(err_msg.value().clone()),
+                neutral_mesh_entry_status: Some(self.get_neutral_mesh_entry_status()),
                 ..Default::default()
             });
         }
-        self.instance_map
+        let mut info = self
+            .instance_map
             .get(instance_id)?
             .get_running_info()
             .await
-            .ok()
+            .ok()?;
+        let mihomo = self.mihomo_owner.status().await;
+        if mihomo.owner_instance_id.as_ref() == Some(instance_id) {
+            info.mihomo_status = Some(mihomo_status_proto(&mihomo));
+        }
+        info.neutral_mesh_entry_status = Some(self.get_neutral_mesh_entry_status());
+        Some(info)
+    }
+
+    pub async fn get_mihomo_status(&self) -> MihomoCoreStatus {
+        self.mihomo_owner.status().await
+    }
+
+    pub fn shutdown_mihomo_owner(&self) -> anyhow::Result<()> {
+        self.mihomo_owner.shutdown()
+    }
+
+    pub fn get_neutral_mesh_entry_status(
+        &self,
+    ) -> crate::proto::api::manage::NeutralMeshEntryStatus {
+        #[cfg(feature = "mesh-socks-egress")]
+        {
+            return CoreMeshEntryHandle::global().status().into_proto();
+        }
+
+        #[cfg(not(feature = "mesh-socks-egress"))]
+        crate::proto::api::manage::NeutralMeshEntryStatus {
+            state: "unsupported".to_owned(),
+            endpoint: None,
+            selected_port: None,
+            backend: "disabled".to_owned(),
+            core_leases: 0,
+            restart_count: 0,
+            last_error: None,
+        }
     }
 
     pub fn list_network_instance_ids(&self) -> Vec<uuid::Uuid> {
@@ -457,6 +1171,14 @@ impl NetworkInstanceManager {
             }
 
             self.stop_check_notifier.notified().await;
+        }
+    }
+}
+
+impl Drop for NetworkInstanceManager {
+    fn drop(&mut self) {
+        for instance_id in self.list_network_instance_ids() {
+            let _ = self.mihomo_owner.stop(instance_id);
         }
     }
 }
@@ -700,6 +1422,52 @@ impl Display for proto::api::instance::PeerConnInfo {
 mod tests {
     use super::*;
     use crate::common::config::*;
+
+    #[cfg(feature = "mesh-socks-egress")]
+    #[test]
+    fn neutral_mesh_entry_first_core_owner_starts_and_other_networks_reuse_it() {
+        assert!(neutral_mesh_entry_acquire_starts_owner(0));
+        assert!(!neutral_mesh_entry_acquire_starts_owner(1));
+        assert!(!neutral_mesh_entry_acquire_starts_owner(8));
+    }
+
+    #[cfg(feature = "mesh-socks-egress")]
+    #[test]
+    fn neutral_mesh_entry_only_stops_after_last_core_owner_releases() {
+        assert!(!neutral_mesh_entry_release_stops_owner(2));
+        assert!(!neutral_mesh_entry_release_stops_owner(1));
+        assert!(neutral_mesh_entry_release_stops_owner(0));
+    }
+
+    #[cfg(feature = "mesh-socks-egress")]
+    #[test]
+    fn neutral_mesh_entry_status_publishes_selected_port_and_endpoint() {
+        let endpoint = "127.0.0.1:11081".parse().unwrap();
+        let status = NeutralMeshEntryStatus {
+            state: NeutralMeshEntryState::Running,
+            endpoint: Some(endpoint),
+            selected_port: Some(11081),
+            backend: "test".to_owned(),
+            core_leases: 3,
+            restart_count: 2,
+            last_error: None,
+        }
+        .into_proto();
+
+        assert_eq!(status.state, "running");
+        assert_eq!(status.endpoint.as_deref(), Some("127.0.0.1:11081"));
+        assert_eq!(status.selected_port, Some(11081));
+        assert_eq!(status.core_leases, 3);
+        assert_eq!(status.restart_count, 2);
+    }
+
+    #[cfg(feature = "mesh-socks-egress")]
+    #[test]
+    fn neutral_mesh_entry_handle_is_process_global() {
+        let first = CoreMeshEntryHandle::global();
+        let second = CoreMeshEntryHandle::global();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
 
     #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
     #[test]

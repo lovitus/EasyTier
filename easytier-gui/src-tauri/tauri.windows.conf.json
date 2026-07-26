@@ -1,12 +1,24 @@
 {
     "bundle": {
         "externalBin": [
-            "binaries/easytier-leaf-worker"
+            "binaries/easytier-leaf-worker",
+            "binaries/easytier-hev-socks-egress",
+            "binaries/easytier-gost",
+            "binaries/easytier-mihomo"
         ],
         "resources": [
             "./wintun.dll",
             "./Packet.dll",
-            "./*.sys"
+            "./*.sys",
+            "binaries/easytier-mihomo-manifest.json",
+            "binaries/MIHOMO_LICENSE.txt",
+            "binaries/MIHOMO_SOURCE.md",
+            "binaries/MIHOMO_SHA256SUMS.txt",
+            "binaries/MIHOMO_BUILD_INFO.txt",
+            "binaries/SOCKS_EGRESS_BUILD_INFO.txt",
+            "binaries/easytier-gost.manifest.json",
+            "binaries/GOST_LICENSE.txt",
+            "binaries/GOST_SOURCE.md"
         ],
         "windows": {
             "nsis": {

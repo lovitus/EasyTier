@@ -4,7 +4,11 @@ import { defineComponent, h, nextTick, reactive } from 'vue'
 import PolicyEditor from '../src/components/policy/PolicyEditor.vue'
 import { MANAGED_RULE_DATA } from '../src/components/policy/managedRuleData'
 import type * as Api from '../src/modules/api'
-import { DEFAULT_NETWORK_CONFIG, type NetworkConfig } from '../src/types/network'
+import {
+  DEFAULT_NETWORK_CONFIG,
+  type NetworkConfig,
+  type NetworkInstanceRunningInfo,
+} from '../src/types/network'
 
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({ t: (key: string) => key }),
@@ -85,14 +89,29 @@ const InputTextStub = defineComponent({
 
 const SelectButtonStub = defineComponent({
   name: 'SelectButton',
-  props: { modelValue: String, disabled: Boolean },
+  inheritAttrs: false,
+  props: {
+    modelValue: String,
+    disabled: Boolean,
+    options: Array,
+    optionValue: String,
+    optionLabel: String,
+  },
   emits: ['update:modelValue'],
-  setup(props) {
-    return () => h('button', {
-      type: 'button',
+  setup(props, { attrs, emit }) {
+    return () => h('select', {
+      ...attrs,
       disabled: props.disabled,
+      value: props.modelValue,
       'data-stub': 'select-button',
-    }, props.modelValue)
+      onChange: (event: Event) =>
+        emit('update:modelValue', (event.target as HTMLSelectElement).value),
+    }, (props.options as Array<Record<string, unknown>> | undefined)?.map(option =>
+      h('option', {
+        value: option[props.optionValue ?? 'value'] as string,
+        disabled: Boolean(option.disabled),
+      }, option[props.optionLabel ?? 'label'] as string),
+    ))
   },
 })
 
@@ -116,7 +135,11 @@ const SelectStub = defineComponent({
 function mountEditor(
   config: NetworkConfig,
   api?: import('../src/modules/api').RemoteClient,
-  options: { yamlOnly?: boolean; readOnly?: boolean } = {},
+  options: {
+    yamlOnly?: boolean
+    readOnly?: boolean
+    runtimeInfo?: NetworkInstanceRunningInfo
+  } = {},
 ) {
   const model = reactive(config) as NetworkConfig
   const wrapper = mount(PolicyEditor, {
@@ -150,6 +173,8 @@ async function expandRow(wrapper: ReturnType<typeof mountEditor>['wrapper'], tes
 describe('PolicyEditor', () => {
   it('makes the focused YAML controls read-only in view mode', () => {
     const inline = DEFAULT_NETWORK_CONFIG()
+    inline.enable_policy_proxy = true
+    inline.policy_proxy_backend = 'leaf'
     inline.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const { wrapper: inlineWrapper } = mountEditor(
       inline,
@@ -159,10 +184,12 @@ describe('PolicyEditor', () => {
 
     expect(inlineWrapper.get<HTMLTextAreaElement>('#policy_config_inline_quick').element.readOnly)
       .toBe(true)
-    expect(inlineWrapper.get<HTMLButtonElement>('[data-stub="select-button"]').element.disabled)
+    expect(inlineWrapper.get<HTMLSelectElement>('[data-stub="select-button"]').element.disabled)
       .toBe(true)
 
     const file = DEFAULT_NETWORK_CONFIG()
+    file.enable_policy_proxy = true
+    file.policy_proxy_backend = 'leaf'
     file.policy_config_file = '/etc/easytier/policy.yaml'
     const { wrapper: fileWrapper } = mountEditor(
       file,
@@ -180,10 +207,11 @@ describe('PolicyEditor', () => {
     expect(model.policy_config_inline).toBe('')
     expect(wrapper.find('[data-header="policy.editor.nodes"]').exists()).toBe(false)
 
-    await wrapper.find<HTMLInputElement>('#enable_policy_proxy').setValue(true)
+    await wrapper.find<HTMLSelectElement>('[data-testid="policy-backend-selector"]').setValue('leaf')
     await nextTick()
 
     expect(model.enable_policy_proxy).toBe(true)
+    expect(model.policy_proxy_backend).toBe('leaf')
     expect(model.policy_config_inline).toContain('MATCH,default-exit')
     expect(model.policy_config_inline).toContain('GEOSITE,github,github-exit')
     expect(model.policy_config_inline).toContain('port: 7890')
@@ -199,9 +227,61 @@ describe('PolicyEditor', () => {
     expect(model.policy_config_inline).toContain('doh:dns.quad9.net@9.9.9.9')
   })
 
+  it('keeps Mihomo configuration native and only edits its source path', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.policy_config_inline = 'proxies: [must-not-be-parsed]'
+    config.policy_outbound_interface = 'eth0'
+    const { model, wrapper } = mountEditor(config)
+
+    await wrapper.find<HTMLSelectElement>('[data-testid="policy-backend-selector"]')
+      .setValue('mihomo')
+    await nextTick()
+
+    expect(model).toMatchObject({
+      enable_policy_proxy: true,
+      policy_proxy_backend: 'mihomo',
+      policy_config_inline: '',
+      policy_outbound_interface: '',
+    })
+    expect(wrapper.find('#policy_config_file').exists()).toBe(true)
+    expect(wrapper.find('[data-header="policy.editor.nodes"]').exists()).toBe(false)
+  })
+
+  it('shows Mihomo lifecycle and the selected process-wide mesh entry', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'mihomo'
+    config.policy_config_file = '/etc/easytier/mihomo.yaml'
+    const runtimeInfo = {
+      policy_runtime_running: true,
+      mihomo_status: {
+        state: 'running',
+        pid: 321,
+        restart_count: 3,
+      },
+      neutral_mesh_entry_status: {
+        state: 'running',
+        endpoint: '127.0.0.1:11081',
+        selected_port: 11081,
+        backend: 'hev-native',
+        core_leases: 1,
+        restart_count: 0,
+      },
+    } as NetworkInstanceRunningInfo
+
+    const { wrapper } = mountEditor(config, undefined, { runtimeInfo })
+
+    expect(wrapper.get('[data-testid="mihomo-runtime-state"]').text()).toContain('running')
+    expect(wrapper.get('[data-testid="mihomo-restart-count"]').text()).toContain('3')
+    expect(wrapper.get('[data-testid="mesh-entry-status"]').text())
+      .toContain('127.0.0.1:11081')
+    expect(wrapper.get('[data-testid="mesh-entry-status"]').text()).toContain('hev-native')
+  })
+
   it('adds the managed mesh HEV actor with automatic port and UDP enabled', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const { model, wrapper } = mountEditor(config)
     const addNode = wrapper.findAllComponents({ name: 'Button' })
@@ -220,6 +300,7 @@ describe('PolicyEditor', () => {
   it('edits Shadowsocks cipher and UoT without dropping protocol fields', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = `version: 1
 proxies:
   ss:
@@ -249,6 +330,7 @@ rules: ["MATCH,ss"]
   it('edits VMess WebSocket and TLS fields without changing group composition', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = `version: 1
 proxies:
   vmess:
@@ -282,6 +364,7 @@ rules: ["MATCH,through-mesh"]
   it('edits direct and proxy DNS sets without losing ordered policy rules', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = `version: 1
 dns:
   direct: [223.5.5.5]
@@ -304,6 +387,7 @@ rules: ["MATCH,DIRECT"]
   it('keeps DNS and groups visible without an experimental feature gate', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const { model, wrapper } = mountEditor(config)
     expect(wrapper.find('[data-header="policy.editor.dns"]').exists()).toBe(true)
@@ -314,6 +398,7 @@ rules: ["MATCH,DIRECT"]
   it('keeps existing advanced documents visible and byte-stable', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = `version: 1
 proxies:
   exit:
@@ -343,6 +428,7 @@ rules: ["MATCH,preferred"]
   it('keeps the Android keyboard target mounted while a proxy name changes', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = `version: 1
 proxies:
   exit:
@@ -366,6 +452,7 @@ rules: ["MATCH,exit"]
   it('enables no-resolve when a custom rule changes to an IP-based kind', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["DOMAIN,example.com,DIRECT"]\n'
     const { model, wrapper } = mountEditor(config)
 
@@ -379,6 +466,7 @@ rules: ["MATCH,exit"]
   it('does not overwrite invalid advanced YAML with the last visual document', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const { model, wrapper } = mountEditor(config)
 
@@ -393,6 +481,7 @@ rules: ["MATCH,exit"]
   it('selects the recommended desktop outbound interface instead of requiring text input', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const api = {
       list_policy_outbound_interfaces: vi.fn(async () => ({
@@ -416,6 +505,7 @@ rules: ["MATCH,exit"]
   it('treats protobuf-omitted address arrays as empty for macOS interfaces', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const api = {
       list_policy_outbound_interfaces: vi.fn(async () => ({
@@ -447,6 +537,7 @@ rules: ["MATCH,exit"]
   it('does not request an outbound interface on Android policy mode', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const api = {
       list_policy_outbound_interfaces: vi.fn(async () => ({
@@ -468,6 +559,7 @@ rules: ["MATCH,exit"]
   it('shows an available Windows runtime when the backend reports support', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const api = {
       list_policy_outbound_interfaces: vi.fn(async () => ({
@@ -486,7 +578,7 @@ rules: ["MATCH,exit"]
         .map(option => option.element.value),
     ).toEqual(['auto', 'Ethernet'])
     expect(wrapper.text()).toContain('policy.editor.runtime_windows_supported')
-    expect(wrapper.find<HTMLInputElement>('#enable_policy_proxy').element.disabled).toBe(false)
+      expect(wrapper.find<HTMLOptionElement>('option[value="leaf"]').element.disabled).toBe(false)
   })
 
   it('shows partial macOS and unavailable Windows runtime status even while disabled', async () => {
@@ -506,7 +598,7 @@ rules: ["MATCH,exit"]
       await flushPromises()
 
       expect(wrapper.text()).toContain(key)
-      expect(wrapper.find<HTMLInputElement>('#enable_policy_proxy').element.disabled).toBe(true)
+      expect(wrapper.find<HTMLOptionElement>('option[value="leaf"]').element.disabled).toBe(true)
       wrapper.unmount()
     }
   })
@@ -514,6 +606,7 @@ rules: ["MATCH,exit"]
   it('applies the GeoSite and GeoIP preset without serializing resource paths', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const { model, wrapper } = mountEditor(config)
     const preset = wrapper.findAllComponents({ name: 'Button' })
@@ -533,6 +626,7 @@ rules: ["MATCH,exit"]
   it('offers sources and manual updates for all Geo resources and accepts empty MMDB categories', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const update = vi.fn(async (_instanceId: string, resource: Api.PolicyRuleDataResource) => ({
       path: `/managed/${resource}`,
@@ -574,6 +668,7 @@ rules: ["MATCH,exit"]
   it('offers searchable GeoSite categories returned by normal GUI mode', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["GEOSITE,CN,DIRECT"]\n'
     const api = {
       list_policy_rule_data_categories: vi.fn(async (_instanceId: string, resource: Api.PolicyRuleDataResource) => ({
@@ -598,6 +693,7 @@ rules: ["MATCH,exit"]
   it('reports an unchanged remote size without replacing saved rule data', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = `version: 1
 rule-sets:
   country:
@@ -629,6 +725,7 @@ rules: ["MATCH,DIRECT"]
   it('adds a verified existing file to YAML when the remote size is unchanged', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const api = {
       update_policy_rule_data: vi.fn(async () => ({
@@ -652,6 +749,7 @@ rules: ["MATCH,DIRECT"]
   it('keeps existing node, group, and rule cards compact until Edit is selected', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = `version: 1
 proxies:
   exit:
@@ -682,6 +780,7 @@ rules: ["MATCH,preferred"]
   it('edits both FakeIP pools in the visual DNS menu', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const { model, wrapper } = mountEditor(config)
 

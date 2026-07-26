@@ -2,7 +2,9 @@ import { v4 as uuidv4 } from 'uuid'
 import {
   NetworkConfig as NetworkConfigPb,
   NetworkingMethod,
+  type MihomoProcessStatus,
   type NetworkConfig as ProtoNetworkConfig,
+  type NeutralMeshEntryStatus,
   type PortForwardConfig,
 } from '../generated/proto/api_manage'
 import {
@@ -106,11 +108,13 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     underlay_candidate_guard: true,
     underlay_exclude_cidrs: DEFAULT_UNDERLAY_EXCLUDE_CIDRS,
     enable_policy_proxy: false,
+    policy_proxy_backend: 'off',
     policy_leaf_tun_fast_path: false,
     policy_config_file: '',
     policy_config_inline: '',
     policy_outbound_interface: '',
     policy_leaf_executable: '',
+    policy_mihomo_executable: '',
     disable_upnp: false,
     enable_udp_broadcast_relay: false,
     disable_sym_hole_punching: false,
@@ -240,6 +244,8 @@ export interface NetworkInstanceRunningInfo {
   running: boolean
   error_msg?: string
   policy_runtime_running?: boolean
+  mihomo_status?: MihomoProcessStatus
+  neutral_mesh_entry_status?: NeutralMeshEntryStatus
   proxy_failover_entries?: TcpProxyEntry[]
 }
 

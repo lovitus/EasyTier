@@ -44,6 +44,8 @@ pub mod connector;
 pub mod core;
 pub mod instance_manager;
 pub mod launcher;
+mod managed_child;
+pub mod mihomo;
 pub mod peers;
 pub mod proto;
 pub mod rpc_service;

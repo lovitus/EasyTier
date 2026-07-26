@@ -9,12 +9,32 @@ fi
 
 target=$1
 output=$2
-: "${HEV_SERVER_COMMIT:?HEV_SERVER_COMMIT must pin the HEV source revision}"
 : "${RUNNER_TEMP:?RUNNER_TEMP must provide an isolated build directory}"
 
+cargo_target_dir="$RUNNER_TEMP/hev-cargo-target-$target"
+if [[ $target == *-pc-windows-* ]]; then
+  CARGO_TARGET_DIR="$cargo_target_dir" \
+    cargo build --locked --release --target "$target" \
+      --package easytier-socks-egress \
+      --bin easytier-hev-socks-egress \
+      --features managed-sidecar-bin
+  mkdir -p "$(dirname "$output")"
+  install -m 0755 \
+    "$cargo_target_dir/$target/release/easytier-hev-socks-egress.exe" "$output"
+  leaf_commit="$(
+    sed -n 's#.*lovitus/leaf.git?rev=\([0-9a-f]\{40\}\).*#\1#p' Cargo.lock |
+      head -1
+  )"
+  [[ $leaf_commit =~ ^[0-9a-f]{40}$ ]]
+  "$output" --version > "$RUNNER_TEMP/hev-version-$target.txt" 2>&1 || true
+  grep -q "${leaf_commit:0:7}" "$RUNNER_TEMP/hev-version-$target.txt"
+  file "$output" | tee "$RUNNER_TEMP/hev-file-$target.txt"
+  exit 0
+fi
+
+: "${HEV_SERVER_COMMIT:?HEV_SERVER_COMMIT must pin the HEV source revision}"
 source_dir="$RUNNER_TEMP/hev-socks5-server-$target"
 library_dir="$RUNNER_TEMP/hev-libs-$target"
-cargo_target_dir="$RUNNER_TEMP/hev-cargo-target-$target"
 if [[ -e $source_dir ]]; then
   echo "refusing to reuse HEV source directory: $source_dir" >&2
   exit 1
@@ -58,6 +78,11 @@ case $target in
       PP='xcrun --sdk macosx --toolchain macosx clang -E' \
       CFLAGS='-arch arm64 -mmacosx-version-min=11.0' \
       LFLAGS='-arch arm64 -mmacosx-version-min=11.0'
+    ;;
+  *-unknown-freebsd)
+    echo "unsupported HEV release target: $target" >&2
+    echo "HEV $HEV_SERVER_COMMIT has FreeBSD source branches, but EasyTier has no verified native FreeBSD HEV build, parent-death lifecycle, or release artifact." >&2
+    exit 2
     ;;
   *)
     echo "unsupported HEV release target: $target" >&2

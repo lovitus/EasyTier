@@ -339,7 +339,7 @@ pub fn configured_for(config: &dyn ConfigLoader) -> anyhow::Result<Option<Policy
     let Some(config) = config.get_policy_proxy_config() else {
         return Ok(None);
     };
-    if !config.enabled {
+    if !config.is_leaf_enabled() {
         return Ok(None);
     }
     resolve_instance_config(config).map(Some)
@@ -355,7 +355,7 @@ pub fn is_configured_for(config: &dyn ConfigLoader) -> bool {
     POLICY_CONFIG.get().is_some()
         || config
             .get_policy_proxy_config()
-            .is_some_and(|policy| policy.enabled)
+            .is_some_and(|policy| policy.is_leaf_enabled())
 }
 
 fn resolve_instance_config(config: PolicyProxyConfig) -> anyhow::Result<PolicyProcessConfig> {
@@ -474,11 +474,13 @@ mod tests {
         let worker = directory.path().join("leaf-worker");
         std::fs::write(&worker, b"worker").unwrap();
         let config = PolicyProxyConfig {
+            backend: None,
             enabled: true,
             leaf_tun_fast_path: true,
             config_inline: Some("version: 1\nrules: [\"FINAL,DIRECT\"]\n".to_owned()),
             outbound_interface: Some("eth0".to_owned()),
             leaf_executable: Some(worker.clone()),
+            mihomo_executable: None,
             source_dir: Some(directory.path().to_path_buf()),
             ..Default::default()
         };
@@ -510,10 +512,12 @@ mod tests {
         let worker = directory.path().join("leaf-worker");
         std::fs::write(&worker, b"worker").unwrap();
         let config = PolicyProxyConfig {
+            backend: None,
             enabled: true,
             config_file: Some("policy/default.yaml".into()),
             outbound_interface: Some("eth0".to_owned()),
             leaf_executable: Some(worker),
+            mihomo_executable: None,
             source_dir: Some(directory.path().to_path_buf()),
             ..Default::default()
         };

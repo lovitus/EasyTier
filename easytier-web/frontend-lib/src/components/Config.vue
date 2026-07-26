@@ -7,6 +7,7 @@ import {
   DEFAULT_NETWORK_CONFIG,
   DEFAULT_UNDERLAY_EXCLUDE_CIDRS,
   NetworkConfig,
+  type NetworkInstanceRunningInfo,
   normalizeNetworkConfig,
   removeRow
 } from '../types/network'
@@ -21,6 +22,7 @@ const props = defineProps<{
   api?: Api.RemoteClient
   configInvalid?: boolean
   hostname?: string
+  policyRuntimeInfo?: NetworkInstanceRunningInfo
 }>()
 
 defineEmits(['runNetwork'])
@@ -605,7 +607,8 @@ const instanceRecvBpsLimitInput = computed<string>({
           <Divider />
 
           <Panel :header="t('policy.editor.title')" toggleable collapsed>
-            <PolicyEditor v-model="curNetwork" :api="props.api" />
+            <PolicyEditor v-model="curNetwork" :api="props.api"
+              :runtime-info="props.policyRuntimeInfo" />
           </Panel>
 
           <Divider />

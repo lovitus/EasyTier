@@ -1,5 +1,5 @@
 use crate::common::config::{
-    ConfigFileControl, ConfigSource, PolicyProxyConfig, PortForwardConfig,
+    ConfigFileControl, ConfigSource, PolicyProxyBackend, PolicyProxyConfig, PortForwardConfig,
     parse_mapped_listener_urls, process_secure_mode_cfg,
 };
 #[cfg(feature = "ffi-dataplane")]
@@ -512,6 +512,8 @@ impl NetworkInstance {
             foreign_network_summary,
             proxy_failover_entries,
             policy_runtime_running: Some(policy_runtime_running),
+            mihomo_status: None,
+            neutral_mesh_entry_status: None,
         })
     }
 
@@ -910,13 +912,21 @@ impl NetworkConfig {
         }
 
         if self.enable_policy_proxy.is_some()
+            || self.policy_proxy_backend.is_some()
             || self.policy_config_file.is_some()
             || self.policy_config_inline.is_some()
             || self.policy_outbound_interface.is_some()
             || self.policy_leaf_executable.is_some()
+            || self.policy_mihomo_executable.is_some()
             || self.policy_leaf_tun_fast_path.is_some()
         {
             let policy = PolicyProxyConfig {
+                backend: self
+                    .policy_proxy_backend
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .map(str::parse::<PolicyProxyBackend>)
+                    .transpose()?,
                 enabled: self.enable_policy_proxy.unwrap_or_default(),
                 leaf_tun_fast_path: self.policy_leaf_tun_fast_path.unwrap_or_default(),
                 config_file: self
@@ -936,6 +946,11 @@ impl NetworkConfig {
                     .cloned(),
                 leaf_executable: self
                     .policy_leaf_executable
+                    .as_ref()
+                    .filter(|value| !value.is_empty())
+                    .map(Into::into),
+                mihomo_executable: self
+                    .policy_mihomo_executable
                     .as_ref()
                     .filter(|value| !value.is_empty())
                     .map(Into::into),
@@ -1261,7 +1276,13 @@ impl NetworkConfig {
             .get_credential_file()
             .map(|path| path.to_string_lossy().into_owned());
         if let Some(policy) = config.get_policy_proxy_config() {
+            // Preserve the legacy Leaf selector verbatim. Reporting Mihomo as
+            // enabled=true creates a conflicting envelope on the next save.
             result.enable_policy_proxy = Some(policy.enabled);
+            result.policy_proxy_backend = policy
+                .backend
+                .as_ref()
+                .map(|backend| backend.as_str().to_owned());
             result.policy_leaf_tun_fast_path = Some(policy.leaf_tun_fast_path);
             result.policy_config_file = policy
                 .config_file
@@ -1270,6 +1291,9 @@ impl NetworkConfig {
             result.policy_outbound_interface = policy.outbound_interface;
             result.policy_leaf_executable = policy
                 .leaf_executable
+                .map(|path| path.to_string_lossy().into_owned());
+            result.policy_mihomo_executable = policy
+                .mihomo_executable
                 .map(|path| path.to_string_lossy().into_owned());
         }
         let flags = config.get_flags();
@@ -1434,6 +1458,53 @@ mod tests {
         assert_eq!(
             roundtrip.policy_leaf_executable.as_deref(),
             Some("easytier-leaf-worker")
+        );
+        Ok(())
+    }
+
+    #[cfg(any(
+        windows,
+        all(
+            unix,
+            not(target_os = "android"),
+            not(target_os = "ios"),
+            not(target_env = "ohos")
+        )
+    ))]
+    #[test]
+    fn network_config_roundtrips_explicit_mihomo_backend() -> Result<(), anyhow::Error> {
+        let network_config = super::NetworkConfig {
+            instance_id: Some(uuid::Uuid::new_v4().to_string()),
+            network_name: Some("mihomo-policy-demo".to_string()),
+            network_secret: Some("secret".to_string()),
+            networking_method: Some(crate::proto::api::manage::NetworkingMethod::Standalone as i32),
+            policy_proxy_backend: Some("mihomo".to_string()),
+            policy_config_inline: Some("rules: []\n".to_string()),
+            policy_mihomo_executable: Some("easytier-mihomo".to_string()),
+            ..Default::default()
+        };
+
+        let config = network_config.gen_config()?;
+        let policy = config.get_policy_proxy_config().unwrap();
+        assert_eq!(
+            policy.effective_backend(),
+            crate::common::config::PolicyProxyBackend::Mihomo
+        );
+
+        let roundtrip = super::NetworkConfig::new_from_config(&config)?;
+        assert_eq!(roundtrip.enable_policy_proxy, Some(false));
+        assert_eq!(roundtrip.policy_proxy_backend.as_deref(), Some("mihomo"));
+        assert_eq!(
+            roundtrip.policy_mihomo_executable.as_deref(),
+            Some("easytier-mihomo")
+        );
+        let second = roundtrip.gen_config()?;
+        assert_eq!(
+            second
+                .get_policy_proxy_config()
+                .unwrap()
+                .effective_backend(),
+            crate::common::config::PolicyProxyBackend::Mihomo
         );
         Ok(())
     }

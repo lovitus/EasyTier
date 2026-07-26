@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Button, Checkbox, ConfirmPopup, Dialog, Divider, IftaLabel, Menu, Message, Select, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
+import { Button, ConfirmPopup, Dialog, Divider, IftaLabel, Menu, Message, Select, SelectButton, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
 import { computed, onMounted, onUnmounted, Ref, ref, shallowRef, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import * as Api from '../modules/api';
@@ -9,6 +9,12 @@ import { type MenuItem } from 'primevue/menuitem';
 import { normalizeRunningInfo } from '../modules/statusDisplay';
 import PolicyEditor from './policy/PolicyEditor.vue';
 import { DEFAULT_POLICY_TEMPLATE } from './policy/policyDocument';
+import {
+    applyPolicyBackend,
+    configuredPolicyBackend,
+    policyBackendSupported,
+    type PolicyProxyBackend,
+} from '../types/networkCompat';
 
 const { t } = useI18n()
 
@@ -41,6 +47,8 @@ let networkConfigRequestEpoch = 0;
 const policyConfigDraft = ref<NetworkTypes.NetworkConfig | undefined>(undefined);
 const showPolicyYamlDialog = ref(false);
 const policyConfigSaving = ref(false);
+const policyRuntimePlatform = ref<string | undefined>(undefined);
+const leafRuntimeSupported = ref<boolean | undefined>(undefined);
 
 const listInstanceIdResponse = ref<Api.ListNetworkInstanceIdResponse | undefined>(undefined);
 
@@ -243,15 +251,22 @@ watch(networkIsDisabled, async (newVal, oldVal) => {
 const loadCurrentNetworkConfig = async () => {
     const requestEpoch = ++networkConfigRequestEpoch;
     currentNetworkConfig.value = undefined;
+    policyRuntimePlatform.value = undefined;
+    leafRuntimeSupported.value = undefined;
 
     if (!selectedInstanceId.value) {
         return;
     }
 
     const requestedInstanceId = selectedInstanceId.value.uuid;
-    const ret = await props.api.get_network_config(requestedInstanceId);
+    const [ret, runtimeSupport] = await Promise.all([
+        props.api.get_network_config(requestedInstanceId),
+        props.api.list_policy_outbound_interfaces?.().catch(() => undefined),
+    ]);
     if (requestEpoch === networkConfigRequestEpoch && selectedInstanceId.value?.uuid === requestedInstanceId) {
         currentNetworkConfig.value = ret;
+        policyRuntimePlatform.value = runtimeSupport?.platform;
+        leafRuntimeSupported.value = runtimeSupport?.supported;
     }
 }
 
@@ -436,14 +451,52 @@ const savePolicyConfig = async (config: NetworkTypes.NetworkConfig): Promise<boo
     }
 }
 
-const setPolicyRoutingEnabled = async (enabled: boolean) => {
+const currentPolicyBackend = computed<PolicyProxyBackend>(() => {
+    if (!currentNetworkConfig.value) return 'off';
+    return configuredPolicyBackend(currentNetworkConfig.value);
+});
+const policyBackendOptions = computed(() => {
+    const leafSupported = leafRuntimeSupported.value ?? true;
+    return [
+        { label: t('policy_backend_off'), value: 'off', disabled: false },
+        {
+            label: t('policy_backend_mihomo'),
+            value: 'mihomo',
+            disabled: !policyBackendSupported('mihomo', policyRuntimePlatform.value, leafSupported),
+        },
+        {
+            label: t('policy_backend_leaf_deprecated'),
+            value: 'leaf',
+            disabled: !policyBackendSupported('leaf', policyRuntimePlatform.value, leafSupported),
+        },
+    ];
+});
+const policyRuntimeRunning = computed(() => {
+    if (currentPolicyBackend.value === 'mihomo') {
+        return currentNetworkStatusInfo.value?.detail?.mihomo_status?.state === 'running';
+    }
+    if (currentPolicyBackend.value === 'leaf') {
+        return Boolean(currentNetworkStatusInfo.value?.detail?.policy_runtime_running);
+    }
+    return false;
+});
+
+const setPolicyRoutingBackend = async (backend: PolicyProxyBackend) => {
     if (!networkIsDisabled.value || !currentNetworkConfig.value || policyConfigSaving.value || !currentNetworkControl.editable.value) {
         return;
     }
+    if (policyBackendOptions.value.find(option => option.value === backend)?.disabled) {
+        return;
+    }
     const config = cloneNetworkConfig(currentNetworkConfig.value);
-    config.enable_policy_proxy = enabled;
-    if (enabled && !config.policy_config_file?.trim() && !config.policy_config_inline?.trim()) {
+    applyPolicyBackend(config, backend);
+    if (backend === 'leaf' && !config.policy_config_file?.trim() && !config.policy_config_inline?.trim()) {
         config.policy_config_inline = DEFAULT_POLICY_TEMPLATE;
+    }
+    if (backend === 'mihomo' && !config.policy_config_file?.trim()) {
+        policyConfigDraft.value = config;
+        showPolicyYamlDialog.value = true;
+        return;
     }
     await savePolicyConfig(config);
 }
@@ -922,16 +975,16 @@ onUnmounted(() => {
             <div v-if="selectedInstanceId"
                 class="policy-home-controls mt-2 flex items-center gap-2 rounded-lg border border-surface-200 px-3 py-2 dark:border-surface-700"
                 data-testid="policy-home-controls">
-                <Checkbox input-id="home-enable-policy-routing"
-                    :model-value="Boolean(currentNetworkConfig?.enable_policy_proxy)" binary
+                <SelectButton input-id="home-policy-backend"
+                    :model-value="currentPolicyBackend" :options="policyBackendOptions"
+                    option-label="label" option-value="value" option-disabled="disabled" :allow-empty="false"
                     :disabled="!networkIsDisabled || !currentNetworkConfig || !currentNetworkControl.editable.value || policyConfigSaving"
-                    data-testid="policy-home-toggle"
-                    @update:model-value="setPolicyRoutingEnabled(Boolean($event))" />
-                <label for="home-enable-policy-routing" class="whitespace-nowrap">
-                    {{ t('enable_policy_proxy') }}
-                </label>
-                <Tag :severity="currentNetworkStatusInfo?.detail?.policy_runtime_running ? 'success' : 'secondary'"
-                    :value="t(currentNetworkStatusInfo?.detail?.policy_runtime_running
+                    data-testid="policy-home-backend"
+                    @update:model-value="setPolicyRoutingBackend($event as PolicyProxyBackend)" />
+                <Tag :value="policyBackendOptions.find(item => item.value === currentPolicyBackend)?.label"
+                    severity="info" data-testid="policy-backend-status" />
+                <Tag :severity="policyRuntimeRunning ? 'success' : 'secondary'"
+                    :value="t(policyRuntimeRunning
                         ? 'web.device_management.policy_runtime_running'
                         : 'web.device_management.policy_runtime_stopped')"
                     data-testid="policy-runtime-status" />
@@ -966,6 +1019,7 @@ onUnmounted(() => {
                 <Divider />
 
                 <Config :cur-network="currentNetworkConfig" :api="props.api" :config-invalid="!currentNetworkConfig"
+                    :policy-runtime-info="currentNetworkStatusInfo?.detail"
                     @run-network="saveAndRunNewNetwork"></Config>
             </div>
 
@@ -1027,7 +1081,8 @@ onUnmounted(() => {
                 : 'web.device_management.edit_policy_yaml')"
             class="w-[min(52rem,95vw)]" data-testid="policy-yaml-dialog">
             <PolicyEditor v-if="policyConfigDraft" v-model="policyConfigDraft" :api="props.api"
-                yaml-only :read-only="policyYamlReadOnly" />
+                yaml-only :read-only="policyYamlReadOnly"
+                :runtime-info="currentNetworkStatusInfo?.detail" />
             <template #footer>
                 <Button :label="t(policyYamlReadOnly ? 'web.common.close' : 'web.common.cancel')"
                     severity="secondary" text

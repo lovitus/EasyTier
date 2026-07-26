@@ -156,6 +156,7 @@ bytecodec = "0.4.15"
 rand = "0.8.5"
 
 serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
 pnet = { version = "0.35.0", features = ["serde"] }
 serde_json = "1"
 easytier-policy = { path = "../easytier-policy", optional = true }
@@ -298,7 +299,9 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Com",
     "Win32_System_Diagnostics",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_JobObjects",
     "Win32_System_Ole",
+    "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_Networking_WinSock",
     "Win32_System_IO",
@@ -366,6 +369,7 @@ default = [
     "smoltcp",
     "tun",
     "socks5",
+    "mesh-socks-egress",
     "kcp",
     "quic",
     "faketcp",
@@ -381,6 +385,7 @@ full = [
     "smoltcp",
     "tun",
     "socks5",
+    "mesh-socks-egress",
     "kcp",
     "quic",
     "faketcp",
@@ -407,9 +412,10 @@ websocket = [
 smoltcp = ["dep:smoltcp"]
 socks5 = ["smoltcp"]
 ffi-dataplane = ["socks5"]
+mesh-socks-egress = ["dep:easytier-socks-egress"]
 leaf-policy-proxy = [
     "dep:easytier-policy",
-    "dep:easytier-socks-egress",
+    "mesh-socks-egress",
     "ffi-dataplane",
     "tun",
 ]

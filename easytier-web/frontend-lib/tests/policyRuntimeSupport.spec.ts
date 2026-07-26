@@ -4,6 +4,47 @@ import {
   canEnablePolicyProxy,
   policyRuntimeNotice,
 } from '../src/components/policy/policyRuntimeSupport'
+import {
+  applyPolicyBackend,
+  configuredPolicyBackend,
+  policyBackendSupported,
+} from '../src/types/networkCompat'
+import { DEFAULT_NETWORK_CONFIG } from '../src/types/network'
+
+describe('policy backend compatibility', () => {
+  it('maps legacy enabled configurations to Leaf', () => {
+    expect(configuredPolicyBackend({ enable_policy_proxy: true })).toBe('leaf')
+    expect(configuredPolicyBackend({ enable_policy_proxy: false })).toBe('off')
+  })
+
+  it('prefers an explicit backend and clears Leaf-only fields for Mihomo', () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.policy_proxy_backend = 'leaf'
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'proxies: []'
+    config.policy_outbound_interface = 'eth0'
+    config.policy_leaf_executable = '/tmp/leaf'
+    config.policy_leaf_tun_fast_path = true
+
+    applyPolicyBackend(config, 'mihomo')
+
+    expect(config).toMatchObject({
+      enable_policy_proxy: false,
+      policy_proxy_backend: 'mihomo',
+      policy_config_inline: '',
+      policy_outbound_interface: '',
+      policy_leaf_executable: '',
+      policy_leaf_tun_fast_path: false,
+    })
+  })
+
+  it('rejects Mihomo on mobile while preserving desktop and Leaf capability semantics', () => {
+    expect(policyBackendSupported('mihomo', 'android')).toBe(false)
+    expect(policyBackendSupported('mihomo', 'linux')).toBe(true)
+    expect(policyBackendSupported('leaf', 'linux', false)).toBe(false)
+    expect(policyBackendSupported('off', 'android', false)).toBe(true)
+  })
+})
 
 describe('canEnablePolicyProxy', () => {
   it('allows enabling before capability discovery and on supported builds', () => {

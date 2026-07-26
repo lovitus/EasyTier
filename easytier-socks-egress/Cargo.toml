@@ -8,12 +8,20 @@ build = "build.rs"
 [features]
 default = []
 hev-inprocess = []
-hev-sidecar-bin = []
+managed-sidecar-bin = ["dep:leaf"]
+# Compatibility feature retained for existing build scripts. The produced
+# executable uses HEV on Linux/macOS and the pinned minimal Leaf runtime on
+# Windows.
+hev-sidecar-bin = ["managed-sidecar-bin"]
 
 [[bin]]
 name = "easytier-hev-socks-egress"
 path = "src/bin/easytier-hev-socks-egress.rs"
-required-features = ["hev-sidecar-bin"]
+required-features = ["managed-sidecar-bin"]
+
+[[bin]]
+name = "easytier-gost-guardian"
+path = "src/bin/easytier-gost-guardian.rs"
 
 [dependencies]
 anyhow = "1"
@@ -22,3 +30,10 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "net", "process", "rt", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+leaf = { git = "https://github.com/lovitus/leaf.git", rev = "682d1dc43585a703c993e8875fe4e937b1038733", optional = true, default-features = false, features = [
+    "config-json",
+    "inbound-socks",
+    "outbound-direct",
+] }

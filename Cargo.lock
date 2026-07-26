@@ -2448,6 +2448,7 @@ dependencies = [
  "seahash",
  "serde",
  "serde_json",
+ "serde_yaml",
  "serial_test",
  "service-manager",
  "sha2",
@@ -2591,6 +2592,7 @@ name = "easytier-socks-egress"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "leaf",
  "libc",
  "tempfile",
  "tokio",

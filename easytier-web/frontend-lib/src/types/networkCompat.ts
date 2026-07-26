@@ -9,8 +9,65 @@ const UINT64_MAX = (1n << 64n) - 1n
 
 type JsonRecord = Record<string, unknown>
 
+export type PolicyProxyBackend = 'off' | 'mihomo' | 'leaf'
+
+export function policyBackendSupported(
+  backend: PolicyProxyBackend,
+  platform?: string,
+  leafRuntimeSupported = true,
+): boolean {
+  const normalizedPlatform = platform?.trim().toLowerCase()
+  const mobilePlatform =
+    normalizedPlatform === 'android' ||
+    normalizedPlatform === 'ios' ||
+    normalizedPlatform === 'ohos'
+  if (backend === 'mihomo') return !mobilePlatform
+  if (backend === 'leaf') return leafRuntimeSupported
+  return true
+}
+
+export function configuredPolicyBackend(
+  config: Pick<NetworkConfig, 'enable_policy_proxy' | 'policy_proxy_backend'>,
+): PolicyProxyBackend {
+  if (
+    config.policy_proxy_backend === 'off' ||
+    config.policy_proxy_backend === 'mihomo' ||
+    config.policy_proxy_backend === 'leaf'
+  ) {
+    return config.policy_proxy_backend
+  }
+  return config.enable_policy_proxy ? 'leaf' : 'off'
+}
+
+export function applyPolicyBackend(
+  config: NetworkConfig,
+  backend: PolicyProxyBackend,
+): void {
+  config.policy_proxy_backend = backend
+  // The legacy boolean selects Leaf only. Explicit Mihomo must leave it false
+  // or Core correctly rejects the envelope as conflicting backend ownership.
+  config.enable_policy_proxy = backend === 'leaf'
+
+  if (backend === 'leaf') {
+    config.policy_mihomo_executable = ''
+  } else if (backend === 'mihomo') {
+    config.policy_config_inline = ''
+    config.policy_outbound_interface = ''
+    config.policy_leaf_executable = ''
+    config.policy_leaf_tun_fast_path = false
+  }
+}
+
+export function normalizePolicyBackendConfig(config: NetworkConfig): NetworkConfig {
+  const normalized = { ...config }
+  applyPolicyBackend(normalized, configuredPolicyBackend(config))
+  return normalized
+}
+
 export function prepareNetworkConfigForProtoJson(config: NetworkConfig): NetworkConfig {
-  const prepared = dropUnsupportedJsonValues(applyLegacyAclDefaults(config)) as NetworkConfig
+  const prepared = dropUnsupportedJsonValues(
+    applyLegacyAclDefaults(normalizePolicyBackendConfig(config)),
+  ) as NetworkConfig
   normalizeLegacyOptionalUint64(prepared as JsonRecord, 'instance_recv_bps_limit')
   return prepared
 }

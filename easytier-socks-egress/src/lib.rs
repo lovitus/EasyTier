@@ -1,8 +1,11 @@
 //! Narrow lifecycle wrapper for the HEV SOCKS5 egress service.
 //!
-//! HEV owns SOCKS5 TCP/UDP protocol state. This crate owns process lifetime,
-//! private configuration, and deterministic TCP listener fallback. It has no
-//! dependency on EasyTier, Leaf, routing, DNS, or mesh types.
+//! The platform backend owns SOCKS5 TCP/UDP protocol state. Linux and macOS use
+//! HEV, Android retains its in-process HEV path, and Windows uses the locked
+//! minimal Leaf runtime. FreeBSD's neutral mesh entry is provided separately by
+//! GOST; OHOS has no managed sidecar in this crate. This crate owns process
+//! lifetime, private configuration, and deterministic TCP listener fallback
+//! without depending on EasyTier routing, DNS, policy, or mesh types.
 
 use std::{
     collections::BTreeSet,
@@ -17,30 +20,35 @@ use std::{
 use anyhow::{Context as _, bail};
 use tokio::{net::TcpStream, process::Child};
 
-pub const DEFAULT_PORT_CANDIDATES: [u16; 3] = [11080, 11081, 11082];
+pub const MESH_ENTRY_PORT_CANDIDATES: [u16; 3] = [11080, 11081, 11082];
+pub const LEAF_DIRECT_EGRESS_PORT_CANDIDATES: [u16; 3] = [11180, 11181, 11182];
+pub const DEFAULT_PORT_CANDIDATES: [u16; 3] = MESH_ENTRY_PORT_CANDIDATES;
 
 const START_TIMEOUT: Duration = Duration::from_secs(2);
 const READY_INTERVAL: Duration = Duration::from_millis(25);
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[cfg(all(
-    feature = "hev-sidecar-bin",
-    any(target_os = "linux", target_os = "macos")
+    feature = "managed-sidecar-bin",
+    any(target_os = "linux", target_os = "macos"),
+    not(target_env = "ohos")
 ))]
 unsafe extern "C" {
     fn hev_socks5_server_main_from_file(config_path: *const std::ffi::c_char) -> std::ffi::c_int;
 }
 
-/// Runs the pinned HEV server in the managed sidecar process.
+/// Runs the target's managed SOCKS server in the sidecar process.
 ///
-/// The sidecar binary deliberately calls this library entry point instead of
-/// declaring a second FFI boundary. That keeps Cargo's native-link metadata on
-/// the library target that owns the HEV dependency.
+/// Linux and macOS use pinned HEV. Windows uses the already
+/// pinned Leaf core with only SOCKS inbound, direct outbound, and JSON config
+/// enabled. Keeping the portable backend in a separate process avoids sharing
+/// Leaf's global runtime IDs or lifecycle with policy routing.
 #[cfg(all(
-    feature = "hev-sidecar-bin",
-    any(target_os = "linux", target_os = "macos")
+    feature = "managed-sidecar-bin",
+    any(target_os = "linux", target_os = "macos"),
+    not(target_env = "ohos")
 ))]
-pub fn run_managed_hev_from_file(config_path: &Path) -> Result<(), String> {
+pub fn run_managed_server_from_file(config_path: &Path, _workers: usize) -> Result<(), String> {
     let config_path = std::ffi::CString::new(config_path.as_os_str().as_encoded_bytes())
         .map_err(|_| "HEV configuration path contains a NUL byte".to_owned())?;
     let status = unsafe { hev_socks5_server_main_from_file(config_path.as_ptr()) };
@@ -48,6 +56,34 @@ pub fn run_managed_hev_from_file(config_path: &Path) -> Result<(), String> {
         return Err(format!("HEV exited with status {status}"));
     }
     Ok(())
+}
+
+#[cfg(all(feature = "managed-sidecar-bin", windows))]
+pub fn run_managed_server_from_file(config_path: &Path, workers: usize) -> Result<(), String> {
+    if !(1..=32).contains(&workers) {
+        return Err("portable SOCKS worker count must be in 1..=32".to_owned());
+    }
+    let runtime_opt = if workers == 1 {
+        leaf::RuntimeOption::SingleThread
+    } else {
+        leaf::RuntimeOption::MultiThread(workers, 2 * 1024 * 1024)
+    };
+    leaf::start(
+        0,
+        leaf::StartOptions {
+            config: leaf::Config::File(config_path.to_string_lossy().into_owned()),
+            runtime_opt,
+        },
+    )
+    .map_err(|error| format!("portable Leaf SOCKS server failed: {error}"))
+}
+
+pub fn managed_backend_name() -> &'static str {
+    option_env!("EASYTIER_SOCKS_BACKEND").unwrap_or("unavailable")
+}
+
+pub fn managed_backend_revision() -> &'static str {
+    option_env!("EASYTIER_SOCKS_BACKEND_REV").unwrap_or("unknown")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +112,25 @@ impl Default for SocksEgressConfig {
 }
 
 impl SocksEgressConfig {
+    /// Public loopback SOCKS entry whose outbound sockets follow the host routing
+    /// table. Do not bind this role to a physical interface or apply the Leaf
+    /// policy mark: EasyTier virtual destinations must remain able to enter the
+    /// EasyTier TUN.
+    pub fn mesh_entry() -> Self {
+        Self::default()
+    }
+
+    /// Private Leaf egress hop. This role deliberately uses a disjoint listener
+    /// range and retains the platform loop-prevention binding selected by Leaf.
+    pub fn leaf_direct_egress(bind_interface: Option<String>, socket_mark: Option<u32>) -> Self {
+        Self {
+            port_candidates: LEAF_DIRECT_EGRESS_PORT_CANDIDATES.to_vec(),
+            bind_interface,
+            socket_mark,
+            ..Self::default()
+        }
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         if self.port_candidates.is_empty() || self.port_candidates.len() > 8 {
             bail!("HEV requires 1..=8 TCP port candidates");
@@ -98,6 +153,12 @@ impl SocksEgressConfig {
                     .any(|character| matches!(character, '\n' | '\r' | '\0'))
         }) {
             bail!("HEV bind interface contains unsupported characters");
+        }
+        #[cfg(windows)]
+        if self.bind_interface.is_some() || self.socket_mark.is_some() {
+            bail!(
+                "the portable SOCKS backend is a neutral mesh entry and cannot bind a physical interface or apply a policy socket mark"
+            );
         }
         Ok(())
     }
@@ -146,17 +207,22 @@ impl ProcessRuntime {
                 failures.push(format!("{port}: {error:#}"));
                 continue;
             }
-            let config_path = private_dir.path().join(format!("hev-{port}.yml"));
+            let config_path = private_dir
+                .path()
+                .join(format!("managed-{port}.{}", managed_config_extension()));
             write_private_file(
                 &config_path,
-                render_hev_config(&config.server, *port).as_bytes(),
+                render_managed_config(&config.server, *port).as_bytes(),
             )
-            .with_context(|| format!("failed to write HEV configuration for port {port}"))?;
+            .with_context(|| {
+                format!("failed to write managed SOCKS configuration for port {port}")
+            })?;
             match start_candidate(
                 &config.executable,
                 &config_path,
                 config.server.listen_address,
                 *port,
+                config.server.workers,
             )
             .await
             {
@@ -247,12 +313,15 @@ async fn start_candidate(
     config_path: &Path,
     listen_address: IpAddr,
     port: u16,
+    workers: usize,
 ) -> anyhow::Result<(Child, SocketAddr)> {
     #[cfg(target_os = "linux")]
     let parent_pid = unsafe { linux_getpid() };
     let mut command = tokio::process::Command::new(executable);
     command
         .arg(config_path)
+        .arg("--workers")
+        .arg(workers.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -297,6 +366,43 @@ async fn start_candidate(
         }
         tokio::time::sleep(READY_INTERVAL).await;
     }
+}
+
+#[cfg(not(windows))]
+fn managed_config_extension() -> &'static str {
+    "yml"
+}
+
+#[cfg(windows)]
+fn managed_config_extension() -> &'static str {
+    "json"
+}
+
+#[cfg(not(windows))]
+fn render_managed_config(config: &SocksEgressConfig, port: u16) -> String {
+    render_hev_config(config, port)
+}
+
+#[cfg(windows)]
+fn render_managed_config(config: &SocksEgressConfig, port: u16) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"log\": {{\"level\": \"off\"}},\n",
+            "  \"inbounds\": [{{\n",
+            "    \"tag\": \"easytier-mesh-entry\",\n",
+            "    \"protocol\": \"socks\",\n",
+            "    \"address\": \"{}\",\n",
+            "    \"port\": {}\n",
+            "  }}],\n",
+            "  \"outbounds\": [{{\n",
+            "    \"tag\": \"direct\",\n",
+            "    \"protocol\": \"direct\"\n",
+            "  }}]\n",
+            "}}\n"
+        ),
+        config.listen_address, port
+    )
 }
 
 fn ensure_candidate_listener_available(listen_address: IpAddr, port: u16) -> anyhow::Result<()> {
@@ -409,11 +515,7 @@ mod tests {
 
     #[test]
     fn renders_bounded_direct_egress_config() {
-        let config = SocksEgressConfig {
-            bind_interface: Some("eth0".to_owned()),
-            socket_mark: Some(0x2333),
-            ..Default::default()
-        };
+        let config = SocksEgressConfig::leaf_direct_egress(Some("eth0".to_owned()), Some(0x2333));
         assert_eq!(
             config.listen_address,
             IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -426,6 +528,25 @@ mod tests {
         assert!(rendered.contains("udp-listen-address: '127.0.0.1'"));
         assert!(rendered.contains("bind-interface: 'eth0'"));
         assert!(rendered.contains("mark: 9011"));
+    }
+
+    #[test]
+    fn mesh_entry_never_inherits_leaf_route_binding() {
+        let config = SocksEgressConfig::mesh_entry();
+        assert_eq!(config.port_candidates, MESH_ENTRY_PORT_CANDIDATES.to_vec());
+        assert_eq!(config.bind_interface, None);
+        assert_eq!(config.socket_mark, None);
+    }
+
+    #[test]
+    fn mesh_entry_and_leaf_direct_egress_ports_are_disjoint() {
+        let mesh = MESH_ENTRY_PORT_CANDIDATES
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let direct = LEAF_DIRECT_EGRESS_PORT_CANDIDATES
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert!(mesh.is_disjoint(&direct));
     }
 
     #[test]

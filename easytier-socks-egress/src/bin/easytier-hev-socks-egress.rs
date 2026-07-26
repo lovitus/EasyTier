@@ -16,10 +16,29 @@ fn run() -> Result<(), String> {
         return Err(usage());
     };
     if first == "--version" {
-        println!("easytier-hev-socks-egress {}", env!("HEV_SERVER_COMMIT"));
+        println!(
+            "easytier-hev-socks-egress {} {}",
+            easytier_socks_egress::managed_backend_name(),
+            easytier_socks_egress::managed_backend_revision()
+        );
         return Ok(());
     }
     let config_path = PathBuf::from(first);
+    let workers_flag = arguments
+        .next()
+        .ok_or_else(usage)?
+        .into_string()
+        .map_err(|_| usage())?;
+    if workers_flag != "--workers" {
+        return Err(usage());
+    }
+    let workers = arguments
+        .next()
+        .ok_or_else(usage)?
+        .into_string()
+        .map_err(|_| usage())?
+        .parse::<usize>()
+        .map_err(|_| "invalid --workers value".to_owned())?;
 
     #[cfg(target_os = "macos")]
     {
@@ -44,14 +63,14 @@ fn run() -> Result<(), String> {
     if arguments.next().is_some() {
         return Err(usage());
     }
-    easytier_socks_egress::run_managed_hev_from_file(&config_path)
+    easytier_socks_egress::run_managed_server_from_file(&config_path, workers)
 }
 
 fn usage() -> String {
     #[cfg(target_os = "macos")]
-    return "usage: easytier-hev-socks-egress CONFIG_PATH --parent-pid PID".to_owned();
+    return "usage: easytier-hev-socks-egress CONFIG_PATH --workers N --parent-pid PID".to_owned();
     #[cfg(not(target_os = "macos"))]
-    return "usage: easytier-hev-socks-egress CONFIG_PATH".to_owned();
+    return "usage: easytier-hev-socks-egress CONFIG_PATH --workers N".to_owned();
 }
 
 #[cfg(target_os = "macos")]

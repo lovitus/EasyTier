@@ -3797,7 +3797,7 @@ impl NicCtx {
             .global_ctx
             .config
             .get_policy_proxy_config()
-            .is_some_and(|config| config.enabled)
+            .is_some_and(|config| config.is_leaf_enabled())
         {
             let lease = crate::policy_proxy::acquire_instance()?;
             self.start_policy_proxy_mobile(dns_servers, network_key, lease)

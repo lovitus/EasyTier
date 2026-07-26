@@ -54,6 +54,7 @@ const UOT_IPV4: u8 = 1;
 const UOT_IPV6: u8 = 4;
 const UOT_STREAM_BUFFER_SIZE: usize = 16 * 1_024;
 const TCP_RELAY_LIMIT: usize = 1_024;
+const TCP_INGRESS_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
 pub(crate) type AssociationToken = [u8; TOKEN_LEN];
 
@@ -104,6 +105,7 @@ pub(crate) struct MeshSocksRelayService {
     associations: Arc<DashMap<AssociationToken, AssociationOwner>>,
     capacity_lock: tokio::sync::Mutex<()>,
     cancel: CancellationToken,
+    tcp_ingress_start_task: Mutex<Option<JoinHandle<()>>>,
     tcp_ingress_tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -120,6 +122,7 @@ impl MeshSocksRelayService {
             associations: Arc::new(DashMap::new()),
             capacity_lock: tokio::sync::Mutex::new(()),
             cancel: CancellationToken::new(),
+            tcp_ingress_start_task: Mutex::new(None),
             tcp_ingress_tasks: Mutex::new(Vec::new()),
         })
     }
@@ -237,10 +240,73 @@ impl MeshSocksRelayService {
         Ok(())
     }
 
+    /// Mihomo's `runtime.retryStartSocks5TCP` keeps tailnet SOCKS startup
+    /// separate from runtime startup, suppresses concurrent attempts, retries
+    /// after transient listener failures, and stops retrying after close. The
+    /// EasyTier data plane can likewise become ready after `Instance::run`
+    /// returns when DHCP supplies the virtual IPv4 address. Keep that delayed
+    /// readiness out of the instance startup path while preserving the existing
+    /// all-or-none reserved-port bind in `start_local_tcp_ingress`.
+    pub(crate) fn start_local_tcp_ingress_background(self: &Arc<Self>) -> anyhow::Result<()> {
+        let mut task_slot = self.tcp_ingress_start_task.lock().unwrap();
+        if task_slot.is_some() {
+            bail!("built-in HEV mesh TCP ingress startup is already scheduled");
+        }
+
+        let relay = Arc::downgrade(self);
+        let cancel = self.cancel.child_token();
+        *task_slot = Some(tokio::spawn(async move {
+            let mut retry_delay = Duration::from_secs(1);
+            loop {
+                let Some(relay) = relay.upgrade() else {
+                    return;
+                };
+                let result = tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    result = relay.start_local_tcp_ingress() => result,
+                };
+                drop(relay);
+
+                match result {
+                    Ok(()) => {
+                        tracing::info!("built-in HEV mesh TCP ingress is ready");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            ?error,
+                            ?retry_delay,
+                            "built-in HEV mesh TCP ingress is unavailable; retrying"
+                        );
+                    }
+                }
+
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = tokio::time::sleep(retry_delay) => {}
+                }
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(TCP_INGRESS_RETRY_MAX_DELAY);
+            }
+        }));
+        Ok(())
+    }
+
     pub(crate) async fn shutdown(&self) {
         self.cancel.cancel();
         for association in self.associations.iter() {
             association.value().cancel.cancel();
+        }
+        let start_task = self.tcp_ingress_start_task.lock().unwrap().take();
+        if let Some(mut task) = start_task {
+            if tokio::time::timeout(Duration::from_secs(5), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = task.await;
+            }
         }
         let tasks = std::mem::take(&mut *self.tcp_ingress_tasks.lock().unwrap());
         for mut task in tasks {
@@ -440,6 +506,9 @@ impl MeshSocksRelayService {
 impl Drop for MeshSocksRelayService {
     fn drop(&mut self) {
         self.cancel.cancel();
+        if let Some(task) = self.tcp_ingress_start_task.lock().unwrap().take() {
+            task.abort();
+        }
         for task in std::mem::take(&mut *self.tcp_ingress_tasks.lock().unwrap()) {
             task.abort();
         }
@@ -1298,6 +1367,7 @@ async fn read_socks_udp_reply(control: &mut TcpStream) -> anyhow::Result<(u8, u1
 mod tests {
     use super::*;
     use crate::{
+        common::global_ctx::GlobalCtxEvent,
         peers::tests::{connect_peer_manager, create_mock_peer_manager, wait_route_appear},
         tunnel::common::tests::wait_for_condition,
     };
@@ -1823,6 +1893,50 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn delayed_ipv4_readiness_retries_local_tcp_ingress() {
+        struct StaticEndpointProvider;
+
+        #[async_trait::async_trait]
+        impl LocalSocksEndpointProvider for StaticEndpointProvider {
+            async fn endpoint(&self) -> anyhow::Result<SocketAddr> {
+                Ok("127.0.0.1:9".parse().unwrap())
+            }
+        }
+
+        let peer = create_mock_peer_manager().await;
+        let global_ctx = peer.get_global_ctx();
+        let previous_ipv4 = global_ctx.get_ipv4();
+        global_ctx.set_ipv4(None);
+        let data_plane = Socks5Server::new(global_ctx.clone(), peer.clone(), None);
+        data_plane
+            .run(
+                #[cfg(feature = "kcp")]
+                None,
+                #[cfg(any(feature = "kcp", feature = "quic"))]
+                None,
+            )
+            .await
+            .unwrap();
+
+        let relay =
+            MeshSocksRelayService::new(&peer, data_plane, Some(Arc::new(StaticEndpointProvider)));
+        relay.start_local_tcp_ingress_background().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(relay.tcp_ingress_tasks.lock().unwrap().is_empty());
+
+        let ipv4: cidr::Ipv4Inet = "10.179.1.2/24".parse().unwrap();
+        global_ctx.set_ipv4(Some(ipv4));
+        global_ctx.issue_event(GlobalCtxEvent::DhcpIpv4Changed(previous_ipv4, Some(ipv4)));
+        wait_for_condition(
+            || async { relay.tcp_ingress_tasks.lock().unwrap().len() == 3 },
+            Duration::from_secs(3),
+        )
+        .await;
+
+        relay.shutdown().await;
     }
 
     fn socks_reply_for_test(address: SocketAddr) -> Vec<u8> {

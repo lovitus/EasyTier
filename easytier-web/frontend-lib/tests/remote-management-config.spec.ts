@@ -105,6 +105,34 @@ vi.mock('primevue', async () => {
     },
   })
 
+  const SelectButtonStub = defineComponent({
+    name: 'SelectButton',
+    inheritAttrs: false,
+    props: {
+      modelValue: String,
+      options: Array,
+      optionValue: String,
+      optionLabel: String,
+      optionDisabled: String,
+      disabled: Boolean,
+    },
+    emits: ['update:modelValue'],
+    setup(props, { attrs, emit }) {
+      return () => h('select', {
+        ...attrs,
+        value: props.modelValue,
+        disabled: props.disabled,
+        onChange: (event: Event) =>
+          emit('update:modelValue', (event.target as HTMLSelectElement).value),
+      }, (props.options as Array<Record<string, unknown>> | undefined)?.map(option =>
+        h('option', {
+          value: option[props.optionValue ?? 'value'] as string,
+          disabled: Boolean(option[props.optionDisabled ?? 'disabled']),
+        }, option[props.optionLabel ?? 'label'] as string),
+      ))
+    },
+  })
+
   const CheckboxStub = defineComponent({
     name: 'Checkbox',
     props: {
@@ -153,6 +181,7 @@ vi.mock('primevue', async () => {
     Menu: MenuStub,
     Message: PassThrough,
     Select: SelectStub,
+    SelectButton: SelectButtonStub,
     Tag: PassThrough,
     useConfirm: () => ({ require: vi.fn() }),
     useToast: () => ({ add: toastAdd }),
@@ -365,7 +394,7 @@ describe('RemoteManagement persisted selection', () => {
 })
 
 describe('RemoteManagement config save', () => {
-  it('saves the home policy toggle for a stopped network without starting it', async () => {
+  it('saves the home policy backend for a stopped network without starting it', async () => {
     const config = {
       ...DEFAULT_NETWORK_CONFIG(),
       instance_id: INSTANCE_ID,
@@ -403,9 +432,9 @@ describe('RemoteManagement config save', () => {
     try {
       await settleRemoteManagement()
 
-      const toggle = wrapper.find('[data-testid="policy-home-toggle"]')
-      expect(toggle.exists()).toBe(true)
-      expect(toggle.attributes('disabled')).toBeUndefined()
+      const backend = wrapper.find('[data-testid="policy-home-backend"]')
+      expect(backend.exists()).toBe(true)
+      expect(backend.attributes('disabled')).toBeUndefined()
       const header = wrapper.get('.network-header')
       const headerRow = header.get('.network-header-row')
       const buttonContainer = headerRow.get('.button-container')
@@ -416,7 +445,7 @@ describe('RemoteManagement config save', () => {
       expect(wrapper.find('[data-testid="policy-runtime-status"]').attributes('data-value'))
         .toBe('web.device_management.policy_runtime_stopped')
 
-      await toggle.setValue(true)
+      await backend.setValue('leaf')
       await settleAsync()
 
       expect(api.validate_config).toHaveBeenCalledOnce()
@@ -424,6 +453,7 @@ describe('RemoteManagement config save', () => {
       expect(api.save_config.mock.calls[0][0]).toMatchObject({
         instance_id: INSTANCE_ID,
         enable_policy_proxy: true,
+        policy_proxy_backend: 'leaf',
       })
       expect((api.save_config.mock.calls[0][0] as NetworkConfig).policy_config_inline).toContain('version: 1')
       expect(api.run_network).not.toHaveBeenCalled()
@@ -441,6 +471,7 @@ describe('RemoteManagement config save', () => {
       ...DEFAULT_NETWORK_CONFIG(),
       instance_id: INSTANCE_ID,
       enable_policy_proxy: true,
+      policy_proxy_backend: 'leaf',
       policy_config_inline: 'version: 1\nrules:\n  - FINAL,DIRECT\n',
     }
     const api = makeStatusApi(vi.fn(async () => ({
@@ -476,15 +507,15 @@ describe('RemoteManagement config save', () => {
     try {
       await settleRemoteManagement()
 
-      const toggle = wrapper.get('[data-testid="policy-home-toggle"]')
+      const backend = wrapper.get('[data-testid="policy-home-backend"]')
       const viewYaml = wrapper.get('[data-testid="policy-home-edit-yaml"]')
-      expect(toggle.attributes('disabled')).toBeDefined()
+      expect(backend.attributes('disabled')).toBeDefined()
       expect(viewYaml.attributes('disabled')).toBeUndefined()
       expect(viewYaml.attributes('data-label')).toBe('web.device_management.view_policy_yaml')
       expect(wrapper.get('[data-testid="policy-runtime-status"]').attributes('data-value'))
         .toBe('web.device_management.policy_runtime_running')
 
-      await toggle.setValue(false)
+      await backend.setValue('off')
       await viewYaml.trigger('click')
       await settleAsync()
 
@@ -494,6 +525,54 @@ describe('RemoteManagement config save', () => {
       expect(editor.props('yamlOnly')).toBe(true)
       expect(editor.props('readOnly')).toBe(true)
       expect(wrapper.find('[data-testid="policy-yaml-save"]').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('reports the Mihomo runtime state instead of the legacy Leaf flag', async () => {
+    const config = {
+      ...DEFAULT_NETWORK_CONFIG(),
+      instance_id: INSTANCE_ID,
+      enable_policy_proxy: false,
+      policy_proxy_backend: 'mihomo',
+      policy_config_file: '/etc/mihomo/config.yaml',
+    }
+    const api = makeStatusApi(vi.fn(async () => ({
+      ...runningInfo('mihomo-running'),
+      policy_runtime_running: false,
+      mihomo_status: { state: 'running' },
+    })))
+    api.get_network_config = vi.fn(async () => cloneConfig(config))
+    api.get_network_metas = vi.fn(async () => ({
+      metas: {
+        [INSTANCE_ID]: {
+          config_permission: 0,
+          network_name: 'mihomo-running',
+        },
+      },
+    }))
+    api.list_network_instance_ids = vi.fn(async () => ({
+      disabled_inst_ids: [],
+      running_inst_ids: [INSTANCE_UUID],
+    }))
+
+    const wrapper = mount(RemoteManagement, {
+      props: { api, instanceId: INSTANCE_ID },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          PolicyEditor: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+      expect(wrapper.get('[data-testid="policy-runtime-status"]').attributes('data-value'))
+        .toBe('web.device_management.policy_runtime_running')
     } finally {
       wrapper.unmount()
     }

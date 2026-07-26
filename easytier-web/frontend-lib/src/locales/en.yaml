@@ -195,6 +195,25 @@ underlay_exclude_cidrs: Excluded underlay candidate CIDRs
 underlay_exclude_cidrs_help: Comma-separated user CIDRs added to the built-in guard. Editing replaces only the user list; clearing it keeps built-in fake-IP ranges and runtime EasyTier virtual-address filtering enabled.
 enable_policy_proxy: Enable Policy Routing
 enable_policy_proxy_help: Transparently route non-mesh traffic with the optional Leaf policy engine. Mesh routes and peer endpoints always stay on the ordinary EasyTier data path.
+policy_proxy_backend: Policy backend
+policy_proxy_backend_help: Off disables policy routing. Mihomo uses the referenced native configuration unchanged. Leaf is retained only for compatibility.
+policy_backend_off: Off
+policy_backend_mihomo: Mihomo
+policy_backend_leaf_deprecated: Leaf (deprecated)
+policy_leaf_deprecated_notice: Leaf policy routing is deprecated and retained for compatibility with existing configurations.
+policy_mihomo_native_config_notice: EasyTier only manages the Mihomo configuration source path and lifecycle. Proxies, groups, rules, and subscriptions are neither parsed nor rewritten.
+policy_mihomo_config_path_example: "Example: /etc/easytier/mihomo.yaml"
+policy_mihomo_config_path_required: Mihomo requires a readable configuration file path.
+policy_runtime_status: Runtime status
+policy_runtime_running: Running
+policy_runtime_stopped: Stopped
+policy_runtime_pid: Process ID
+policy_runtime_restart_count: Restart count
+policy_mesh_entry: Mesh SOCKS entry
+policy_mesh_entry_error: Mesh SOCKS entry error
+policy_instance_error: Instance error
+edit_policy_config: Edit policy configuration
+view_policy_config: View policy configuration
 policy_leaf_tun_fast_path: Leaf-owned policy TUN (experimental)
 policy_leaf_tun_fast_path_help: Linux TUN mode only. Removes the EasyTier-to-Leaf packet bridge from policy traffic. It is disabled by default and falls back to the legacy path if unsupported or startup fails.
 policy_config_file: Policy file

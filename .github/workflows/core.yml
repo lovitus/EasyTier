@@ -25,6 +25,25 @@ defaults:
     shell: bash
 
 jobs:
+  resolve_mihomo:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve latest stable Mihomo release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/fetch-mihomo-release.sh resolve-latest \
+            mihomo-release-manifest.json
+      - uses: actions/upload-artifact@v5
+        with:
+          name: mihomo-release-manifest
+          path: mihomo-release-manifest.json
+          if-no-files-found: error
+
   pre_job:
     # continue-on-error: true # Uncomment once integration is finished
     runs-on: ubuntu-latest
@@ -41,7 +60,7 @@ jobs:
           concurrent_skipping: 'same_content_newer'
           skip_after_successful_duplicate: 'true'
           cancel_others: 'true'
-          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "easytier-policy/**", "easytier-socks-egress/**", "third_party/**", "scripts/build-hev-socks-egress.sh", ".github/workflows/core.yml", ".github/actions/**", "easytier-web/**"]'
+          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "easytier-policy/**", "easytier-socks-egress/**", "third_party/**", "scripts/build-hev-socks-egress.sh", "scripts/fetch-gost-release.sh", "scripts/fetch-mihomo-release.sh", ".github/workflows/core.yml", ".github/actions/**", "easytier-web/**"]'
   build_web:
     runs-on: ubuntu-latest
     needs: pre_job
@@ -69,14 +88,17 @@ jobs:
             OS: ubuntu-24.04
             ARTIFACT_NAME: linux-x86_64
             POLICY_RELEASE: true
+            MIHOMO_RELEASE: true
           - TARGET: aarch64-unknown-linux-musl
             OS: ubuntu-24.04-arm
             ARTIFACT_NAME: linux-aarch64
             POLICY_RELEASE: true
+            MIHOMO_RELEASE: true
 
           - TARGET: riscv64gc-unknown-linux-musl
             OS: ubuntu-24.04
             ARTIFACT_NAME: linux-riscv64
+            MIHOMO_RELEASE: true
           - TARGET: loongarch64-unknown-linux-musl
             OS: ubuntu-24.04
             ARTIFACT_NAME: linux-loongarch64
@@ -105,25 +127,31 @@ jobs:
             OS: ubuntu-24.04
             ARTIFACT_NAME: freebsd-13.2-x86_64
             BSD_VERSION: 13.2
+            MIHOMO_RELEASE: true
 
           - TARGET: x86_64-apple-darwin
             OS: macos-latest
             ARTIFACT_NAME: macos-x86_64
             POLICY_RELEASE: true
+            MIHOMO_RELEASE: true
           - TARGET: aarch64-apple-darwin
             OS: macos-latest
             ARTIFACT_NAME: macos-aarch64
             POLICY_RELEASE: true
+            MIHOMO_RELEASE: true
 
           - TARGET: x86_64-pc-windows-msvc
             OS: windows-latest
             ARTIFACT_NAME: windows-x86_64
+            MIHOMO_RELEASE: true
           - TARGET: i686-pc-windows-msvc
             OS: windows-latest
             ARTIFACT_NAME: windows-i686
+            MIHOMO_RELEASE: true
           - TARGET: aarch64-pc-windows-msvc
             OS: windows-11-arm
             ARTIFACT_NAME: windows-arm64
+            MIHOMO_RELEASE: true
 
     runs-on: ${{ matrix.OS }}
     env:
@@ -131,17 +159,20 @@ jobs:
       TARGET: ${{ matrix.TARGET }}
       OS: ${{ matrix.OS }}
       POLICY_RELEASE: ${{ matrix.POLICY_RELEASE || false }}
+      MIHOMO_RELEASE: ${{ matrix.MIHOMO_RELEASE || false }}
+      MIHOMO_RELEASE_MANIFEST: ${{ github.workspace }}/target/mihomo-release/mihomo-release-manifest.json
       OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
     needs:
       - pre_job
       - build_web
+      - resolve_mihomo
     if: needs.pre_job.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v5
 
       - name: Set current ref as env variable
         run: |
-          echo "GIT_DESC=$(git log -1 --format=%cd.%h --date=format:%Y-%m-%d_%H:%M:%S)" >> $GITHUB_ENV
+          echo "GIT_DESC=$(git log -1 --format=%cd.%h --date=format:%Y-%m-%d_%H:%M:%S)" >> "$GITHUB_ENV"
 
       - name: Download web artifact
         uses: actions/download-artifact@v4
@@ -176,16 +207,84 @@ jobs:
         with:
           tool: cargo-zigbuild
 
-      - name: Build policy sidecars
+      - name: Build Leaf policy sidecar
         if: matrix.POLICY_RELEASE == true
-        env:
-          HEV_SERVER_COMMIT: 97e74f1068bd924e740032382cdc94ca83741ae6
         run: |
           set -euo pipefail
           cargo build --locked --release --target "$TARGET" \
             --package easytier-policy --bin easytier-leaf-worker --features leaf-worker
+
+      - name: Build legacy Leaf policy SOCKS sidecar
+        if: matrix.POLICY_RELEASE == true || contains(matrix.TARGET, 'windows')
+        env:
+          HEV_SERVER_COMMIT: 97e74f1068bd924e740032382cdc94ca83741ae6
+        run: |
+          set -euo pipefail
+          suffix=""
+          backend="hev-native"
+          if [[ "$TARGET" == *windows* ]]; then suffix=".exe"; fi
+          if [[ "$TARGET" == *windows* ]]; then
+            backend="leaf-portable"
+          fi
           scripts/build-hev-socks-egress.sh "$TARGET" \
-            "target/$TARGET/release/easytier-hev-socks-egress"
+            "target/$TARGET/release/easytier-hev-socks-egress$suffix"
+          sidecar="target/$TARGET/release/easytier-hev-socks-egress$suffix"
+          test -f "$sidecar"
+          if [[ "$TARGET" != *windows* ]]; then test -x "$sidecar"; fi
+          printf 'component=easytier-socks-egress\ntarget=%s\nbackend=%s\n' \
+            "$TARGET" "$backend" \
+            > "target/$TARGET/release/SOCKS_EGRESS_BUILD_INFO.txt"
+          python3 - "$sidecar" "$TARGET" <<'PY'
+          import pathlib, struct, sys
+          data = pathlib.Path(sys.argv[1]).read_bytes()
+          target = sys.argv[2]
+          expected = {
+              "x86_64-unknown-linux-musl": 62,
+              "aarch64-unknown-linux-musl": 183,
+              "x86_64-unknown-freebsd": 62,
+              "x86_64-pc-windows-msvc": 0x8664,
+              "i686-pc-windows-msvc": 0x014c,
+              "aarch64-pc-windows-msvc": 0xaa64,
+          }
+          if "apple-darwin" in target:
+              machine = struct.unpack_from("<I", data, 4)[0]
+              wanted = 0x01000007 if target.startswith("x86_64") else 0x0100000c
+          elif "windows" in target:
+              offset = struct.unpack_from("<I", data, 0x3c)[0]
+              if data[offset:offset + 4] != b"PE\0\0":
+                  raise SystemExit("invalid portable socks-egress PE header")
+              machine = struct.unpack_from("<H", data, offset + 4)[0]
+              wanted = expected[target]
+          else:
+              if data[:4] != b"\x7fELF":
+                  raise SystemExit("invalid portable socks-egress ELF header")
+              endian = "<" if data[5] == 1 else ">"
+              machine = struct.unpack_from(endian + "H", data, 18)[0]
+              wanted = expected[target]
+          if machine != wanted:
+              raise SystemExit(f"socks-egress machine mismatch: expected {wanted}, got {machine}")
+          PY
+
+      - name: Fetch pinned GOST mesh entry
+        if: contains('x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-unknown-freebsd,x86_64-pc-windows-msvc,i686-pc-windows-msvc,aarch64-pc-windows-msvc', matrix.TARGET)
+        run: |
+          set -euo pipefail
+          suffix=""
+          if [[ "$TARGET" == *windows* ]]; then suffix=".exe"; fi
+          runtime_dir="target/$TARGET/release"
+          bash scripts/fetch-gost-release.sh fetch "$TARGET" \
+            "$runtime_dir/easytier-gost$suffix" \
+            "$runtime_dir/easytier-gost.manifest.json"
+          cp easytier/resources/gost/LICENSE "$runtime_dir/GOST_LICENSE.txt"
+          cp easytier/resources/gost/SOURCE.md "$runtime_dir/GOST_SOURCE.md"
+
+      - name: Build GOST parent guardian
+        if: contains(matrix.TARGET, 'apple-darwin') || matrix.TARGET == 'x86_64-unknown-freebsd'
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target "$TARGET" \
+            --package easytier-socks-egress --bin easytier-gost-guardian
+          test -x "target/$TARGET/release/easytier-gost-guardian"
 
       - name: Build Windows policy worker
         if: contains(matrix.TARGET, 'windows')
@@ -196,7 +295,7 @@ jobs:
 
       - name: Build
         if: ${{ !contains(matrix.TARGET, 'mips') }}
-        run: |          
+        run: |
           if [[ "$TARGET" == *windows* ]]; then
             SUFFIX=.exe
           else
@@ -221,10 +320,45 @@ jobs:
             FEATURES="$FEATURES,leaf-policy-windows"
           fi
           
-          cargo $BUILD --locked --release --target $TARGET --package=easytier-web --features=embed
-          mv ./target/$TARGET/release/easytier-web"$SUFFIX" ./target/$TARGET/release/easytier-web-embed"$SUFFIX"
+          cargo "$BUILD" --locked --release --target "$TARGET" --package=easytier-web --features=embed
+          mv "./target/$TARGET/release/easytier-web$SUFFIX" "./target/$TARGET/release/easytier-web-embed$SUFFIX"
           
-          cargo $BUILD --locked --release --target $TARGET --features=$FEATURES
+          cargo "$BUILD" --locked --release --target "$TARGET" --features="$FEATURES"
+
+      - name: Download resolved Mihomo release manifest
+        uses: actions/download-artifact@v5
+        with:
+          name: mihomo-release-manifest
+          path: target/mihomo-release
+
+      - name: Fetch and verify workflow-pinned Mihomo
+        if: matrix.MIHOMO_RELEASE == true
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET" == *windows* ]]; then
+            SUFFIX=.exe
+          else
+            SUFFIX=""
+          fi
+          runtime_dir="target/$TARGET/release"
+          mkdir -p "$runtime_dir"
+          bash scripts/fetch-mihomo-release.sh fetch "$TARGET" \
+            "$runtime_dir/easytier-mihomo$SUFFIX" \
+            "$runtime_dir/easytier-mihomo.manifest.json"
+          cp easytier/resources/policy-rule-data/METACUBEX-GPL-3.0.txt \
+            "$runtime_dir/MIHOMO_LICENSE.txt"
+          cp easytier/resources/mihomo/SOURCE.md "$runtime_dir/MIHOMO_SOURCE.md"
+
+      - name: Mark unsupported Mihomo target
+        if: matrix.MIHOMO_RELEASE != true
+        run: |
+          set -euo pipefail
+          runtime_dir="./target/$TARGET/release"
+          mkdir -p "$runtime_dir"
+          reason="$(jq -er --arg target "$TARGET" '.targets[$target] | select(.status == "needs_review") | .reason' \
+            easytier/resources/mihomo/manifest.json)"
+          printf 'target=%s\nstatus=unsupported\nreason=%s\n' "$TARGET" "$reason" \
+            > "$runtime_dir/MIHOMO_UNSUPPORTED.txt"
 
       - name: Stage Windows runtime payload
         if: contains(matrix.TARGET, 'windows')
@@ -251,7 +385,11 @@ jobs:
           $core = Join-Path $runtimeDir "easytier-core.exe"
           $worker = Join-Path $runtimeDir "easytier-leaf-worker.exe"
           $helpFile = Join-Path $env:RUNNER_TEMP "easytier-core-help.txt"
-          foreach ($required in @($core, $worker, (Join-Path $runtimeDir "wintun.dll"), (Join-Path $runtimeDir "Packet.dll"))) {
+          $socksEgress = Join-Path $runtimeDir "easytier-hev-socks-egress.exe"
+          $socksBuildInfo = Join-Path $runtimeDir "SOCKS_EGRESS_BUILD_INFO.txt"
+          $gost = Join-Path $runtimeDir "easytier-gost.exe"
+          $gostMetadata = Join-Path $runtimeDir "easytier-gost.manifest.json"
+          foreach ($required in @($core, $worker, $socksEgress, $socksBuildInfo, $gost, $gostMetadata, (Join-Path $runtimeDir "GOST_LICENSE.txt"), (Join-Path $runtimeDir "GOST_SOURCE.md"), (Join-Path $runtimeDir "wintun.dll"), (Join-Path $runtimeDir "Packet.dll"))) {
             if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
               throw "missing Windows runtime payload: $required"
             }
@@ -269,19 +407,25 @@ jobs:
         env:
           RUSTC_BOOTSTRAP: 1
         run: |
-          cargo build --locked -r --target $TARGET -Z build-std=std,panic_abort --package=easytier --features=jemalloc
+          cargo build --locked -r --target "$TARGET" -Z build-std=std,panic_abort --package=easytier --features=jemalloc
 
       - name: Sign and verify macOS release executables
-        if: contains(matrix.TARGET, 'darwin') && matrix.POLICY_RELEASE == true
+        if: contains(matrix.TARGET, 'darwin')
         run: |
           set -euo pipefail
-          for executable in \
-            easytier-core \
-            easytier-cli \
-            easytier-web \
-            easytier-web-embed \
-            easytier-leaf-worker \
+          executables=(
+            easytier-core
+            easytier-cli
+            easytier-web
+            easytier-web-embed
             easytier-hev-socks-egress
+            easytier-gost-guardian
+            easytier-gost
+          )
+          if [[ "$POLICY_RELEASE" == "true" ]]; then
+            executables+=(easytier-leaf-worker easytier-mihomo)
+          fi
+          for executable in "${executables[@]}"
           do
             binary="target/$TARGET/release/$executable"
             test -x "$binary"
@@ -307,12 +451,6 @@ jobs:
               fi
           fi
 
-          if [[ $GITHUB_REF_TYPE =~ ^tag$ ]]; then
-            TAG=$GITHUB_REF_NAME
-          else
-            TAG=$GITHUB_SHA
-          fi
-          
           if [[ $OS =~ ^ubuntu.*$ && ! $TARGET =~ (loongarch|freebsd) ]]; then
             HOST_ARCH=$(uname -m)
             case $HOST_ARCH in
@@ -339,18 +477,60 @@ jobs:
           done
 
           if [[ "$POLICY_RELEASE" == "true" ]]; then
-            for SIDECAR in easytier-leaf-worker easytier-hev-socks-egress; do
-              BIN="./target/$TARGET/release/$SIDECAR$SUFFIX"
-              test -x "$BIN"
-              mv "$BIN" ./artifacts/objects/
-            done
+            BIN="./target/$TARGET/release/easytier-leaf-worker$SUFFIX"
+            test -x "$BIN"
+            mv "$BIN" ./artifacts/objects/
+          fi
+          case "$TARGET" in
+            x86_64-unknown-linux-musl|aarch64-unknown-linux-musl|x86_64-apple-darwin|aarch64-apple-darwin|x86_64-unknown-freebsd|x86_64-pc-windows-msvc|i686-pc-windows-msvc|aarch64-pc-windows-msvc)
+              GOST_BIN="./target/$TARGET/release/easytier-gost$SUFFIX"
+              GOST_METADATA="./target/$TARGET/release/easytier-gost.manifest.json"
+              bash scripts/fetch-gost-release.sh verify "$TARGET" \
+                "$GOST_BIN" "$GOST_METADATA"
+              mv "$GOST_BIN" "$GOST_METADATA" \
+                "./target/$TARGET/release/GOST_LICENSE.txt" \
+                "./target/$TARGET/release/GOST_SOURCE.md" \
+                ./artifacts/objects/
+              ;;
+          esac
+          case "$TARGET" in
+            x86_64-apple-darwin|aarch64-apple-darwin|x86_64-unknown-freebsd)
+              GUARDIAN_BIN="./target/$TARGET/release/easytier-gost-guardian"
+              test -x "$GUARDIAN_BIN"
+              mv "$GUARDIAN_BIN" ./artifacts/objects/
+              ;;
+          esac
+          if [[ "$POLICY_RELEASE" == "true" || "$TARGET" == *windows* ]]; then
+            BIN="./target/$TARGET/release/easytier-hev-socks-egress$SUFFIX"
+            test -f "$BIN"
+            if [[ "$TARGET" != *windows* ]]; then test -x "$BIN"; fi
+            mv "$BIN" "./target/$TARGET/release/SOCKS_EGRESS_BUILD_INFO.txt" \
+              ./artifacts/objects/
           fi
           if [[ "$TARGET" == *windows* ]]; then
             BIN="./target/$TARGET/release/easytier-leaf-worker$SUFFIX"
             test -f "$BIN"
             mv "$BIN" ./artifacts/objects/
           fi
+          if [[ "$MIHOMO_RELEASE" == "true" ]]; then
+            MIHOMO_BIN="./target/$TARGET/release/easytier-mihomo$SUFFIX"
+            MIHOMO_METADATA="./target/$TARGET/release/easytier-mihomo.manifest.json"
+            test -f "$MIHOMO_BIN"
+            bash scripts/fetch-mihomo-release.sh verify "$TARGET" \
+              "$MIHOMO_BIN" "$MIHOMO_METADATA"
+            mv "$MIHOMO_BIN" "$MIHOMO_METADATA" \
+              "./target/$TARGET/release/MIHOMO_LICENSE.txt" \
+              "./target/$TARGET/release/MIHOMO_SOURCE.md" \
+              "./target/$TARGET/release/MIHOMO_SHA256SUMS.txt" \
+              "./target/$TARGET/release/MIHOMO_BUILD_INFO.txt" \
+              ./artifacts/objects/
+          else
+            test -f "./target/$TARGET/release/MIHOMO_UNSUPPORTED.txt"
+            mv "./target/$TARGET/release/MIHOMO_UNSUPPORTED.txt" ./artifacts/objects/
+          fi
 
+          cp "$MIHOMO_RELEASE_MANIFEST" \
+            "./artifacts/objects/MIHOMO_RELEASE_MANIFEST.json"
           mv ./artifacts/objects/* ./artifacts/
           rm -rf ./artifacts/objects/
 

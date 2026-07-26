@@ -6,9 +6,17 @@ interface VpnRouteConfig {
   routes?: readonly string[]
   enable_magic_dns?: boolean
   enable_policy_proxy?: boolean
+  policy_proxy_backend?: string
   dhcp?: boolean
   virtual_ipv4?: string
   network_length?: number
+}
+
+function usesLeafPolicyBackend(config: VpnRouteConfig): boolean {
+  if (config.policy_proxy_backend) {
+    return config.policy_proxy_backend === 'leaf'
+  }
+  return Boolean(config.enable_policy_proxy)
 }
 
 const MAGIC_DNS_SERVER = '100.100.100.101'
@@ -34,7 +42,7 @@ export function getDnsForVpn(config: VpnRouteConfig): string | undefined {
   if (config.enable_magic_dns) {
     return MAGIC_DNS_SERVER
   }
-  if (config.enable_policy_proxy) {
+  if (usesLeafPolicyBackend(config)) {
     return POLICY_FAKE_DNS_SERVER
   }
   return undefined
@@ -60,7 +68,7 @@ export function getRoutesForVpn(
     ret.push(`${MAGIC_DNS_SERVER}/32`)
   }
 
-  if (config.enable_policy_proxy) {
+  if (usesLeafPolicyBackend(config)) {
     ret.push('0.0.0.0/0', '::/0')
   }
 

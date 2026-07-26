@@ -4,13 +4,23 @@ fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let android_inprocess =
         std::env::var_os("CARGO_FEATURE_HEV_INPROCESS").is_some() && target_os == "android";
-    let sidecar = std::env::var_os("CARGO_FEATURE_HEV_SIDECAR_BIN").is_some();
+    let sidecar = std::env::var_os("CARGO_FEATURE_MANAGED_SIDECAR_BIN").is_some();
     if !android_inprocess && !sidecar {
         return;
     }
-    if sidecar && !matches!(target_os.as_str(), "linux" | "macos") {
-        panic!("the managed HEV sidecar is supported only on Linux and macOS");
+
+    let portable_leaf = target_os == "windows";
+    if sidecar && portable_leaf {
+        println!("cargo:rustc-env=EASYTIER_SOCKS_BACKEND=leaf");
+        println!(
+            "cargo:rustc-env=EASYTIER_SOCKS_BACKEND_REV=682d1dc43585a703c993e8875fe4e937b1038733"
+        );
+        return;
     }
+    if sidecar && !matches!(target_os.as_str(), "linux" | "macos") {
+        panic!("the managed SOCKS sidecar has no verified backend for target OS {target_os}");
+    }
+
     let directory = std::env::var_os("HEV_SOCKS5_LIB_DIR")
         .expect("HEV_SOCKS5_LIB_DIR is required for managed HEV builds");
     println!(
@@ -24,5 +34,7 @@ fn main() {
         let commit = std::env::var("HEV_SERVER_COMMIT")
             .expect("HEV_SERVER_COMMIT is required for the managed HEV sidecar");
         println!("cargo:rustc-env=HEV_SERVER_COMMIT={commit}");
+        println!("cargo:rustc-env=EASYTIER_SOCKS_BACKEND=hev");
+        println!("cargo:rustc-env=EASYTIER_SOCKS_BACKEND_REV={commit}");
     }
 }

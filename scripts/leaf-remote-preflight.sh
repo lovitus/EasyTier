@@ -27,6 +27,7 @@ readonly -a BUILD_SSH_OPTIONS=(
 
 readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   common::underlay_guard::tests::should_block_configured_and_runtime_addresses_when_enabled
+  common::config::tests::policy_proxy_backend_preserves_legacy_mapping_and_explicit_selection
   common::config::tests::policy_proxy_config_roundtrips_and_preserves_disabled_preference
   core::tests::check_config_fully_parses_policy_only_input_like_mihomo_test_mode
   gateway::socks5::dataplane::tests::mesh_only_connect_never_falls_back_to_kernel
@@ -42,11 +43,20 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   instance::virtual_nic::tests::leaf_owned_tun_selection_is_default_off_and_backend_bounded
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
   instance::instance::tests::socks_egress_uses_the_configured_linux_policy_mark
+  instance_manager::tests::neutral_mesh_entry
+  instance_manager::gost::tests::socks5_udp_readiness_packet_round_trips_large_ipv4_payload
+  instance_manager::gost::tests::socks5_udp_payload_rejects_fragmented_and_truncated_packets
   launcher::tests::network_config_roundtrips_policy_proxy_envelope
+  launcher::tests::network_config_roundtrips_explicit_mihomo_backend
+  managed_child::tests
+  mihomo::tests
+  rpc_service::instance_manage::tests::mihomo_policy_yaml_is_not_validated_by_the_leaf_parser
   tests::three_node::port_forward_with_inbound_default_drop_acl_test::case_2
 )
 readonly -a DEFAULT_SOCKS_EGRESS_TEST_FILTERS=(
   tests::renders_bounded_direct_egress_config
+  tests::mesh_entry_never_inherits_leaf_route_binding
+  tests::mesh_entry_and_leaf_direct_egress_ports_are_disjoint
   tests::occupied_candidate_is_rejected_without_connecting_to_owner
 )
 readonly -a DEFAULT_POLICY_TEST_FILTERS=(

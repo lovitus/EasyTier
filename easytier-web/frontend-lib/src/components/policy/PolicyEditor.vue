@@ -14,7 +14,13 @@ import {
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type * as Api from '../../modules/api'
-import type { NetworkConfig } from '../../types/network'
+import type { NetworkConfig, NetworkInstanceRunningInfo } from '../../types/network'
+import {
+  applyPolicyBackend,
+  configuredPolicyBackend,
+  policyBackendSupported,
+  type PolicyProxyBackend,
+} from '../../types/networkCompat'
 import { canEnablePolicyProxy, policyRuntimeNotice } from './policyRuntimeSupport'
 import {
   DEFAULT_POLICY_TEMPLATE,
@@ -39,7 +45,12 @@ import {
 } from './managedRuleData'
 
 const config = defineModel<NetworkConfig>({ required: true })
-const props = defineProps<{ api?: Api.RemoteClient; yamlOnly?: boolean; readOnly?: boolean }>()
+const props = defineProps<{
+  api?: Api.RemoteClient
+  yamlOnly?: boolean
+  readOnly?: boolean
+  runtimeInfo?: NetworkInstanceRunningInfo
+}>()
 const { t } = useI18n()
 
 const document = ref<PolicyEditorDocument>(emptyPolicyDocument())
@@ -63,6 +74,33 @@ const sourceOptions = computed(() => [
   { label: t('policy.editor.inline'), value: 'inline' },
   { label: t('policy.editor.file'), value: 'file' },
 ])
+const policyBackend = computed<PolicyProxyBackend>({
+  get: () => configuredPolicyBackend(config.value),
+  set: backend => setPolicyBackend(backend),
+})
+const mihomoRuntimeStatus = computed(() => props.runtimeInfo?.mihomo_status)
+const neutralMeshEntryStatus = computed(() => props.runtimeInfo?.neutral_mesh_entry_status)
+const policyBackendOptions = computed(() => {
+  const platform = outboundInfo.value?.platform?.trim().toLowerCase()
+  const leafSupported = canEnablePolicyProxy(outboundInfo.value)
+  return [
+    { label: t('policy_backend_off'), value: 'off', disabled: false },
+    {
+      label: t('policy_backend_mihomo'),
+      value: 'mihomo',
+      disabled: !policyBackendSupported('mihomo', platform, leafSupported),
+    },
+    {
+      label: t('policy_backend_leaf_deprecated'),
+      value: 'leaf',
+      disabled: !policyBackendSupported('leaf', platform, leafSupported),
+    },
+  ] satisfies Array<{
+    label: string
+    value: PolicyProxyBackend
+    disabled: boolean
+  }>
+})
 const proxyViaOptions = ['mesh', 'native']
 const proxyTypeOptions: PolicyProxyKind[] = ['socks5', 'shadowsocks', 'trojan', 'vmess', 'vless']
 const shadowsocksUdpOptions = computed(() => [
@@ -132,15 +170,17 @@ function ensureInlineDocument() {
   }
 }
 
-function setEnabled(enabled: boolean) {
-  if (enabled && !canEnablePolicyProxy(outboundInfo.value)) return
-  config.value.enable_policy_proxy = enabled
-  if (enabled && sourceMode.value === 'inline') ensureInlineDocument()
+function setPolicyBackend(backend: PolicyProxyBackend) {
+  const option = policyBackendOptions.value.find(candidate => candidate.value === backend)
+  if (props.readOnly || option?.disabled) return
+  applyPolicyBackend(config.value, backend)
+  if (backend === 'leaf' && sourceMode.value === 'inline') ensureInlineDocument()
 }
 
 watch(
   () => config.value.policy_config_inline ?? '',
   source => {
+    if (policyBackend.value !== 'leaf') return
     if (source === lastSerialized) return
     try {
       const parsed = parsePolicyDocument(source)
@@ -570,8 +610,8 @@ async function loadOutboundInterfaces() {
   }
 }
 
-watch(() => config.value.enable_policy_proxy, enabled => {
-  if (enabled && !props.yamlOnly) void loadOutboundInterfaces()
+watch(policyBackend, backend => {
+  if (backend === 'leaf' && !props.yamlOnly) void loadOutboundInterfaces()
 })
 
 const ruleDataCategoryIdentity = computed(() => {
@@ -594,6 +634,20 @@ onMounted(() => {
 <template>
   <div class="flex flex-col gap-4">
     <template v-if="props.yamlOnly">
+      <template v-if="policyBackend === 'mihomo'">
+        <Message severity="info" :closable="false">
+          {{ t('policy_mihomo_native_config_notice') }}
+        </Message>
+        <div class="flex items-center">
+          <label for="policy_config_file_quick">
+            {{ fieldLabel('policy_config_file', '/etc/easytier/mihomo.yaml') }}
+          </label>
+          <span class="pi pi-question-circle ml-2" v-tooltip="t('policy_mihomo_config_path_required')" />
+        </div>
+        <InputText id="policy_config_file_quick" v-model="config.policy_config_file"
+          :placeholder="t('policy_mihomo_config_path_example')" :readonly="props.readOnly" />
+      </template>
+      <template v-else-if="policyBackend === 'leaf'">
       <div class="flex flex-wrap items-end gap-4">
         <div class="flex flex-col gap-2">
           <label class="font-semibold">{{ t('policy.editor.source') }}</label>
@@ -619,24 +673,74 @@ onMounted(() => {
           class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')"
           :readonly="props.readOnly" />
       </template>
+      </template>
     </template>
     <template v-else>
-    <Message v-if="outboundInfo && runtimeNoticeKey" :severity="runtimeNoticeSeverity" :closable="false">
+    <Message v-if="outboundInfo && runtimeNoticeKey"
+      :severity="runtimeNoticeSeverity" :closable="false">
       {{ t(runtimeNoticeKey, { platform: outboundInfo.platform }) }}
     </Message>
     <Message v-else-if="outboundError" severity="warn" :closable="false">
       {{ t('policy.editor.outbound_load_failed') }}: {{ outboundError }}
     </Message>
 
-    <div class="flex items-center gap-3">
-      <Checkbox input-id="enable_policy_proxy" :model-value="config.enable_policy_proxy"
-        :disabled="!config.enable_policy_proxy && outboundInfo?.supported === false" binary
-        @update:model-value="setEnabled(Boolean($event))" />
-      <label for="enable_policy_proxy" class="font-semibold">{{ t('enable_policy_proxy') }}</label>
-      <span class="pi pi-question-circle" v-tooltip="t('enable_policy_proxy_help')" />
+    <div class="flex flex-col gap-2">
+      <label for="policy-backend-selector" class="font-semibold">{{ t('policy_proxy_backend') }}</label>
+      <SelectButton id="policy-backend-selector" data-testid="policy-backend-selector"
+        :model-value="policyBackend" :options="policyBackendOptions" option-label="label"
+        option-value="value" option-disabled="disabled" :allow-empty="false" :disabled="props.readOnly"
+        @update:model-value="setPolicyBackend($event as PolicyProxyBackend)" />
+      <small>{{ t('policy_proxy_backend_help') }}</small>
     </div>
 
-    <template v-if="config.enable_policy_proxy">
+    <template v-if="policyBackend === 'mihomo'">
+      <Message severity="info" :closable="false">
+        {{ t('policy_mihomo_native_config_notice') }}
+      </Message>
+      <div class="flex items-center">
+        <label for="policy_config_file">
+          {{ fieldLabel('policy_config_file', '/etc/easytier/mihomo.yaml') }}
+        </label>
+        <span class="pi pi-question-circle ml-2" v-tooltip="t('policy_mihomo_config_path_required')" />
+      </div>
+      <InputText id="policy_config_file" v-model="config.policy_config_file"
+        :placeholder="t('policy_mihomo_config_path_example')" :readonly="props.readOnly" />
+      <div class="flex items-center gap-2">
+        <span>{{ t('policy_runtime_status') }}</span>
+        <strong data-testid="mihomo-runtime-state">
+          {{ mihomoRuntimeStatus?.state || (props.runtimeInfo?.policy_runtime_running
+            ? t('policy_runtime_running')
+            : t('policy_runtime_stopped')) }}
+        </strong>
+      </div>
+      <div v-if="mihomoRuntimeStatus?.pid" class="text-sm">
+        {{ t('policy_runtime_pid') }}: {{ mihomoRuntimeStatus.pid }}
+      </div>
+      <div class="text-sm" data-testid="mihomo-restart-count">
+        {{ t('policy_runtime_restart_count') }}: {{ mihomoRuntimeStatus?.restart_count ?? 0 }}
+      </div>
+      <div v-if="neutralMeshEntryStatus" class="text-sm" data-testid="mesh-entry-status">
+        {{ t('policy_mesh_entry') }}:
+        {{ neutralMeshEntryStatus.state }}
+        <template v-if="neutralMeshEntryStatus.endpoint">
+          · {{ neutralMeshEntryStatus.endpoint }}
+        </template>
+        · {{ neutralMeshEntryStatus.backend }}
+      </div>
+      <Message v-if="mihomoRuntimeStatus?.last_error || props.runtimeInfo?.error_msg"
+        severity="error" :closable="false">
+        {{ t('policy_instance_error') }}:
+        {{ mihomoRuntimeStatus?.last_error || props.runtimeInfo?.error_msg }}
+      </Message>
+      <Message v-if="neutralMeshEntryStatus?.last_error" severity="warn" :closable="false">
+        {{ t('policy_mesh_entry_error') }}: {{ neutralMeshEntryStatus.last_error }}
+      </Message>
+    </template>
+
+    <template v-if="policyBackend === 'leaf'">
+      <Message severity="warn" :closable="false">
+        {{ t('policy_leaf_deprecated_notice') }}
+      </Message>
       <div v-if="outboundInfo?.platform === 'linux'" class="flex items-center gap-3">
         <Checkbox input-id="policy_leaf_tun_fast_path" v-model="config.policy_leaf_tun_fast_path" binary />
         <label for="policy_leaf_tun_fast_path" class="font-semibold">{{ t('policy_leaf_tun_fast_path') }}</label>

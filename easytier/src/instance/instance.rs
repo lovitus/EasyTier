@@ -619,14 +619,14 @@ impl InstanceConfigPatcher {
     }
 }
 
-#[cfg(feature = "leaf-policy-proxy")]
+#[cfg(feature = "mesh-socks-egress")]
 struct SocksEgressGuard {
     endpoint: std::net::SocketAddr,
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
-#[cfg(feature = "leaf-policy-proxy")]
+#[cfg(feature = "mesh-socks-egress")]
 impl SocksEgressGuard {
     fn is_finished(&self) -> bool {
         self.task
@@ -653,7 +653,7 @@ impl SocksEgressGuard {
     }
 }
 
-#[cfg(feature = "leaf-policy-proxy")]
+#[cfg(feature = "mesh-socks-egress")]
 impl Drop for SocksEgressGuard {
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -663,28 +663,27 @@ impl Drop for SocksEgressGuard {
     }
 }
 
-#[cfg(feature = "leaf-policy-proxy")]
+#[cfg(feature = "mesh-socks-egress")]
 struct SocksEgressManager {
     guard: tokio::sync::Mutex<Option<SocksEgressGuard>>,
-    #[cfg(target_os = "linux")]
-    socket_mark: Option<u32>,
-    #[cfg(target_os = "macos")]
-    outbound_interface: Option<String>,
+    server: easytier_socks_egress::SocksEgressConfig,
 }
 
-#[cfg(feature = "leaf-policy-proxy")]
+#[cfg(feature = "mesh-socks-egress")]
+fn pin_socks_egress_restart_port(
+    mut config: easytier_socks_egress::ProcessConfig,
+    endpoint: std::net::SocketAddr,
+) -> easytier_socks_egress::ProcessConfig {
+    config.server.port_candidates = vec![endpoint.port()];
+    config
+}
+
+#[cfg(feature = "mesh-socks-egress")]
 impl SocksEgressManager {
-    fn new(socket_mark: Option<u32>, outbound_interface: Option<String>) -> Self {
-        #[cfg(not(target_os = "linux"))]
-        let _ = socket_mark;
-        #[cfg(not(target_os = "macos"))]
-        let _ = outbound_interface;
+    fn new(server: easytier_socks_egress::SocksEgressConfig) -> Self {
         Self {
             guard: tokio::sync::Mutex::new(None),
-            #[cfg(target_os = "linux")]
-            socket_mark,
-            #[cfg(target_os = "macos")]
-            outbound_interface,
+            server,
         }
     }
 
@@ -693,17 +692,8 @@ impl SocksEgressManager {
         &self,
         executable: std::path::PathBuf,
     ) -> easytier_socks_egress::ProcessConfig {
-        let config = easytier_socks_egress::ProcessConfig::new(executable);
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let mut config = config;
-        #[cfg(target_os = "linux")]
-        {
-            config.server.socket_mark = self.socket_mark;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            config.server.bind_interface = self.outbound_interface.clone();
-        }
+        let mut config = easytier_socks_egress::ProcessConfig::new(executable);
+        config.server = self.server.clone();
         config
     }
 
@@ -723,13 +713,49 @@ impl SocksEgressManager {
             );
         }
         let config = self.process_config(executable);
-        let runtime = easytier_socks_egress::ProcessRuntime::start(config).await?;
+        let runtime = easytier_socks_egress::ProcessRuntime::start(config.clone()).await?;
         let endpoint = runtime.endpoint();
+        // The endpoint is externally configured by port. After publishing it,
+        // retries must preserve that port instead of silently moving to another
+        // candidate and leaving existing SOCKS clients pointed at a stale address.
+        let restart_config = pin_socks_egress_restart_port(config, endpoint);
         let cancel = CancellationToken::new();
         let runtime_cancel = cancel.clone();
         let task = tokio::spawn(async move {
-            if let Err(error) = runtime.run_until_cancel(runtime_cancel).await {
-                tracing::warn!(%endpoint, ?error, "HEV SOCKS egress stopped unexpectedly");
+            let mut runtime = runtime;
+            loop {
+                let result = runtime.run_until_cancel(runtime_cancel.clone()).await;
+                if runtime_cancel.is_cancelled() {
+                    return;
+                }
+                tracing::warn!(%endpoint, ?result, "HEV SOCKS egress stopped unexpectedly");
+
+                let mut retry_delay = std::time::Duration::from_secs(1);
+                loop {
+                    tokio::select! {
+                        _ = runtime_cancel.cancelled() => return,
+                        _ = tokio::time::sleep(retry_delay) => {}
+                    }
+                    match easytier_socks_egress::ProcessRuntime::start(restart_config.clone()).await
+                    {
+                        Ok(restarted) => {
+                            tracing::info!(%endpoint, "HEV SOCKS egress restarted");
+                            runtime = restarted;
+                            break;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %endpoint,
+                                ?error,
+                                ?retry_delay,
+                                "failed to restart HEV SOCKS egress"
+                            );
+                            retry_delay = retry_delay
+                                .saturating_mul(2)
+                                .min(std::time::Duration::from_secs(30));
+                        }
+                    }
+                }
             }
         });
         Ok(SocksEgressGuard {
@@ -741,10 +767,7 @@ impl SocksEgressManager {
 
     #[cfg(all(mobile, target_os = "android"))]
     async fn start_guard(&self) -> anyhow::Result<SocksEgressGuard> {
-        let runtime = easytier_socks_egress::InProcessRuntime::start(
-            easytier_socks_egress::SocksEgressConfig::default(),
-        )
-        .await?;
+        let runtime = easytier_socks_egress::InProcessRuntime::start(self.server.clone()).await?;
         let endpoint = runtime.endpoint();
         let cancel = CancellationToken::new();
         let runtime_cancel = cancel.clone();
@@ -837,8 +860,8 @@ pub struct Instance {
     #[cfg(feature = "leaf-policy-proxy")]
     policy_socks_relay: Option<Arc<crate::policy_proxy::MeshSocksRelayService>>,
 
-    #[cfg(feature = "leaf-policy-proxy")]
-    socks_egress: Option<Arc<SocksEgressManager>>,
+    #[cfg(all(feature = "leaf-policy-proxy", not(target_os = "android")))]
+    policy_socks_egress: Option<Arc<SocksEgressManager>>,
 
     proxy_cidrs_monitor: Option<AbortOnDropHandle<()>>,
 
@@ -932,8 +955,8 @@ impl Instance {
             #[cfg(feature = "leaf-policy-proxy")]
             policy_socks_relay: None,
 
-            #[cfg(feature = "leaf-policy-proxy")]
-            socks_egress: None,
+            #[cfg(all(feature = "leaf-policy-proxy", not(target_os = "android")))]
+            policy_socks_egress: None,
 
             proxy_cidrs_monitor: None,
 
@@ -1382,35 +1405,53 @@ impl Instance {
 
         #[cfg(feature = "leaf-policy-proxy")]
         {
-            // This relay and all built-in virtual ingress candidates are
-            // intentionally registered for every feature-on instance, even when
-            // this node has no local policy document. A remote portless mesh actor
-            // must be able to select this node as an egress without requiring an
-            // unrelated local policy switch. Registration only reserves the
-            // userspace mesh ports; SocksEgressManager still starts HEV lazily on
-            // the first built-in TCP/UDP request. Do not make this conditional on
-            // local policy configuration as a disabled-mode optimization.
-            let policy_config = self.global_ctx.config.get_policy_proxy_config();
-            let outbound_interface = policy_config
-                .filter(|config| config.enabled)
-                .and_then(|config| config.outbound_interface);
-            let socks_egress = Arc::new(SocksEgressManager::new(
-                self.global_ctx.get_flags().socket_mark,
-                outbound_interface,
-            ));
-            let endpoint_provider: Arc<dyn crate::policy_proxy::LocalSocksEndpointProvider> =
-                socks_egress.clone();
+            // The neutral 11080-11082 mesh entry is Core-owned and shared by all
+            // networks. Leaf direct egress remains policy-instance-owned on
+            // 11180-11182 for non-Android hosts.
+            #[cfg(target_os = "android")]
+            let endpoint_provider: Arc<
+                dyn crate::policy_proxy::LocalSocksEndpointProvider,
+            > = crate::instance_manager::CoreMeshEntryHandle::global();
+            #[cfg(not(target_os = "android"))]
+            let policy_socks_egress = {
+                let policy_config = self.global_ctx.config.get_policy_proxy_config();
+                let outbound_interface = policy_config
+                    .filter(|config| config.is_leaf_enabled())
+                    .and_then(|config| config.outbound_interface);
+                let direct_config =
+                    easytier_socks_egress::SocksEgressConfig::leaf_direct_egress(None, None);
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                let mut direct_config = direct_config;
+                #[cfg(target_os = "linux")]
+                {
+                    direct_config.socket_mark = self.global_ctx.get_flags().socket_mark;
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    direct_config.bind_interface = outbound_interface;
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = outbound_interface;
+                Arc::new(SocksEgressManager::new(direct_config))
+            };
+            #[cfg(not(target_os = "android"))]
+            let endpoint_provider: Arc<
+                dyn crate::policy_proxy::LocalSocksEndpointProvider,
+            > = policy_socks_egress.clone();
             let relay = crate::policy_proxy::MeshSocksRelayService::new(
                 &self.peer_manager,
                 self.socks5_server.clone(),
                 Some(endpoint_provider),
             );
             relay.register();
-            if let Err(error) = relay.start_local_tcp_ingress().await {
-                tracing::warn!(?error, "built-in HEV mesh TCP ingress is unavailable");
+            if let Err(error) = relay.start_local_tcp_ingress_background() {
+                tracing::warn!(?error, "failed to schedule built-in HEV mesh TCP ingress");
             }
             self.policy_socks_relay = Some(relay);
-            self.socks_egress = Some(socks_egress);
+            #[cfg(not(target_os = "android"))]
+            {
+                self.policy_socks_egress = Some(policy_socks_egress);
+            }
         }
 
         Ok(())
@@ -1959,9 +2000,9 @@ impl Instance {
         if let Some(relay) = self.policy_socks_relay.take() {
             relay.shutdown().await;
         }
-        #[cfg(feature = "leaf-policy-proxy")]
-        if let Some(socks_egress) = self.socks_egress.take() {
-            socks_egress.shutdown().await;
+        #[cfg(all(feature = "leaf-policy-proxy", not(target_os = "android")))]
+        if let Some(policy_socks_egress) = self.policy_socks_egress.take() {
+            policy_socks_egress.shutdown().await;
         }
         self.peer_manager.clear_resources().await;
     }
@@ -2009,7 +2050,7 @@ mod tests {
         proto::{api::config::InstanceConfigPatch, rpc_impl::standalone::RpcServerHook},
     };
 
-    #[cfg(feature = "leaf-policy-proxy")]
+    #[cfg(feature = "mesh-socks-egress")]
     #[tokio::test]
     async fn socks_egress_guard_shutdown_waits_for_owned_task() {
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -2030,22 +2071,57 @@ mod tests {
         assert!(finished_rx.await.is_ok());
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", not(mobile), target_os = "linux"))]
+    #[cfg(feature = "mesh-socks-egress")]
+    #[test]
+    fn socks_egress_restart_keeps_the_published_port() {
+        let config = easytier_socks_egress::ProcessConfig::new("/tmp/easytier-hev-socks-egress");
+        let endpoint = "127.0.0.1:11081".parse().unwrap();
+
+        let pinned = super::pin_socks_egress_restart_port(config, endpoint);
+
+        assert_eq!(pinned.server.port_candidates, vec![11081]);
+    }
+
+    #[cfg(all(feature = "mesh-socks-egress", not(mobile), target_os = "linux"))]
     #[test]
     fn socks_egress_uses_the_configured_linux_policy_mark() {
-        let manager = super::SocksEgressManager::new(Some(77), None);
+        let manager = super::SocksEgressManager::new(
+            easytier_socks_egress::SocksEgressConfig::leaf_direct_egress(None, Some(77)),
+        );
         let config = manager.process_config("/tmp/easytier-hev-socks-egress".into());
 
         assert_eq!(config.server.socket_mark, Some(77));
+        assert_eq!(
+            config.server.port_candidates,
+            easytier_socks_egress::LEAF_DIRECT_EGRESS_PORT_CANDIDATES
+        );
     }
 
-    #[cfg(all(feature = "leaf-policy-proxy", not(mobile), target_os = "macos"))]
+    #[cfg(all(feature = "mesh-socks-egress", not(mobile), target_os = "macos"))]
     #[test]
     fn socks_egress_binds_macos_outbound_interface() {
-        let manager = super::SocksEgressManager::new(None, Some("en0".to_owned()));
+        let manager = super::SocksEgressManager::new(
+            easytier_socks_egress::SocksEgressConfig::leaf_direct_egress(
+                Some("en0".to_owned()),
+                None,
+            ),
+        );
         let config = manager.process_config("/tmp/easytier-hev-socks-egress".into());
 
         assert_eq!(config.server.bind_interface.as_deref(), Some("en0"));
+    }
+
+    #[cfg(all(feature = "mesh-socks-egress", not(mobile)))]
+    #[test]
+    fn mesh_entry_uses_system_routes_without_leaf_binding() {
+        let config = easytier_socks_egress::SocksEgressConfig::mesh_entry();
+
+        assert_eq!(config.bind_interface, None);
+        assert_eq!(config.socket_mark, None);
+        assert_eq!(
+            config.port_candidates,
+            easytier_socks_egress::MESH_ENTRY_PORT_CANDIDATES
+        );
     }
 
     #[tokio::test]

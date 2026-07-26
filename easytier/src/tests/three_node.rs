@@ -312,6 +312,8 @@ async fn init_lazy_p2p_three_node_ex<F: Fn(TomlConfigLoader) -> TomlConfigLoader
 }
 
 pub async fn drop_insts(insts: Vec<Instance>) {
+    const INSTANCE_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
     let mut set = JoinSet::new();
     for mut inst in insts {
         set.spawn(async move {
@@ -319,14 +321,16 @@ pub async fn drop_insts(insts: Vec<Instance>) {
             let pm = Arc::downgrade(&inst.get_peer_manager());
             drop(inst);
             let now = std::time::Instant::now();
-            while now.elapsed().as_secs() < 5 && pm.strong_count() > 0 {
+            while now.elapsed() < INSTANCE_CLEANUP_TIMEOUT && pm.strong_count() > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
 
-            debug_assert_eq!(pm.strong_count(), 0, "PeerManager should be dropped");
+            assert_eq!(pm.strong_count(), 0, "PeerManager should be dropped");
         });
     }
-    while set.join_next().await.is_some() {}
+    while let Some(result) = set.join_next().await {
+        result.expect("three-node instance cleanup task panicked");
+    }
 }
 
 mod direct_connector_mapped_listener_tests {
@@ -2654,6 +2658,9 @@ pub async fn port_forward_with_inbound_default_drop_acl_test(
         Duration::from_secs(5),
     )
     .await;
+    // The readiness snapshot owns one Arc per instance. Release those test-only
+    // references before drop_insts verifies that runtime owners have shut down.
+    drop(peer_managers);
 
     for (bind_port, server_ns) in [(23456, "net_c"), (23457, "net_d")] {
         let tcp_listener =

@@ -25,6 +25,25 @@ defaults:
     shell: bash
 
 jobs:
+  resolve_mihomo:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve latest stable Mihomo release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/fetch-mihomo-release.sh resolve-latest \
+            mihomo-release-manifest.json
+      - uses: actions/upload-artifact@v5
+        with:
+          name: mihomo-release-manifest
+          path: mihomo-release-manifest.json
+          if-no-files-found: error
+
   pre_job:
     # continue-on-error: true # Uncomment once integration is finished
     runs-on: ubuntu-latest
@@ -40,7 +59,7 @@ jobs:
           concurrent_skipping: 'same_content_newer'
           skip_after_successful_duplicate: 'true'
           cancel_others: 'true'
-          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "easytier-policy/**", "easytier-socks-egress/**", "third_party/**", "scripts/build-hev-socks-egress.sh", "easytier-gui/**", ".github/workflows/gui.yml", ".github/actions/**", "easytier-web/frontend-lib/**"]'
+          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "easytier-policy/**", "easytier-socks-egress/**", "third_party/**", "scripts/build-hev-socks-egress.sh", "scripts/fetch-gost-release.sh", "scripts/fetch-mihomo-release.sh", "easytier-gui/**", ".github/workflows/gui.yml", ".github/actions/**", "easytier-web/frontend-lib/**"]'
   build-gui:
     strategy:
       fail-fast: true
@@ -49,10 +68,12 @@ jobs:
           - TARGET: x86_64-unknown-linux-musl
             OS: ubuntu-24.04
             GUI_TARGET: x86_64-unknown-linux-gnu
+            MIHOMO_TARGET: x86_64-unknown-linux-musl
             ARTIFACT_NAME: linux-x86_64
           - TARGET: aarch64-unknown-linux-musl
             OS: ubuntu-24.04-arm
             GUI_TARGET: aarch64-unknown-linux-gnu
+            MIHOMO_TARGET: aarch64-unknown-linux-musl
             ARTIFACT_NAME: linux-aarch64
 
           - TARGET: x86_64-apple-darwin
@@ -84,14 +105,14 @@ jobs:
       OS: ${{ matrix.OS }}
       GUI_TARGET: ${{ matrix.GUI_TARGET }}
       OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
-    needs: pre_job
+    needs: [pre_job, resolve_mihomo]
     if: needs.pre_job.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v5
 
       - name: Set current ref as env variable
         run: |
-          echo "GIT_DESC=$(git log -1 --format=%cd.%h --date=format:%Y-%m-%d_%H:%M:%S)" >> $GITHUB_ENV
+          echo "GIT_DESC=$(git log -1 --format=%cd.%h --date=format:%Y-%m-%d_%H:%M:%S)" >> "$GITHUB_ENV"
 
       - name: Prepare build environment
         uses: ./.github/actions/prepare-build
@@ -140,13 +161,84 @@ jobs:
           cp "target/$GUI_TARGET/release/easytier-leaf-worker$SUFFIX" \
             "easytier-gui/src-tauri/binaries/easytier-leaf-worker-$GUI_TARGET$SUFFIX"
           test -f "easytier-gui/src-tauri/binaries/easytier-leaf-worker-$GUI_TARGET$SUFFIX"
-          if [[ "$GUI_TARGET" == *windows* ]]; then
-            exit 0
-          fi
+          backend="hev-native"
+          if [[ "$GUI_TARGET" == *windows* ]]; then backend="leaf-portable"; fi
           scripts/build-hev-socks-egress.sh "$GUI_TARGET" \
-            "easytier-gui/src-tauri/binaries/easytier-hev-socks-egress-$GUI_TARGET"
-          test -x "easytier-gui/src-tauri/binaries/easytier-leaf-worker-$GUI_TARGET"
-          test -x "easytier-gui/src-tauri/binaries/easytier-hev-socks-egress-$GUI_TARGET"
+            "easytier-gui/src-tauri/binaries/easytier-hev-socks-egress-$GUI_TARGET$SUFFIX"
+          test -f "easytier-gui/src-tauri/binaries/easytier-hev-socks-egress-$GUI_TARGET$SUFFIX"
+          if [[ "$GUI_TARGET" != *windows* ]]; then
+            test -x "easytier-gui/src-tauri/binaries/easytier-hev-socks-egress-$GUI_TARGET"
+          fi
+          printf 'component=easytier-socks-egress\ntarget=%s\nbackend=%s\n' \
+            "$GUI_TARGET" "$backend" \
+            > easytier-gui/src-tauri/binaries/SOCKS_EGRESS_BUILD_INFO.txt
+          if command -v python3 >/dev/null 2>&1; then python_cmd=python3; else python_cmd=python; fi
+          "$python_cmd" - \
+            "easytier-gui/src-tauri/binaries/easytier-hev-socks-egress-$GUI_TARGET$SUFFIX" \
+            "$GUI_TARGET" <<'PY'
+          import pathlib, struct, sys
+          data = pathlib.Path(sys.argv[1]).read_bytes()
+          target = sys.argv[2]
+          if "windows" in target:
+              offset = struct.unpack_from("<I", data, 0x3c)[0]
+              if data[offset:offset + 4] != b"PE\0\0":
+                  raise SystemExit("invalid GUI socks-egress PE header")
+              machine = struct.unpack_from("<H", data, offset + 4)[0]
+              wanted = {"x86_64": 0x8664, "i686": 0x014c, "aarch64": 0xaa64}[target.split("-", 1)[0]]
+          elif "darwin" in target:
+              machine = struct.unpack_from("<I", data, 4)[0]
+              wanted = 0x01000007 if target.startswith("x86_64") else 0x0100000c
+          else:
+              if data[:4] != b"\x7fELF":
+                  raise SystemExit("invalid GUI socks-egress ELF header")
+              endian = "<" if data[5] == 1 else ">"
+              machine = struct.unpack_from(endian + "H", data, 18)[0]
+              wanted = 62 if target.startswith("x86_64") else 183
+          if machine != wanted:
+              raise SystemExit(f"GUI socks-egress machine mismatch: expected {wanted}, got {machine}")
+          PY
+
+      - name: Download resolved Mihomo release manifest
+        uses: actions/download-artifact@v5
+        with:
+          name: mihomo-release-manifest
+          path: target/mihomo-release
+
+      - name: Fetch and verify workflow-pinned Mihomo
+        env:
+          MIHOMO_RELEASE_MANIFEST: ${{ github.workspace }}/target/mihomo-release/mihomo-release-manifest.json
+          MIHOMO_TARGET: ${{ matrix.MIHOMO_TARGET }}
+        run: |
+          set -euo pipefail
+          mkdir -p easytier-gui/src-tauri/binaries
+          MIHOMO_TARGET="${MIHOMO_TARGET:-$GUI_TARGET}"
+          if [[ "$GUI_TARGET" == *windows* ]]; then
+            SUFFIX=.exe
+          else
+            SUFFIX=""
+          fi
+          MIHOMO_DISTRIBUTED_BINARY_NAME="easytier-mihomo$SUFFIX" \
+            bash scripts/fetch-mihomo-release.sh fetch "$MIHOMO_TARGET" \
+            "easytier-gui/src-tauri/binaries/easytier-mihomo-$GUI_TARGET$SUFFIX" \
+            "easytier-gui/src-tauri/binaries/easytier-mihomo-manifest.json"
+          cp easytier/resources/policy-rule-data/METACUBEX-GPL-3.0.txt \
+            easytier-gui/src-tauri/binaries/MIHOMO_LICENSE.txt
+          cp easytier/resources/mihomo/SOURCE.md \
+            easytier-gui/src-tauri/binaries/MIHOMO_SOURCE.md
+          bash scripts/fetch-gost-release.sh fetch "$MIHOMO_TARGET" \
+            "easytier-gui/src-tauri/binaries/easytier-gost-$GUI_TARGET$SUFFIX" \
+            "easytier-gui/src-tauri/binaries/easytier-gost.manifest.json"
+          cp easytier/resources/gost/LICENSE \
+            easytier-gui/src-tauri/binaries/GOST_LICENSE.txt
+          cp easytier/resources/gost/SOURCE.md \
+            easytier-gui/src-tauri/binaries/GOST_SOURCE.md
+          if [[ "$GUI_TARGET" == *darwin* ]]; then
+            cargo build --locked --release --target "$GUI_TARGET" \
+              --package easytier-socks-egress --bin easytier-gost-guardian
+            cp "target/$GUI_TARGET/release/easytier-gost-guardian" \
+              "easytier-gui/src-tauri/binaries/easytier-gost-guardian-$GUI_TARGET"
+            test -x "easytier-gui/src-tauri/binaries/easytier-gost-guardian-$GUI_TARGET"
+          fi
 
       - name: Build GUI
         if: matrix.GUI_TARGET != ''
@@ -162,7 +254,7 @@ jobs:
           if [[ "$GUI_TARGET" == *darwin* ]]; then
             app_dir=$(find "target/$GUI_TARGET/release/bundle/macos" -maxdepth 1 -type d -name '*.app' -print -quit)
             test -n "$app_dir"
-            for executable in easytier-gui easytier-leaf-worker easytier-hev-socks-egress; do
+            for executable in easytier-gui easytier-leaf-worker easytier-hev-socks-egress easytier-gost-guardian easytier-gost easytier-mihomo; do
               test -x "$app_dir/Contents/MacOS/$executable"
               codesign --verify --strict --verbose=2 "$app_dir/Contents/MacOS/$executable"
             done
@@ -173,7 +265,7 @@ jobs:
             extract_dir="$RUNNER_TEMP/easytier-gui-deb"
             mkdir -p "$extract_dir"
             dpkg-deb -x "$deb_file" "$extract_dir"
-            for executable in easytier-leaf-worker easytier-hev-socks-egress; do
+            for executable in easytier-leaf-worker easytier-hev-socks-egress easytier-gost easytier-mihomo; do
               bundled=$(find "$extract_dir" -type f -name "$executable" -print -quit)
               test -n "$bundled"
               test -x "$bundled"
@@ -188,27 +280,56 @@ jobs:
           test -n "$installer"
           7z l "$installer" > "$RUNNER_TEMP/windows-installer-files.txt"
           grep -F "easytier-leaf-worker.exe" "$RUNNER_TEMP/windows-installer-files.txt"
+          grep -F "easytier-hev-socks-egress.exe" "$RUNNER_TEMP/windows-installer-files.txt"
+          grep -F "easytier-gost.exe" "$RUNNER_TEMP/windows-installer-files.txt"
+          grep -F "easytier-gost.manifest.json" "$RUNNER_TEMP/windows-installer-files.txt"
+          grep -F "GOST_LICENSE.txt" "$RUNNER_TEMP/windows-installer-files.txt"
+          grep -F "GOST_SOURCE.md" "$RUNNER_TEMP/windows-installer-files.txt"
+          grep -F "SOCKS_EGRESS_BUILD_INFO.txt" "$RUNNER_TEMP/windows-installer-files.txt"
+          grep -F "easytier-mihomo.exe" "$RUNNER_TEMP/windows-installer-files.txt"
+          grep -F "easytier-mihomo-manifest.json" "$RUNNER_TEMP/windows-installer-files.txt"
+          grep -F "MIHOMO_LICENSE.txt" "$RUNNER_TEMP/windows-installer-files.txt"
+          grep -F "MIHOMO_SOURCE.md" "$RUNNER_TEMP/windows-installer-files.txt"
+          grep -F "MIHOMO_SHA256SUMS.txt" "$RUNNER_TEMP/windows-installer-files.txt"
+          grep -F "MIHOMO_BUILD_INFO.txt" "$RUNNER_TEMP/windows-installer-files.txt"
           grep -F "wintun.dll" "$RUNNER_TEMP/windows-installer-files.txt"
+
+      - name: Verify packaged Mihomo compliance payload
+        if: matrix.GUI_TARGET != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="easytier-gui/src-tauri/target/${GUI_TARGET}/release/bundle"
+          test -d "$bundle_root"
+          for required_name in \
+            easytier-mihomo-manifest.json \
+            MIHOMO_LICENSE.txt \
+            MIHOMO_SOURCE.md \
+            MIHOMO_SHA256SUMS.txt \
+            MIHOMO_BUILD_INFO.txt \
+            easytier-gost.manifest.json \
+            GOST_LICENSE.txt \
+            GOST_SOURCE.md \
+            SOCKS_EGRESS_BUILD_INFO.txt
+          do
+            find "$bundle_root" -type f -name "$required_name" -print -quit | grep -q .
+          done
 
       - name: Collect artifact
         run: |
           mkdir -p ./artifacts/objects/
+          cp target/mihomo-release/mihomo-release-manifest.json \
+            "./artifacts/objects/MIHOMO_RELEASE_MANIFEST-${GUI_TARGET}.json"
           
-          if [[ $GITHUB_REF_TYPE =~ ^tag$ ]]; then
-            TAG=$GITHUB_REF_NAME
-          else
-            TAG=$GITHUB_SHA
-          fi
-
           # copy gui bundle, gui is built without specific target
           if [[ $GUI_TARGET =~ windows ]]; then
-              mv ./target/$GUI_TARGET/release/bundle/nsis/*.exe ./artifacts/objects/
+              mv "./target/$GUI_TARGET/release/bundle/nsis/"*.exe ./artifacts/objects/
           elif [[ $GUI_TARGET =~ darwin ]]; then
-              mv ./target/$GUI_TARGET/release/bundle/dmg/*.dmg ./artifacts/objects/
+              mv "./target/$GUI_TARGET/release/bundle/dmg/"*.dmg ./artifacts/objects/
           elif [[ $GUI_TARGET =~ linux ]]; then
-              mv ./target/$GUI_TARGET/release/bundle/deb/*.deb ./artifacts/objects/
-              mv ./target/$GUI_TARGET/release/bundle/rpm/*.rpm ./artifacts/objects/
-              mv ./target/$GUI_TARGET/release/bundle/appimage/*.AppImage ./artifacts/objects/
+              mv "./target/$GUI_TARGET/release/bundle/deb/"*.deb ./artifacts/objects/
+              mv "./target/$GUI_TARGET/release/bundle/rpm/"*.rpm ./artifacts/objects/
+              mv "./target/$GUI_TARGET/release/bundle/appimage/"*.AppImage ./artifacts/objects/
           fi
 
           mv ./artifacts/objects/* ./artifacts/

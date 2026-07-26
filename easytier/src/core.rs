@@ -1542,6 +1542,13 @@ fn win_service_main(arg: Vec<std::ffi::OsString>) {
 async fn run_main(cli: Cli) -> anyhow::Result<()> {
     defer!(dump_profile(0););
     log::init(&cli.logging_options, true)?;
+    // Register Unix termination handlers before starting any network instance
+    // or supervised sidecar. Otherwise SIGINT/SIGTERM received while Mihomo is
+    // becoming ready takes the kernel default path and skips Rust cleanup.
+    #[cfg(unix)]
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     if cli.nic_backend() != NicBackend::Tun && cli.network_options.no_tun == Some(true) {
         anyhow::bail!("--no-tun conflicts with --nic-backend veth/auto");
     }
@@ -1587,6 +1594,18 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
             .with_config_path(cli.config_dir.clone())
             .with_nic_backend(cli.nic_backend()),
     );
+    struct MihomoOwnerShutdownGuard(Arc<NetworkInstanceManager>);
+    impl Drop for MihomoOwnerShutdownGuard {
+        fn drop(&mut self) {
+            if let Err(error) = self.0.shutdown_mihomo_owner() {
+                log::error!(%error, "failed to shut down Mihomo owner");
+            }
+        }
+    }
+    // The owner itself is process-global and therefore cannot rely on Drop.
+    // Keep this guard in run_main so every return path reaps Mihomo before the
+    // Tokio runtime and its network-instance tasks are torn down.
+    let _mihomo_owner_shutdown = MihomoOwnerShutdownGuard(manager.clone());
 
     let _rpc_server = ApiRpcServer::new(
         cli.rpc_portal_options.rpc_portal,
@@ -1724,11 +1743,13 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     }
 
     #[cfg(unix)]
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    #[cfg(unix)]
     let sigterm = sigterm.recv();
     #[cfg(not(unix))]
     let sigterm = std::future::pending::<()>();
+    #[cfg(unix)]
+    let sigint = sigint.recv();
+    #[cfg(not(unix))]
+    let sigint = tokio::signal::ctrl_c();
 
     tokio::select! {
         _ = manager.wait() => {
@@ -1739,7 +1760,7 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
                 return Err(anyhow::anyhow!("some instances stopped with errors"));
             }
         }
-        _ = tokio::signal::ctrl_c() => {
+        _ = sigint => {
             log::info!("ctrl-c received, exiting...");
         }
 

@@ -1,0 +1,104 @@
+{
+  "schema_version": 2,
+  "repository": "https://github.com/MetaCubeX/mihomo",
+  "release_policy": {
+    "channel": "latest-stable",
+    "reject_draft": true,
+    "reject_prerelease": true
+  },
+  "license": "GPL-3.0-only",
+  "license_file": "easytier/resources/policy-rule-data/METACUBEX-GPL-3.0.txt",
+  "targets": {
+    "x86_64-unknown-linux-musl": {
+      "status": "supported",
+      "asset_template": "mihomo-linux-amd64-compatible-v{version}.gz",
+      "archive": "gzip",
+      "binary_format": "elf",
+      "machine": 62
+    },
+    "aarch64-unknown-linux-musl": {
+      "status": "supported",
+      "asset_template": "mihomo-linux-arm64-v{version}.gz",
+      "archive": "gzip",
+      "binary_format": "elf",
+      "machine": 183
+    },
+    "riscv64gc-unknown-linux-musl": {
+      "status": "supported",
+      "asset_template": "mihomo-linux-riscv64-v{version}.gz",
+      "archive": "gzip",
+      "binary_format": "elf",
+      "machine": 243
+    },
+    "loongarch64-unknown-linux-musl": {
+      "status": "needs_review",
+      "reason": "Upstream publishes separate loong64 ABI1 and ABI2 assets; the current release target has no verified ABI mapping."
+    },
+    "armv7-unknown-linux-musleabihf": {
+      "status": "needs_review",
+      "reason": "The upstream armv7 asset does not encode the hard-float ABI required by this Rust target."
+    },
+    "armv7-unknown-linux-musleabi": {
+      "status": "needs_review",
+      "reason": "The upstream armv7 asset does not encode the soft-float ABI required by this Rust target."
+    },
+    "arm-unknown-linux-musleabihf": {
+      "status": "needs_review",
+      "reason": "Upstream publishes an armv5 asset, but compatibility with this Rust target has not been proven."
+    },
+    "arm-unknown-linux-musleabi": {
+      "status": "needs_review",
+      "reason": "Upstream publishes an armv5 asset, but compatibility with this Rust target has not been proven."
+    },
+    "mips-unknown-linux-musl": {
+      "status": "needs_review",
+      "reason": "Upstream publishes hard-float and soft-float MIPS assets; the current release target has no verified ABI mapping."
+    },
+    "mipsel-unknown-linux-musl": {
+      "status": "needs_review",
+      "reason": "Upstream publishes hard-float and soft-float MIPSel assets; the current release target has no verified ABI mapping."
+    },
+    "x86_64-unknown-freebsd": {
+      "status": "supported",
+      "asset_template": "mihomo-freebsd-amd64-compatible-v{version}.gz",
+      "archive": "gzip",
+      "binary_format": "elf",
+      "machine": 62
+    },
+    "x86_64-apple-darwin": {
+      "status": "supported",
+      "asset_template": "mihomo-darwin-amd64-compatible-v{version}.gz",
+      "archive": "gzip",
+      "binary_format": "macho",
+      "machine": 16777223
+    },
+    "aarch64-apple-darwin": {
+      "status": "supported",
+      "asset_template": "mihomo-darwin-arm64-v{version}.gz",
+      "archive": "gzip",
+      "binary_format": "macho",
+      "machine": 16777228
+    },
+    "x86_64-pc-windows-msvc": {
+      "status": "supported",
+      "asset_template": "mihomo-windows-amd64-compatible-v{version}.zip",
+      "archive": "zip",
+      "binary_format": "pe",
+      "machine": 34404
+    },
+    "i686-pc-windows-msvc": {
+      "status": "supported",
+      "asset_template": "mihomo-windows-386-v{version}.zip",
+      "archive": "zip",
+      "binary_format": "pe",
+      "machine": 332
+    },
+    "aarch64-pc-windows-msvc": {
+      "status": "supported",
+      "asset_template": "mihomo-windows-arm64-v{version}.zip",
+      "archive": "zip",
+      "binary_format": "pe",
+      "machine": 43620
+    }
+  }
+}

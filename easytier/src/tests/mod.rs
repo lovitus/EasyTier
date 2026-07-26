@@ -256,6 +256,8 @@ fn set_link_status(net_ns: &str, up: bool) {
 }
 
 pub async fn drop_insts(insts: Vec<crate::instance::instance::Instance>) {
+    const INSTANCE_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
     let mut set = tokio::task::JoinSet::new();
     for mut inst in insts {
         set.spawn(async move {
@@ -263,13 +265,15 @@ pub async fn drop_insts(insts: Vec<crate::instance::instance::Instance>) {
             let pm = std::sync::Arc::downgrade(&inst.get_peer_manager());
             drop(inst);
             let now = std::time::Instant::now();
-            while now.elapsed().as_secs() < 5 && pm.strong_count() > 0 {
+            while now.elapsed() < INSTANCE_CLEANUP_TIMEOUT && pm.strong_count() > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             assert_eq!(pm.strong_count(), 0, "PeerManager should be dropped");
         });
     }
-    while set.join_next().await.is_some() {}
+    while let Some(result) = set.join_next().await {
+        result.expect("instance cleanup task panicked");
+    }
 }
 
 pub async fn ping_test(from_netns: &str, target_ip: &str, payload_size: Option<usize>) -> bool {

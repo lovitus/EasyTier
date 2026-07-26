@@ -26,6 +26,25 @@ defaults:
     shell: bash
 
 jobs:
+  resolve_mihomo:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Resolve latest stable Mihomo release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/fetch-mihomo-release.sh resolve-latest \
+            mihomo-release-manifest.json
+      - uses: actions/upload-artifact@v5
+        with:
+          name: mihomo-release-manifest
+          path: mihomo-release-manifest.json
+          if-no-files-found: error
+
   pre_job:
     # continue-on-error: true # Uncomment once integration is finished
     runs-on: ubuntu-latest
@@ -39,12 +58,14 @@ jobs:
           # All of these options are optional, so you can remove them if you are happy with the defaults
           concurrent_skipping: 'never'
           skip_after_successful_duplicate: 'true'
-          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "easytier-policy/**", "easytier-socks-egress/**", "third_party/**", ".github/workflows/test.yml", ".github/actions/**"]'
+          paths: '["Cargo.toml", "Cargo.lock", "easytier/**", "easytier-policy/**", "easytier-socks-egress/**", "third_party/**", "scripts/build-hev-socks-egress.sh", "scripts/fetch-gost-release.sh", "scripts/fetch-mihomo-release.sh", ".github/workflows/test.yml", ".github/actions/**"]'
 
   check:
     name: Run linters & check
     runs-on: ubuntu-latest
-    needs: pre_job
+    needs:
+      - pre_job
+      - resolve_mihomo
     if: needs.pre_job.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v5
@@ -63,7 +84,15 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-hack
 
-      - name: Prepare GUI sidecar fixtures for static checks
+      - name: Download resolved Mihomo release manifest
+        uses: actions/download-artifact@v5
+        with:
+          name: mihomo-release-manifest
+          path: target/mihomo-release
+
+      - name: Prepare GUI sidecars for static checks
+        env:
+          MIHOMO_RELEASE_MANIFEST: ${{ github.workspace }}/target/mihomo-release/mihomo-release-manifest.json
         run: |
           set -euo pipefail
           host_target="$(rustc -vV | sed -n 's/^host: //p')"
@@ -74,8 +103,28 @@ jobs:
             install -m 0755 /bin/true "$sidecar_path"
             test -x "$sidecar_path"
           done
-          # Clippy only needs Tauri's declared externalBin paths to exist. Formal
-          # GUI workflows build, package, and inspect the real Leaf/HEV sidecars.
+          MIHOMO_DISTRIBUTED_BINARY_NAME=easytier-mihomo \
+            bash scripts/fetch-mihomo-release.sh fetch \
+            x86_64-unknown-linux-musl \
+            "easytier-gui/src-tauri/binaries/easytier-mihomo-${host_target}" \
+            easytier-gui/src-tauri/binaries/easytier-mihomo-manifest.json
+          cp easytier/resources/policy-rule-data/METACUBEX-GPL-3.0.txt \
+            easytier-gui/src-tauri/binaries/MIHOMO_LICENSE.txt
+          cp easytier/resources/mihomo/SOURCE.md \
+            easytier-gui/src-tauri/binaries/MIHOMO_SOURCE.md
+          bash scripts/fetch-gost-release.sh fetch \
+            x86_64-unknown-linux-musl \
+            "easytier-gui/src-tauri/binaries/easytier-gost-${host_target}" \
+            easytier-gui/src-tauri/binaries/easytier-gost.manifest.json
+          cp easytier/resources/gost/LICENSE \
+            easytier-gui/src-tauri/binaries/GOST_LICENSE.txt
+          cp easytier/resources/gost/SOURCE.md \
+            easytier-gui/src-tauri/binaries/GOST_SOURCE.md
+          printf 'fixture=true\nbackend=hev-native\n' \
+            > easytier-gui/src-tauri/binaries/SOCKS_EGRESS_BUILD_INFO.txt
+          # Leaf/HEV only need declared externalBin paths for Clippy. Mihomo is
+          # the exact workflow-resolved binary so Test covers its release
+          # manifest, target mapping, executable format, and metadata.
 
       - name: Check formatting
         if: ${{ !cancelled() }}

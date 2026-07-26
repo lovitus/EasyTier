@@ -1,13 +1,91 @@
-# Mihomo Desktop and Unix Policy Backend, Reduced Design
+# Mihomo Desktop and Unix Policy Backend
 
-**Status:** USER-APPROVED DIRECTION, NOT IMPLEMENTED
+**Status:** IMPLEMENTED IN MUTABLE WORKSPACE; CURRENT GOST SNAPSHOT REQUIRES
+REMOTE PREFLIGHT; IMMUTABLE MULTI-PLATFORM VALIDATION PENDING
 
-**Date:** 2026-07-24
-
-**Required platforms:** Linux, macOS, Windows, and every Unix-family target in
-the EasyTier release matrix.
+**Updated:** 2026-07-26
 
 **Out of scope:** Android and OHOS Mihomo integration.
+
+## Current implementation contract
+
+### Backend selection
+
+Policy routing is a three-way selector:
+
+| Configuration | Effective backend |
+| --- | --- |
+| Explicit `backend = "off"` | `off` |
+| Explicit `backend = "mihomo"` | `mihomo` |
+| Explicit `backend = "leaf"` | `leaf` |
+| No explicit backend and legacy `enable_policy_proxy = true` | `leaf` |
+| No explicit backend and legacy flag absent or false | `off` |
+| Explicit backend conflicts with the legacy boolean | Explicit backend wins |
+
+The legacy boolean is consulted only when `backend` is absent. Current
+serializers normalize it to the selected backend. Mihomo configuration is
+owned and parsed by Mihomo; it must not enter the Leaf policy parser. Leaf is a
+deprecated compatibility backend, not an implementation dependency of Mihomo.
+
+Android keeps its existing in-process HEV path and uses the same effective
+backend decision so an explicit `backend = "leaf"` works. Mihomo remains
+unavailable on Android, iOS, and OHOS.
+
+### Neutral mesh entry
+
+Desktop and supported Unix builds use one Core-owned, process-global,
+loopback-only GOST process as the neutral SOCKS5 mesh entry:
+
+- try `127.0.0.1:11080`, `:11081`, and `:11082` sequentially;
+- retain only a process that passes SOCKS5 TCP negotiation and a real 8 KiB UDP
+  loopback echo;
+- start GOST with `udp=true&udpBufferSize=65535`;
+- discard GOST stdin, stdout, and stderr;
+- publish the selected endpoint and lifecycle error through the neutral
+  mesh-entry status;
+- keep Leaf DIRECT egress and Android HEV ownership separate;
+- treat failure to start the optional neutral entry as nonfatal to ordinary
+  EasyTier mesh operation.
+
+Linux uses a parent-death signal, Windows uses a kill-on-close Job Object, and
+macOS/FreeBSD use the packaged guardian. The macOS/FreeBSD paths must explicitly
+wait for and reap the guardian after GOST exits or is stopped.
+
+Pinned GOST `v3.2.6` payloads currently cover Linux x86_64/aarch64, macOS
+x86_64/aarch64, FreeBSD x86_64, and Windows x86_64/i686/aarch64. Other targets
+must not claim or package this neutral entry until an exact verified artifact
+and lifecycle implementation exist; normal EasyTier mesh support is unaffected.
+
+### Mihomo ownership boundary
+
+EasyTier owns only the Mihomo process lifecycle, private controller, required
+TUN/route safety overlay, reserved process-rule prefix, and exact cleanup of
+state it created. User proxy, provider, group, rule, DNS, subscription,
+transport, and `dialer-proxy` semantics remain Mihomo-owned.
+
+Reserved DIRECT process rules include EasyTier GUI/Core/CLI, GOST, HEV, the
+legacy Leaf worker, Mihomo, and Tailscale executables. Exact, regular-expression,
+and wildcard rules use Mihomo's corresponding matcher types; an exact
+`PROCESS-NAME` rule is never used as if it supported wildcards.
+
+### Validation state
+
+Implementation in the mutable workspace is not validation evidence. The
+2026-07-24 results below belong to the superseded HEV-neutral-entry snapshot.
+The current GOST snapshot still requires the remote locked no-run build,
+focused tests, real GOST TCP/8 KiB UDP readiness, abnormal-exit and guardian
+cleanup checks, frontend/package gates, and immutable platform artifacts.
+
+The dispatch contract is
+[`mihomo_policy_candidate_manifest.md`](mihomo_policy_candidate_manifest.md);
+results belong in
+[`mihomo_policy_validation_matrix.md`](mihomo_policy_validation_matrix.md).
+
+## Archived 2026-07-24 HEV-era design
+
+Everything below this heading is non-normative design history. In particular,
+requirements that make desktop HEV the always-running neutral mesh entry are
+superseded by the current GOST contract above.
 
 ## 1. Final user requirement
 
@@ -156,7 +234,11 @@ Required compatibility:
 | Legacy `enable_policy_proxy = true` with no backend | `leaf` |
 | Explicit `backend = "leaf"` | `leaf` |
 | Explicit `backend = "mihomo"` | `mihomo` |
-| Conflicting legacy boolean and enum | Reject |
+| Explicit backend plus a conflicting legacy boolean | Explicit backend wins |
+
+`backend` is the authoritative selector whenever present. The legacy boolean
+is consulted only when `backend` is absent, and serializers normalize the
+boolean to the effective backend when writing current-format configuration.
 
 HEV is not selected by this enum. HEV belongs to EasyTier mesh and starts for
 every supported EasyTier instance regardless of `off`, `mihomo`, or `leaf`.
@@ -373,14 +455,50 @@ Conceptual prefix:
 
 ```yaml
 rules:
+  # Tailscale coexistence, macOS/Linux/Windows.
+  - PROCESS-NAME,io.tailscale.ipn.macsys.network-extension,DIRECT
+  - PROCESS-NAME,tailscaled,DIRECT
+  - PROCESS-NAME,tailscaled.exe,DIRECT
+  - PROCESS-NAME,tailscale,DIRECT
+  - PROCESS-NAME,tailscale.exe,DIRECT
+
+  # EasyTier GUI, Core, CLI, HEV, and legacy Leaf worker.
+  - PROCESS-NAME,easytier-gui,DIRECT
+  - PROCESS-NAME,easytier-gui.exe,DIRECT
   - PROCESS-NAME,easytier-core,DIRECT
-  - PROCESS-NAME,<owned-hev-process>,DIRECT
+  - PROCESS-NAME,easytier-core.exe,DIRECT
+  - PROCESS-NAME,easytier-cli,DIRECT
+  - PROCESS-NAME,easytier-cli.exe,DIRECT
+  - PROCESS-NAME,easytier-hev-socks-egress,DIRECT
+  - PROCESS-NAME,easytier-hev-socks-egress.exe,DIRECT
+  - PROCESS-NAME,easytier-leaf-worker,DIRECT
+  - PROCESS-NAME,easytier-leaf-worker.exe,DIRECT
+
+  # Future EasyTier-owned executables. PROCESS-NAME is exact-match only;
+  # wildcard matching requires PROCESS-NAME-WILDCARD in Mihomo.
+  - PROCESS-NAME-REGEX,(?i)^easytier(?:[-_.].*)?$,DIRECT
+  - PROCESS-NAME-WILDCARD,easytier-*,DIRECT
+
+  # Exact EasyTier-owned mesh prefixes are generated at runtime.
   - IP-CIDR,<exact-easytier-prefix>,DIRECT,no-resolve
   - <all original user rules, unchanged>
 ```
 
 The actual process and path rules are platform-specific and must be checked
 against the pinned Mihomo implementation.
+
+The pinned Mihomo reference currently parses these rule types in
+`rules/parser.go::{ParseRule}` and implements case-insensitive exact, regex, and
+wildcard matching in `rules/common/process.go::{NewProcess,Match}`. In
+particular, `PROCESS-NAME,easytier-*` is invalid for the intended wildcard
+semantics because `PROCESS-NAME` performs an exact case-insensitive comparison.
+The generated prefix must use `PROCESS-NAME-WILDCARD,easytier-*` instead.
+
+The explicit executable rules are intentionally retained even though the regex
+and wildcard provide broader future coverage. They make the protected process
+contract auditable on every platform and provide direct regression fixtures for
+the current binary names. Duplicate semantic matches are acceptable because
+first-match terminates evaluation and the reserved prefix is small and bounded.
 
 If equivalent protection cannot be expressed safely on a platform, socket and
 route protection must provide the guarantee. The platform remains unsupported

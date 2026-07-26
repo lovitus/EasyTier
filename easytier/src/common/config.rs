@@ -560,8 +560,46 @@ pub struct PortForwardConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PolicyProxyBackend {
+    #[default]
+    Off,
+    Mihomo,
+    Leaf,
+}
+
+impl PolicyProxyBackend {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Mihomo => "mihomo",
+            Self::Leaf => "leaf",
+        }
+    }
+}
+
+impl std::str::FromStr for PolicyProxyBackend {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "mihomo" => Ok(Self::Mihomo),
+            "leaf" => Ok(Self::Leaf),
+            _ => anyhow::bail!(
+                "unsupported policy_proxy backend {value:?}; expected off, mihomo, or leaf"
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyProxyConfig {
+    /// Explicit backend selection. When omitted, the legacy `enabled` field
+    /// maps `true` to Leaf and `false` to Off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<PolicyProxyBackend>,
     #[serde(default)]
     pub enabled: bool,
     /// Experimental Linux fast path. Leaf owns only the policy TUN; EasyTier
@@ -572,6 +610,7 @@ pub struct PolicyProxyConfig {
     pub config_inline: Option<String>,
     pub outbound_interface: Option<String>,
     pub leaf_executable: Option<PathBuf>,
+    pub mihomo_executable: Option<PathBuf>,
     #[serde(skip)]
     pub source_dir: Option<PathBuf>,
 }
@@ -592,29 +631,72 @@ impl PolicyProxyConfig {
         ))
     }
 
-    pub fn validate_runtime_support(&self) -> anyhow::Result<()> {
-        if !self.enabled || Self::runtime_supported() {
-            return Ok(());
-        }
+    pub const fn mihomo_runtime_supported() -> bool {
+        cfg!(any(
+            windows,
+            all(
+                unix,
+                not(target_os = "android"),
+                not(target_os = "ios"),
+                not(target_env = "ohos")
+            )
+        ))
+    }
 
-        // Mihomo listener/inbound/tun.go::Tun.Listen propagates sing_tun.New
-        // failures, while listener/sing_tun/server.go::New closes partial state
-        // before returning the error. Reject even earlier because silently
-        // starting an ordinary EasyTier instance would violate the same
-        // externally observable fail-closed behavior.
-        anyhow::bail!(
-            "policy_proxy enabled=true is unsupported on {} by this build; the policy runtime is unavailable",
-            std::env::consts::OS
-        );
+    pub fn effective_backend(&self) -> PolicyProxyBackend {
+        self.backend.clone().unwrap_or(if self.enabled {
+            PolicyProxyBackend::Leaf
+        } else {
+            PolicyProxyBackend::Off
+        })
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self.effective_backend(), PolicyProxyBackend::Off)
+    }
+
+    pub fn is_leaf_enabled(&self) -> bool {
+        matches!(self.effective_backend(), PolicyProxyBackend::Leaf)
+    }
+
+    pub fn is_mihomo_enabled(&self) -> bool {
+        matches!(self.effective_backend(), PolicyProxyBackend::Mihomo)
+    }
+
+    pub fn validate_runtime_support(&self) -> anyhow::Result<()> {
+        match self.effective_backend() {
+            PolicyProxyBackend::Off => Ok(()),
+            PolicyProxyBackend::Leaf if Self::runtime_supported() => Ok(()),
+            PolicyProxyBackend::Mihomo if Self::mihomo_runtime_supported() => Ok(()),
+            PolicyProxyBackend::Leaf => anyhow::bail!(
+                "policy_proxy backend=leaf is unsupported on {} by this build; the Leaf policy runtime is unavailable",
+                std::env::consts::OS
+            ),
+            PolicyProxyBackend::Mihomo => anyhow::bail!(
+                "policy_proxy backend=mihomo is unsupported on {}; Android, iOS, and OHOS are intentionally outside this backend",
+                std::env::consts::OS
+            ),
+        }
     }
 
     pub fn validate_envelope(&self) -> anyhow::Result<()> {
+        if self.enabled
+            && matches!(
+                self.backend,
+                Some(PolicyProxyBackend::Off | PolicyProxyBackend::Mihomo)
+            )
+        {
+            anyhow::bail!(
+                "policy_proxy enabled=true selects the legacy Leaf backend and conflicts with backend={}",
+                self.backend.as_ref().unwrap().as_str()
+            );
+        }
         if self.config_file.is_some() && self.config_inline.is_some() {
             anyhow::bail!("policy_proxy config_file and config_inline are mutually exclusive");
         }
-        if self.enabled && self.config_file.is_none() && self.config_inline.is_none() {
+        if self.is_enabled() && self.config_file.is_none() && self.config_inline.is_none() {
             anyhow::bail!(
-                "policy_proxy enabled=true requires exactly one of config_file or config_inline"
+                "enabled policy_proxy requires exactly one of config_file or config_inline"
             );
         }
         if self
@@ -648,6 +730,25 @@ impl PolicyProxyConfig {
             .is_some_and(|path| path.as_os_str().is_empty())
         {
             anyhow::bail!("policy_proxy leaf_executable cannot be empty");
+        }
+        if self
+            .mihomo_executable
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            anyhow::bail!("policy_proxy mihomo_executable cannot be empty");
+        }
+        if self.is_mihomo_enabled()
+            && (self.outbound_interface.is_some()
+                || self.leaf_executable.is_some()
+                || self.leaf_tun_fast_path)
+        {
+            anyhow::bail!(
+                "policy_proxy backend=mihomo cannot use Leaf-only outbound_interface, leaf_executable, or leaf_tun_fast_path"
+            );
+        }
+        if self.is_leaf_enabled() && self.mihomo_executable.is_some() {
+            anyhow::bail!("policy_proxy backend=leaf cannot use the Mihomo-only mihomo_executable");
         }
         Ok(())
     }
@@ -2958,6 +3059,70 @@ leaf_executable = "easytier-leaf-worker"
         let dumped = config.dump();
         let loaded = TomlConfigLoader::new_from_str(&dumped).unwrap();
         assert_eq!(loaded.get_policy_proxy_config(), Some(policy));
+    }
+
+    #[test]
+    fn policy_proxy_backend_preserves_legacy_mapping_and_explicit_selection() {
+        let legacy_off = PolicyProxyConfig::default();
+        assert_eq!(legacy_off.effective_backend(), PolicyProxyBackend::Off);
+
+        let legacy_leaf = PolicyProxyConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(legacy_leaf.effective_backend(), PolicyProxyBackend::Leaf);
+
+        let explicit_mihomo = PolicyProxyConfig {
+            backend: Some(PolicyProxyBackend::Mihomo),
+            ..Default::default()
+        };
+        assert!(explicit_mihomo.is_enabled());
+        assert!(explicit_mihomo.is_mihomo_enabled());
+        assert!(!explicit_mihomo.is_leaf_enabled());
+
+        let conflicting_legacy_flag = PolicyProxyConfig {
+            backend: Some(PolicyProxyBackend::Mihomo),
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(
+            conflicting_legacy_flag
+                .validate_envelope()
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts with backend=mihomo")
+        );
+    }
+
+    #[test]
+    fn policy_proxy_backend_rejects_cross_backend_fields() {
+        let mihomo_with_leaf_field = PolicyProxyConfig {
+            backend: Some(PolicyProxyBackend::Mihomo),
+            config_inline: Some("rules: []".to_owned()),
+            leaf_executable: Some("easytier-leaf-worker".into()),
+            ..Default::default()
+        };
+        assert!(
+            mihomo_with_leaf_field
+                .validate_envelope()
+                .unwrap_err()
+                .to_string()
+                .contains("Leaf-only")
+        );
+
+        let leaf_with_mihomo_field = PolicyProxyConfig {
+            backend: Some(PolicyProxyBackend::Leaf),
+            config_inline: Some("version: 1\nrules: []".to_owned()),
+            mihomo_executable: Some("easytier-mihomo".into()),
+            ..Default::default()
+        };
+        assert!(
+            leaf_with_mihomo_field
+                .validate_envelope()
+                .unwrap_err()
+                .to_string()
+                .contains("Mihomo-only")
+        );
     }
 
     #[test]

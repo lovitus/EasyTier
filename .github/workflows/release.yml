@@ -141,21 +141,173 @@ jobs:
           repo: ${{ github.repository }}
           path: release_assets_nozip
 
-      - name: Verify policy release payloads
+      - name: Select immutable candidate Mihomo release manifest
         run: |
           set -euo pipefail
+          mapfile -d '' candidate_manifests < <(
+            find release_assets -type f -name 'MIHOMO_RELEASE_MANIFEST.json' \
+              -print0 | sort -z
+          )
+          test "${#candidate_manifests[@]}" -gt 0
+          mkdir -p target
+          cp "${candidate_manifests[0]}" target/mihomo-release-manifest.json
+
+      - name: Verify policy release payloads
+        env:
+          MIHOMO_RELEASE_MANIFEST: ${{ github.workspace }}/target/mihomo-release-manifest.json
+        run: |
+          set -euo pipefail
+          core_manifest_count=0
+          while IFS= read -r -d '' artifact_dir; do
+            candidate_manifest="$artifact_dir/MIHOMO_RELEASE_MANIFEST.json"
+            test -f "$candidate_manifest"
+            cmp --silent "$MIHOMO_RELEASE_MANIFEST" "$candidate_manifest" || {
+              echo "::error title=Mihomo version drift::$candidate_manifest differs from the immutable candidate manifest"
+              exit 1
+            }
+            core_manifest_count=$((core_manifest_count + 1))
+          done < <(
+            find release_assets -mindepth 1 -maxdepth 1 -type d \
+              -name 'easytier-*' -print0
+          )
+          gui_manifest_count=0
+          gui_targets=(
+            x86_64-unknown-linux-gnu
+            aarch64-unknown-linux-gnu
+            x86_64-apple-darwin
+            aarch64-apple-darwin
+            x86_64-pc-windows-msvc
+            i686-pc-windows-msvc
+            aarch64-pc-windows-msvc
+          )
+          for gui_target in "${gui_targets[@]}"; do
+            mapfile -t gui_manifests < <(
+              find release_assets_nozip -type f \
+                -name "MIHOMO_RELEASE_MANIFEST-${gui_target}.json"
+            )
+            test "${#gui_manifests[@]}" -eq 1
+            candidate_manifest="${gui_manifests[0]}"
+            cmp --silent "$MIHOMO_RELEASE_MANIFEST" "$candidate_manifest" || {
+              echo "::error title=Mihomo version drift::$candidate_manifest differs from the immutable candidate manifest"
+              exit 1
+            }
+            gui_manifest_count=$((gui_manifest_count + 1))
+          done
+          test "$core_manifest_count" -gt 0
+          test "$gui_manifest_count" -eq "${#gui_targets[@]}"
+          declare -A mihomo_targets=(
+            [easytier-linux-x86_64]=x86_64-unknown-linux-musl
+            [easytier-linux-aarch64]=aarch64-unknown-linux-musl
+            [easytier-linux-riscv64]=riscv64gc-unknown-linux-musl
+            [easytier-freebsd-13.2-x86_64]=x86_64-unknown-freebsd
+            [easytier-macos-x86_64]=x86_64-apple-darwin
+            [easytier-macos-aarch64]=aarch64-apple-darwin
+            [easytier-windows-x86_64]=x86_64-pc-windows-msvc
+            [easytier-windows-i686]=i686-pc-windows-msvc
+            [easytier-windows-arm64]=aarch64-pc-windows-msvc
+          )
+          for artifact in "${!mihomo_targets[@]}"; do
+            artifact_dir=$(find release_assets -type d -name "$artifact" -print -quit)
+            test -n "$artifact_dir"
+            suffix=""
+            if [[ "$artifact" == easytier-windows-* ]]; then suffix=".exe"; fi
+            test -f "$artifact_dir/easytier-core$suffix"
+            test -f "$artifact_dir/easytier-mihomo$suffix"
+            test -f "$artifact_dir/easytier-mihomo.manifest.json"
+            test -f "$artifact_dir/MIHOMO_LICENSE.txt"
+            test -f "$artifact_dir/MIHOMO_SOURCE.md"
+            test -f "$artifact_dir/MIHOMO_SHA256SUMS.txt"
+            test -f "$artifact_dir/MIHOMO_BUILD_INFO.txt"
+            bash scripts/fetch-mihomo-release.sh verify \
+              "${mihomo_targets[$artifact]}" \
+              "$artifact_dir/easytier-mihomo$suffix" \
+              "$artifact_dir/easytier-mihomo.manifest.json"
+          done
           for artifact in \
-            easytier-linux-x86_64 \
-            easytier-linux-aarch64 \
-            easytier-macos-x86_64 \
-            easytier-macos-aarch64
+            easytier-linux-loongarch64 \
+            easytier-linux-armv7hf \
+            easytier-linux-armv7 \
+            easytier-linux-armhf \
+            easytier-linux-arm \
+            easytier-linux-mips \
+            easytier-linux-mipsel
           do
             artifact_dir=$(find release_assets -type d -name "$artifact" -print -quit)
             test -n "$artifact_dir"
-            for executable in easytier-core easytier-leaf-worker easytier-hev-socks-egress; do
-              test -f "$artifact_dir/$executable"
-            done
+            test -f "$artifact_dir/MIHOMO_UNSUPPORTED.txt"
+            if find "$artifact_dir" -maxdepth 1 -type f \
+              -name 'easytier-mihomo*' -print -quit | grep -q .
+            then
+              echo "::error title=Unexpected Mihomo payload::$artifact must not contain Mihomo"
+              exit 1
+            fi
           done
+          declare -A socks_targets=(
+            [easytier-linux-x86_64]=x86_64-unknown-linux-musl
+            [easytier-linux-aarch64]=aarch64-unknown-linux-musl
+            [easytier-freebsd-13.2-x86_64]=x86_64-unknown-freebsd
+            [easytier-macos-x86_64]=x86_64-apple-darwin
+            [easytier-macos-aarch64]=aarch64-apple-darwin
+            [easytier-windows-x86_64]=x86_64-pc-windows-msvc
+            [easytier-windows-i686]=i686-pc-windows-msvc
+            [easytier-windows-arm64]=aarch64-pc-windows-msvc
+          )
+          for artifact in "${!socks_targets[@]}"; do
+            artifact_dir=$(find release_assets -type d -name "$artifact" -print -quit)
+            target="${socks_targets[$artifact]}"
+            suffix=""
+            backend="hev-native"
+            if [[ "$artifact" == easytier-windows-* ]]; then suffix=".exe"; fi
+            gost="$artifact_dir/easytier-gost$suffix"
+            gost_metadata="$artifact_dir/easytier-gost.manifest.json"
+            test -f "$artifact_dir/GOST_LICENSE.txt"
+            test -f "$artifact_dir/GOST_SOURCE.md"
+            bash scripts/fetch-gost-release.sh verify \
+              "$target" "$gost" "$gost_metadata"
+            if [[ "$target" == *windows* ]]; then backend="leaf-portable"; fi
+            if [[ "$target" != *freebsd* ]]; then
+              sidecar="$artifact_dir/easytier-hev-socks-egress$suffix"
+              test -f "$sidecar"
+              if [[ "$target" != *windows* ]]; then test -x "$sidecar"; fi
+              build_info="$artifact_dir/SOCKS_EGRESS_BUILD_INFO.txt"
+              test -f "$build_info"
+              grep -Fx "target=$target" "$build_info"
+              grep -Fx "backend=$backend" "$build_info"
+              python3 - "$sidecar" "$target" <<'PY'
+          import pathlib, struct, sys
+          data = pathlib.Path(sys.argv[1]).read_bytes()
+          target = sys.argv[2]
+          if "windows" in target:
+              offset = struct.unpack_from("<I", data, 0x3c)[0]
+              if data[offset:offset + 4] != b"PE\0\0":
+                  raise SystemExit("invalid release socks-egress PE header")
+              machine = struct.unpack_from("<H", data, offset + 4)[0]
+              wanted = {"x86_64": 0x8664, "i686": 0x014c, "aarch64": 0xaa64}[target.split("-", 1)[0]]
+          elif "apple-darwin" in target:
+              machine = struct.unpack_from("<I", data, 4)[0]
+              wanted = 0x01000007 if target.startswith("x86_64") else 0x0100000c
+          else:
+              if data[:4] != b"\x7fELF":
+                  raise SystemExit("invalid release socks-egress ELF header")
+              endian = "<" if data[5] == 1 else ">"
+              machine = struct.unpack_from(endian + "H", data, 18)[0]
+              wanted = 62 if target.startswith("x86_64") else 183
+          if machine != wanted:
+              raise SystemExit(f"release socks-egress machine mismatch: expected {wanted}, got {machine}")
+          PY
+            fi
+            if [[ "$target" == *apple-darwin || "$target" == *freebsd* ]]; then
+              test -x "$artifact_dir/easytier-gost-guardian"
+            fi
+          done
+
+      - name: Fetch and verify corresponding Mihomo source
+        env:
+          MIHOMO_RELEASE_MANIFEST: ${{ github.workspace }}/target/mihomo-release-manifest.json
+        run: |
+          set -euo pipefail
+          bash scripts/fetch-mihomo-release.sh fetch-source \
+            release_assets_nozip/mihomo-source
 
       - name: Zip release assets
         env:
@@ -176,7 +328,19 @@ jobs:
 
           cd release_assets
           ls -lR ./
-          chmod -R 755 .
+          find . -type d -exec chmod 0755 {} +
+          find . -type f -exec chmod 0644 {} +
+          find . -type f \( \
+            -name easytier-core -o \
+            -name easytier-cli -o \
+            -name easytier-web -o \
+            -name easytier-leaf-worker -o \
+            -name easytier-hev-socks-egress -o \
+            -name easytier-gost-guardian -o \
+            -name easytier-gost -o \
+            -name easytier-mihomo -o \
+            -name '*.sh' \
+          \) -exec chmod 0755 {} +
           for path in ./*; do
             x=$(basename "${path}")
             if [[ "${x}" == "Easytier-Magisk" ]]; then
