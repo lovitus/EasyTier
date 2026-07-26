@@ -14,8 +14,8 @@
 >
 # Mihomo policy backend validation matrix
 
-Status: FINAL COMBINED SOURCE PREFLIGHT AND ANDROID CFG PASSED; MACOS WORKFLOW
-REVALIDATION PENDING; IMMUTABLE ARTIFACT MATRIX PENDING
+Status: FINAL COMBINED SOURCE PREFLIGHT AND ANDROID CFG PASSED; PACKAGING
+WORKFLOW REVALIDATION PENDING; IMMUTABLE ARTIFACT MATRIX PENDING
 
 This matrix validates the optional desktop/Unix Mihomo policy backend without
 changing Mihomo proxy, provider, group, rule, or `dialer-proxy` semantics.
@@ -83,6 +83,11 @@ propagation and therefore does not satisfy the current dispatch gate.
 | Android candidate `bdb8c3d0` | PASS | Workflow 30190085529 completed successfully, including the cfg(android) neutral mesh-entry branch that failed in the prior SHA. |
 | macOS candidate `bdb8c3d0` | FAIL | Resolver ownership/route suite passed 10/10; the combined step then hit its 10-minute aggregate timeout during the next Cargo invocation. Tests are split into separate bounded steps for revalidation. |
 | Linux candidate `bdb8c3d0` | CANCELLED | Cancelled after the macOS workflow definition required a tracked correction; no artifact is accepted. |
+| Android candidate `26ae1ff1` | PASS | Workflow 30190613355 completed successfully for the exact SHA. |
+| Linux candidate `26ae1ff1` build | PASS | Workflow 30190613343 completed; artifact ZIP, outer and inner checksums, exact commit/target/toolchain/HEV pin, static PIE format, symbols, and Build IDs verified. |
+| Linux candidate `26ae1ff1` package completeness | FAIL | Profiling bundle omitted easytier-mihomo and its metadata, so it cannot validate the implemented backend. Packaging now includes the verified runtime and compliance/build metadata; old artifact rejected. |
+| macOS candidate `26ae1ff1` implementation/build | PASS | Quinn truncation, resolver 10/10, interface cache, scoped DNS, GUI build, and all six executable signatures passed. |
+| macOS candidate `26ae1ff1` final verifier | FAIL | Verifier assumed resources were flattened at Contents/Resources root; formal GUI uses recursive lookup. Focused workflow now matches formal semantics; old run produced no accepted artifact. |
 | Final macOS policy and Quinn workflow tests | PENDING | Must compile the exact final tree on macOS and run truncated-datagram, resolver ownership, scoped-DNS, and interface-cache tests. |
 | Current focused frontend tests | PASS | Policy runtime/editor/document tests passed 35/35 and RemoteManagement tests passed 20/20. |
 | Current clean-output frontend builds | PASS | frontend-lib, Web, VPN plugin, and GUI production builds returned success after generated output was removed and recreated; GUI consumed the refreshed API and VPN declarations. |

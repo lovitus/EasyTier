@@ -84,6 +84,33 @@ jobs:
             "$gost_bin/easytier-gost.manifest.json"
           echo "GOST_RUNTIME_DIR=$gost_bin" >> "$GITHUB_ENV"
 
+      - name: Resolve latest stable Mihomo release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mihomo_dir="$RUNNER_TEMP/mihomo-bin"
+          mkdir -p "$mihomo_dir"
+          bash scripts/fetch-mihomo-release.sh resolve-latest \
+            "$mihomo_dir/mihomo-release-manifest.json"
+          echo "MIHOMO_RELEASE_MANIFEST=$mihomo_dir/mihomo-release-manifest.json" \
+            >> "$GITHUB_ENV"
+          echo "MIHOMO_RUNTIME_DIR=$mihomo_dir" >> "$GITHUB_ENV"
+
+      - name: Fetch and verify workflow-pinned Mihomo
+        run: |
+          set -euo pipefail
+          bash scripts/fetch-mihomo-release.sh fetch "$TARGET" \
+            "$MIHOMO_RUNTIME_DIR/easytier-mihomo" \
+            "$MIHOMO_RUNTIME_DIR/easytier-mihomo.manifest.json"
+          cp easytier/resources/policy-rule-data/METACUBEX-GPL-3.0.txt \
+            "$MIHOMO_RUNTIME_DIR/MIHOMO_LICENSE.txt"
+          cp easytier/resources/mihomo/SOURCE.md \
+            "$MIHOMO_RUNTIME_DIR/MIHOMO_SOURCE.md"
+          bash scripts/fetch-mihomo-release.sh verify "$TARGET" \
+            "$MIHOMO_RUNTIME_DIR/easytier-mihomo" \
+            "$MIHOMO_RUNTIME_DIR/easytier-mihomo.manifest.json"
+
       - name: Build profiling-only isolated performance probe
         run: |
           set -euo pipefail
@@ -214,6 +241,16 @@ jobs:
             "$GOST_RUNTIME_DIR/easytier-gost.manifest.json" "staging/$bundle/"
           cp easytier/resources/gost/LICENSE "staging/$bundle/GOST_LICENSE.txt"
           cp easytier/resources/gost/SOURCE.md "staging/$bundle/GOST_SOURCE.md"
+          cp "$MIHOMO_RUNTIME_DIR/easytier-mihomo" \
+            "$MIHOMO_RUNTIME_DIR/easytier-mihomo.manifest.json" \
+            "$MIHOMO_RUNTIME_DIR/mihomo-release-manifest.json" \
+            "$MIHOMO_RUNTIME_DIR/MIHOMO_LICENSE.txt" \
+            "$MIHOMO_RUNTIME_DIR/MIHOMO_SOURCE.md" \
+            "$MIHOMO_RUNTIME_DIR/MIHOMO_SHA256SUMS.txt" \
+            "$MIHOMO_RUNTIME_DIR/MIHOMO_BUILD_INFO.txt" \
+            "staging/$bundle/"
+          mv "staging/$bundle/mihomo-release-manifest.json" \
+            "staging/$bundle/MIHOMO_RELEASE_MANIFEST.json"
           install -m 0755 "$SELFTEST_PROBE" "staging/$bundle/easytier-perf-probe"
           install -m 0755 scripts/leaf-perf-selftest.sh \
             "staging/$bundle/leaf-perf-selftest.sh"
@@ -246,6 +283,7 @@ jobs:
               easytier-leaf-worker
               easytier-hev-socks-egress
               easytier-gost
+              easytier-mihomo
               easytier-perf-probe
               leaf-perf-selftest.sh
               mesh-perf-selftest.sh
@@ -269,6 +307,7 @@ jobs:
             echo
             echo "This is an optimized, unstripped profiling build with DWARF and frame pointers."
             echo "It includes an isolated Linux performance self-test that is excluded from production packages."
+            echo "It includes the workflow-pinned GOST and latest-stable Mihomo runtimes for exact-artifact policy validation."
             echo "It is not a production release."
           } > artifacts/RELEASE_NOTES.txt
 

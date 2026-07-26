@@ -14,8 +14,8 @@
 >
 # Mihomo desktop/Unix policy backend candidate manifest
 
-Status: FINAL COMBINED SOURCE PREFLIGHT AND ANDROID CFG PASSED; MACOS WORKFLOW
-REVALIDATION PENDING; IMMUTABLE CANDIDATE NOT YET DISPATCHED
+Status: FINAL COMBINED SOURCE PREFLIGHT AND ANDROID CFG PASSED; PACKAGING
+WORKFLOW REVALIDATION PENDING; IMMUTABLE CANDIDATE NOT YET DISPATCHED
 
 This is a pre-build manifest. Build IDs, workflow run IDs, measurements, and
 post-build results belong in the validation matrix keyed to the immutable SHA.
@@ -247,6 +247,24 @@ route tests, but its single 10-minute step timed out while recompiling for the
 next filter. The workflow now gives resolver ownership, interface cache, and
 scoped-DNS selection separate bounded steps. Linux for the superseded workflow
 layout was cancelled before artifact publication.
+
+The next exact-SHA set at `26ae1ff1` passed Android again. Linux workflow
+`30190613343` completed and its downloaded 134,971,297-byte artifact passed ZIP,
+outer tarball, and every inner checksum; `BUILD_INFO.txt` identified exact
+commit `26ae1ff1`, run, Rust 1.95, musl target, and HEV pin, and all Rust
+binaries were static PIE with symbols and Build IDs. Artifact inspection then
+correctly rejected the bundle because it omitted `easytier-mihomo` and its
+metadata, making exact-artifact Mihomo validation impossible. Profiling
+packaging now resolves latest-stable Mihomo once, verifies it, includes the
+runtime plus release manifest/license/source/checksum/build metadata, and
+checks the binary in the inner checksum list.
+
+The matching macOS workflow passed Quinn truncation, 10/10 resolver/route
+tests, interface-cache tests, scoped-DNS selection, GUI build, and codesign
+verification for GUI, Leaf, HEV, guardian, GOST, and Mihomo. Its final resource
+check falsely assumed Tauri flattened resources into `Contents/Resources`;
+the focused workflow now uses the same recursive resource lookup as the formal
+GUI workflow. No artifact from either superseded packaging layout is accepted.
 
 - `.160` locked no-run build for the complete current snapshot.
 - `.160` locked no-run plus complete integration-test execution for the

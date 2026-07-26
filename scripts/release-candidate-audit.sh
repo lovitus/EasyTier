@@ -183,12 +183,19 @@ done
 for packaging_file in \
   .github/workflows/core.yml \
   .github/workflows/gui.yml \
-  .github/workflows/gui-macos-aarch64-test.yml
+  .github/workflows/gui-macos-aarch64-test.yml \
+  .github/workflows/profiling-beta.yml
 do
   if ! rg -q 'fetch-mihomo-release\.sh resolve-latest' "$packaging_file"; then
     fail "latest-stable Mihomo resolution is missing from $packaging_file"
   fi
 done
+if ! rg -q 'easytier-mihomo' .github/workflows/profiling-beta.yml ||
+   ! rg -q 'MIHOMO_RELEASE_MANIFEST\.json' .github/workflows/profiling-beta.yml ||
+   ! rg -q 'MIHOMO_SHA256SUMS\.txt' .github/workflows/profiling-beta.yml ||
+   ! rg -q 'MIHOMO_BUILD_INFO\.txt' .github/workflows/profiling-beta.yml; then
+  fail "profiling bundle does not contain the pinned Mihomo runtime and metadata"
+fi
 if ! rg -q 'Mihomo version drift' .github/workflows/release.yml ||
    ! rg -q 'MIHOMO_RELEASE_MANIFEST-\$\{gui_target\}\.json' \
      .github/workflows/release.yml; then

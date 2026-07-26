@@ -159,7 +159,11 @@ jobs:
             GOST_SOURCE.md \
             SOCKS_EGRESS_BUILD_INFO.txt
           do
-            test -f "$app_dir/Contents/Resources/$required_name"
+            resource_path="$(
+              find "$app_dir/Contents/Resources" -type f \
+                -name "$required_name" -print -quit
+            )"
+            test -n "$resource_path"
           done
           codesign --verify --deep --strict --verbose=2 "$app_dir"
 

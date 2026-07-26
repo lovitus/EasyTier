@@ -60,6 +60,17 @@ while recompiling for the interface-cache filter. Those three test groups now
 use separate bounded workflow steps. Linux for that superseded workflow layout
 was cancelled before artifact publication.
 
+At `26ae1ff1`, Android passed again. Linux completed and its artifact passed
+outer/inner checksums, exact-SHA/toolchain/target metadata, static-PIE format,
+symbols, and Build IDs, but inspection found that the profiling bundle omitted
+Mihomo entirely. The bundle is rejected and now packages the verified
+latest-stable Mihomo runtime plus manifest, release manifest, license/source,
+checksum, and build metadata. macOS passed every new network test, GUI build,
+and all six executable signature checks; only its final verifier failed because
+it assumed Tauri flattened resources. The focused verifier now uses the formal
+GUI workflow's recursive resource lookup. Both packaging corrections require
+one final exact-SHA workflow set.
+
 ## Current parallel lanes
 
 | Lane | Objective | Write scope | Status |
