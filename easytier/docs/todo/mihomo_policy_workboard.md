@@ -260,3 +260,49 @@ Post-change evidence:
 This is strong implementation evidence but not an immutable optimized workflow
 artifact. The next single profiling candidate must repeat the TCP/UDP,
 crash/recovery, resource, and cleanup checks from its exact packaged artifact.
+
+## 2026-07-27 exact optimized artifact evidence
+
+The required repeat was completed against immutable commit
+`d72b30f09a3930e23b02958f481370282798cd79` from profiling workflow run
+`30212622811`. The workflow succeeded for that exact SHA. The downloaded
+archive and every inner asset matched `SHA256SUMS.txt`; `BUILD_INFO.txt`
+matched the commit, run, x86_64-musl target, and pinned HEV revision. The
+packaged Core was a static PIE with Build ID
+`198dc0a2807acee5473b2a35d28835f267d09222`. The packaged sidecars reported
+GOST `v3.2.9-easytier.1` and Mihomo `1.19.29`.
+
+Exact packaged runtime results on the same public dual-stack pair:
+
+- Both directions passed IPv4 and IPv6 mesh reachability with KCP and QUIC
+  proxy support left enabled.
+- GOST listened only on loopback `11080`. Core listened only on its exact
+  virtual IPv4 at `11080-11082`; no wildcard SOCKS listener existed.
+- Five sequential 32 MiB transfers through
+  Mihomo -> local GOST -> mesh -> peer GOST measured `184.878`, `203.432`,
+  `191.249`, `204.478`, and `200.471 Mbit/s`. The median was
+  `200.471 Mbit/s`.
+- Across those five transfers, source CPU time increased by `3.22s` for Core,
+  `1.50s` for GOST, and `1.37s` for Mihomo. Source RSS changed from
+  `37172` to `50684 KiB` for Core, `42092` to `46048 KiB` for GOST, and
+  remained `34672 KiB` for Mihomo. Target CPU time increased by `2.07s` for
+  Core and `0.15s` for GOST; target RSS changed from `22040` to `22208 KiB`
+  for Core and `37552` to `38012 KiB` for GOST.
+- Real UDP echoes of `64`, `1200`, and `8192` bytes all passed through the
+  complete nested `dialer-proxy` chain.
+- After `SIGKILL` of the peer GOST, Core created a new child after the
+  one-second restart delay. Its loopback listener was observed ready on the
+  next `250ms` probe with the same UDP buffer, source-check, and
+  `publicAddr=0.0.0.0` parameters.
+- After recovery, one 32 MiB transfer completed in `1.350911s`; a second
+  measured `193.006 Mbit/s`. All three UDP sizes passed again.
+- Normal termination made both Core processes exit within the first `250ms`
+  observation interval. Both GOST children, Mihomo, TCP/UDP test services,
+  ports `11080-11082`, and TUN devices returned to baseline. No validation
+  firewall rule was added.
+
+This closes the exact Linux artifact gate for the neutral GOST mesh entry.
+Android retains its existing in-process compatibility path and was not changed
+or exercised by this batch. macOS, Windows, and BSD runtime compatibility
+remain separate platform gates; this Linux evidence must not be used as their
+substitute.
