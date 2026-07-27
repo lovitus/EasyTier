@@ -45,6 +45,7 @@ import {
 } from './managedRuleData'
 
 const config = defineModel<NetworkConfig>({ required: true })
+const mihomoFileContents = defineModel<string>('mihomoFileContents', { default: '' })
 const props = defineProps<{
   api?: Api.RemoteClient
   yamlOnly?: boolean
@@ -657,26 +658,21 @@ onMounted(() => {
         <Message severity="info" :closable="false">
           {{ t('policy_mihomo_native_config_notice') }}
         </Message>
-        <SelectButton v-model="sourceMode" :options="sourceOptions" option-label="label" option-value="value"
-          :allow-empty="false" :disabled="props.readOnly" />
-        <template v-if="sourceMode === 'file'">
         <div class="flex items-center">
-          <label for="policy_config_file_quick">
+          <label for="policy_mihomo_config_file_quick">
             {{ fieldLabel('policy_config_file', '/etc/easytier/mihomo.yaml') }}
           </label>
           <span class="pi pi-question-circle ml-2" v-tooltip="t('policy_mihomo_config_path_required')" />
         </div>
-        <InputText id="policy_config_file_quick" v-model="activeConfigFile"
-          :placeholder="t('policy_mihomo_config_path_example')" :readonly="props.readOnly" />
-        </template>
-        <template v-else>
+        <InputText id="policy_mihomo_config_file_quick" v-model="activeConfigFile"
+          :placeholder="t('policy_mihomo_config_path_example')" readonly />
+        <Message severity="info" :closable="false">{{ t('policy_mihomo_file_edit_notice') }}</Message>
           <label for="policy_mihomo_config_inline_quick" class="font-semibold">
             {{ t('policy.editor.advanced_yaml') }}
           </label>
-          <Textarea id="policy_mihomo_config_inline_quick" v-model="activeConfigInline" rows="20"
+          <Textarea id="policy_mihomo_config_inline_quick" v-model="mihomoFileContents" rows="20"
             auto-resize class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')"
             :readonly="props.readOnly" />
-        </template>
       </div>
       <div v-else-if="policyBackend === 'leaf'" key="leaf-yaml-editor" class="contents">
       <div class="flex flex-wrap items-end gap-4">
@@ -728,9 +724,6 @@ onMounted(() => {
       <Message severity="info" :closable="false">
         {{ t('policy_mihomo_native_config_notice') }}
       </Message>
-      <SelectButton v-model="sourceMode" :options="sourceOptions" option-label="label" option-value="value"
-        :allow-empty="false" :disabled="props.readOnly" />
-      <template v-if="sourceMode === 'file'">
       <div class="flex items-center">
         <label for="policy_config_file">
           {{ fieldLabel('policy_config_file', '/etc/easytier/mihomo.yaml') }}
@@ -739,15 +732,17 @@ onMounted(() => {
       </div>
       <InputText id="policy_config_file" v-model="activeConfigFile"
         :placeholder="t('policy_mihomo_config_path_example')" :readonly="props.readOnly" />
-      </template>
-      <template v-else>
-        <label for="policy_mihomo_config_inline" class="font-semibold">
-          {{ t('policy.editor.advanced_yaml') }}
+      <div class="flex items-center">
+        <label for="policy_mihomo_controller_secret">
+          {{ fieldLabel('policy_mihomo_controller_secret', 'optional runtime override') }}
         </label>
-        <Textarea id="policy_mihomo_config_inline" v-model="activeConfigInline" rows="20"
-          auto-resize class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')"
-          :readonly="props.readOnly" />
-      </template>
+        <span class="pi pi-question-circle ml-2"
+          v-tooltip="t('policy_mihomo_controller_secret_help')" />
+      </div>
+      <Password id="policy_mihomo_controller_secret"
+        v-model="config.policy_mihomo_controller_secret" toggle-mask :feedback="false"
+        :placeholder="t('policy_mihomo_controller_secret_placeholder')"
+        :readonly="props.readOnly" />
       <div class="flex items-center gap-2">
         <span>{{ t('policy_runtime_status') }}</span>
         <strong data-testid="mihomo-runtime-state">

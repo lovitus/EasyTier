@@ -95,6 +95,7 @@ fn build_mihomo_start_request(
         home_dir,
         tun_device: format!("etm{}", &compact_id[..8]),
         route_exclude_addresses: route_exclude_addresses.into_keys().collect(),
+        controller_secret_override: policy.mihomo_controller_secret.clone(),
     })
 }
 
@@ -989,6 +990,13 @@ impl NetworkInstanceManager {
 
     pub async fn get_mihomo_status(&self) -> MihomoCoreStatus {
         self.mihomo_owner.status().await
+    }
+
+    pub async fn get_mihomo_dashboard_url(
+        &self,
+        instance_id: uuid::Uuid,
+    ) -> anyhow::Result<String> {
+        self.mihomo_owner.dashboard_url(instance_id).await
     }
 
     pub fn shutdown_mihomo_owner(&self) -> anyhow::Result<()> {

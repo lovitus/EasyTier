@@ -201,9 +201,12 @@ policy_backend_off: Off
 policy_backend_mihomo: Mihomo
 policy_backend_leaf_deprecated: Leaf (deprecated)
 policy_leaf_deprecated_notice: Leaf policy routing is deprecated and retained for compatibility with existing configurations.
-policy_mihomo_native_config_notice: EasyTier only manages the Mihomo configuration source and lifecycle. File and inline YAML preserve native Mihomo semantics; proxies, groups, rules, and subscriptions are neither parsed nor rewritten.
+policy_mihomo_native_config_notice: EasyTier edits the referenced native Mihomo YAML file without parsing or rewriting proxies, groups, rules, or subscriptions.
+policy_mihomo_file_edit_notice: This is the actual referenced Mihomo file. If none existed, EasyTier created an instance-local autogen.yaml and saved its path.
+policy_mihomo_controller_secret_help: Optional runtime-only override for the secret in the source Mihomo YAML. The source file is not modified.
+policy_mihomo_controller_secret_placeholder: Leave empty to use the YAML secret
 policy_mihomo_config_path_example: "Example: /etc/easytier/mihomo.yaml"
-policy_mihomo_config_path_required: Mihomo requires either a readable configuration file or inline YAML.
+policy_mihomo_config_path_required: Mihomo uses this native YAML file. The editor creates an instance-local autogen.yaml when the path is empty.
 policy_runtime_status: Runtime status
 policy_runtime_running: Running
 policy_runtime_stopped: Stopped
@@ -521,9 +524,14 @@ web:
     config_saved: Config Saved
     edit_policy_yaml: Edit Policy YAML
     view_policy_yaml: View Policy YAML
+    mihomo_file_api_unavailable: Mihomo file editing is unavailable through this client
+    mihomo_file_open_failed: Failed to open Mihomo config file
+    mihomo_file_save_failed: Failed to save Mihomo config file
+    open_mihomo_dashboard: Zashboard
+    mihomo_dashboard_failed: Failed to open Zashboard
     policy_saved_restart_required: Policy configuration saved; restart this network to apply it
     policy_save_failed: Failed to save policy configuration
-    policy_runtime_running: Leaf Running
+    policy_runtime_running: Policy Runtime Running
     policy_runtime_stopped: Leaf Stopped
     import_config: Import Config
     create_new: Create New Network

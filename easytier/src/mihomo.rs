@@ -54,7 +54,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::managed_child::{ManagedChild, configure_command};
 
-#[cfg(windows)]
 use std::net::{Ipv4Addr, TcpListener};
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
@@ -62,6 +61,7 @@ const MAX_CONTROLLER_RESPONSE_BYTES: u64 = 1024 * 1024;
 const MAX_VALIDATION_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const OWNER_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_TAILSCALE_ROUTES: &[&str] = &["100.64.0.0/10", "fd7a:115c:a1e0::/48"];
+const DEFAULT_AUTOGEN_CONFIG: &str = "mode: rule\nrules:\n  - MATCH,DIRECT\n";
 
 const RESERVED_PROCESS_RULES: &[&str] = &[
     "PROCESS-NAME,io.tailscale.ipn.macsys.network-extension,DIRECT",
@@ -118,6 +118,10 @@ impl ControllerSecret {
     #[cfg(test)]
     fn test_only(value: &str) -> Self {
         Self(Arc::from(value))
+    }
+
+    fn configured(value: impl Into<Arc<str>>) -> Self {
+        Self(value.into())
     }
 
     fn expose_to_child(&self) -> &str {
@@ -232,6 +236,7 @@ pub struct MihomoOverlay {
     pub route_exclude_addresses: Vec<String>,
     pub controller: MihomoPrivateController,
     controller_secret: ControllerSecret,
+    controller_secret_override: Option<Arc<str>>,
 }
 
 impl fmt::Debug for MihomoOverlay {
@@ -251,12 +256,14 @@ impl MihomoOverlay {
         tun_device: String,
         route_exclude_addresses: Vec<String>,
         controller: MihomoPrivateController,
+        controller_secret_override: Option<String>,
     ) -> Self {
         Self {
             tun_device,
             route_exclude_addresses,
             controller,
             controller_secret: ControllerSecret::random(),
+            controller_secret_override: controller_secret_override.map(Arc::from),
         }
     }
 
@@ -271,7 +278,42 @@ impl MihomoOverlay {
             route_exclude_addresses,
             controller,
             controller_secret: ControllerSecret::test_only("test-only-secret"),
+            controller_secret_override: None,
         }
+    }
+
+    fn resolve_controller_secret(&mut self, source: &LoadedMihomoConfig) -> anyhow::Result<()> {
+        let document: Value = serde_yaml::from_str(source.as_str())
+            .with_context(|| format!("failed to parse Mihomo source {}", source.label))?;
+        let root = document
+            .as_mapping()
+            .ok_or_else(|| anyhow::anyhow!("Mihomo config root must be a YAML mapping"))?;
+        if let Some(secret) = self.controller_secret_override.clone() {
+            self.controller_secret = ControllerSecret::configured(secret);
+            return Ok(());
+        }
+        if let Some(secret) = root.get(yaml_key("secret")) {
+            let secret = secret
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Mihomo secret must be a string"))?;
+            self.controller_secret = ControllerSecret::configured(Arc::<str>::from(secret));
+        }
+        Ok(())
+    }
+
+    fn dashboard_url(&self) -> anyhow::Result<String> {
+        let MihomoPrivateController::Loopback(address) = self.controller else {
+            anyhow::bail!("Mihomo dashboard requires a loopback TCP controller");
+        };
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("hostname", "127.0.0.1")
+            .append_pair("port", &address.port().to_string())
+            .append_pair("secret", self.controller_secret.expose_to_child())
+            .append_pair("http", "true")
+            .append_pair("disableUpgradeCore", "1")
+            .append_pair("disableTunMode", "1")
+            .finish();
+        Ok(format!("https://board.zash.run.place/#/setup?{query}"))
     }
 }
 
@@ -621,6 +663,59 @@ fn write_runtime_copy(path: &Path, yaml: &str) -> anyhow::Result<()> {
     result.with_context(|| format!("failed to publish Mihomo runtime config {}", path.display()))
 }
 
+pub fn load_user_config(path: &Path) -> anyhow::Result<String> {
+    Ok(MihomoConfigSource::File(path.to_owned())
+        .load()?
+        .contents
+        .to_string())
+}
+
+pub fn save_user_config(path: &Path, contents: &str) -> anyhow::Result<()> {
+    ensure!(
+        contents.len() as u64 <= MAX_SOURCE_BYTES,
+        "Mihomo config exceeds {MAX_SOURCE_BYTES} bytes"
+    );
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "refusing non-regular Mihomo source config {}",
+            path.display()
+        );
+    }
+    write_runtime_copy(path, contents)
+}
+
+pub fn materialize_user_config(
+    config_dir: &Path,
+    instance_id: uuid::Uuid,
+    inline: Option<&str>,
+) -> anyhow::Result<(PathBuf, String, bool)> {
+    let directory = config_dir
+        .join("mihomo")
+        .join(instance_id.simple().to_string());
+    if !directory.exists() {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder.create(&directory)?;
+    }
+    let path = directory.join("autogen.yaml");
+    if path.exists() {
+        let contents = load_user_config(&path)?;
+        return Ok((path, contents, false));
+    }
+    let contents = inline
+        .filter(|contents| !contents.trim().is_empty())
+        .unwrap_or(DEFAULT_AUTOGEN_CONFIG)
+        .to_owned();
+    save_user_config(&path, &contents)?;
+    Ok((path, contents, true))
+}
+
 #[derive(Debug, Clone)]
 pub struct MihomoRestartPolicy {
     pub max_restarts: u32,
@@ -750,6 +845,7 @@ impl MihomoSupervisor {
             status.last_error = None;
         }
         let source = self.config.source.load()?;
+        self.config.overlay.resolve_controller_secret(&source)?;
         let compiled = compile_runtime_config(&source, &self.config.overlay)?;
         write_runtime_copy(&self.config.runtime_config, &compiled.yaml)?;
         validate_runtime_config(&self.config).await?;
@@ -1283,9 +1379,8 @@ struct OwnedRuntimeDirectory {
 
 impl OwnedRuntimeDirectory {
     fn create(_instance_id: uuid::Uuid) -> anyhow::Result<Self> {
-        // Mihomo's Unix controller inherits the platform sun_path limit.
-        // macOS and FreeBSD commonly expose a long per-user TMPDIR, so use a
-        // random mode-0700 directory directly below /tmp on every Unix host.
+        // Keep generated runtime configuration and health state in a short,
+        // private directory that is removed with the owned Mihomo process.
         #[cfg(unix)]
         let base = PathBuf::from("/tmp");
         #[cfg(not(unix))]
@@ -1316,6 +1411,7 @@ pub struct MihomoCoreStartRequest {
     pub home_dir: PathBuf,
     pub tun_device: String,
     pub route_exclude_addresses: Vec<String>,
+    pub controller_secret_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1335,6 +1431,10 @@ enum CoreOwnerCommand {
     },
     Status {
         response: oneshot::Sender<MihomoCoreStatus>,
+    },
+    DashboardUrl {
+        instance_id: uuid::Uuid,
+        response: oneshot::Sender<anyhow::Result<String>>,
     },
     Shutdown,
 }
@@ -1432,6 +1532,19 @@ impl MihomoCoreOwner {
             })
     }
 
+    pub async fn dashboard_url(&self, instance_id: uuid::Uuid) -> anyhow::Result<String> {
+        let (response, result) = oneshot::channel();
+        self.commands
+            .send(CoreOwnerCommand::DashboardUrl {
+                instance_id,
+                response,
+            })
+            .map_err(|_| anyhow::anyhow!("Mihomo Core owner is unavailable"))?;
+        tokio::time::timeout(Duration::from_secs(2), result)
+            .await
+            .map_err(|_| anyhow::anyhow!("Mihomo dashboard request timed out"))??
+    }
+
     /// Stop the process-wide supervisor before Core tears down its Tokio
     /// runtime. The owner lives in a `OnceLock`, so normal process shutdown
     /// cannot rely on `Drop` to reap the Mihomo child and its TUN.
@@ -1483,6 +1596,25 @@ async fn core_owner_loop(mut commands: mpsc::UnboundedReceiver<CoreOwnerCommand>
                 };
                 let _ = response.send(status);
             }
+            CoreOwnerCommand::DashboardUrl {
+                instance_id,
+                response,
+            } => {
+                let result = match owned.as_ref() {
+                    Some(owned) if owned.instance_id == instance_id => {
+                        let status = owned.supervisor.status().await;
+                        if status.state == MihomoProcessState::Running {
+                            owned.supervisor.config.overlay.dashboard_url()
+                        } else {
+                            Err(anyhow::anyhow!("Mihomo is not running"))
+                        }
+                    }
+                    _ => Err(anyhow::anyhow!(
+                        "network instance does not own the Mihomo runtime"
+                    )),
+                };
+                let _ = response.send(result);
+            }
             CoreOwnerCommand::Shutdown => break,
         }
     }
@@ -1511,6 +1643,7 @@ async fn start_owned_mihomo(
             request.tun_device,
             request.route_exclude_addresses,
             controller,
+            request.controller_secret_override,
         ),
         restart: MihomoRestartPolicy::default(),
     };
@@ -1559,24 +1692,11 @@ async fn stop_owned_mihomo(
 fn core_private_controller(
     runtime_directory: &OwnedRuntimeDirectory,
 ) -> anyhow::Result<MihomoPrivateController> {
-    #[cfg(unix)]
-    {
-        Ok(MihomoPrivateController::UnixSocket(
-            runtime_directory.path.join("controller.sock"),
-        ))
-    }
-    #[cfg(windows)]
-    {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-        let address = listener.local_addr()?;
-        drop(listener);
-        Ok(MihomoPrivateController::Loopback(address))
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = runtime_directory;
-        anyhow::bail!("Mihomo controller is unsupported on this platform")
-    }
+    let _ = runtime_directory;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let address = listener.local_addr()?;
+    drop(listener);
+    Ok(MihomoPrivateController::Loopback(address))
 }
 
 #[cfg(test)]
@@ -1773,6 +1893,58 @@ rules:
     }
 
     #[test]
+    fn materialized_user_config_is_instance_local_and_preserves_legacy_inline() {
+        let directory = tempfile::tempdir().unwrap();
+        let instance_id = uuid::Uuid::new_v4();
+        let (path, contents, created) = materialize_user_config(
+            directory.path(),
+            instance_id,
+            Some("secret: original\nrules: []\n"),
+        )
+        .unwrap();
+        assert!(created);
+        assert_eq!(path.file_name().unwrap(), "autogen.yaml");
+        assert!(
+            path.to_string_lossy()
+                .contains(&instance_id.simple().to_string())
+        );
+        assert_eq!(contents, "secret: original\nrules: []\n");
+        save_user_config(&path, "secret: changed\nrules: []\n").unwrap();
+        assert_eq!(
+            load_user_config(&path).unwrap(),
+            "secret: changed\nrules: []\n"
+        );
+    }
+
+    #[test]
+    fn controller_secret_uses_yaml_then_runtime_override() {
+        let controller = MihomoPrivateController::Loopback("127.0.0.1:19090".parse().unwrap());
+        let loaded = source("secret: yaml-secret\nrules: []\n");
+        let mut from_yaml = MihomoOverlay::new(
+            "et-policy-test".to_owned(),
+            Vec::new(),
+            controller.clone(),
+            None,
+        );
+        from_yaml.resolve_controller_secret(&loaded).unwrap();
+        assert_eq!(from_yaml.controller_secret.expose_to_child(), "yaml-secret");
+        assert!(from_yaml.dashboard_url().unwrap().contains("port=19090"));
+        assert!(from_yaml.dashboard_url().unwrap().contains("yaml-secret"));
+
+        let mut overridden = MihomoOverlay::new(
+            "et-policy-test".to_owned(),
+            Vec::new(),
+            controller,
+            Some("runtime-secret".to_owned()),
+        );
+        overridden.resolve_controller_secret(&loaded).unwrap();
+        assert_eq!(
+            overridden.controller_secret.expose_to_child(),
+            "runtime-secret"
+        );
+    }
+
+    #[test]
     fn supervisor_does_not_report_running_before_health_gate() {
         assert_ne!(
             MihomoProcessState::Starting.as_str(),
@@ -1827,26 +1999,24 @@ rules:
         assert!(ensure_owner_available(Some(first), uuid::Uuid::new_v4()).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn private_controller_uses_a_short_mode_private_runtime_path() {
-        use std::os::unix::fs::MetadataExt as _;
-
+    fn private_controller_is_loopback_only() {
         let runtime = OwnedRuntimeDirectory::create(uuid::Uuid::new_v4()).unwrap();
         let controller = core_private_controller(&runtime).unwrap();
-        let MihomoPrivateController::UnixSocket(path) = controller else {
-            panic!("Unix must use a private Unix controller");
+        let MihomoPrivateController::Loopback(address) = controller else {
+            panic!("the managed dashboard requires a loopback TCP controller");
         };
-        assert!(path.starts_with("/tmp"));
-        assert!(
-            path.as_os_str().as_encoded_bytes().len() < 104,
-            "controller path exceeds the Darwin/FreeBSD sun_path limit: {}",
-            path.display()
-        );
-        assert_eq!(
-            fs::symlink_metadata(&runtime.path).unwrap().mode() & 0o777,
-            0o700
-        );
+        assert!(address.is_ipv4());
+        assert!(address.ip().is_loopback());
+        assert_ne!(address.port(), 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            assert_eq!(
+                fs::symlink_metadata(&runtime.path).unwrap().mode() & 0o777,
+                0o700
+            );
+        }
     }
 
     #[tokio::test]

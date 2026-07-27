@@ -920,6 +920,7 @@ impl NetworkConfig {
             || self.policy_outbound_interface.is_some()
             || self.policy_leaf_executable.is_some()
             || self.policy_mihomo_executable.is_some()
+            || self.policy_mihomo_controller_secret.is_some()
             || self.policy_leaf_tun_fast_path.is_some()
         {
             let mihomo_source_explicit = self.policy_mihomo_config_file.is_some()
@@ -968,6 +969,11 @@ impl NetworkConfig {
                     .as_ref()
                     .filter(|value| !value.is_empty())
                     .map(Into::into),
+                mihomo_controller_secret: self
+                    .policy_mihomo_controller_secret
+                    .as_ref()
+                    .filter(|value| !value.is_empty())
+                    .cloned(),
                 source_dir: None,
                 mihomo_source_explicit,
             };
@@ -1314,6 +1320,7 @@ impl NetworkConfig {
             result.policy_mihomo_executable = policy
                 .mihomo_executable
                 .map(|path| path.to_string_lossy().into_owned());
+            result.policy_mihomo_controller_secret = policy.mihomo_controller_secret;
         }
         let flags = config.get_flags();
         let default_flags = default_config.get_flags();
@@ -1501,6 +1508,7 @@ mod tests {
             policy_config_inline: Some("version: 1\nrules: [MATCH,DIRECT]\n".to_string()),
             policy_mihomo_config_inline: Some("rules: []\n".to_string()),
             policy_mihomo_executable: Some("easytier-mihomo".to_string()),
+            policy_mihomo_controller_secret: Some("runtime-secret".to_string()),
             ..Default::default()
         };
 
@@ -1517,6 +1525,10 @@ mod tests {
         assert_eq!(
             roundtrip.policy_mihomo_executable.as_deref(),
             Some("easytier-mihomo")
+        );
+        assert_eq!(
+            roundtrip.policy_mihomo_controller_secret.as_deref(),
+            Some("runtime-secret")
         );
         assert_eq!(
             roundtrip.policy_config_inline.as_deref(),

@@ -13,17 +13,18 @@ use crate::{
             manage::{
                 CollectNetworkInfoRequest, CollectNetworkInfoResponse,
                 DeleteNetworkInstanceRequest, DeleteNetworkInstanceResponse,
+                GetMihomoDashboardUrlRequest, GetMihomoDashboardUrlResponse,
                 GetNetworkInstanceConfigRequest, GetNetworkInstanceConfigResponse,
                 ListNetworkInstanceMetaRequest, ListNetworkInstanceMetaResponse,
                 ListNetworkInstanceRequest, ListNetworkInstanceResponse,
                 ListPolicyOutboundInterfacesRequest, ListPolicyOutboundInterfacesResponse,
                 ListPolicyRuleDataCategoriesRequest, ListPolicyRuleDataCategoriesResponse,
-                NetworkInstanceRunningInfoMap, NetworkMeta, PolicyConfigDiagnostic,
-                PolicyOutboundInterface, RetainNetworkInstanceRequest,
-                RetainNetworkInstanceResponse, RunNetworkInstanceRequest,
-                RunNetworkInstanceResponse, UpdatePolicyRuleDataRequest,
-                UpdatePolicyRuleDataResponse, ValidateConfigRequest, ValidateConfigResponse,
-                WebClientService,
+                NetworkInstanceRunningInfoMap, NetworkMeta, OpenMihomoConfigRequest,
+                OpenMihomoConfigResponse, PolicyConfigDiagnostic, PolicyOutboundInterface,
+                RetainNetworkInstanceRequest, RetainNetworkInstanceResponse,
+                RunNetworkInstanceRequest, RunNetworkInstanceResponse, SaveMihomoConfigRequest,
+                UpdatePolicyRuleDataRequest, UpdatePolicyRuleDataResponse, ValidateConfigRequest,
+                ValidateConfigResponse, WebClientService,
             },
         },
         rpc_types::{self, controller::BaseController},
@@ -251,6 +252,104 @@ impl WebClientService for InstanceManageRpcService {
         Ok(ValidateConfigResponse {
             toml_config: config.dump(),
             policy_diagnostics,
+        })
+    }
+
+    async fn open_mihomo_config(
+        &self,
+        _: BaseController,
+        req: OpenMihomoConfigRequest,
+    ) -> Result<OpenMihomoConfigResponse, rpc_types::error::Error> {
+        let _mutation_guard = self.remote_mutation_lock.lock().await;
+        let network_config = req
+            .config
+            .ok_or_else(|| anyhow::anyhow!("network config is required"))?;
+        let config = network_config.gen_config()?;
+        let policy = config
+            .get_policy_proxy_config()
+            .ok_or_else(|| anyhow::anyhow!("Mihomo policy config is unavailable"))?;
+        if !policy.is_mihomo_enabled() {
+            return Err(anyhow::anyhow!("selected policy backend is not Mihomo").into());
+        }
+        let config_dir = self
+            .manager
+            .get_config_dir()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("managed config directory is unavailable"))?;
+        if let Some(config_file) = policy.active_config_file() {
+            let path = if config_file.is_absolute() {
+                config_file.clone()
+            } else {
+                config_dir.join(config_file)
+            };
+            let contents = crate::mihomo::load_user_config(&path)?;
+            return Ok(OpenMihomoConfigResponse {
+                path: path.to_string_lossy().into_owned(),
+                contents,
+                created: false,
+            });
+        }
+        if !req.materialize {
+            return Ok(OpenMihomoConfigResponse {
+                path: String::new(),
+                contents: policy.active_config_inline().cloned().unwrap_or_default(),
+                created: false,
+            });
+        }
+        let (path, contents, created) = crate::mihomo::materialize_user_config(
+            &config_dir,
+            config.get_id(),
+            policy.active_config_inline().map(String::as_str),
+        )?;
+        Ok(OpenMihomoConfigResponse {
+            path: path.to_string_lossy().into_owned(),
+            contents,
+            created,
+        })
+    }
+
+    async fn save_mihomo_config(
+        &self,
+        _: BaseController,
+        req: SaveMihomoConfigRequest,
+    ) -> Result<crate::proto::common::Void, rpc_types::error::Error> {
+        let _mutation_guard = self.remote_mutation_lock.lock().await;
+        let network_config = req
+            .config
+            .ok_or_else(|| anyhow::anyhow!("network config is required"))?;
+        let config = network_config.gen_config()?;
+        let policy = config
+            .get_policy_proxy_config()
+            .ok_or_else(|| anyhow::anyhow!("Mihomo policy config is unavailable"))?;
+        if !policy.is_mihomo_enabled() {
+            return Err(anyhow::anyhow!("selected policy backend is not Mihomo").into());
+        }
+        let config_file = policy
+            .active_config_file()
+            .ok_or_else(|| anyhow::anyhow!("Mihomo config file is required"))?;
+        let path = if config_file.is_absolute() {
+            config_file.clone()
+        } else {
+            self.manager
+                .get_config_dir()
+                .ok_or_else(|| anyhow::anyhow!("managed config directory is unavailable"))?
+                .join(config_file)
+        };
+        crate::mihomo::save_user_config(&path, &req.contents)?;
+        Ok(crate::proto::common::Void {})
+    }
+
+    async fn get_mihomo_dashboard_url(
+        &self,
+        _: BaseController,
+        req: GetMihomoDashboardUrlRequest,
+    ) -> Result<GetMihomoDashboardUrlResponse, rpc_types::error::Error> {
+        let instance_id: uuid::Uuid = req
+            .inst_id
+            .ok_or_else(|| anyhow::anyhow!("instance id is required"))?
+            .into();
+        Ok(GetMihomoDashboardUrlResponse {
+            url: self.manager.get_mihomo_dashboard_url(instance_id).await?,
         })
     }
 

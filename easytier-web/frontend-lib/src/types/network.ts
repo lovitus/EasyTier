@@ -35,6 +35,7 @@ export type NetworkConfig = Omit<
   networking_method: NetworkingMethod | string
   policy_mihomo_config_file?: string
   policy_mihomo_config_inline?: string
+  policy_mihomo_controller_secret?: string
 }
 
 const UINT64_MAX = (1n << 64n) - 1n
@@ -116,6 +117,7 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     policy_config_inline: '',
     policy_mihomo_config_file: '',
     policy_mihomo_config_inline: '',
+    policy_mihomo_controller_secret: '',
     policy_outbound_interface: '',
     policy_leaf_executable: '',
     policy_mihomo_executable: '',

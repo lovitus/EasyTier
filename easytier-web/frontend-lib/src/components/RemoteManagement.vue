@@ -45,6 +45,7 @@ const isEditingNetwork = ref(false); // Flag to indicate if we're in network edi
 const currentNetworkConfig = ref<NetworkTypes.NetworkConfig | undefined>(undefined);
 let networkConfigRequestEpoch = 0;
 const policyConfigDraft = ref<NetworkTypes.NetworkConfig | undefined>(undefined);
+const mihomoYamlContents = ref('');
 const showPolicyYamlDialog = ref(false);
 const policyConfigSaving = ref(false);
 const policyRuntimePlatform = ref<string | undefined>(undefined);
@@ -503,11 +504,44 @@ const setPolicyRoutingBackend = async (backend: PolicyProxyBackend) => {
     await savePolicyConfig(config);
 }
 
-const openPolicyYaml = () => {
+const openPolicyYaml = async () => {
     if (!currentNetworkConfig.value) {
         return;
     }
-    policyConfigDraft.value = cloneNetworkConfig(currentNetworkConfig.value);
+    const draft = cloneNetworkConfig(currentNetworkConfig.value);
+    if (configuredPolicyBackend(draft) === 'mihomo') {
+        if (!props.api.open_mihomo_config) {
+            toast.add({
+                severity: 'error',
+                summary: 'Error',
+                detail: t('web.device_management.mihomo_file_api_unavailable'),
+                life: 10000,
+            });
+            return;
+        }
+        try {
+            const response = await props.api.open_mihomo_config(draft, !policyYamlReadOnly.value);
+            mihomoYamlContents.value = response.contents;
+            if (response.path) {
+                draft.policy_mihomo_config_file = response.path;
+                draft.policy_mihomo_config_inline = '';
+            }
+            if (!policyYamlReadOnly.value
+                && response.path
+                && response.path !== currentNetworkConfig.value.policy_mihomo_config_file) {
+                if (!(await savePolicyConfig(cloneNetworkConfig(draft)))) return;
+            }
+        } catch (error) {
+            toast.add({
+                severity: 'error',
+                summary: 'Error',
+                detail: t('web.device_management.mihomo_file_open_failed') + ': ' + errorDetail(error),
+                life: 10000,
+            });
+            return;
+        }
+    }
+    policyConfigDraft.value = draft;
     showPolicyYamlDialog.value = true;
 }
 
@@ -515,8 +549,39 @@ const savePolicyYaml = async () => {
     if (policyYamlReadOnly.value || !policyConfigDraft.value) {
         return;
     }
-    if (await savePolicyConfig(cloneNetworkConfig(policyConfigDraft.value))) {
+    const draft = cloneNetworkConfig(policyConfigDraft.value);
+    if (configuredPolicyBackend(draft) === 'mihomo') {
+        if (!props.api.save_mihomo_config) return;
+        try {
+            await props.api.save_mihomo_config(draft, mihomoYamlContents.value);
+            draft.policy_mihomo_config_inline = '';
+        } catch (error) {
+            toast.add({
+                severity: 'error',
+                summary: 'Error',
+                detail: t('web.device_management.mihomo_file_save_failed') + ': ' + errorDetail(error),
+                life: 10000,
+            });
+            return;
+        }
+    }
+    if (await savePolicyConfig(draft)) {
         showPolicyYamlDialog.value = false;
+    }
+}
+
+const openMihomoDashboard = async () => {
+    const instanceId = selectedInstanceId.value?.uuid;
+    if (!instanceId || !props.api.open_mihomo_dashboard) return;
+    try {
+        await props.api.open_mihomo_dashboard(instanceId);
+    } catch (error) {
+        toast.add({
+            severity: 'error',
+            summary: 'Error',
+            detail: t('web.device_management.mihomo_dashboard_failed') + ': ' + errorDetail(error),
+            life: 10000,
+        });
     }
 }
 const newNetwork = async () => {
@@ -983,8 +1048,6 @@ onUnmounted(() => {
                     :disabled="!networkIsDisabled || !currentNetworkConfig || !currentNetworkControl.editable.value || policyConfigSaving"
                     data-testid="policy-home-backend"
                     @update:model-value="setPolicyRoutingBackend($event as PolicyProxyBackend)" />
-                <Tag :value="policyBackendOptions.find(item => item.value === currentPolicyBackend)?.label"
-                    severity="info" data-testid="policy-backend-status" />
                 <Tag :severity="policyRuntimeRunning ? 'success' : 'secondary'"
                     :value="t(policyRuntimeRunning
                         ? 'web.device_management.policy_runtime_running'
@@ -996,6 +1059,11 @@ onUnmounted(() => {
                         : 'web.device_management.edit_policy_yaml')"
                     :disabled="!currentNetworkConfig || policyConfigSaving"
                     data-testid="policy-home-edit-yaml" @click="openPolicyYaml" />
+                <Button v-if="currentPolicyBackend === 'mihomo' && policyRuntimeRunning"
+                    icon="pi pi-chart-bar" severity="secondary" size="small"
+                    :label="t('web.device_management.open_mihomo_dashboard')"
+                    :disabled="!props.api.open_mihomo_dashboard"
+                    data-testid="policy-open-mihomo-dashboard" @click="openMihomoDashboard" />
             </div>
         </div>
 
@@ -1083,6 +1151,7 @@ onUnmounted(() => {
                 : 'web.device_management.edit_policy_yaml')"
             class="w-[min(52rem,95vw)]" data-testid="policy-yaml-dialog">
             <PolicyEditor v-if="policyConfigDraft" v-model="policyConfigDraft" :api="props.api"
+                v-model:mihomo-file-contents="mihomoYamlContents"
                 yaml-only :read-only="policyYamlReadOnly"
                 :runtime-info="currentNetworkStatusInfo?.detail" />
             <template #footer>

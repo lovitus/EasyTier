@@ -7,8 +7,8 @@ mod vpn_stop_dispatch;
 use anyhow::Context;
 use easytier::proto::api::manage::{
     CollectNetworkInfoResponse, ListPolicyOutboundInterfacesResponse,
-    ListPolicyRuleDataCategoriesResponse, UpdatePolicyRuleDataResponse, ValidateConfigResponse,
-    WebClientService, WebClientServiceClientFactory,
+    ListPolicyRuleDataCategoriesResponse, OpenMihomoConfigResponse, UpdatePolicyRuleDataResponse,
+    ValidateConfigResponse, WebClientService, WebClientServiceClientFactory,
 };
 use easytier::rpc_service::remote_client::{
     GetNetworkMetasResponse, ListNetworkInstanceIdsJsonResp, ListNetworkProps, RemoteClientManager,
@@ -329,6 +329,42 @@ async fn validate_config(
     get_client_manager!()?
         .handle_validate_config(app, config)
         .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn open_mihomo_config(
+    app: AppHandle,
+    config: NetworkConfig,
+    materialize: bool,
+) -> Result<OpenMihomoConfigResponse, String> {
+    get_client_manager!()?
+        .handle_open_mihomo_config(app, config, materialize)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn save_mihomo_config(
+    app: AppHandle,
+    config: NetworkConfig,
+    contents: String,
+) -> Result<(), String> {
+    get_client_manager!()?
+        .handle_save_mihomo_config(app, config, contents)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_mihomo_dashboard_url(app: AppHandle, instance_id: String) -> Result<String, String> {
+    let instance_id = instance_id
+        .parse()
+        .map_err(|e: uuid::Error| e.to_string())?;
+    get_client_manager!()?
+        .handle_get_mihomo_dashboard_url(app, instance_id)
+        .await
+        .map(|response| response.url)
         .map_err(|e| e.to_string())
 }
 
@@ -1528,6 +1564,9 @@ pub fn run_gui() -> std::process::ExitCode {
             update_network_config_state,
             save_network_config,
             validate_config,
+            open_mihomo_config,
+            save_mihomo_config,
+            get_mihomo_dashboard_url,
             update_policy_rule_data,
             list_policy_rule_data_categories,
             list_policy_outbound_interfaces,

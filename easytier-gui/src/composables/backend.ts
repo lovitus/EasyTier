@@ -102,6 +102,24 @@ export async function validateConfig(cfg: NetworkConfig) {
   return await invoke<ValidateConfigResponse>('validate_config', { config: NetworkTypes.toBackendNetworkConfig(cfg) })
 }
 
+export async function openMihomoConfig(cfg: NetworkConfig, materialize: boolean) {
+  return await invoke<Api.OpenMihomoConfigResponse>('open_mihomo_config', {
+    config: NetworkTypes.toBackendNetworkConfig(cfg),
+    materialize,
+  })
+}
+
+export async function saveMihomoConfig(cfg: NetworkConfig, contents: string) {
+  await invoke('save_mihomo_config', {
+    config: NetworkTypes.toBackendNetworkConfig(cfg),
+    contents,
+  })
+}
+
+export async function getMihomoDashboardUrl(instanceId: string) {
+  return await invoke<string>('get_mihomo_dashboard_url', { instanceId })
+}
+
 export async function updatePolicyRuleData(instanceId: string, resource: string, sourceUrl?: string) {
   return await invoke<Api.UpdatePolicyRuleDataResponse>('update_policy_rule_data', {
     instanceId,

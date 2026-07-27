@@ -119,6 +119,7 @@ message NetworkConfig {
   optional string policy_mihomo_executable = 82;
   optional string policy_mihomo_config_file = 83;
   optional string policy_mihomo_config_inline = 84;
+  optional string policy_mihomo_controller_secret = 85;
 }
 
 message PortForwardConfig {
@@ -216,6 +217,26 @@ message UpdatePolicyRuleDataResponse {
   optional bool updated = 6;
 }
 
+message OpenMihomoConfigRequest {
+  NetworkConfig config = 1;
+  bool materialize = 2;
+}
+
+message OpenMihomoConfigResponse {
+  string path = 1;
+  string contents = 2;
+  bool created = 3;
+}
+
+message SaveMihomoConfigRequest {
+  NetworkConfig config = 1;
+  string contents = 2;
+}
+
+message GetMihomoDashboardUrlRequest { common.UUID inst_id = 1; }
+
+message GetMihomoDashboardUrlResponse { string url = 1; }
+
 message ListPolicyRuleDataCategoriesRequest {
   common.UUID inst_id = 1;
   string resource = 2;
@@ -287,6 +308,11 @@ message ListNetworkInstanceMetaResponse { repeated NetworkMeta metas = 1; }
 
 service WebClientService {
   rpc ValidateConfig(ValidateConfigRequest) returns (ValidateConfigResponse) {}
+  rpc OpenMihomoConfig(OpenMihomoConfigRequest)
+      returns (OpenMihomoConfigResponse) {}
+  rpc SaveMihomoConfig(SaveMihomoConfigRequest) returns (common.Void) {}
+  rpc GetMihomoDashboardUrl(GetMihomoDashboardUrlRequest)
+      returns (GetMihomoDashboardUrlResponse) {}
   rpc UpdatePolicyRuleData(UpdatePolicyRuleDataRequest)
       returns (UpdatePolicyRuleDataResponse) {}
   rpc ListPolicyRuleDataCategories(ListPolicyRuleDataCategoriesRequest)

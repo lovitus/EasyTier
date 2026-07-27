@@ -6,11 +6,13 @@ use crate::{
     proto::{
         api::manage::{
             CollectNetworkInfoRequest, CollectNetworkInfoResponse, DeleteNetworkInstanceRequest,
+            GetMihomoDashboardUrlRequest, GetMihomoDashboardUrlResponse,
             GetNetworkInstanceConfigRequest, ListNetworkInstanceMetaRequest,
             ListNetworkInstanceRequest, ListPolicyOutboundInterfacesRequest,
             ListPolicyOutboundInterfacesResponse, ListPolicyRuleDataCategoriesRequest,
             ListPolicyRuleDataCategoriesResponse, NetworkConfig, NetworkMeta,
-            RunNetworkInstanceRequest, UpdatePolicyRuleDataRequest, UpdatePolicyRuleDataResponse,
+            OpenMihomoConfigRequest, OpenMihomoConfigResponse, RunNetworkInstanceRequest,
+            SaveMihomoConfigRequest, UpdatePolicyRuleDataRequest, UpdatePolicyRuleDataResponse,
             ValidateConfigRequest, ValidateConfigResponse, WebClientService,
         },
         rpc_types::controller::BaseController,
@@ -55,6 +57,68 @@ where
                 BaseController::default(),
                 ValidateConfigRequest {
                     config: Some(config),
+                },
+            )
+            .await
+            .map_err(RemoteClientError::RpcError)
+    }
+
+    async fn handle_open_mihomo_config(
+        &self,
+        identify: T,
+        config: NetworkConfig,
+        materialize: bool,
+    ) -> Result<OpenMihomoConfigResponse, RemoteClientError<E>> {
+        let client = self
+            .get_rpc_client(identify)
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        client
+            .open_mihomo_config(
+                BaseController::default(),
+                OpenMihomoConfigRequest {
+                    config: Some(config),
+                    materialize,
+                },
+            )
+            .await
+            .map_err(RemoteClientError::RpcError)
+    }
+
+    async fn handle_save_mihomo_config(
+        &self,
+        identify: T,
+        config: NetworkConfig,
+        contents: String,
+    ) -> Result<(), RemoteClientError<E>> {
+        let client = self
+            .get_rpc_client(identify)
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        client
+            .save_mihomo_config(
+                BaseController::default(),
+                SaveMihomoConfigRequest {
+                    config: Some(config),
+                    contents,
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(RemoteClientError::RpcError)
+    }
+
+    async fn handle_get_mihomo_dashboard_url(
+        &self,
+        identify: T,
+        inst_id: Uuid,
+    ) -> Result<GetMihomoDashboardUrlResponse, RemoteClientError<E>> {
+        let client = self
+            .get_rpc_client(identify)
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        client
+            .get_mihomo_dashboard_url(
+                BaseController::default(),
+                GetMihomoDashboardUrlRequest {
+                    inst_id: Some(inst_id.into()),
                 },
             )
             .await

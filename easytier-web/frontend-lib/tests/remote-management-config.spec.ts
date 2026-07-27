@@ -259,6 +259,9 @@ function makeStatusApi(getNetworkInfo: ReturnType<typeof vi.fn>) {
         source: 2,
       }])),
     })),
+    open_mihomo_config: vi.fn(),
+    save_mihomo_config: vi.fn(),
+    open_mihomo_dashboard: vi.fn(),
     list_network_instance_ids: vi.fn(async () => ({
       disabled_inst_ids: [],
       running_inst_ids: [INSTANCE_UUID, SECOND_INSTANCE_UUID],
@@ -573,6 +576,78 @@ describe('RemoteManagement config save', () => {
       await settleRemoteManagement()
       expect(wrapper.get('[data-testid="policy-runtime-status"]').attributes('data-value'))
         .toBe('web.device_management.policy_runtime_running')
+      expect(wrapper.find('[data-testid="policy-backend-status"]').exists()).toBe(false)
+      await wrapper.get('[data-testid="policy-open-mihomo-dashboard"]').trigger('click')
+      expect(api.open_mihomo_dashboard).toHaveBeenCalledWith(INSTANCE_ID)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('materializes and edits the actual Mihomo file without source-mode state', async () => {
+    const config = {
+      ...DEFAULT_NETWORK_CONFIG(),
+      instance_id: INSTANCE_ID,
+      policy_proxy_backend: 'mihomo',
+    }
+    const api = makeStatusApi(vi.fn(async () => undefined))
+    api.get_network_config = vi.fn(async () => cloneConfig(config))
+    api.get_network_metas = vi.fn(async () => ({
+      metas: {
+        [INSTANCE_ID]: {
+          config_permission: 0,
+          network_name: 'mihomo-file',
+        },
+      },
+    }))
+    api.list_network_instance_ids = vi.fn(async () => ({
+      disabled_inst_ids: [INSTANCE_UUID],
+      running_inst_ids: [],
+    }))
+    api.validate_config = vi.fn(async () => ({ policy_diagnostics: [] }))
+    api.open_mihomo_config = vi.fn(async () => ({
+      path: '/managed/mihomo/autogen.yaml',
+      contents: 'secret: yaml-secret\nrules:\n  - MATCH,DIRECT\n',
+      created: true,
+    }))
+
+    const wrapper = mount(RemoteManagement, {
+      props: { api, instanceId: INSTANCE_ID },
+      global: {
+        stubs: {
+          Config: true,
+          ConfigEditDialog: true,
+          PolicyEditor: true,
+          Status: StatusStub,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+      await wrapper.get('[data-testid="policy-home-edit-yaml"]').trigger('click')
+      await settleAsync()
+
+      expect(api.open_mihomo_config).toHaveBeenCalledWith(
+        expect.objectContaining({ instance_id: INSTANCE_ID }),
+        true,
+      )
+      expect(api.save_config).toHaveBeenCalledWith(expect.objectContaining({
+        policy_mihomo_config_file: '/managed/mihomo/autogen.yaml',
+        policy_mihomo_config_inline: '',
+      }))
+      const editor = wrapper.findComponent({ name: 'PolicyEditor' })
+      expect(editor.props('mihomoFileContents')).toContain('yaml-secret')
+      editor.vm.$emit('update:mihomoFileContents', 'secret: changed\nrules: []\n')
+      await nextTick()
+      await wrapper.get('[data-testid="policy-yaml-save"]').trigger('click')
+      await settleAsync()
+      expect(api.save_mihomo_config).toHaveBeenCalledWith(
+        expect.objectContaining({
+          policy_mihomo_config_file: '/managed/mihomo/autogen.yaml',
+        }),
+        'secret: changed\nrules: []\n',
+      )
     } finally {
       wrapper.unmount()
     }

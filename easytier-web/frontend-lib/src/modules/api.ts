@@ -22,6 +22,12 @@ export interface UpdatePolicyRuleDataResponse {
     updated?: boolean;
 }
 
+export interface OpenMihomoConfigResponse {
+    path: string;
+    contents: string;
+    created: boolean;
+}
+
 export interface ListPolicyRuleDataCategoriesResponse {
     resource: PolicyRuleDataResource;
     sha256: string;
@@ -92,6 +98,9 @@ export interface GetNetworkMetasResponse {
 
 export interface RemoteClient {
     validate_config(config: NetworkConfig): Promise<ValidateConfigResponse>;
+    open_mihomo_config?(config: NetworkConfig, materialize: boolean): Promise<OpenMihomoConfigResponse>;
+    save_mihomo_config?(config: NetworkConfig, contents: string): Promise<void>;
+    open_mihomo_dashboard?(inst_id: string): Promise<void>;
     update_policy_rule_data?(inst_id: string, resource: PolicyRuleDataResource, source_url?: string): Promise<UpdatePolicyRuleDataResponse>;
     list_policy_rule_data_categories?(inst_id: string, resource: PolicyRuleDataResource, expected_sha256?: string, path?: string): Promise<ListPolicyRuleDataCategoriesResponse>;
     list_policy_outbound_interfaces?(): Promise<ListPolicyOutboundInterfacesResponse>;

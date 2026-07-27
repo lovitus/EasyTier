@@ -139,11 +139,17 @@ function mountEditor(
     yamlOnly?: boolean
     readOnly?: boolean
     runtimeInfo?: NetworkInstanceRunningInfo
+    mihomoFileContents?: string
   } = {},
 ) {
   const model = reactive(config) as NetworkConfig
   const wrapper = mount(PolicyEditor, {
-    props: { modelValue: model, api, ...options },
+    props: {
+      modelValue: model,
+      api,
+      ...options,
+      mihomoFileContents: options.mihomoFileContents ?? '',
+    },
     global: {
       directives: { tooltip: () => {} },
       stubs: {
@@ -227,7 +233,7 @@ describe('PolicyEditor', () => {
     expect(model.policy_config_inline).toContain('doh:dns.quad9.net@9.9.9.9')
   })
 
-  it('keeps Leaf and Mihomo sources isolated and supports native inline YAML', async () => {
+  it('keeps Leaf and Mihomo sources isolated while exposing only the native file', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
     config.policy_proxy_backend = 'mihomo'
@@ -244,7 +250,8 @@ describe('PolicyEditor', () => {
       policy_mihomo_config_inline: 'proxies: [native-mihomo]',
       policy_outbound_interface: 'eth0',
     })
-    expect(wrapper.find('#policy_mihomo_config_inline').exists()).toBe(true)
+    expect(wrapper.find('#policy_config_file').exists()).toBe(true)
+    expect(wrapper.find('#policy_mihomo_config_inline').exists()).toBe(false)
     expect(wrapper.find('[data-header="policy.editor.nodes"]').exists()).toBe(false)
 
     await wrapper.find<HTMLSelectElement>('[data-testid="policy-backend-selector"]')
@@ -255,7 +262,7 @@ describe('PolicyEditor', () => {
     expect(model.policy_mihomo_config_inline).toBe('proxies: [native-mihomo]')
   })
 
-  it('opens an empty Mihomo source as inline YAML without borrowing Leaf', async () => {
+  it('opens an empty Mihomo source as a file without borrowing Leaf', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.policy_proxy_backend = 'leaf'
     config.enable_policy_proxy = true
@@ -266,7 +273,8 @@ describe('PolicyEditor', () => {
       .setValue('mihomo')
     await nextTick()
 
-    expect(wrapper.find('#policy_mihomo_config_inline').exists()).toBe(true)
+    expect(wrapper.find('#policy_config_file').exists()).toBe(true)
+    expect(wrapper.find('#policy_mihomo_config_inline').exists()).toBe(false)
     expect(model.policy_mihomo_config_inline).toBe('')
     expect(model.policy_config_inline).toContain('MATCH,DIRECT')
   })

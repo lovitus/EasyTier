@@ -211,6 +211,24 @@ class WebRemoteClient implements Api.RemoteClient {
         });
         return response;
     }
+    async open_mihomo_config(config: NetworkTypes.NetworkConfig, materialize: boolean): Promise<Api.OpenMihomoConfigResponse> {
+        return await this.client.post<any, Api.OpenMihomoConfigResponse>(
+            `/machines/${this.machine_id}/mihomo-config`,
+            { config: NetworkTypes.toBackendNetworkConfig(config), materialize },
+        );
+    }
+    async save_mihomo_config(config: NetworkTypes.NetworkConfig, contents: string): Promise<void> {
+        await this.client.put(`/machines/${this.machine_id}/mihomo-config`, {
+            config: NetworkTypes.toBackendNetworkConfig(config),
+            contents,
+        });
+    }
+    async open_mihomo_dashboard(instanceId: string): Promise<void> {
+        const response = await this.client.get<any, { url: string }>(
+            `/machines/${this.machine_id}/networks/${instanceId}/mihomo-dashboard`,
+        );
+        window.open(response.url, '_blank', 'noopener,noreferrer');
+    }
     async update_policy_rule_data(instanceId: string, resource: Api.PolicyRuleDataResource, sourceUrl?: string): Promise<Api.UpdatePolicyRuleDataResponse> {
         return await this.client.post<any, Api.UpdatePolicyRuleDataResponse>(
             `/machines/${this.machine_id}/networks/${instanceId}/policy-rule-data/${resource}`,

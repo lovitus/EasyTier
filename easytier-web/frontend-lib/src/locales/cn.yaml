@@ -202,9 +202,12 @@ policy_backend_off: 关闭
 policy_backend_mihomo: Mihomo
 policy_backend_leaf_deprecated: Leaf（已弃用）
 policy_leaf_deprecated_notice: Leaf 策略路由已经弃用，仅为兼容现有配置保留。
-policy_mihomo_native_config_notice: EasyTier 只管理 Mihomo 配置来源和运行生命周期；文件与内联 YAML 均保留 Mihomo 原生语义，不解析或改写代理、组、规则及订阅。
+policy_mihomo_native_config_notice: EasyTier 直接编辑引用的 Mihomo 原生 YAML 文件，不解析或改写代理、组、规则及订阅。
+policy_mihomo_file_edit_notice: 这里展示的是实际引用的 Mihomo 文件；若原先没有文件，EasyTier 会创建实例独立的 autogen.yaml 并保存其路径。
+policy_mihomo_controller_secret_help: 可选的运行时 secret 覆盖值，不修改源 Mihomo YAML。
+policy_mihomo_controller_secret_placeholder: 留空则使用 YAML 中的 secret
 policy_mihomo_config_path_example: "示例：/etc/easytier/mihomo.yaml"
-policy_mihomo_config_path_required: Mihomo 必须配置可读取的配置文件或内联 YAML。
+policy_mihomo_config_path_required: Mihomo 使用此原生 YAML 文件；路径为空时，编辑器会创建实例独立的 autogen.yaml。
 policy_runtime_status: 运行状态
 policy_runtime_running: 运行中
 policy_runtime_stopped: 已停止
@@ -521,9 +524,14 @@ web:
     config_saved: 配置已保存
     edit_policy_yaml: 编辑 Policy YAML
     view_policy_yaml: 查看 Policy YAML
+    mihomo_file_api_unavailable: 当前客户端不支持编辑 Mihomo 文件
+    mihomo_file_open_failed: 打开 Mihomo 配置文件失败
+    mihomo_file_save_failed: 保存 Mihomo 配置文件失败
+    open_mihomo_dashboard: Zashboard
+    mihomo_dashboard_failed: 打开 Zashboard 失败
     policy_saved_restart_required: Policy 配置已保存，重启该网络后生效
     policy_save_failed: 保存 Policy 配置失败
-    policy_runtime_running: Leaf 运行中
+    policy_runtime_running: 策略运行中
     policy_runtime_stopped: Leaf 已停止
     import_config: 导入配置
     create_new: 创建新网络

@@ -625,6 +625,7 @@ pub struct PolicyProxyConfig {
     pub outbound_interface: Option<String>,
     pub leaf_executable: Option<PathBuf>,
     pub mihomo_executable: Option<PathBuf>,
+    pub mihomo_controller_secret: Option<String>,
     #[serde(skip)]
     pub source_dir: Option<PathBuf>,
     #[serde(skip)]
@@ -747,6 +748,13 @@ impl PolicyProxyConfig {
             .is_some_and(|path| path.as_os_str().is_empty())
         {
             anyhow::bail!("policy_proxy mihomo_executable cannot be empty");
+        }
+        if self
+            .mihomo_controller_secret
+            .as_ref()
+            .is_some_and(|secret| secret.is_empty())
+        {
+            anyhow::bail!("policy_proxy mihomo_controller_secret cannot be empty");
         }
         Ok(())
     }
