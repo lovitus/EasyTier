@@ -532,7 +532,7 @@ web:
     policy_saved_restart_required: Policy 配置已保存，重启该网络后生效
     policy_save_failed: 保存 Policy 配置失败
     policy_runtime_running: 策略运行中
-    policy_runtime_stopped: Leaf 已停止
+    policy_runtime_stopped: 策略已停止
     import_config: 导入配置
     create_new: 创建新网络
     network_status: 网络状态

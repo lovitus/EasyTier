@@ -446,12 +446,13 @@ describe('RemoteManagement config save', () => {
       expect(buttonContainer.find('.create-button').exists()).toBe(true)
       expect(header.get('[data-testid="policy-home-controls"]').element.parentElement)
         .toBe(header.element)
-      expect(wrapper.find('[data-testid="policy-runtime-status"]').attributes('data-value'))
-        .toBe('web.device_management.policy_runtime_stopped')
+      expect(wrapper.find('[data-testid="policy-runtime-status"]').exists()).toBe(false)
 
       await backend.setValue('leaf')
       await settleAsync()
 
+      expect(wrapper.get('[data-testid="policy-runtime-status"]').attributes('data-value'))
+        .toBe('web.device_management.policy_runtime_stopped')
       expect(api.validate_config).toHaveBeenCalledOnce()
       expect(api.save_config).toHaveBeenCalledOnce()
       expect(api.save_config.mock.calls[0][0]).toMatchObject({

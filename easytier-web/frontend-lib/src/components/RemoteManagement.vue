@@ -1097,7 +1097,8 @@ onUnmounted(() => {
                     :disabled="!networkIsDisabled || !currentNetworkConfig || !currentNetworkControl.editable.value || policyConfigSaving"
                     data-testid="policy-home-backend"
                     @update:model-value="setPolicyRoutingBackend($event as PolicyProxyBackend)" />
-                <Tag :severity="policyRuntimeRunning ? 'success' : 'secondary'"
+                <Tag v-if="currentPolicyBackend !== 'off'"
+                    :severity="policyRuntimeRunning ? 'success' : 'secondary'"
                     :value="t(policyRuntimeRunning
                         ? 'web.device_management.policy_runtime_running'
                         : 'web.device_management.policy_runtime_stopped')"

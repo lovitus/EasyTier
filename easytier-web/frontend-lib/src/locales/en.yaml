@@ -532,7 +532,7 @@ web:
     policy_saved_restart_required: Policy configuration saved; restart this network to apply it
     policy_save_failed: Failed to save policy configuration
     policy_runtime_running: Policy Runtime Running
-    policy_runtime_stopped: Leaf Stopped
+    policy_runtime_stopped: Policy Runtime Stopped
     import_config: Import Config
     create_new: Create New Network
     network_status: Network Status
