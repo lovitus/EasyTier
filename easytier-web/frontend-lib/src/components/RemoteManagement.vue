@@ -493,7 +493,9 @@ const setPolicyRoutingBackend = async (backend: PolicyProxyBackend) => {
     if (backend === 'leaf' && !config.policy_config_file?.trim() && !config.policy_config_inline?.trim()) {
         config.policy_config_inline = DEFAULT_POLICY_TEMPLATE;
     }
-    if (backend === 'mihomo' && !config.policy_config_file?.trim()) {
+    if (backend === 'mihomo'
+        && !config.policy_mihomo_config_file?.trim()
+        && !config.policy_mihomo_config_inline?.trim()) {
         policyConfigDraft.value = config;
         showPolicyYamlDialog.value = true;
         return;

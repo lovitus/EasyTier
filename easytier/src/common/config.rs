@@ -620,11 +620,15 @@ pub struct PolicyProxyConfig {
     pub leaf_tun_fast_path: bool,
     pub config_file: Option<PathBuf>,
     pub config_inline: Option<String>,
+    pub mihomo_config_file: Option<PathBuf>,
+    pub mihomo_config_inline: Option<String>,
     pub outbound_interface: Option<String>,
     pub leaf_executable: Option<PathBuf>,
     pub mihomo_executable: Option<PathBuf>,
     #[serde(skip)]
     pub source_dir: Option<PathBuf>,
+    #[serde(skip)]
+    pub mihomo_source_explicit: bool,
 }
 
 impl PolicyProxyConfig {
@@ -703,31 +707,25 @@ impl PolicyProxyConfig {
                 self.backend.as_ref().unwrap().as_str()
             );
         }
-        if self.config_file.is_some() && self.config_inline.is_some() {
-            anyhow::bail!("policy_proxy config_file and config_inline are mutually exclusive");
-        }
-        if self.is_enabled() && self.config_file.is_none() && self.config_inline.is_none() {
-            anyhow::bail!(
-                "enabled policy_proxy requires exactly one of config_file or config_inline"
-            );
-        }
-        if self
-            .config_file
-            .as_ref()
-            .is_some_and(|path| path.as_os_str().is_empty())
+        Self::validate_source_pair(
+            self.config_file.as_ref(),
+            self.config_inline.as_ref(),
+            "config_file",
+            "config_inline",
+        )?;
+        Self::validate_source_pair(
+            self.mihomo_config_file.as_ref(),
+            self.mihomo_config_inline.as_ref(),
+            "mihomo_config_file",
+            "mihomo_config_inline",
+        )?;
+        if self.is_enabled()
+            && self.active_config_file().is_none()
+            && self.active_config_inline().is_none()
         {
-            anyhow::bail!("policy_proxy config_file cannot be empty");
-        }
-        if let Some(config_inline) = self.config_inline.as_ref() {
-            if config_inline.trim().is_empty() {
-                anyhow::bail!("policy_proxy config_inline cannot be empty");
-            }
-            if config_inline.len() > Self::MAX_INLINE_BYTES {
-                anyhow::bail!(
-                    "policy_proxy config_inline exceeds {} bytes",
-                    Self::MAX_INLINE_BYTES
-                );
-            }
+            anyhow::bail!(
+                "enabled policy_proxy requires exactly one configuration source for the selected backend"
+            );
         }
         if self
             .outbound_interface
@@ -750,32 +748,79 @@ impl PolicyProxyConfig {
         {
             anyhow::bail!("policy_proxy mihomo_executable cannot be empty");
         }
-        if self.is_mihomo_enabled()
-            && (self.outbound_interface.is_some()
-                || self.leaf_executable.is_some()
-                || self.leaf_tun_fast_path)
-        {
-            anyhow::bail!(
-                "policy_proxy backend=mihomo cannot use Leaf-only outbound_interface, leaf_executable, or leaf_tun_fast_path"
-            );
+        Ok(())
+    }
+
+    fn validate_source_pair(
+        config_file: Option<&PathBuf>,
+        config_inline: Option<&String>,
+        file_name: &str,
+        inline_name: &str,
+    ) -> anyhow::Result<()> {
+        if config_file.is_some() && config_inline.is_some() {
+            anyhow::bail!("policy_proxy {file_name} and {inline_name} are mutually exclusive");
         }
-        if self.is_leaf_enabled() && self.mihomo_executable.is_some() {
-            anyhow::bail!("policy_proxy backend=leaf cannot use the Mihomo-only mihomo_executable");
+        if config_file.is_some_and(|path| path.as_os_str().is_empty()) {
+            anyhow::bail!("policy_proxy {file_name} cannot be empty");
+        }
+        if let Some(config_inline) = config_inline {
+            if config_inline.trim().is_empty() {
+                anyhow::bail!("policy_proxy {inline_name} cannot be empty");
+            }
+            if config_inline.len() > Self::MAX_INLINE_BYTES {
+                anyhow::bail!(
+                    "policy_proxy {inline_name} exceeds {} bytes",
+                    Self::MAX_INLINE_BYTES
+                );
+            }
         }
         Ok(())
     }
 
+    pub fn active_config_file(&self) -> Option<&PathBuf> {
+        if self.is_mihomo_enabled()
+            && (self.mihomo_source_explicit
+                || self.mihomo_config_file.is_some()
+                || self.mihomo_config_inline.is_some())
+        {
+            self.mihomo_config_file.as_ref()
+        } else {
+            self.config_file.as_ref()
+        }
+    }
+
+    pub fn active_config_inline(&self) -> Option<&String> {
+        if self.is_mihomo_enabled()
+            && (self.mihomo_source_explicit
+                || self.mihomo_config_file.is_some()
+                || self.mihomo_config_inline.is_some())
+        {
+            self.mihomo_config_inline.as_ref()
+        } else {
+            self.config_inline.as_ref()
+        }
+    }
+
     pub fn resolved_config_file(&self) -> Option<PathBuf> {
-        self.config_file.as_ref().map(|path| {
-            if path.is_absolute() {
-                path.clone()
-            } else {
-                self.source_dir
-                    .as_deref()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(path)
-            }
-        })
+        self.config_file
+            .as_ref()
+            .map(|path| self.resolve_config_path(path))
+    }
+
+    pub fn resolved_active_config_file(&self) -> Option<PathBuf> {
+        self.active_config_file()
+            .map(|path| self.resolve_config_path(path))
+    }
+
+    fn resolve_config_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_owned()
+        } else {
+            self.source_dir
+                .as_deref()
+                .unwrap_or_else(|| Path::new("."))
+                .join(path)
+        }
     }
 }
 
@@ -3132,33 +3177,46 @@ leaf_executable = "easytier-leaf-worker"
     }
 
     #[test]
-    fn policy_proxy_backend_rejects_cross_backend_fields() {
-        let mihomo_with_leaf_field = PolicyProxyConfig {
+    fn policy_proxy_backend_preserves_isolated_backend_fields() {
+        let mut policy = PolicyProxyConfig {
             backend: Some(PolicyProxyBackend::Mihomo),
-            config_inline: Some("rules: []".to_owned()),
+            config_inline: Some("version: 1\nrules: [MATCH,DIRECT]".to_owned()),
+            mihomo_config_inline: Some("rules: []".to_owned()),
+            outbound_interface: Some("en0".to_owned()),
             leaf_executable: Some("easytier-leaf-worker".into()),
-            ..Default::default()
-        };
-        assert!(
-            mihomo_with_leaf_field
-                .validate_envelope()
-                .unwrap_err()
-                .to_string()
-                .contains("Leaf-only")
-        );
-
-        let leaf_with_mihomo_field = PolicyProxyConfig {
-            backend: Some(PolicyProxyBackend::Leaf),
-            config_inline: Some("version: 1\nrules: []".to_owned()),
             mihomo_executable: Some("easytier-mihomo".into()),
             ..Default::default()
         };
+        policy.validate_envelope().unwrap();
+        assert_eq!(
+            policy.active_config_inline().map(String::as_str),
+            Some("rules: []")
+        );
+
+        policy.backend = Some(PolicyProxyBackend::Leaf);
+        policy.enabled = true;
+        policy.validate_envelope().unwrap();
+        assert_eq!(
+            policy.active_config_inline().map(String::as_str),
+            Some("version: 1\nrules: [MATCH,DIRECT]")
+        );
+    }
+
+    #[test]
+    fn explicit_empty_mihomo_source_never_falls_back_to_leaf() {
+        let policy = PolicyProxyConfig {
+            backend: Some(PolicyProxyBackend::Mihomo),
+            config_inline: Some("version: 1\nrules: [MATCH,DIRECT]".to_owned()),
+            mihomo_source_explicit: true,
+            ..Default::default()
+        };
+        assert!(policy.active_config_inline().is_none());
         assert!(
-            leaf_with_mihomo_field
+            policy
                 .validate_envelope()
                 .unwrap_err()
                 .to_string()
-                .contains("Mihomo-only")
+                .contains("selected backend")
         );
     }
 

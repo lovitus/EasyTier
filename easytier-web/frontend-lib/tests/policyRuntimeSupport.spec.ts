@@ -17,7 +17,7 @@ describe('policy backend compatibility', () => {
     expect(configuredPolicyBackend({ enable_policy_proxy: false })).toBe('off')
   })
 
-  it('prefers an explicit backend and clears Leaf-only fields for Mihomo', () => {
+  it('prefers an explicit backend and preserves isolated Leaf and Mihomo fields', () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.policy_proxy_backend = 'leaf'
     config.enable_policy_proxy = true
@@ -25,17 +25,31 @@ describe('policy backend compatibility', () => {
     config.policy_outbound_interface = 'eth0'
     config.policy_leaf_executable = '/tmp/leaf'
     config.policy_leaf_tun_fast_path = true
+    config.policy_mihomo_config_inline = 'rules: []'
 
     applyPolicyBackend(config, 'mihomo')
 
     expect(config).toMatchObject({
       enable_policy_proxy: false,
       policy_proxy_backend: 'mihomo',
-      policy_config_inline: '',
-      policy_outbound_interface: '',
-      policy_leaf_executable: '',
-      policy_leaf_tun_fast_path: false,
+      policy_config_inline: 'proxies: []',
+      policy_mihomo_config_inline: 'rules: []',
+      policy_outbound_interface: 'eth0',
+      policy_leaf_executable: '/tmp/leaf',
+      policy_leaf_tun_fast_path: true,
     })
+  })
+
+  it('migrates a legacy Mihomo source without exposing it to Leaf', () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.policy_proxy_backend = 'mihomo'
+    config.policy_config_file = '/etc/mihomo/config.yaml'
+
+    applyPolicyBackend(config, 'leaf')
+
+    expect(config.policy_config_file).toBe('')
+    expect(config.policy_mihomo_config_file).toBe('/etc/mihomo/config.yaml')
+    expect(config.policy_proxy_backend).toBe('leaf')
   })
 
   it('rejects Mihomo on mobile while preserving desktop and Leaf capability semantics', () => {

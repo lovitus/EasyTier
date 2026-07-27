@@ -915,11 +915,15 @@ impl NetworkConfig {
             || self.policy_proxy_backend.is_some()
             || self.policy_config_file.is_some()
             || self.policy_config_inline.is_some()
+            || self.policy_mihomo_config_file.is_some()
+            || self.policy_mihomo_config_inline.is_some()
             || self.policy_outbound_interface.is_some()
             || self.policy_leaf_executable.is_some()
             || self.policy_mihomo_executable.is_some()
             || self.policy_leaf_tun_fast_path.is_some()
         {
+            let mihomo_source_explicit = self.policy_mihomo_config_file.is_some()
+                || self.policy_mihomo_config_inline.is_some();
             let policy = PolicyProxyConfig {
                 backend: self
                     .policy_proxy_backend
@@ -939,6 +943,16 @@ impl NetworkConfig {
                     .as_ref()
                     .filter(|value| !value.is_empty())
                     .cloned(),
+                mihomo_config_file: self
+                    .policy_mihomo_config_file
+                    .as_ref()
+                    .filter(|value| !value.is_empty())
+                    .map(Into::into),
+                mihomo_config_inline: self
+                    .policy_mihomo_config_inline
+                    .as_ref()
+                    .filter(|value| !value.is_empty())
+                    .cloned(),
                 outbound_interface: self
                     .policy_outbound_interface
                     .as_ref()
@@ -955,6 +969,7 @@ impl NetworkConfig {
                     .filter(|value| !value.is_empty())
                     .map(Into::into),
                 source_dir: None,
+                mihomo_source_explicit,
             };
             policy.validate_envelope()?;
             policy.validate_runtime_support()?;
@@ -1288,6 +1303,10 @@ impl NetworkConfig {
                 .config_file
                 .map(|path| path.to_string_lossy().into_owned());
             result.policy_config_inline = policy.config_inline;
+            result.policy_mihomo_config_file = policy
+                .mihomo_config_file
+                .map(|path| path.to_string_lossy().into_owned());
+            result.policy_mihomo_config_inline = policy.mihomo_config_inline;
             result.policy_outbound_interface = policy.outbound_interface;
             result.policy_leaf_executable = policy
                 .leaf_executable
@@ -1479,7 +1498,8 @@ mod tests {
             network_secret: Some("secret".to_string()),
             networking_method: Some(crate::proto::api::manage::NetworkingMethod::Standalone as i32),
             policy_proxy_backend: Some("mihomo".to_string()),
-            policy_config_inline: Some("rules: []\n".to_string()),
+            policy_config_inline: Some("version: 1\nrules: [MATCH,DIRECT]\n".to_string()),
+            policy_mihomo_config_inline: Some("rules: []\n".to_string()),
             policy_mihomo_executable: Some("easytier-mihomo".to_string()),
             ..Default::default()
         };
@@ -1497,6 +1517,14 @@ mod tests {
         assert_eq!(
             roundtrip.policy_mihomo_executable.as_deref(),
             Some("easytier-mihomo")
+        );
+        assert_eq!(
+            roundtrip.policy_config_inline.as_deref(),
+            Some("version: 1\nrules: [MATCH,DIRECT]\n")
+        );
+        assert_eq!(
+            roundtrip.policy_mihomo_config_inline.as_deref(),
+            Some("rules: []\n")
         );
         let second = roundtrip.gen_config()?;
         assert_eq!(

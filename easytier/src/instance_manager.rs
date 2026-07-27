@@ -56,7 +56,7 @@ fn build_mihomo_start_request(
     config: &TomlConfigLoader,
     policy: PolicyProxyConfig,
 ) -> anyhow::Result<MihomoCoreStartRequest> {
-    let resolved_file = policy.resolved_config_file();
+    let resolved_file = policy.resolved_active_config_file();
     let home_dir = if let Some(path) = resolved_file.as_ref() {
         path.parent()
             .ok_or_else(|| anyhow::anyhow!("Mihomo source config has no parent directory"))?
@@ -69,7 +69,7 @@ fn build_mihomo_start_request(
     };
     let source = if let Some(path) = resolved_file {
         MihomoConfigSource::File(path)
-    } else if let Some(contents) = policy.config_inline {
+    } else if let Some(contents) = policy.active_config_inline().cloned() {
         MihomoConfigSource::Inline {
             label: format!("network {} inline Mihomo config", config.get_id()),
             contents: contents.into(),
@@ -646,7 +646,7 @@ mod mihomo_request_tests {
         let source_home = tempfile::tempdir().unwrap();
         let policy = PolicyProxyConfig {
             backend: Some(PolicyProxyBackend::Mihomo),
-            config_inline: Some("rules: []\n".to_owned()),
+            mihomo_config_inline: Some("rules: []\n".to_owned()),
             mihomo_executable: Some("easytier-mihomo".into()),
             source_dir: Some(source_home.path().to_owned()),
             ..Default::default()

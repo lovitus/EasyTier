@@ -117,6 +117,8 @@ message NetworkConfig {
   optional bool policy_leaf_tun_fast_path = 80;
   optional string policy_proxy_backend = 81;
   optional string policy_mihomo_executable = 82;
+  optional string policy_mihomo_config_file = 83;
+  optional string policy_mihomo_config_inline = 84;
 }
 
 message PortForwardConfig {

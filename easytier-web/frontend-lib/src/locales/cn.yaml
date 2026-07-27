@@ -202,9 +202,9 @@ policy_backend_off: 关闭
 policy_backend_mihomo: Mihomo
 policy_backend_leaf_deprecated: Leaf（已弃用）
 policy_leaf_deprecated_notice: Leaf 策略路由已经弃用，仅为兼容现有配置保留。
-policy_mihomo_native_config_notice: EasyTier 只管理 Mihomo 配置来源路径和运行生命周期，不解析或改写代理、组、规则及订阅。
+policy_mihomo_native_config_notice: EasyTier 只管理 Mihomo 配置来源和运行生命周期；文件与内联 YAML 均保留 Mihomo 原生语义，不解析或改写代理、组、规则及订阅。
 policy_mihomo_config_path_example: "示例：/etc/easytier/mihomo.yaml"
-policy_mihomo_config_path_required: Mihomo 必须配置一个可读取的配置文件路径。
+policy_mihomo_config_path_required: Mihomo 必须配置可读取的配置文件或内联 YAML。
 policy_runtime_status: 运行状态
 policy_runtime_running: 运行中
 policy_runtime_stopped: 已停止

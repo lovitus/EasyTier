@@ -490,13 +490,23 @@ dns:
 
 | 字段 | 必需 | 说明 |
 | --- | --- | --- |
-| `enabled` | 是 | `false` 时不创建 Leaf、策略 TUN 或策略任务 |
-| `config_file` | 二选一 | policy YAML 路径 |
-| `config_inline` | 二选一 | 内联 policy YAML，最多 4 MiB |
-| `outbound_interface` | 启用时是 | underlay 物理出口接口 |
-| `leaf_executable` | Linux 可省略 | 默认查找同目录或 `PATH` 中的 `easytier-leaf-worker` |
+| `backend` | 推荐 | `off`、`mihomo` 或 `leaf`；省略时由旧 `enabled` 映射到 Leaf/Off |
+| `enabled` | 兼容字段 | 仅兼容旧 Leaf 配置；显式 backend 时不要用它选择 Mihomo |
+| `config_file` | Leaf 二选一 | Leaf policy YAML 路径 |
+| `config_inline` | Leaf 二选一 | 内联 Leaf policy YAML，最多 4 MiB |
+| `mihomo_config_file` | Mihomo 二选一 | 原生 Mihomo YAML 路径 |
+| `mihomo_config_inline` | Mihomo 二选一 | 原样保存的内联 Mihomo YAML，最多 4 MiB |
+| `outbound_interface` | Leaf 启用时是 | Leaf underlay 物理出口接口 |
+| `leaf_executable` | Leaf/Linux 可省略 | 默认查找同目录或 `PATH` 中的 `easytier-leaf-worker` |
+| `mihomo_executable` | Mihomo 可省略 | 默认使用与 Core/GUI 同目录的 `easytier-mihomo` |
 
-`config_file` 与 `config_inline` 互斥。当前每个进程只允许一个 policy-enabled 实例。
+Leaf 的 `config_file/config_inline` 与 Mihomo 的
+`mihomo_config_file/mihomo_config_inline` 分别互斥，但两组可以同时保存；
+切换 backend 只选择对应来源，不会清空或解析另一组。旧版 Mihomo
+配置若只含共享 `config_file/config_inline`，会按当前 Mihomo backend
+迁移到专属来源。新配置明确选择 Mihomo 但专属来源为空时 fail-closed，
+不会把 Leaf YAML 当成 Mihomo 配置。当前每个进程只允许一个
+policy-enabled 实例。
 
 ### 9.2 policy 根字段
 

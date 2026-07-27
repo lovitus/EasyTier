@@ -227,24 +227,48 @@ describe('PolicyEditor', () => {
     expect(model.policy_config_inline).toContain('doh:dns.quad9.net@9.9.9.9')
   })
 
-  it('keeps Mihomo configuration native and only edits its source path', async () => {
+  it('keeps Leaf and Mihomo sources isolated and supports native inline YAML', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
-    config.policy_config_inline = 'proxies: [must-not-be-parsed]'
+    config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'mihomo'
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     config.policy_outbound_interface = 'eth0'
+    config.policy_mihomo_config_inline = 'proxies: [native-mihomo]'
+    const { model, wrapper } = mountEditor(config)
+    await nextTick()
+
+    expect(model).toMatchObject({
+      enable_policy_proxy: false,
+      policy_proxy_backend: 'mihomo',
+      policy_config_inline: 'version: 1\nrules: ["MATCH,DIRECT"]\n',
+      policy_mihomo_config_inline: 'proxies: [native-mihomo]',
+      policy_outbound_interface: 'eth0',
+    })
+    expect(wrapper.find('#policy_mihomo_config_inline').exists()).toBe(true)
+    expect(wrapper.find('[data-header="policy.editor.nodes"]').exists()).toBe(false)
+
+    await wrapper.find<HTMLSelectElement>('[data-testid="policy-backend-selector"]')
+      .setValue('leaf')
+    await nextTick()
+    expect(model.enable_policy_proxy).toBe(true)
+    expect(model.policy_config_inline).toBe('version: 1\nrules: ["MATCH,DIRECT"]\n')
+    expect(model.policy_mihomo_config_inline).toBe('proxies: [native-mihomo]')
+  })
+
+  it('opens an empty Mihomo source as inline YAML without borrowing Leaf', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.policy_proxy_backend = 'leaf'
+    config.enable_policy_proxy = true
+    config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const { model, wrapper } = mountEditor(config)
 
     await wrapper.find<HTMLSelectElement>('[data-testid="policy-backend-selector"]')
       .setValue('mihomo')
     await nextTick()
 
-    expect(model).toMatchObject({
-      enable_policy_proxy: false,
-      policy_proxy_backend: 'mihomo',
-      policy_config_inline: '',
-      policy_outbound_interface: '',
-    })
-    expect(wrapper.find('#policy_config_file').exists()).toBe(true)
-    expect(wrapper.find('[data-header="policy.editor.nodes"]').exists()).toBe(false)
+    expect(wrapper.find('#policy_mihomo_config_inline').exists()).toBe(true)
+    expect(model.policy_mihomo_config_inline).toBe('')
+    expect(model.policy_config_inline).toContain('MATCH,DIRECT')
   })
 
   it('shows Mihomo lifecycle and the selected process-wide mesh entry', async () => {

@@ -201,9 +201,9 @@ policy_backend_off: Off
 policy_backend_mihomo: Mihomo
 policy_backend_leaf_deprecated: Leaf (deprecated)
 policy_leaf_deprecated_notice: Leaf policy routing is deprecated and retained for compatibility with existing configurations.
-policy_mihomo_native_config_notice: EasyTier only manages the Mihomo configuration source path and lifecycle. Proxies, groups, rules, and subscriptions are neither parsed nor rewritten.
+policy_mihomo_native_config_notice: EasyTier only manages the Mihomo configuration source and lifecycle. File and inline YAML preserve native Mihomo semantics; proxies, groups, rules, and subscriptions are neither parsed nor rewritten.
 policy_mihomo_config_path_example: "Example: /etc/easytier/mihomo.yaml"
-policy_mihomo_config_path_required: Mihomo requires a readable configuration file path.
+policy_mihomo_config_path_required: Mihomo requires either a readable configuration file or inline YAML.
 policy_runtime_status: Runtime status
 policy_runtime_running: Running
 policy_runtime_stopped: Stopped

@@ -78,6 +78,25 @@ const policyBackend = computed<PolicyProxyBackend>({
   get: () => configuredPolicyBackend(config.value),
   set: backend => setPolicyBackend(backend),
 })
+applyPolicyBackend(config.value, configuredPolicyBackend(config.value))
+const activeConfigFile = computed<string>({
+  get: () => policyBackend.value === 'mihomo'
+    ? config.value.policy_mihomo_config_file ?? ''
+    : config.value.policy_config_file ?? '',
+  set: value => {
+    if (policyBackend.value === 'mihomo') config.value.policy_mihomo_config_file = value
+    else config.value.policy_config_file = value
+  },
+})
+const activeConfigInline = computed<string>({
+  get: () => policyBackend.value === 'mihomo'
+    ? config.value.policy_mihomo_config_inline ?? ''
+    : config.value.policy_config_inline ?? '',
+  set: value => {
+    if (policyBackend.value === 'mihomo') config.value.policy_mihomo_config_inline = value
+    else config.value.policy_config_inline = value
+  },
+})
 const mihomoRuntimeStatus = computed(() => props.runtimeInfo?.mihomo_status)
 const neutralMeshEntryStatus = computed(() => props.runtimeInfo?.neutral_mesh_entry_status)
 const policyBackendOptions = computed(() => {
@@ -152,14 +171,14 @@ const runtimeNoticeKey = computed(() => runtimeNotice.value
   : '')
 
 const sourceMode = computed({
-  get: () => config.value.policy_config_file?.trim() ? 'file' : 'inline',
+  get: () => activeConfigFile.value.trim() ? 'file' : 'inline',
   set: (mode: string) => {
     if (mode === 'file') {
-      config.value.policy_config_inline = ''
+      activeConfigInline.value = ''
     }
     else {
-      config.value.policy_config_file = ''
-      ensureInlineDocument()
+      activeConfigFile.value = ''
+      if (policyBackend.value === 'leaf') ensureInlineDocument()
     }
   },
 })
@@ -199,7 +218,7 @@ watch(
 )
 
 watch(document, value => {
-  if (sourceMode.value !== 'inline' || parseError.value) return
+  if (policyBackend.value !== 'leaf' || sourceMode.value !== 'inline' || parseError.value) return
   try {
     const serialized = serializePolicyDocument(value)
     editError.value = ''
@@ -634,20 +653,32 @@ onMounted(() => {
 <template>
   <div class="flex flex-col gap-4">
     <template v-if="props.yamlOnly">
-      <template v-if="policyBackend === 'mihomo'">
+      <div v-if="policyBackend === 'mihomo'" key="mihomo-yaml-editor" class="contents">
         <Message severity="info" :closable="false">
           {{ t('policy_mihomo_native_config_notice') }}
         </Message>
+        <SelectButton v-model="sourceMode" :options="sourceOptions" option-label="label" option-value="value"
+          :allow-empty="false" :disabled="props.readOnly" />
+        <template v-if="sourceMode === 'file'">
         <div class="flex items-center">
           <label for="policy_config_file_quick">
             {{ fieldLabel('policy_config_file', '/etc/easytier/mihomo.yaml') }}
           </label>
           <span class="pi pi-question-circle ml-2" v-tooltip="t('policy_mihomo_config_path_required')" />
         </div>
-        <InputText id="policy_config_file_quick" v-model="config.policy_config_file"
+        <InputText id="policy_config_file_quick" v-model="activeConfigFile"
           :placeholder="t('policy_mihomo_config_path_example')" :readonly="props.readOnly" />
-      </template>
-      <template v-else-if="policyBackend === 'leaf'">
+        </template>
+        <template v-else>
+          <label for="policy_mihomo_config_inline_quick" class="font-semibold">
+            {{ t('policy.editor.advanced_yaml') }}
+          </label>
+          <Textarea id="policy_mihomo_config_inline_quick" v-model="activeConfigInline" rows="20"
+            auto-resize class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')"
+            :readonly="props.readOnly" />
+        </template>
+      </div>
+      <div v-else-if="policyBackend === 'leaf'" key="leaf-yaml-editor" class="contents">
       <div class="flex flex-wrap items-end gap-4">
         <div class="flex flex-col gap-2">
           <label class="font-semibold">{{ t('policy.editor.source') }}</label>
@@ -673,7 +704,7 @@ onMounted(() => {
           class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')"
           :readonly="props.readOnly" />
       </template>
-      </template>
+      </div>
     </template>
     <template v-else>
     <Message v-if="outboundInfo && runtimeNoticeKey"
@@ -693,18 +724,30 @@ onMounted(() => {
       <small>{{ t('policy_proxy_backend_help') }}</small>
     </div>
 
-    <template v-if="policyBackend === 'mihomo'">
+    <div v-if="policyBackend === 'mihomo'" key="mihomo-policy-editor" class="contents">
       <Message severity="info" :closable="false">
         {{ t('policy_mihomo_native_config_notice') }}
       </Message>
+      <SelectButton v-model="sourceMode" :options="sourceOptions" option-label="label" option-value="value"
+        :allow-empty="false" :disabled="props.readOnly" />
+      <template v-if="sourceMode === 'file'">
       <div class="flex items-center">
         <label for="policy_config_file">
           {{ fieldLabel('policy_config_file', '/etc/easytier/mihomo.yaml') }}
         </label>
         <span class="pi pi-question-circle ml-2" v-tooltip="t('policy_mihomo_config_path_required')" />
       </div>
-      <InputText id="policy_config_file" v-model="config.policy_config_file"
+      <InputText id="policy_config_file" v-model="activeConfigFile"
         :placeholder="t('policy_mihomo_config_path_example')" :readonly="props.readOnly" />
+      </template>
+      <template v-else>
+        <label for="policy_mihomo_config_inline" class="font-semibold">
+          {{ t('policy.editor.advanced_yaml') }}
+        </label>
+        <Textarea id="policy_mihomo_config_inline" v-model="activeConfigInline" rows="20"
+          auto-resize class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')"
+          :readonly="props.readOnly" />
+      </template>
       <div class="flex items-center gap-2">
         <span>{{ t('policy_runtime_status') }}</span>
         <strong data-testid="mihomo-runtime-state">
@@ -735,9 +778,9 @@ onMounted(() => {
       <Message v-if="neutralMeshEntryStatus?.last_error" severity="warn" :closable="false">
         {{ t('policy_mesh_entry_error') }}: {{ neutralMeshEntryStatus.last_error }}
       </Message>
-    </template>
+    </div>
 
-    <template v-if="policyBackend === 'leaf'">
+    <div v-else-if="policyBackend === 'leaf'" key="leaf-policy-editor" class="contents">
       <Message severity="warn" :closable="false">
         {{ t('policy_leaf_deprecated_notice') }}
       </Message>
@@ -1125,7 +1168,7 @@ onMounted(() => {
             class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')" />
         </Panel>
       </template>
-    </template>
+    </div>
     </template>
   </div>
 </template>

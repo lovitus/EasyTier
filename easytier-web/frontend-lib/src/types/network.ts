@@ -33,6 +33,8 @@ export type NetworkConfig = Omit<
   mtu: number | null
   instance_recv_bps_limit: number | string | null
   networking_method: NetworkingMethod | string
+  policy_mihomo_config_file?: string
+  policy_mihomo_config_inline?: string
 }
 
 const UINT64_MAX = (1n << 64n) - 1n
@@ -112,6 +114,8 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     policy_leaf_tun_fast_path: false,
     policy_config_file: '',
     policy_config_inline: '',
+    policy_mihomo_config_file: '',
+    policy_mihomo_config_inline: '',
     policy_outbound_interface: '',
     policy_leaf_executable: '',
     policy_mihomo_executable: '',
