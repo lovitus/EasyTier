@@ -52,7 +52,6 @@ pub(crate) fn configure_command(command: &mut Command) {
 
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt as _;
         command.creation_flags(0x0800_0000);
     }
 }
@@ -196,14 +195,17 @@ impl ManagedChild {
 }
 
 #[cfg(windows)]
-struct WindowsJob(windows::Win32::Foundation::HANDLE);
+struct WindowsJob {
+    _handle: std::os::windows::io::OwnedHandle,
+}
 
 #[cfg(windows)]
 impl WindowsJob {
     fn attach(child: &Child) -> anyhow::Result<Self> {
+        use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
         use windows::{
             Win32::{
-                Foundation::CloseHandle,
+                Foundation::{CloseHandle, HANDLE},
                 System::{
                     JobObjects::{
                         AssignProcessToJobObject, CreateJobObjectW,
@@ -225,43 +227,31 @@ impl WindowsJob {
         unsafe {
             let job = CreateJobObjectW(None, PCWSTR::null())
                 .context("failed to create managed sidecar Windows job")?;
+            let job = std::os::windows::io::OwnedHandle::from_raw_handle(job.0);
+            let job_handle = HANDLE(job.as_raw_handle());
             let mut information = std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
             information.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             if let Err(error) = SetInformationJobObject(
-                job,
+                job_handle,
                 JobObjectExtendedLimitInformation,
                 std::ptr::addr_of!(information).cast(),
                 std::mem::size_of_val(&information) as u32,
             ) {
-                let _ = CloseHandle(job);
                 return Err(error).context("failed to configure managed sidecar Windows job");
             }
             let process = match OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, child_pid)
             {
                 Ok(process) => process,
                 Err(error) => {
-                    let _ = CloseHandle(job);
                     return Err(error).context("failed to open managed sidecar process");
                 }
             };
-            let assignment = AssignProcessToJobObject(job, process);
+            let assignment = AssignProcessToJobObject(job_handle, process);
             let _ = CloseHandle(process);
             if let Err(error) = assignment {
-                let _ = CloseHandle(job);
                 return Err(error).context("failed to assign managed sidecar to Windows job");
             }
-            Ok(Self(job))
-        }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for WindowsJob {
-    fn drop(&mut self) {
-        // SAFETY: WindowsJob exclusively owns this handle. Closing it applies
-        // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE to the managed process.
-        unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+            Ok(Self { _handle: job })
         }
     }
 }
@@ -298,5 +288,12 @@ mod tests {
             candidates,
             vec![PathBuf::from("/opt/easytier/easytier-gost-guardian")]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_child_can_cross_tokio_worker_threads() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::ManagedChild>();
     }
 }
