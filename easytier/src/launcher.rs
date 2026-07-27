@@ -701,6 +701,19 @@ pub type NetworkConfig = crate::proto::api::manage::NetworkConfig;
 
 impl NetworkConfig {
     pub fn gen_config(&self) -> Result<TomlConfigLoader, anyhow::Error> {
+        self.gen_config_inner(false)
+    }
+
+    pub(crate) fn gen_config_for_mihomo_materialization(
+        &self,
+    ) -> Result<TomlConfigLoader, anyhow::Error> {
+        self.gen_config_inner(true)
+    }
+
+    fn gen_config_inner(
+        &self,
+        allow_missing_mihomo_source: bool,
+    ) -> Result<TomlConfigLoader, anyhow::Error> {
         let cfg = TomlConfigLoader::default();
         cfg.set_id(
             self.instance_id
@@ -974,7 +987,11 @@ impl NetworkConfig {
                     .cloned(),
                 source_dir: None,
             };
-            policy.validate_envelope()?;
+            if allow_missing_mihomo_source {
+                policy.validate_envelope_for_mihomo_materialization()?;
+            } else {
+                policy.validate_envelope()?;
+            }
             policy.validate_runtime_support()?;
             cfg.set_policy_proxy_config(Some(policy));
         }
@@ -1544,6 +1561,55 @@ mod tests {
             crate::common::config::PolicyProxyBackend::Mihomo
         );
         Ok(())
+    }
+
+    #[cfg(any(
+        windows,
+        all(
+            unix,
+            not(target_os = "android"),
+            not(target_os = "ios"),
+            not(target_env = "ohos")
+        )
+    ))]
+    #[test]
+    fn mihomo_materialization_is_the_only_empty_source_exception() {
+        let mihomo = super::NetworkConfig {
+            instance_id: Some(uuid::Uuid::new_v4().to_string()),
+            network_name: Some("mihomo-materialization".to_string()),
+            network_secret: Some("secret".to_string()),
+            networking_method: Some(crate::proto::api::manage::NetworkingMethod::Standalone as i32),
+            policy_proxy_backend: Some("mihomo".to_string()),
+            ..Default::default()
+        };
+
+        assert!(
+            mihomo
+                .gen_config()
+                .unwrap_err()
+                .to_string()
+                .contains("requires exactly one configuration source")
+        );
+        let config = mihomo.gen_config_for_mihomo_materialization().unwrap();
+        let policy = config.get_policy_proxy_config().unwrap();
+        assert!(policy.is_mihomo_enabled());
+        assert!(policy.active_config_file().is_none());
+        assert!(policy.active_config_inline().is_none());
+
+        let leaf = super::NetworkConfig {
+            instance_id: Some(uuid::Uuid::new_v4().to_string()),
+            network_name: Some("leaf-must-remain-strict".to_string()),
+            network_secret: Some("secret".to_string()),
+            networking_method: Some(crate::proto::api::manage::NetworkingMethod::Standalone as i32),
+            policy_proxy_backend: Some("leaf".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            leaf.gen_config_for_mihomo_materialization()
+                .unwrap_err()
+                .to_string()
+                .contains("selected policy backend is not Mihomo")
+        );
     }
 
     #[cfg(not(any(

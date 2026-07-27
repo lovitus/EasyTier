@@ -609,14 +609,16 @@ describe('RemoteManagement config save', () => {
     }))
     api.validate_config = vi.fn(async () => ({ policy_diagnostics: [] }))
     let openedMihomoConfig: NetworkConfig | undefined
-    api.open_mihomo_config = vi.fn(async (openedConfig) => {
-      openedMihomoConfig = cloneConfig(openedConfig)
-      return {
-        path: '/managed/mihomo/autogen.yaml',
-        contents: 'secret: yaml-secret\nrules:\n  - MATCH,DIRECT\n',
-        created: true,
-      }
-    })
+    api.open_mihomo_config = vi.fn()
+      .mockRejectedValueOnce(new Error('materialization failed'))
+      .mockImplementation(async (openedConfig) => {
+        openedMihomoConfig = cloneConfig(openedConfig)
+        return {
+          path: '/managed/mihomo/autogen.yaml',
+          contents: 'secret: yaml-secret\nrules:\n  - MATCH,DIRECT\n',
+          created: true,
+        }
+      })
 
     const wrapper = mount(RemoteManagement, {
       props: { api, instanceId: INSTANCE_ID },
@@ -633,6 +635,17 @@ describe('RemoteManagement config save', () => {
 
     try {
       await settleRemoteManagement()
+
+      const initialSelector = wrapper.getComponent({ name: 'SelectButton' })
+      const initialSelectorKey = initialSelector.vm.$.vnode.key
+      const savesBeforeFailedSwitch = vi.mocked(api.save_config).mock.calls.length
+      await wrapper.get('[data-testid="policy-home-backend"]').setValue('mihomo')
+      await settleAsync()
+
+      const selectorAfterFailure = wrapper.getComponent({ name: 'SelectButton' })
+      expect(selectorAfterFailure.vm.$.vnode.key).not.toBe(initialSelectorKey)
+      expect(selectorAfterFailure.props('modelValue')).toBe('leaf')
+      expect(vi.mocked(api.save_config).mock.calls).toHaveLength(savesBeforeFailedSwitch)
 
       await wrapper.get('[data-testid="policy-home-backend"]').setValue('mihomo')
       await settleAsync()

@@ -280,7 +280,11 @@ impl WebClientService for InstanceManageRpcService {
         let network_config = req
             .config
             .ok_or_else(|| anyhow::anyhow!("network config is required"))?;
-        let config = network_config.gen_config()?;
+        let config = if req.materialize {
+            network_config.gen_config_for_mihomo_materialization()?
+        } else {
+            network_config.gen_config()?
+        };
         let policy = config
             .get_policy_proxy_config()
             .ok_or_else(|| anyhow::anyhow!("Mihomo policy config is unavailable"))?;

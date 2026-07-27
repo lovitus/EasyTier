@@ -695,6 +695,17 @@ impl PolicyProxyConfig {
     }
 
     pub fn validate_envelope(&self) -> anyhow::Result<()> {
+        self.validate_envelope_inner(true)
+    }
+
+    pub(crate) fn validate_envelope_for_mihomo_materialization(&self) -> anyhow::Result<()> {
+        if !self.is_mihomo_enabled() {
+            anyhow::bail!("selected policy backend is not Mihomo");
+        }
+        self.validate_envelope_inner(false)
+    }
+
+    fn validate_envelope_inner(&self, require_active_source: bool) -> anyhow::Result<()> {
         if self.enabled
             && matches!(
                 self.backend,
@@ -718,7 +729,8 @@ impl PolicyProxyConfig {
             "mihomo_config_file",
             "mihomo_config_inline",
         )?;
-        if self.is_enabled()
+        if require_active_source
+            && self.is_enabled()
             && self.active_config_file().is_none()
             && self.active_config_inline().is_none()
         {

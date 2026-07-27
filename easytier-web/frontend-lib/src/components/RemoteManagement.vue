@@ -53,6 +53,7 @@ const mihomoYamlContents = ref('');
 const showPolicyYamlDialog = ref(false);
 let policyYamlDialogGeneration = 0;
 const policyConfigSaving = ref(false);
+const policyBackendSelectorGeneration = ref(0);
 const policyRuntimePlatform = ref<string | undefined>(undefined);
 const leafRuntimeSupported = ref<boolean | undefined>(undefined);
 
@@ -519,6 +520,10 @@ const loadMihomoConfigFile = async (
 };
 
 const setPolicyRoutingBackend = async (backend: PolicyProxyBackend) => {
+    // PrimeVue updates its internal selection before this async command
+    // completes. Remount immediately with the persisted value; a successful
+    // save updates currentPolicyBackend and becomes visible afterward.
+    policyBackendSelectorGeneration.value += 1;
     if (!networkIsDisabled.value || !currentNetworkConfig.value || policyConfigSaving.value || !currentNetworkControl.editable.value) {
         return;
     }
@@ -1086,6 +1091,7 @@ onUnmounted(() => {
                 class="policy-home-controls mt-2 flex items-center gap-2 rounded-lg border border-surface-200 px-3 py-2 dark:border-surface-700"
                 data-testid="policy-home-controls">
                 <SelectButton input-id="home-policy-backend"
+                    :key="`${selectedInstanceId ?? 'none'}:${currentPolicyBackend}:${policyBackendSelectorGeneration}`"
                     :model-value="currentPolicyBackend" :options="policyBackendOptions"
                     option-label="label" option-value="value" option-disabled="disabled" :allow-empty="false"
                     :disabled="!networkIsDisabled || !currentNetworkConfig || !currentNetworkControl.editable.value || policyConfigSaving"
