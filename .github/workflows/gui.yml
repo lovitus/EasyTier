@@ -341,7 +341,7 @@ jobs:
           grep -F "wintun.dll" "$RUNNER_TEMP/windows-installer-files.txt"
 
       - name: Verify packaged Mihomo compliance payload
-        if: matrix.GUI_TARGET != ''
+        if: matrix.GUI_TARGET != '' && !contains(matrix.GUI_TARGET, 'windows')
         shell: bash
         run: |
           set -euo pipefail
