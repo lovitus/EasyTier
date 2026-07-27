@@ -639,7 +639,9 @@ impl Default for MihomoRestartPolicy {
             max_restarts: 3,
             initial_backoff: Duration::from_secs(1),
             maximum_backoff: Duration::from_secs(30),
-            validation_timeout: Duration::from_secs(20),
+            // Mihomo `-t` runs executor.Parse(), which may fetch missing Geo data.
+            // Its per-file download timeout is 90s, so 20s rejects valid first starts.
+            validation_timeout: Duration::from_secs(120),
             readiness_timeout: Duration::from_secs(20),
             readiness_interval: Duration::from_millis(200),
             stop_timeout: Duration::from_secs(5),

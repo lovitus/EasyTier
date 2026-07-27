@@ -17,6 +17,17 @@ use crate::{
     },
 };
 
+const RUN_NETWORK_RPC_TIMEOUT_MS: i32 = 190_000;
+
+fn run_network_controller() -> BaseController {
+    // Starting a Mihomo-backed network may validate and download missing Geo data.
+    // Keep short RPCs at the 5s default, but allow the Core owner's bounded 180s start.
+    BaseController {
+        timeout_ms: RUN_NETWORK_RPC_TIMEOUT_MS,
+        ..Default::default()
+    }
+}
+
 #[async_trait]
 pub trait RemoteClientManager<T, C, E>
 where
@@ -136,7 +147,7 @@ where
             .ok_or(RemoteClientError::ClientNotFound)?;
         let resp = client
             .run_network_instance(
-                BaseController::default(),
+                run_network_controller(),
                 RunNetworkInstanceRequest {
                     inst_id: None,
                     config: Some(config.clone()),
@@ -279,7 +290,7 @@ where
         } else {
             client
                 .run_network_instance(
-                    BaseController::default(),
+                    run_network_controller(),
                     RunNetworkInstanceRequest {
                         inst_id: Some(inst_id.into()),
                         config: Some(cfg),
