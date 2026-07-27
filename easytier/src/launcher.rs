@@ -923,8 +923,6 @@ impl NetworkConfig {
             || self.policy_mihomo_controller_secret.is_some()
             || self.policy_leaf_tun_fast_path.is_some()
         {
-            let mihomo_source_explicit = self.policy_mihomo_config_file.is_some()
-                || self.policy_mihomo_config_inline.is_some();
             let policy = PolicyProxyConfig {
                 backend: self
                     .policy_proxy_backend
@@ -975,7 +973,6 @@ impl NetworkConfig {
                     .filter(|value| !value.is_empty())
                     .cloned(),
                 source_dir: None,
-                mihomo_source_explicit,
             };
             policy.validate_envelope()?;
             policy.validate_runtime_support()?;

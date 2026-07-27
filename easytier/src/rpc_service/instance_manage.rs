@@ -1649,7 +1649,7 @@ mod tests {
             r#"
 [policy_proxy]
 backend = "mihomo"
-config_inline = '''
+mihomo_config_inline = '''
 mixed-port: 7890
 proxies: []
 proxy-groups: []

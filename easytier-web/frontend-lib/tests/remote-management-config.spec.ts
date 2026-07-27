@@ -588,7 +588,9 @@ describe('RemoteManagement config save', () => {
     const config = {
       ...DEFAULT_NETWORK_CONFIG(),
       instance_id: INSTANCE_ID,
-      policy_proxy_backend: 'mihomo',
+      enable_policy_proxy: true,
+      policy_proxy_backend: 'leaf',
+      policy_config_inline: 'version: 1\nrules:\n  - FINAL,DIRECT\n',
     }
     const api = makeStatusApi(vi.fn(async () => undefined))
     api.get_network_config = vi.fn(async () => cloneConfig(config))
@@ -605,11 +607,15 @@ describe('RemoteManagement config save', () => {
       running_inst_ids: [],
     }))
     api.validate_config = vi.fn(async () => ({ policy_diagnostics: [] }))
-    api.open_mihomo_config = vi.fn(async () => ({
-      path: '/managed/mihomo/autogen.yaml',
-      contents: 'secret: yaml-secret\nrules:\n  - MATCH,DIRECT\n',
-      created: true,
-    }))
+    let openedMihomoConfig: NetworkConfig | undefined
+    api.open_mihomo_config = vi.fn(async (openedConfig) => {
+      openedMihomoConfig = cloneConfig(openedConfig)
+      return {
+        path: '/managed/mihomo/autogen.yaml',
+        contents: 'secret: yaml-secret\nrules:\n  - MATCH,DIRECT\n',
+        created: true,
+      }
+    })
 
     const wrapper = mount(RemoteManagement, {
       props: { api, instanceId: INSTANCE_ID },
@@ -625,6 +631,25 @@ describe('RemoteManagement config save', () => {
 
     try {
       await settleRemoteManagement()
+
+      await wrapper.get('[data-testid="policy-home-backend"]').setValue('mihomo')
+      await settleAsync()
+
+      expect(api.open_mihomo_config).toHaveBeenCalledWith(expect.anything(), true)
+      expect(openedMihomoConfig).toEqual(expect.objectContaining({
+        instance_id: INSTANCE_ID,
+        policy_config_inline: 'version: 1\nrules:\n  - FINAL,DIRECT\n',
+        policy_mihomo_config_file: '',
+      }))
+      expect(api.save_config).toHaveBeenCalledWith(expect.objectContaining({
+        enable_policy_proxy: false,
+        policy_proxy_backend: 'mihomo',
+        policy_config_inline: 'version: 1\nrules:\n  - FINAL,DIRECT\n',
+        policy_mihomo_config_file: '/managed/mihomo/autogen.yaml',
+        policy_mihomo_config_inline: '',
+      }))
+      expect(wrapper.find('[data-testid="policy-yaml-dialog"]').exists()).toBe(false)
+
       await wrapper.get('[data-testid="policy-home-edit-yaml"]').trigger('click')
       await settleAsync()
 

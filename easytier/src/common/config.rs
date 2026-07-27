@@ -628,8 +628,6 @@ pub struct PolicyProxyConfig {
     pub mihomo_controller_secret: Option<String>,
     #[serde(skip)]
     pub source_dir: Option<PathBuf>,
-    #[serde(skip)]
-    pub mihomo_source_explicit: bool,
 }
 
 impl PolicyProxyConfig {
@@ -786,11 +784,7 @@ impl PolicyProxyConfig {
     }
 
     pub fn active_config_file(&self) -> Option<&PathBuf> {
-        if self.is_mihomo_enabled()
-            && (self.mihomo_source_explicit
-                || self.mihomo_config_file.is_some()
-                || self.mihomo_config_inline.is_some())
-        {
+        if self.is_mihomo_enabled() {
             self.mihomo_config_file.as_ref()
         } else {
             self.config_file.as_ref()
@@ -798,11 +792,7 @@ impl PolicyProxyConfig {
     }
 
     pub fn active_config_inline(&self) -> Option<&String> {
-        if self.is_mihomo_enabled()
-            && (self.mihomo_source_explicit
-                || self.mihomo_config_file.is_some()
-                || self.mihomo_config_inline.is_some())
-        {
+        if self.is_mihomo_enabled() {
             self.mihomo_config_inline.as_ref()
         } else {
             self.config_inline.as_ref()
@@ -3215,7 +3205,6 @@ leaf_executable = "easytier-leaf-worker"
         let policy = PolicyProxyConfig {
             backend: Some(PolicyProxyBackend::Mihomo),
             config_inline: Some("version: 1\nrules: [MATCH,DIRECT]".to_owned()),
-            mihomo_source_explicit: true,
             ..Default::default()
         };
         assert!(policy.active_config_inline().is_none());

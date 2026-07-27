@@ -502,10 +502,10 @@ dns:
 
 Leaf 的 `config_file/config_inline` 与 Mihomo 的
 `mihomo_config_file/mihomo_config_inline` 分别互斥，但两组可以同时保存；
-切换 backend 只选择对应来源，不会清空或解析另一组。旧版 Mihomo
-配置若只含共享 `config_file/config_inline`，会按当前 Mihomo backend
-迁移到专属来源。新配置明确选择 Mihomo 但专属来源为空时 fail-closed，
-不会把 Leaf YAML 当成 Mihomo 配置。当前每个进程只允许一个
+切换 backend 只选择对应来源，不会复制、清空、解析或迁移另一组。
+Mihomo 的旧内联来源只会物化为 Mihomo 自己的 `autogen.yaml`；缺少
+Mihomo 专属来源时 fail-closed，绝不会把 Leaf YAML 当成 Mihomo 配置。
+当前每个进程只允许一个
 policy-enabled 实例。
 
 ### 9.2 policy 根字段

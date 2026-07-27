@@ -264,19 +264,24 @@ describe('PolicyEditor', () => {
 
   it('opens an empty Mihomo source as a file without borrowing Leaf', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
-    config.policy_proxy_backend = 'leaf'
-    config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'mihomo'
+    config.enable_policy_proxy = false
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const { model, wrapper } = mountEditor(config)
-
-    await wrapper.find<HTMLSelectElement>('[data-testid="policy-backend-selector"]')
-      .setValue('mihomo')
     await nextTick()
 
     expect(wrapper.find('#policy_config_file').exists()).toBe(true)
     expect(wrapper.find('#policy_mihomo_config_inline').exists()).toBe(false)
     expect(model.policy_mihomo_config_inline).toBe('')
     expect(model.policy_config_inline).toContain('MATCH,DIRECT')
+
+    await wrapper.find<HTMLSelectElement>('[data-testid="policy-backend-selector"]')
+      .setValue('leaf')
+    await nextTick()
+
+    expect(model.policy_config_inline).toContain('MATCH,DIRECT')
+    expect(model.policy_mihomo_config_file).toBe('')
+    expect(wrapper.find('#policy_config_inline').exists()).toBe(true)
   })
 
   it('shows Mihomo lifecycle and the selected process-wide mesh entry', async () => {

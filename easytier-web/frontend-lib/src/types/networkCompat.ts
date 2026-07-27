@@ -43,22 +43,10 @@ export function applyPolicyBackend(
   config: NetworkConfig,
   backend: PolicyProxyBackend,
 ): void {
-  const previousBackend = configuredPolicyBackend(config)
-  if (
-    previousBackend === 'mihomo'
-    && !config.policy_mihomo_config_file?.trim()
-    && !config.policy_mihomo_config_inline?.trim()
-  ) {
-    config.policy_mihomo_config_file = config.policy_config_file
-    config.policy_mihomo_config_inline = config.policy_config_inline
-    config.policy_config_file = ''
-    config.policy_config_inline = ''
-  }
   config.policy_proxy_backend = backend
   // The legacy boolean selects Leaf only. Explicit Mihomo must leave it false
   // or Core correctly rejects the envelope as conflicting backend ownership.
   config.enable_policy_proxy = backend === 'leaf'
-
 }
 
 export function normalizePolicyBackendConfig(config: NetworkConfig): NetworkConfig {

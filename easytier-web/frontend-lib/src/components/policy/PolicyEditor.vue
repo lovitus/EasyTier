@@ -80,24 +80,6 @@ const policyBackend = computed<PolicyProxyBackend>({
   set: backend => setPolicyBackend(backend),
 })
 applyPolicyBackend(config.value, configuredPolicyBackend(config.value))
-const activeConfigFile = computed<string>({
-  get: () => policyBackend.value === 'mihomo'
-    ? config.value.policy_mihomo_config_file ?? ''
-    : config.value.policy_config_file ?? '',
-  set: value => {
-    if (policyBackend.value === 'mihomo') config.value.policy_mihomo_config_file = value
-    else config.value.policy_config_file = value
-  },
-})
-const activeConfigInline = computed<string>({
-  get: () => policyBackend.value === 'mihomo'
-    ? config.value.policy_mihomo_config_inline ?? ''
-    : config.value.policy_config_inline ?? '',
-  set: value => {
-    if (policyBackend.value === 'mihomo') config.value.policy_mihomo_config_inline = value
-    else config.value.policy_config_inline = value
-  },
-})
 const mihomoRuntimeStatus = computed(() => props.runtimeInfo?.mihomo_status)
 const neutralMeshEntryStatus = computed(() => props.runtimeInfo?.neutral_mesh_entry_status)
 const policyBackendOptions = computed(() => {
@@ -171,15 +153,15 @@ const runtimeNoticeKey = computed(() => runtimeNotice.value
   ? `policy.editor.runtime_${runtimeNotice.value.replace(/-/g, '_')}`
   : '')
 
-const sourceMode = computed({
-  get: () => activeConfigFile.value.trim() ? 'file' : 'inline',
+const leafSourceMode = computed({
+  get: () => config.value.policy_config_file?.trim() ? 'file' : 'inline',
   set: (mode: string) => {
     if (mode === 'file') {
-      activeConfigInline.value = ''
+      config.value.policy_config_inline = ''
     }
     else {
-      activeConfigFile.value = ''
-      if (policyBackend.value === 'leaf') ensureInlineDocument()
+      config.value.policy_config_file = ''
+      ensureInlineDocument()
     }
   },
 })
@@ -194,7 +176,7 @@ function setPolicyBackend(backend: PolicyProxyBackend) {
   const option = policyBackendOptions.value.find(candidate => candidate.value === backend)
   if (props.readOnly || option?.disabled) return
   applyPolicyBackend(config.value, backend)
-  if (backend === 'leaf' && sourceMode.value === 'inline') ensureInlineDocument()
+  if (backend === 'leaf' && leafSourceMode.value === 'inline') ensureInlineDocument()
 }
 
 watch(
@@ -219,7 +201,7 @@ watch(
 )
 
 watch(document, value => {
-  if (policyBackend.value !== 'leaf' || sourceMode.value !== 'inline' || parseError.value) return
+  if (policyBackend.value !== 'leaf' || leafSourceMode.value !== 'inline' || parseError.value) return
   try {
     const serialized = serializePolicyDocument(value)
     editError.value = ''
@@ -658,31 +640,29 @@ onMounted(() => {
         <Message severity="info" :closable="false">
           {{ t('policy_mihomo_native_config_notice') }}
         </Message>
-        <div class="flex items-center">
-          <label for="policy_mihomo_config_file_quick">
-            {{ fieldLabel('policy_config_file', '/etc/easytier/mihomo.yaml') }}
-          </label>
-          <span class="pi pi-question-circle ml-2" v-tooltip="t('policy_mihomo_config_path_required')" />
+        <div class="flex flex-col gap-1">
+          <span class="font-semibold">{{ t('policy_config_file') }}</span>
+          <code class="text-sm break-all" data-testid="policy-mihomo-file-path">
+            {{ config.policy_mihomo_config_file }}
+          </code>
         </div>
-        <InputText id="policy_mihomo_config_file_quick" v-model="activeConfigFile"
-          :placeholder="t('policy_mihomo_config_path_example')" readonly />
         <Message severity="info" :closable="false">{{ t('policy_mihomo_file_edit_notice') }}</Message>
-          <label for="policy_mihomo_config_inline_quick" class="font-semibold">
-            {{ t('policy.editor.advanced_yaml') }}
-          </label>
-          <Textarea id="policy_mihomo_config_inline_quick" v-model="mihomoFileContents" rows="20"
-            auto-resize class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')"
-            :readonly="props.readOnly" />
+        <label for="policy_mihomo_config_inline_quick" class="font-semibold">
+          {{ t('policy.editor.advanced_yaml') }}
+        </label>
+        <Textarea id="policy_mihomo_config_inline_quick" v-model="mihomoFileContents" rows="20"
+          auto-resize class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')"
+          :readonly="props.readOnly" />
       </div>
       <div v-else-if="policyBackend === 'leaf'" key="leaf-yaml-editor" class="contents">
       <div class="flex flex-wrap items-end gap-4">
         <div class="flex flex-col gap-2">
           <label class="font-semibold">{{ t('policy.editor.source') }}</label>
-          <SelectButton v-model="sourceMode" :options="sourceOptions" option-label="label" option-value="value"
+          <SelectButton v-model="leafSourceMode" :options="sourceOptions" option-label="label" option-value="value"
             :allow-empty="false" :disabled="props.readOnly" />
         </div>
       </div>
-      <template v-if="sourceMode === 'file'">
+      <template v-if="leafSourceMode === 'file'">
         <div class="flex items-center">
           <label for="policy_config_file_quick">{{ fieldLabel('policy_config_file', '/etc/easytier/policy.yaml') }}</label>
           <span class="pi pi-question-circle ml-2" v-tooltip="t('policy_config_file_help')" />
@@ -730,7 +710,7 @@ onMounted(() => {
         </label>
         <span class="pi pi-question-circle ml-2" v-tooltip="t('policy_mihomo_config_path_required')" />
       </div>
-      <InputText id="policy_config_file" v-model="activeConfigFile"
+      <InputText id="policy_config_file" v-model="config.policy_mihomo_config_file"
         :placeholder="t('policy_mihomo_config_path_example')" :readonly="props.readOnly" />
       <div class="flex items-center">
         <label for="policy_mihomo_controller_secret">
@@ -787,7 +767,7 @@ onMounted(() => {
       <div class="flex flex-wrap items-end gap-4">
         <div class="flex flex-col gap-2">
           <label class="font-semibold">{{ t('policy.editor.source') }}</label>
-          <SelectButton v-model="sourceMode" :options="sourceOptions" option-label="label" option-value="value"
+          <SelectButton v-model="leafSourceMode" :options="sourceOptions" option-label="label" option-value="value"
             :allow-empty="false" />
         </div>
         <div v-if="outboundInfo?.required" class="flex flex-col gap-2 grow min-w-64">
@@ -814,7 +794,7 @@ onMounted(() => {
         </div>
       </div>
 
-      <template v-if="sourceMode === 'file'">
+      <template v-if="leafSourceMode === 'file'">
         <div class="flex items-center">
           <label for="policy_config_file">{{ fieldLabel('policy_config_file', '/etc/easytier/policy.yaml') }}</label>
           <span class="pi pi-question-circle ml-2" v-tooltip="t('policy_config_file_help')" />

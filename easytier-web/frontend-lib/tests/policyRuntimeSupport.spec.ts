@@ -40,15 +40,15 @@ describe('policy backend compatibility', () => {
     })
   })
 
-  it('migrates a legacy Mihomo source without exposing it to Leaf', () => {
+  it('never migrates a Leaf source into the Mihomo source fields', () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.policy_proxy_backend = 'mihomo'
-    config.policy_config_file = '/etc/mihomo/config.yaml'
+    config.policy_config_file = '/etc/easytier/leaf.yaml'
 
     applyPolicyBackend(config, 'leaf')
 
-    expect(config.policy_config_file).toBe('')
-    expect(config.policy_mihomo_config_file).toBe('/etc/mihomo/config.yaml')
+    expect(config.policy_config_file).toBe('/etc/easytier/leaf.yaml')
+    expect(config.policy_mihomo_config_file).toBe('')
     expect(config.policy_proxy_backend).toBe('leaf')
   })
 
