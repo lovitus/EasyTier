@@ -152,14 +152,34 @@ const runtimeNoticeKey = computed(() => runtimeNotice.value
   ? `policy.editor.runtime_${runtimeNotice.value.replace(/-/g, '_')}`
   : '')
 
+// Source selection is editor state, not a value derived from a non-empty path.
+// Keep both drafts locally so selecting an empty file source never destroys the
+// existing inline document, while the persisted model still has one active source.
+const leafInlineDraft = ref(config.value.policy_config_inline ?? '')
+const leafFileDraft = ref(config.value.policy_config_file ?? '')
+const leafSourceModeState = ref<'inline' | 'file'>(
+  config.value.policy_config_file?.trim() ? 'file' : 'inline',
+)
 const leafSourceMode = computed({
-  get: () => config.value.policy_config_file?.trim() ? 'file' : 'inline',
-  set: (mode: string) => {
+  get: () => leafSourceModeState.value,
+  set: (mode: 'inline' | 'file') => {
+    if (mode === leafSourceModeState.value) return
+
+    if (leafSourceModeState.value === 'inline') {
+      leafInlineDraft.value = config.value.policy_config_inline ?? ''
+    }
+    else {
+      leafFileDraft.value = config.value.policy_config_file ?? ''
+    }
+
+    leafSourceModeState.value = mode
     if (mode === 'file') {
       config.value.policy_config_inline = ''
+      config.value.policy_config_file = leafFileDraft.value
     }
     else {
       config.value.policy_config_file = ''
+      config.value.policy_config_inline = leafInlineDraft.value
       ensureInlineDocument()
     }
   },
@@ -640,7 +660,7 @@ onMounted(() => {
       <div class="flex flex-wrap items-end gap-4">
         <div class="flex flex-col gap-2">
           <label class="font-semibold">{{ t('policy.editor.source') }}</label>
-          <SelectButton v-model="leafSourceMode" :options="sourceOptions" option-label="label" option-value="value"
+          <SelectButton v-model="leafSourceMode" data-testid="leaf-source-selector" :options="sourceOptions" option-label="label" option-value="value"
             :allow-empty="false" :disabled="props.readOnly" />
         </div>
       </div>
@@ -749,7 +769,7 @@ onMounted(() => {
       <div class="flex flex-wrap items-end gap-4">
         <div class="flex flex-col gap-2">
           <label class="font-semibold">{{ t('policy.editor.source') }}</label>
-          <SelectButton v-model="leafSourceMode" :options="sourceOptions" option-label="label" option-value="value"
+          <SelectButton v-model="leafSourceMode" data-testid="leaf-source-selector" :options="sourceOptions" option-label="label" option-value="value"
             :allow-empty="false" />
         </div>
         <div v-if="outboundInfo?.required" class="flex flex-col gap-2 grow min-w-64">

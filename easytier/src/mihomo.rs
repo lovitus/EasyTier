@@ -518,6 +518,22 @@ fn apply_private_controller(
                 Value::String(address.to_string()),
             );
             report.changed_fields.push("external-controller".to_owned());
+
+            // Mihomo's controller middleware requires the exact web origin and
+            // Private Network Access opt-in for an HTTPS dashboard to reach a
+            // loopback controller. Only the generated runtime copy is changed.
+            let mut cors = Mapping::new();
+            cors.insert(
+                yaml_key("allow-origins"),
+                Value::Sequence(vec![Value::String(
+                    "https://board.zash.run.place".to_owned(),
+                )]),
+            );
+            cors.insert(yaml_key("allow-private-network"), Value::Bool(true));
+            root.insert(yaml_key("external-controller-cors"), Value::Mapping(cors));
+            report
+                .changed_fields
+                .push("external-controller-cors".to_owned());
         }
     }
     root.insert(

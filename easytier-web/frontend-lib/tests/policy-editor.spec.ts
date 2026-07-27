@@ -282,6 +282,33 @@ describe('PolicyEditor', () => {
     expect(wrapper.find('#policy_config_inline').exists()).toBe(true)
   })
 
+  it('switches Leaf sources without losing either draft', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
+    config.policy_config_inline = 'version: 1\nrules: ["DOMAIN,private.example,DIRECT"]\n'
+    const { model, wrapper } = mountEditor(config)
+    await nextTick()
+
+    const sourceSelector = wrapper.get<HTMLSelectElement>('[data-testid="leaf-source-selector"]')
+    await sourceSelector.setValue('file')
+    await nextTick()
+
+    expect(wrapper.find('#policy_config_file').exists()).toBe(true)
+    expect(model.policy_config_inline).toBe('')
+    model.policy_config_file = '/etc/easytier/leaf-private.yaml'
+
+    await sourceSelector.setValue('inline')
+    await nextTick()
+    expect(model.policy_config_file).toBe('')
+    expect(model.policy_config_inline).toBe('version: 1\nrules: ["DOMAIN,private.example,DIRECT"]\n')
+
+    await sourceSelector.setValue('file')
+    await nextTick()
+    expect(model.policy_config_file).toBe('/etc/easytier/leaf-private.yaml')
+    expect(model.policy_config_inline).toBe('')
+  })
+
   it('shows Mihomo lifecycle and the selected process-wide mesh entry', async () => {
     const config = DEFAULT_NETWORK_CONFIG()
     config.enable_policy_proxy = true
