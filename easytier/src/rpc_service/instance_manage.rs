@@ -1,4 +1,8 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
 use crate::common::config::PolicyProxyBackend;
@@ -37,6 +41,18 @@ pub struct InstanceManageRpcService {
     manager: Arc<NetworkInstanceManager>,
     hooks: Arc<dyn WebClientHooks>,
     remote_mutation_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+fn resolve_mihomo_user_config_path(
+    config_file: &Path,
+    config_dir: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
+    if config_file.is_absolute() {
+        return Ok(config_file.to_owned());
+    }
+    Ok(config_dir
+        .ok_or_else(|| anyhow::anyhow!("managed config directory is unavailable"))?
+        .join(config_file))
 }
 
 #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]
@@ -271,17 +287,11 @@ impl WebClientService for InstanceManageRpcService {
         if !policy.is_mihomo_enabled() {
             return Err(anyhow::anyhow!("selected policy backend is not Mihomo").into());
         }
-        let config_dir = self
-            .manager
-            .get_config_dir()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("managed config directory is unavailable"))?;
         if let Some(config_file) = policy.active_config_file() {
-            let path = if config_file.is_absolute() {
-                config_file.clone()
-            } else {
-                config_dir.join(config_file)
-            };
+            let path = resolve_mihomo_user_config_path(
+                config_file,
+                self.manager.get_config_dir().map(PathBuf::as_path),
+            )?;
             let contents = crate::mihomo::load_user_config(&path)?;
             return Ok(OpenMihomoConfigResponse {
                 path: path.to_string_lossy().into_owned(),
@@ -296,6 +306,11 @@ impl WebClientService for InstanceManageRpcService {
                 created: false,
             });
         }
+        let config_dir = self
+            .manager
+            .get_config_dir()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("managed config directory is unavailable"))?;
         let (path, contents, created) = crate::mihomo::materialize_user_config(
             &config_dir,
             config.get_id(),
@@ -327,14 +342,10 @@ impl WebClientService for InstanceManageRpcService {
         let config_file = policy
             .active_config_file()
             .ok_or_else(|| anyhow::anyhow!("Mihomo config file is required"))?;
-        let path = if config_file.is_absolute() {
-            config_file.clone()
-        } else {
-            self.manager
-                .get_config_dir()
-                .ok_or_else(|| anyhow::anyhow!("managed config directory is unavailable"))?
-                .join(config_file)
-        };
+        let path = resolve_mihomo_user_config_path(
+            config_file,
+            self.manager.get_config_dir().map(PathBuf::as_path),
+        )?;
         crate::mihomo::save_user_config(&path, &req.contents)?;
         Ok(crate::proto::common::Void {})
     }
@@ -1608,6 +1619,27 @@ mod tests {
             HashSet::from([existing_id])
         );
         assert!(hooks.removed_ids.lock().unwrap().is_empty());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn absolute_mihomo_config_path_does_not_require_managed_directory() {
+        #[cfg(unix)]
+        let absolute = PathBuf::from("/tmp/easytier-mihomo.yaml");
+        #[cfg(windows)]
+        let absolute = PathBuf::from(r"C:\easytier\mihomo.yaml");
+        let relative = PathBuf::from("mihomo.yaml");
+        let managed = PathBuf::from("managed");
+
+        assert_eq!(
+            resolve_mihomo_user_config_path(&absolute, None).unwrap(),
+            absolute
+        );
+        assert!(resolve_mihomo_user_config_path(&relative, None).is_err());
+        assert_eq!(
+            resolve_mihomo_user_config_path(&relative, Some(&managed)).unwrap(),
+            managed.join(relative)
+        );
     }
 
     #[cfg(all(feature = "leaf-policy-proxy", any(unix, windows)))]

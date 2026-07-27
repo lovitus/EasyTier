@@ -52,6 +52,7 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   launcher::tests::network_config_roundtrips_explicit_mihomo_backend
   managed_child::tests
   mihomo::tests
+  rpc_service::instance_manage::tests::absolute_mihomo_config_path_does_not_require_managed_directory
   rpc_service::instance_manage::tests::mihomo_policy_yaml_is_not_validated_by_the_leaf_parser
   tests::three_node::port_forward_with_inbound_default_drop_acl_test::case_2
 )

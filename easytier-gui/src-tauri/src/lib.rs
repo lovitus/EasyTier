@@ -542,16 +542,15 @@ async fn init_rpc_connection(
         let instance_manager = if let Some(im) = instance_manager_guard.take() {
             im
         } else {
-            let instance_manager = NetworkInstanceManager::new();
-            #[cfg(target_os = "android")]
-            let instance_manager =
-                instance_manager.with_config_path(Some(_app.path().app_data_dir().map_err(
-                    |err| format!("failed to resolve the Android app data directory: {err}"),
-                )?));
-
-            // Android hosts the manager in-process. Keep a stable writable config
-            // directory so GeoSite/GeoIP metadata remains available while no VPN
-            // instance is running. Desktop managers receive their path elsewhere.
+            // Normal GUI mode hosts the manager in-process on every platform.
+            // Give it Tauri's platform-native writable directory so generated
+            // policy files and Geo indexes survive restarts without inventing
+            // per-platform paths in EasyTier Core.
+            let instance_manager = NetworkInstanceManager::new().with_config_path(Some(
+                _app.path()
+                    .app_data_dir()
+                    .map_err(|err| format!("failed to resolve the app data directory: {err}"))?,
+            ));
             Arc::new(instance_manager)
         };
 
