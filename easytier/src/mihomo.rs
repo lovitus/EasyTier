@@ -1020,6 +1020,27 @@ fn parse_controller_response(response: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(response[separator + 4..].to_vec())
 }
 
+fn is_numbered_macos_utun(device: &str) -> bool {
+    device.strip_prefix("utun").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn active_tun_device_matches(actual_device: &str, expected_device: &str, is_macos: bool) -> bool {
+    if actual_device == expected_device {
+        return true;
+    }
+    if !is_macos || is_numbered_macos_utun(expected_device) {
+        return false;
+    }
+
+    // Mihomo listener/sing_tun/server.go::{checkTunName,New} rejects a
+    // non-numbered macOS TUN name and replaces it with an available `utunN`.
+    // Accept only that platform-owned rename; explicit utun names and every
+    // other platform retain strict device identity.
+    is_numbered_macos_utun(actual_device)
+}
+
 fn validate_active_tun(response: &[u8], expected_device: &str) -> anyhow::Result<()> {
     let active: serde_json::Value = serde_json::from_slice(response)?;
     ensure!(
@@ -1029,11 +1050,12 @@ fn validate_active_tun(response: &[u8], expected_device: &str) -> anyhow::Result
             == Some(true),
         "Mihomo controller reports TUN disabled"
     );
+    let actual_device = active
+        .pointer("/tun/device")
+        .and_then(|value| value.as_str())
+        .context("Mihomo controller response is missing the active TUN device")?;
     ensure!(
-        active
-            .pointer("/tun/device")
-            .and_then(|value| value.as_str())
-            == Some(expected_device),
+        active_tun_device_matches(actual_device, expected_device, cfg!(target_os = "macos")),
         "Mihomo controller reports an unexpected TUN device"
     );
     Ok(())
@@ -1777,6 +1799,24 @@ rules:
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn macos_health_accepts_only_the_platform_assigned_utun_name() {
+        assert!(active_tun_device_matches("utun18", "et-policy-test", true));
+        assert!(!active_tun_device_matches("utun", "et-policy-test", true));
+        assert!(!active_tun_device_matches(
+            "utun18-extra",
+            "et-policy-test",
+            true
+        ));
+        assert!(!active_tun_device_matches("tun18", "et-policy-test", true));
+        assert!(!active_tun_device_matches("utun18", "utun17", true));
+        assert!(!active_tun_device_matches(
+            "utun18",
+            "et-policy-test",
+            false
+        ));
     }
 
     #[test]
