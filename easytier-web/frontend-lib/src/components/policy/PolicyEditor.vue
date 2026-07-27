@@ -45,7 +45,6 @@ import {
 } from './managedRuleData'
 
 const config = defineModel<NetworkConfig>({ required: true })
-const mihomoFileContents = defineModel<string>('mihomoFileContents', { default: '' })
 const props = defineProps<{
   api?: Api.RemoteClient
   yamlOnly?: boolean
@@ -636,25 +635,8 @@ onMounted(() => {
 <template>
   <div class="flex flex-col gap-4">
     <template v-if="props.yamlOnly">
-      <div v-if="policyBackend === 'mihomo'" key="mihomo-yaml-editor" class="contents">
-        <Message severity="info" :closable="false">
-          {{ t('policy_mihomo_native_config_notice') }}
-        </Message>
-        <div class="flex flex-col gap-1">
-          <span class="font-semibold">{{ t('policy_config_file') }}</span>
-          <code class="text-sm break-all" data-testid="policy-mihomo-file-path">
-            {{ config.policy_mihomo_config_file }}
-          </code>
-        </div>
-        <Message severity="info" :closable="false">{{ t('policy_mihomo_file_edit_notice') }}</Message>
-        <label for="policy_mihomo_config_inline_quick" class="font-semibold">
-          {{ t('policy.editor.advanced_yaml') }}
-        </label>
-        <Textarea id="policy_mihomo_config_inline_quick" v-model="mihomoFileContents" rows="20"
-          auto-resize class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')"
-          :readonly="props.readOnly" />
-      </div>
-      <div v-else-if="policyBackend === 'leaf'" key="leaf-yaml-editor" class="contents">
+      <div v-if="policyBackend === 'leaf'" key="leaf-yaml-editor" class="contents"
+        data-testid="leaf-policy-yaml-editor">
       <div class="flex flex-wrap items-end gap-4">
         <div class="flex flex-col gap-2">
           <label class="font-semibold">{{ t('policy.editor.source') }}</label>

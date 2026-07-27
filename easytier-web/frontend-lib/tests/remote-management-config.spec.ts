@@ -426,6 +426,7 @@ describe('RemoteManagement config save', () => {
         stubs: {
           Config: true,
           ConfigEditDialog: true,
+          MihomoYamlEditor: true,
           PolicyEditor: true,
           Status: StatusStub,
         },
@@ -623,6 +624,7 @@ describe('RemoteManagement config save', () => {
         stubs: {
           Config: true,
           ConfigEditDialog: true,
+          MihomoYamlEditor: true,
           PolicyEditor: true,
           Status: StatusStub,
         },
@@ -661,9 +663,12 @@ describe('RemoteManagement config save', () => {
         policy_mihomo_config_file: '/managed/mihomo/autogen.yaml',
         policy_mihomo_config_inline: '',
       }))
-      const editor = wrapper.findComponent({ name: 'PolicyEditor' })
-      expect(editor.props('mihomoFileContents')).toContain('yaml-secret')
-      editor.vm.$emit('update:mihomoFileContents', 'secret: changed\nrules: []\n')
+      const editor = wrapper.findComponent({ name: 'MihomoYamlEditor' })
+      expect(editor.exists()).toBe(true)
+      expect(wrapper.findComponent({ name: 'PolicyEditor' }).exists()).toBe(false)
+      expect(editor.props('modelValue')).toContain('yaml-secret')
+      expect(editor.props('filePath')).toBe('/managed/mihomo/autogen.yaml')
+      editor.vm.$emit('update:modelValue', 'secret: changed\nrules: []\n')
       await nextTick()
       await wrapper.get('[data-testid="policy-yaml-save"]').trigger('click')
       await settleAsync()
@@ -673,6 +678,31 @@ describe('RemoteManagement config save', () => {
         }),
         'secret: changed\nrules: []\n',
       )
+
+      await wrapper.get('[data-testid="policy-home-backend"]').setValue('leaf')
+      await settleAsync()
+      await wrapper.get('[data-testid="policy-home-edit-yaml"]').trigger('click')
+      await settleAsync()
+
+      const leafEditor = wrapper.findComponent({ name: 'PolicyEditor' })
+      expect(leafEditor.exists()).toBe(true)
+      expect(wrapper.findComponent({ name: 'MihomoYamlEditor' }).exists()).toBe(false)
+      expect((leafEditor.props('modelValue') as NetworkConfig).policy_config_inline)
+        .toBe('version: 1\nrules:\n  - FINAL,DIRECT\n')
+
+      await wrapper.find('button[data-label="web.common.cancel"]').trigger('click')
+      await settleAsync()
+      expect(wrapper.find('[data-testid="policy-yaml-dialog"]').exists()).toBe(false)
+
+      await wrapper.get('[data-testid="policy-home-backend"]').setValue('mihomo')
+      await settleAsync()
+      await wrapper.get('[data-testid="policy-home-edit-yaml"]').trigger('click')
+      await settleAsync()
+
+      const reopenedMihomoEditor = wrapper.findComponent({ name: 'MihomoYamlEditor' })
+      expect(reopenedMihomoEditor.exists()).toBe(true)
+      expect(wrapper.findComponent({ name: 'PolicyEditor' }).exists()).toBe(false)
+      expect(reopenedMihomoEditor.props('modelValue')).toContain('yaml-secret')
     } finally {
       wrapper.unmount()
     }
@@ -683,6 +713,7 @@ describe('RemoteManagement config save', () => {
       ...DEFAULT_NETWORK_CONFIG(),
       instance_id: INSTANCE_ID,
       enable_policy_proxy: true,
+      policy_proxy_backend: 'leaf',
       policy_config_inline: 'version: 1\nrules:\n  - FINAL,DIRECT\n',
     }
     const api = makeStatusApi(vi.fn(async () => undefined))
@@ -707,6 +738,7 @@ describe('RemoteManagement config save', () => {
         stubs: {
           Config: true,
           ConfigEditDialog: true,
+          MihomoYamlEditor: true,
           PolicyEditor: true,
           Status: StatusStub,
         },
@@ -720,6 +752,7 @@ describe('RemoteManagement config save', () => {
 
       const editor = wrapper.findComponent({ name: 'PolicyEditor' })
       expect(editor.exists()).toBe(true)
+      expect(wrapper.findComponent({ name: 'MihomoYamlEditor' }).exists()).toBe(false)
       expect(editor.props('yamlOnly')).toBe(true)
       expect(editor.props('readOnly')).toBe(false)
       expect(wrapper.get('[data-testid="policy-home-edit-yaml"]').attributes('data-label'))

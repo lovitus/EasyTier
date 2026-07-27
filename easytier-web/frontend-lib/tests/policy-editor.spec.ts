@@ -139,7 +139,6 @@ function mountEditor(
     yamlOnly?: boolean
     readOnly?: boolean
     runtimeInfo?: NetworkInstanceRunningInfo
-    mihomoFileContents?: string
   } = {},
 ) {
   const model = reactive(config) as NetworkConfig
@@ -148,7 +147,6 @@ function mountEditor(
       modelValue: model,
       api,
       ...options,
-      mihomoFileContents: options.mihomoFileContents ?? '',
     },
     global: {
       directives: { tooltip: () => {} },
