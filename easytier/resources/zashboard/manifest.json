@@ -1,0 +1,10 @@
+{
+  "project": "Zephyruso/zashboard",
+  "version": "v3.16.0",
+  "asset": "dist-no-fonts.zip",
+  "sha256": "1d8c7aca69e6ddead5e4fe6e92ceda23a499105f675d053362f7c9b53a9730f9",
+  "size": 1780878,
+  "license": "MIT",
+  "source": "https://github.com/Zephyruso/zashboard",
+  "release_asset": "https://github.com/Zephyruso/zashboard/releases/download/v3.16.0/dist-no-fonts.zip"
+}

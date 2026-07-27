@@ -139,6 +139,9 @@ anyhow = "1.0"
 ariadne = "0.5"
 
 url = { version = "2.5", features = ["serde"] }
+zip = { version = "4.0.0", default-features = false, features = [
+    "deflate-flate2-zlib-rs",
+] }
 percent-encoding = "2.3.1"
 idna = "1.0"
 

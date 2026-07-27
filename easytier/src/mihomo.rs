@@ -235,6 +235,7 @@ pub struct MihomoOverlay {
     pub tun_device: String,
     pub route_exclude_addresses: Vec<String>,
     pub controller: MihomoPrivateController,
+    dashboard_ui_path: Option<PathBuf>,
     controller_secret: ControllerSecret,
     controller_secret_override: Option<Arc<str>>,
 }
@@ -246,6 +247,7 @@ impl fmt::Debug for MihomoOverlay {
             .field("tun_device", &self.tun_device)
             .field("route_exclude_addresses", &self.route_exclude_addresses)
             .field("controller", &self.controller)
+            .field("dashboard_ui_path", &self.dashboard_ui_path)
             .field("controller_secret", &self.controller_secret)
             .finish()
     }
@@ -262,6 +264,7 @@ impl MihomoOverlay {
             tun_device,
             route_exclude_addresses,
             controller,
+            dashboard_ui_path: None,
             controller_secret: ControllerSecret::random(),
             controller_secret_override: controller_secret_override.map(Arc::from),
         }
@@ -277,9 +280,15 @@ impl MihomoOverlay {
             tun_device,
             route_exclude_addresses,
             controller,
+            dashboard_ui_path: None,
             controller_secret: ControllerSecret::test_only("test-only-secret"),
             controller_secret_override: None,
         }
+    }
+
+    fn with_dashboard_ui_path(mut self, path: PathBuf) -> Self {
+        self.dashboard_ui_path = Some(path);
+        self
     }
 
     fn resolve_controller_secret(&mut self, source: &LoadedMihomoConfig) -> anyhow::Result<()> {
@@ -313,7 +322,14 @@ impl MihomoOverlay {
             .append_pair("disableUpgradeCore", "1")
             .append_pair("disableTunMode", "1")
             .finish();
-        Ok(format!("https://board.zash.run.place/#/setup?{query}"))
+        if self.dashboard_ui_path.is_some() {
+            Ok(format!(
+                "http://127.0.0.1:{}/ui/#/setup?{query}",
+                address.port()
+            ))
+        } else {
+            Ok(format!("https://board.zash.run.place/#/setup?{query}"))
+        }
     }
 }
 
@@ -518,23 +534,23 @@ fn apply_private_controller(
                 Value::String(address.to_string()),
             );
             report.changed_fields.push("external-controller".to_owned());
-
-            // Mihomo's controller middleware requires the exact web origin and
-            // Private Network Access opt-in for an HTTPS dashboard to reach a
-            // loopback controller. Only the generated runtime copy is changed.
-            let mut cors = Mapping::new();
-            cors.insert(
-                yaml_key("allow-origins"),
-                Value::Sequence(vec![Value::String(
-                    "https://board.zash.run.place".to_owned(),
-                )]),
-            );
-            cors.insert(yaml_key("allow-private-network"), Value::Bool(true));
-            root.insert(yaml_key("external-controller-cors"), Value::Mapping(cors));
-            report
-                .changed_fields
-                .push("external-controller-cors".to_owned());
         }
+    }
+    if let Some(path) = &overlay.dashboard_ui_path {
+        // Mihomo parity: hub/hub.go::applyRoute passes ExternalUI to
+        // hub/route/server.go::SetUIPath, whose router serves that directory at
+        // /ui/. Supplying an already populated absolute directory also makes
+        // component/updater::UIUpdater::AutoDownloadUI skip network download.
+        for field in ["external-ui", "external-ui-name", "external-ui-url"] {
+            if root.remove(yaml_key(field)).is_some() {
+                report.removed_controller_fields.push(field.to_owned());
+            }
+        }
+        root.insert(
+            yaml_key("external-ui"),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+        report.changed_fields.push("external-ui".to_owned());
     }
     root.insert(
         yaml_key("secret"),
@@ -542,6 +558,96 @@ fn apply_private_controller(
     );
     report.changed_fields.push("secret".to_owned());
     Ok(())
+}
+
+const BUNDLED_ZASHBOARD_ARCHIVE: &[u8] = include_bytes!("../resources/zashboard/dist-no-fonts.zip");
+
+fn prepare_bundled_zashboard(runtime_directory: &Path) -> anyhow::Result<PathBuf> {
+    let ui_path = runtime_directory.join("zashboard");
+    fs::create_dir_all(&ui_path)
+        .with_context(|| format!("failed to create Zashboard directory {}", ui_path.display()))?;
+
+    let reader = std::io::Cursor::new(BUNDLED_ZASHBOARD_ARCHIVE);
+    let mut archive = zip::ZipArchive::new(reader).context("failed to open bundled Zashboard")?;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .with_context(|| format!("failed to read bundled Zashboard entry {index}"))?;
+        let enclosed = entry
+            .enclosed_name()
+            .ok_or_else(|| anyhow::anyhow!("bundled Zashboard contains an unsafe path"))?;
+        let mut components = enclosed.components();
+        ensure!(
+            components
+                .next()
+                .is_some_and(|component| { component.as_os_str() == std::ffi::OsStr::new("dist") }),
+            "bundled Zashboard entry is outside the dist directory"
+        );
+        let relative = components.as_path();
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        if entry
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            anyhow::bail!("bundled Zashboard contains a symbolic link");
+        }
+
+        let output = ui_path.join(relative);
+        if entry.is_dir() {
+            fs::create_dir_all(&output)?;
+            continue;
+        }
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut destination = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output)
+            .with_context(|| format!("failed to create Zashboard file {}", output.display()))?;
+        std::io::copy(&mut entry, &mut destination)
+            .with_context(|| format!("failed to extract Zashboard file {}", output.display()))?;
+    }
+
+    ensure!(
+        ui_path.join("index.html").is_file(),
+        "bundled Zashboard is missing index.html"
+    );
+    Ok(ui_path)
+}
+
+#[cfg(test)]
+mod bundled_zashboard_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_verified_dashboard_into_owned_runtime_directory() {
+        let runtime = tempfile::tempdir().unwrap();
+        let ui_path = prepare_bundled_zashboard(runtime.path()).unwrap();
+
+        assert_eq!(ui_path, runtime.path().join("zashboard"));
+        assert!(ui_path.join("index.html").is_file());
+        assert!(ui_path.join("assets").is_dir());
+        assert!(!ui_path.join("dist").exists());
+    }
+
+    #[test]
+    fn local_dashboard_url_uses_the_private_controller_and_secret() {
+        let overlay = MihomoOverlay::test_only(
+            "utun-test".to_owned(),
+            Vec::new(),
+            MihomoPrivateController::Loopback("127.0.0.1:19090".parse().unwrap()),
+        )
+        .with_dashboard_ui_path(PathBuf::from("/tmp/zashboard"));
+
+        let url = overlay.dashboard_url().unwrap();
+        assert!(url.starts_with("http://127.0.0.1:19090/ui/#/setup?"));
+        assert!(url.contains("hostname=127.0.0.1"));
+        assert!(url.contains("port=19090"));
+        assert!(url.contains("secret=test-only-secret"));
+    }
 }
 
 pub fn compile_runtime_config(
@@ -1649,6 +1755,7 @@ async fn start_owned_mihomo(
     )?;
 
     let runtime_directory = OwnedRuntimeDirectory::create(request.instance_id)?;
+    let dashboard_ui_path = prepare_bundled_zashboard(&runtime_directory.path)?;
     let controller = core_private_controller(&runtime_directory)?;
     let config = MihomoSupervisorConfig {
         executable: request.executable,
@@ -1660,7 +1767,8 @@ async fn start_owned_mihomo(
             request.route_exclude_addresses,
             controller,
             request.controller_secret_override,
-        ),
+        )
+        .with_dashboard_ui_path(dashboard_ui_path),
         restart: MihomoRestartPolicy::default(),
     };
     let mut supervisor = MihomoSupervisor::new(config);
