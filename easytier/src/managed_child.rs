@@ -11,6 +11,21 @@ use anyhow::bail;
 use std::process::Stdio;
 use tokio::process::{Child, Command};
 
+#[cfg(any(test, target_os = "macos", target_os = "freebsd"))]
+fn guardian_attachment_failed(
+    guardian_status: Option<std::process::ExitStatus>,
+    child_status: Option<std::process::ExitStatus>,
+) -> Option<std::process::ExitStatus> {
+    match (guardian_status, child_status) {
+        // A short-lived child such as `mihomo -t` may finish before the
+        // attachment probe. The guardian then exits successfully by design;
+        // preserve the child so its caller can inspect the real exit status
+        // and diagnostics instead of reporting a false guardian failure.
+        (Some(_), Some(_)) | (None, _) => None,
+        (Some(guardian_status), None) => Some(guardian_status),
+    }
+}
+
 fn guardian_executable_candidates(
     current_executable: &Path,
     managed_executable: &Path,
@@ -113,10 +128,13 @@ impl ManagedChild {
                 }
             };
             tokio::time::sleep(Duration::from_millis(25)).await;
-            if let Some(status) = guardian
+            let guardian_status = guardian
                 .try_wait()
-                .context("failed to inspect managed sidecar guardian")?
-            {
+                .context("failed to inspect managed sidecar guardian")?;
+            let child_status = child
+                .try_wait()
+                .context("failed to inspect managed sidecar during guardian attachment")?;
+            if let Some(status) = guardian_attachment_failed(guardian_status, child_status) {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 bail!("managed sidecar guardian exited during attachment with {status}");
@@ -261,6 +279,12 @@ mod tests {
     use super::guardian_executable_candidates;
     use std::path::{Path, PathBuf};
 
+    #[cfg(unix)]
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt as _;
+        std::process::ExitStatus::from_raw(code << 8)
+    }
+
     #[test]
     fn guardian_prefers_the_easytier_directory_then_the_managed_executable_directory() {
         let candidates = guardian_executable_candidates(
@@ -288,6 +312,26 @@ mod tests {
             candidates,
             vec![PathBuf::from("/opt/easytier/easytier-gost-guardian")]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_short_lived_child_is_not_a_guardian_attachment_failure() {
+        assert!(
+            super::guardian_attachment_failed(Some(exit_status(0)), Some(exit_status(0))).is_none()
+        );
+        assert!(
+            super::guardian_attachment_failed(Some(exit_status(0)), Some(exit_status(1))).is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guardian_exit_while_child_is_alive_remains_an_attachment_failure() {
+        let status = super::guardian_attachment_failed(Some(exit_status(1)), None)
+            .expect("a dead guardian cannot protect a live child");
+        assert_eq!(status.code(), Some(1));
+        assert!(super::guardian_attachment_failed(None, None).is_none());
     }
 
     #[cfg(windows)]
