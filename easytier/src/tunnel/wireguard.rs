@@ -10,9 +10,9 @@ use std::{
 use hotpath::instant::Instant;
 
 use super::{
-    FromUrl, IpVersion, Tunnel, TunnelError, TunnelInfo, TunnelListener, TunnelUrl, ZCPacketSink,
-    ZCPacketStream,
-    common::wait_for_connect_futures,
+    FromUrl, IpVersion, ResolvedBindAddr, Tunnel, TunnelError, TunnelInfo, TunnelListener,
+    TunnelUrl, ZCPacketSink, ZCPacketStream,
+    common::wait_for_bound_connect_futures,
     generate_digest_from_str,
     packet_def::{PEER_MANAGER_HEADER_SIZE, ZCPacketType},
     ring::create_ring_tunnel_pair,
@@ -840,7 +840,7 @@ pub struct WgTunnelConnector {
     config: WgConfig,
     udp: Option<Arc<UdpSocket>>,
 
-    bind_addrs: Vec<SocketAddr>,
+    bind_addrs: Vec<ResolvedBindAddr>,
     ip_version: IpVersion,
     resolved_addr: Option<SocketAddr>,
     socket_mark: Option<u32>,
@@ -993,8 +993,8 @@ impl WgTunnelConnector {
     }
 
     async fn connect_with_ipv6(&self, addr: SocketAddr) -> Result<Box<dyn Tunnel>, TunnelError> {
-        let bind_addr = "[::]:0".parse().unwrap();
-        let socket = Self::bind_connector_socket(bind_addr, self.socket_mark, true)?;
+        let bind_addr = ResolvedBindAddr::auto("[::]:0".parse().unwrap());
+        let socket = Self::bind_connector_socket(&bind_addr, self.socket_mark, true)?;
         Self::connect_with_mode(
             self.addr.clone(),
             self.config.clone(),
@@ -1010,16 +1010,25 @@ impl WgTunnelConnector {
     }
 
     fn bind_connector_socket(
-        bind_addr: SocketAddr,
+        bind_addr: &ResolvedBindAddr,
         socket_mark: Option<u32>,
         disable_bind_dev: bool,
     ) -> Result<UdpSocket, TunnelError> {
         let builder = bind()
-            .addr(bind_addr)
+            .addr(bind_addr.addr)
             .only_v6(true)
             .maybe_socket_mark(socket_mark);
         if disable_bind_dev {
             Ok(builder.dev(BindDev::Disabled).call()?)
+        } else if let Some(name) = bind_addr.interface_name.as_ref() {
+            Ok(crate::tunnel::common::bind_resolved::<UdpSocket>(
+                bind_addr.addr,
+                name.clone(),
+                bind_addr.interface_index,
+                None,
+                true,
+                socket_mark,
+            )?)
         } else {
             Ok(builder.call()?)
         }
@@ -1030,7 +1039,7 @@ impl WgTunnelConnector {
         addr_url: url::Url,
         config: WgConfig,
         socket: UdpSocket,
-        bind_addr: SocketAddr,
+        bind_addr: ResolvedBindAddr,
         addr: SocketAddr,
         socket_mark: Option<u32>,
         disable_bind_dev: bool,
@@ -1064,7 +1073,8 @@ impl WgTunnelConnector {
                         "WG stealth attempt failed, retrying legacy wire format"
                     ),
                 }
-                let socket = Self::bind_connector_socket(bind_addr, socket_mark, disable_bind_dev)?;
+                let socket = Self::bind_connector_socket(&bind_addr, socket_mark, disable_bind_dev)
+                    .map_err(crate::tunnel::mark_local_bind_error)?;
                 Self::connect_with_socket(addr_url, config, socket, addr, None).await
             }
         }
@@ -1085,19 +1095,20 @@ impl super::TunnelConnector for WgTunnelConnector {
         }
 
         let bind_addrs = if self.bind_addrs.is_empty() {
-            vec!["0.0.0.0:0".parse().unwrap()]
+            vec![ResolvedBindAddr::auto("0.0.0.0:0".parse().unwrap())]
         } else {
             self.bind_addrs.clone()
         };
         let futures = FuturesUnordered::new();
-        for bind_addr in bind_addrs.into_iter() {
-            tracing::info!(?bind_addr, ?addr, "bind addr");
-            match Self::bind_connector_socket(bind_addr, self.socket_mark, false) {
+        let mut last_bind_error = None;
+        for bind_addr in bind_addrs {
+            tracing::info!(bind_addr = ?bind_addr.addr, ?addr, "bind addr");
+            match Self::bind_connector_socket(&bind_addr, self.socket_mark, false) {
                 Ok(socket) => futures.push(Self::connect_with_mode(
                     self.addr.clone(),
                     self.config.clone(),
                     socket,
-                    bind_addr,
+                    bind_addr.clone(),
                     addr,
                     self.socket_mark,
                     false,
@@ -1105,13 +1116,14 @@ impl super::TunnelConnector for WgTunnelConnector {
                     self.stealth_candidate.clone(),
                 )),
                 Err(error) => {
-                    tracing::error!(?error, ?bind_addr, ?addr, "bind addr fail");
+                    tracing::error!(?error, bind_addr = ?bind_addr.addr, ?addr, "bind addr fail");
+                    last_bind_error = Some(error);
                     continue;
                 }
             }
         }
 
-        wait_for_connect_futures(futures).await
+        wait_for_bound_connect_futures(futures, last_bind_error).await
     }
 
     fn remote_url(&self) -> url::Url {
@@ -1119,6 +1131,10 @@ impl super::TunnelConnector for WgTunnelConnector {
     }
 
     fn set_bind_addrs(&mut self, addrs: Vec<SocketAddr>) {
+        self.bind_addrs = addrs.into_iter().map(ResolvedBindAddr::auto).collect();
+    }
+
+    fn set_resolved_bind_addrs(&mut self, addrs: Vec<ResolvedBindAddr>) {
         self.bind_addrs = addrs;
     }
 

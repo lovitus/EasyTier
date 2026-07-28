@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, SocketAddr};
 
 use crate::{
     common::{
@@ -11,7 +11,7 @@ use crate::{
     connector::dns_connector::DnsTunnelConnector,
     proto::common::PeerFeatureFlag,
     tunnel::{
-        self, IpScheme, IpVersion, TunnelConnector, TunnelError, TunnelScheme,
+        self, IpScheme, IpVersion, ResolvedBindAddr, TunnelConnector, TunnelError, TunnelScheme,
         ring::RingTunnelConnector, tcp::TcpTunnelConnector, udp::UdpTunnelConnector,
     },
     utils::BoxExt,
@@ -40,6 +40,197 @@ pub(crate) fn should_try_p2p_with_peer(
                 && (!flag.disable_p2p || local_need_p2p)
         })
         .unwrap_or(!local_disable_p2p)
+}
+
+#[cfg(test)]
+mod snapshot_connector_contract_tests {
+    use std::{
+        io,
+        net::IpAddr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Instant,
+    };
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::{
+        common::{
+            global_ctx::tests::get_mock_global_ctx,
+            network::{IPCollector, UnderlayInterfaceSnapshot},
+        },
+        tunnel::{Tunnel, TunnelError, mark_local_bind_error},
+    };
+
+    fn interface(name: &str, index: u32, ips: &[&str]) -> pnet::datalink::NetworkInterface {
+        pnet::datalink::NetworkInterface {
+            name: name.to_owned(),
+            description: String::new(),
+            index,
+            mac: None,
+            ips: ips.iter().map(|ip| ip.parse().unwrap()).collect(),
+            flags: 0,
+        }
+    }
+
+    fn snapshot(
+        name: &str,
+        index: u32,
+        address: &str,
+        fallback_ipv4: Option<std::net::Ipv4Addr>,
+        fallback_ipv6: Option<std::net::Ipv6Addr>,
+    ) -> UnderlayInterfaceSnapshot {
+        let iface = interface(name, index, &[address]);
+        IPCollector::build_underlay_snapshot(
+            &[iface.clone()],
+            &[iface],
+            fallback_ipv4,
+            fallback_ipv6,
+        )
+    }
+
+    #[test]
+    fn unmapped_fallback_blocks_only_its_address_family() {
+        let ipv4 = snapshot(
+            "en-v4",
+            4,
+            "192.0.2.10/24",
+            Some("192.0.2.10".parse().unwrap()),
+            Some("2001:db8::99".parse().unwrap()),
+        );
+        assert!(
+            build_resolved_bind_addrs(&ipv4, true, |_| false)
+                .unwrap()
+                .iter()
+                .any(|source| source.addr.ip() == "192.0.2.10".parse::<IpAddr>().unwrap())
+        );
+        assert!(build_resolved_bind_addrs(&ipv4, false, |_| false).is_err());
+
+        let ipv6 = snapshot(
+            "en-v6",
+            6,
+            "2001:db8::10/64",
+            Some("192.0.2.99".parse().unwrap()),
+            Some("2001:db8::10".parse().unwrap()),
+        );
+        assert!(build_resolved_bind_addrs(&ipv6, true, |_| false).is_err());
+        assert!(
+            build_resolved_bind_addrs(&ipv6, false, |_| false)
+                .unwrap()
+                .iter()
+                .any(|source| source.addr.ip() == "2001:db8::10".parse::<IpAddr>().unwrap())
+        );
+    }
+
+    struct FailingConnector {
+        calls: Arc<AtomicUsize>,
+        error: Option<TunnelError>,
+    }
+
+    #[async_trait]
+    impl TunnelConnector for FailingConnector {
+        async fn connect(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(self.error.take().unwrap())
+        }
+
+        fn remote_url(&self) -> url::Url {
+            "tcp://127.0.0.1:1".parse().unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn only_typed_stale_local_bind_invalidates_generation_without_retry() {
+        let global_ctx = get_mock_global_ctx();
+        let collector = global_ctx.get_ip_collector();
+        let lease = collector.underlay_snapshot_generation_lease(7);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut prepared = PreparedUnderlayConnector {
+            inner: Box::new(FailingConnector {
+                calls: calls.clone(),
+                error: Some(mark_local_bind_error(TunnelError::IOError(io::Error::new(
+                    io::ErrorKind::AddrNotAvailable,
+                    "test bind failure",
+                )))),
+            }),
+            preflight: None,
+            resolved_addr: None,
+            snapshot_owner: Some(lease.clone()),
+        };
+        assert!(prepared.connect().await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(lease.is_invalidated());
+
+        let ordinary_lease = collector.underlay_snapshot_generation_lease(8);
+        let ordinary_calls = Arc::new(AtomicUsize::new(0));
+        let mut ordinary = PreparedUnderlayConnector {
+            inner: Box::new(FailingConnector {
+                calls: ordinary_calls.clone(),
+                error: Some(TunnelError::IOError(io::Error::new(
+                    io::ErrorKind::AddrNotAvailable,
+                    "ordinary connect failure",
+                ))),
+            }),
+            preflight: None,
+            resolved_addr: None,
+            snapshot_owner: Some(ordinary_lease.clone()),
+        };
+        assert!(ordinary.connect().await.is_err());
+        assert_eq!(ordinary_calls.load(Ordering::SeqCst), 1);
+        assert!(!ordinary_lease.is_invalidated());
+    }
+
+    #[tokio::test]
+    async fn next_attempt_recollects_and_rebuilds_resolved_targets() {
+        let global_ctx = get_mock_global_ctx();
+        let collector = global_ctx.get_ip_collector();
+        let calls = AtomicUsize::new(0);
+        let now = Instant::now();
+
+        let first = collector
+            .collect_underlay_snapshot_with(now, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    snapshot(
+                        "en-old",
+                        4,
+                        "192.0.2.10/24",
+                        Some("192.0.2.10".parse().unwrap()),
+                        None,
+                    )
+                }
+            })
+            .await
+            .unwrap();
+        collector
+            .underlay_snapshot_generation_lease(first.generation)
+            .invalidate();
+        let second = collector
+            .collect_underlay_snapshot_with(now, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    snapshot(
+                        "en-new",
+                        12,
+                        "198.51.100.10/24",
+                        Some("198.51.100.10".parse().unwrap()),
+                        None,
+                    )
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_ne!(first.generation, second.generation);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let targets = build_resolved_bind_addrs(&second, true, |_| false).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].interface_name.as_deref(), Some("en-new"));
+        assert_eq!(targets[0].interface_index, std::num::NonZeroU32::new(12));
+    }
 }
 
 pub(crate) fn should_background_p2p_with_peer(
@@ -73,11 +264,61 @@ pub(crate) fn should_attempt_ranked_hole_punch(
     !has_peer || (priority_enabled && !has_same_transport && candidate_improves)
 }
 
+fn build_resolved_bind_addrs(
+    snapshot: &crate::common::network::UnderlayInterfaceSnapshot,
+    is_ipv4: bool,
+    mut should_block: impl FnMut(IpAddr) -> bool,
+) -> Result<Vec<ResolvedBindAddr>, Error> {
+    if snapshot.has_unmapped_fallback_for(is_ipv4) {
+        return Err(Error::InvalidUrl(format!(
+            "underlay {} fallback has no interface identity",
+            if is_ipv4 { "IPv4" } else { "IPv6" }
+        )));
+    }
+
+    let source_ips: Vec<IpAddr> = if is_ipv4 {
+        snapshot
+            .ip_list
+            .interface_ipv4s
+            .iter()
+            .copied()
+            .map(|ip| IpAddr::V4(ip.into()))
+            .collect()
+    } else {
+        snapshot
+            .ip_list
+            .interface_ipv6s
+            .iter()
+            .copied()
+            .map(|ip| IpAddr::V6(ip.into()))
+            .collect()
+    };
+
+    source_ips
+        .into_iter()
+        .filter(|ip| !should_block(*ip))
+        .map(|ip| {
+            let interface = snapshot.interface_for(&ip).ok_or_else(|| {
+                Error::InvalidUrl(format!(
+                    "underlay bind address {ip} has no interface identity"
+                ))
+            })?;
+            let addr = SocketAddr::new(ip, 0);
+            Ok(ResolvedBindAddr {
+                addr,
+                interface_name: Some(interface.name.clone()),
+                interface_index: std::num::NonZeroU32::new(interface.index),
+            })
+        })
+        .collect()
+}
+
 async fn set_bind_addr_for_peer_connector(
     connector: &mut (impl TunnelConnector + ?Sized),
     is_ipv4: bool,
     global_ctx: &ArcGlobalCtx,
-) {
+    snapshot: &crate::common::network::UnderlayInterfaceSnapshot,
+) -> Result<(), Error> {
     if cfg!(any(
         target_os = "android",
         any(
@@ -86,39 +327,15 @@ async fn set_bind_addr_for_peer_connector(
         ),
         target_env = "ohos"
     )) {
-        return;
+        return Ok(());
     }
 
-    let ips = global_ctx
-        .get_ip_collector()
-        .collect_local_ip_addrs_now()
-        .await;
-    if is_ipv4 {
-        let mut bind_addrs = vec![];
-        for ipv4 in ips.interface_ipv4s {
-            let ip = IpAddr::V4(ipv4.into());
-            if underlay_guard::should_block_underlay_ip(global_ctx, ip) {
-                continue;
-            }
-            let socket_addr = SocketAddrV4::new(ipv4.into(), 0).into();
-            bind_addrs.push(socket_addr);
-        }
-        connector.set_bind_addrs(bind_addrs);
-    } else {
-        let mut bind_addrs = vec![];
-        for ipv6 in ips.interface_ipv6s.iter().chain(ips.public_ipv6.iter()) {
-            let ipv6 = std::net::Ipv6Addr::from(*ipv6);
-            if global_ctx.is_ip_easytier_managed_ipv6(&ipv6)
-                || underlay_guard::should_block_underlay_ip(global_ctx, IpAddr::V6(ipv6))
-            {
-                continue;
-            }
-            let socket_addr = SocketAddrV6::new(ipv6, 0, 0, 0).into();
-            bind_addrs.push(socket_addr);
-        }
-        connector.set_bind_addrs(bind_addrs);
-    }
-    let _ = connector;
+    let bind_addrs = build_resolved_bind_addrs(snapshot, is_ipv4, |ip| {
+        underlay_guard::should_block_underlay_ip(global_ctx, ip)
+            || matches!(ip, IpAddr::V6(ipv6) if global_ctx.is_ip_easytier_managed_ipv6(&ipv6))
+    })?;
+    connector.set_resolved_bind_addrs(bind_addrs);
+    Ok(())
 }
 
 struct ResolvedConnectorAddr {
@@ -131,6 +348,7 @@ pub(crate) struct PreparedUnderlayConnector {
     inner: Box<dyn TunnelConnector + 'static>,
     preflight: Option<UnderlayPreflightGuard>,
     resolved_addr: Option<SocketAddr>,
+    snapshot_owner: Option<crate::common::network::UnderlaySnapshotGenerationLease>,
 }
 
 impl std::fmt::Debug for PreparedUnderlayConnector {
@@ -160,11 +378,22 @@ impl PreparedUnderlayConnector {
     }
 }
 
+fn stale_interface_tunnel_error(error: &TunnelError) -> bool {
+    tunnel::local_bind_io_error(error).is_some_and(tunnel::is_stale_interface_io_error)
+}
+
 #[async_trait::async_trait]
 impl TunnelConnector for PreparedUnderlayConnector {
     async fn connect(&mut self) -> Result<Box<dyn tunnel::Tunnel>, TunnelError> {
         self.commit_preflight();
-        self.inner.connect().await
+        let result = self.inner.connect().await;
+        if let Err(error) = &result
+            && stale_interface_tunnel_error(error)
+            && let Some(snapshot_owner) = &self.snapshot_owner
+        {
+            snapshot_owner.invalidate();
+        }
+        result
     }
 
     fn remote_url(&self) -> url::Url {
@@ -173,6 +402,10 @@ impl TunnelConnector for PreparedUnderlayConnector {
 
     fn set_bind_addrs(&mut self, addrs: Vec<SocketAddr>) {
         self.inner.set_bind_addrs(addrs);
+    }
+
+    fn set_resolved_bind_addrs(&mut self, addrs: Vec<ResolvedBindAddr>) {
+        self.inner.set_resolved_bind_addrs(addrs);
     }
 
     fn set_ip_version(&mut self, ip_version: IpVersion) {
@@ -456,12 +689,21 @@ pub(crate) async fn create_connector_by_url_with_scope(
             connector.set_resolved_addr(resolved_addr.addr);
             connector.set_socket_mark(global_ctx.config.get_flags().socket_mark);
             if global_ctx.config.get_flags().bind_device {
+                let snapshot = preflight
+                    .as_ref()
+                    .and_then(UnderlayPreflightGuard::underlay_snapshot)
+                    .ok_or_else(|| {
+                        Error::InvalidUrl(
+                            "bind-device connector has no underlay interface snapshot".to_owned(),
+                        )
+                    })?;
                 set_bind_addr_for_peer_connector(
                     &mut connector,
                     resolved_addr.addr.is_ipv4(),
                     global_ctx,
+                    snapshot,
                 )
-                .await;
+                .await?;
             }
             connector
         }
@@ -483,10 +725,19 @@ pub(crate) async fn create_connector_by_url_with_scope(
     };
     connector.set_ip_version(effective_connector_ip_version);
 
+    let snapshot_owner = preflight
+        .as_ref()
+        .and_then(UnderlayPreflightGuard::underlay_snapshot)
+        .map(|snapshot| {
+            global_ctx
+                .get_ip_collector()
+                .underlay_snapshot_generation_lease(snapshot.generation)
+        });
     Ok(PreparedUnderlayConnector {
         inner: connector,
         preflight,
         resolved_addr: resolved_socket_addr,
+        snapshot_owner,
     })
 }
 

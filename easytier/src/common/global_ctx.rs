@@ -15,7 +15,7 @@ use super::{
         ConfigLoader, Flags, NicBackend, is_effective_secure_mode_enabled, process_secure_mode_cfg,
     },
     netns::NetNS,
-    network::IPCollector,
+    network::{IPCollector, UnderlayInterfaceSnapshot},
     stun::{StunInfoCollector, StunInfoCollectorTrait},
 };
 use crate::{
@@ -460,6 +460,7 @@ pub struct UnderlayPreflightGuard {
     global_ctx: ArcGlobalCtx,
     lease_id: u64,
     acquired_half_open_keys: Vec<UnderlayBreakerKey>,
+    underlay_snapshot: Option<Arc<UnderlayInterfaceSnapshot>>,
     committed: bool,
 }
 
@@ -473,8 +474,20 @@ impl UnderlayPreflightGuard {
             global_ctx,
             lease_id,
             acquired_half_open_keys,
+            underlay_snapshot: None,
             committed: false,
         }
+    }
+
+    pub(crate) fn set_underlay_snapshot(
+        &mut self,
+        snapshot: Option<Arc<UnderlayInterfaceSnapshot>>,
+    ) {
+        self.underlay_snapshot = snapshot;
+    }
+
+    pub(crate) fn underlay_snapshot(&self) -> Option<&Arc<UnderlayInterfaceSnapshot>> {
+        self.underlay_snapshot.as_ref()
     }
 
     pub fn commit(&mut self) {
@@ -678,7 +691,6 @@ impl GlobalCtx {
     }
 
     pub fn issue_event(&self, event: GlobalCtxEvent) {
-        #[cfg(any(target_os = "ios", target_os = "macos"))]
         if matches!(
             event,
             GlobalCtxEvent::DhcpIpv4Changed(_, _)
@@ -686,7 +698,11 @@ impl GlobalCtx {
                 | GlobalCtxEvent::PublicIpv6Changed(_, _)
                 | GlobalCtxEvent::ConfigPatched(_)
         ) {
-            crate::tunnel::common::refresh_interface_index_cache();
+            if let Some(ip_collector) = self.ip_collector.lock().unwrap().as_ref().cloned() {
+                ip_collector.invalidate_underlay_snapshot();
+            }
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
+            crate::tunnel::common::invalidate_interface_index_cache();
         }
         if let Err(e) = self.event_bus.send(event.clone()) {
             tracing::warn!(

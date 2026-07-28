@@ -22,9 +22,9 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, instrument};
 
 use super::{
-    FromUrl, IpVersion, Tunnel, TunnelConnCounter, TunnelError, TunnelInfo, TunnelListener,
-    TunnelUrl,
-    common::wait_for_connect_futures,
+    FromUrl, IpVersion, ResolvedBindAddr, Tunnel, TunnelConnCounter, TunnelError, TunnelInfo,
+    TunnelListener, TunnelUrl,
+    common::wait_for_bound_connect_futures,
     packet_def::{UDP_TUNNEL_HEADER_SIZE, UDPTunnelHeader, V4HolePunchPacket, V6HolePunchPacket},
     ring::{RingSink, RingStream},
 };
@@ -938,7 +938,7 @@ impl TunnelListener for UdpTunnelListener {
 #[derive(Debug)]
 pub struct UdpTunnelConnector {
     addr: url::Url,
-    bind_addrs: Vec<SocketAddr>,
+    bind_addrs: Vec<ResolvedBindAddr>,
     ip_version: IpVersion,
     stealth: std::sync::Arc<crate::tunnel::stealth::OuterSessionState>,
     stealth_mode: UdpStealthMode,
@@ -1372,22 +1372,34 @@ impl UdpTunnelConnector {
     ) -> Result<Box<dyn Tunnel>, super::TunnelError> {
         let futures = FuturesUnordered::new();
 
-        for bind_addr in self.bind_addrs.iter() {
-            tracing::info!(?bind_addr, ?addr, "bind addr");
-            match bind()
-                .addr(*bind_addr)
-                .only_v6(true)
-                .maybe_socket_mark(self.socket_mark)
-                .call()
-            {
+        let mut last_bind_error = None;
+        for bind_addr in &self.bind_addrs {
+            tracing::info!(bind_addr = ?bind_addr.addr, ?addr, "bind addr");
+            let socket = match bind_addr.interface_name.as_ref() {
+                Some(name) => crate::tunnel::common::bind_resolved::<UdpSocket>(
+                    bind_addr.addr,
+                    name.clone(),
+                    bind_addr.interface_index,
+                    None,
+                    true,
+                    self.socket_mark,
+                ),
+                None => bind()
+                    .addr(bind_addr.addr)
+                    .only_v6(true)
+                    .maybe_socket_mark(self.socket_mark)
+                    .call(),
+            };
+            match socket {
                 Ok(socket) => futures.push(self.try_connect_with_socket(Arc::new(socket), addr)),
                 Err(error) => {
-                    tracing::error!(?error, ?bind_addr, ?addr, "bind addr fail");
+                    tracing::error!(?error, bind_addr = ?bind_addr.addr, ?addr, "bind addr fail");
+                    last_bind_error = Some(error);
                     continue;
                 }
             }
         }
-        wait_for_connect_futures(futures).await
+        wait_for_bound_connect_futures(futures, last_bind_error).await
     }
 }
 
@@ -1410,6 +1422,10 @@ impl super::TunnelConnector for UdpTunnelConnector {
     }
 
     fn set_bind_addrs(&mut self, addrs: Vec<SocketAddr>) {
+        self.bind_addrs = addrs.into_iter().map(ResolvedBindAddr::auto).collect();
+    }
+
+    fn set_resolved_bind_addrs(&mut self, addrs: Vec<ResolvedBindAddr>) {
         self.bind_addrs = addrs;
     }
 

@@ -13,7 +13,7 @@ use crate::{
             ArcGlobalCtx, UnderlayBreakerKey, UnderlayBreakerScope, UnderlayBreakerStrikeKind,
             UnderlayBreakerTrace, UnderlayPreflightGuard,
         },
-        network::IPCollector,
+        network::UnderlayInterfaceSnapshot,
     },
     tunnel::IpScheme,
 };
@@ -112,6 +112,73 @@ fn wildcard_udp_bind_addr(remote_addr: SocketAddr) -> SocketAddr {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PreflightUdpBindTarget {
+    Wildcard,
+    Resolved {
+        interface_name: String,
+        interface_index: std::num::NonZeroU32,
+    },
+}
+
+fn select_preflight_udp_bind_target(
+    bind_addr: SocketAddr,
+    snapshot: Option<&UnderlayInterfaceSnapshot>,
+) -> Result<PreflightUdpBindTarget, Error> {
+    if bind_addr.ip().is_unspecified() {
+        return Ok(PreflightUdpBindTarget::Wildcard);
+    }
+
+    let interface = snapshot
+        .and_then(|snapshot| snapshot.interface_for(&bind_addr.ip()))
+        .ok_or_else(|| {
+            Error::InvalidUrl(format!(
+                "underlay preflight source {bind_addr} has no interface identity"
+            ))
+        })?;
+    let interface_index = std::num::NonZeroU32::new(interface.index).ok_or_else(|| {
+        Error::InvalidUrl(format!(
+            "underlay preflight source {bind_addr} has invalid interface index 0"
+        ))
+    })?;
+
+    Ok(PreflightUdpBindTarget::Resolved {
+        interface_name: interface.name.clone(),
+        interface_index,
+    })
+}
+
+fn bind_preflight_udp_source(
+    global_ctx: &ArcGlobalCtx,
+    remote_addr: SocketAddr,
+    bind_addr: SocketAddr,
+    snapshot: Option<&UnderlayInterfaceSnapshot>,
+) -> Result<tokio::net::UdpSocket, Error> {
+    let socket = match select_preflight_udp_bind_target(bind_addr, snapshot)? {
+        PreflightUdpBindTarget::Wildcard => crate::tunnel::common::bind::<tokio::net::UdpSocket>()
+            .addr(bind_addr)
+            .dev(crate::tunnel::common::BindDev::Disabled)
+            .net_ns(global_ctx.net_ns.clone())
+            .only_v6(remote_addr.is_ipv6())
+            .maybe_socket_mark(global_ctx.get_flags().socket_mark)
+            .call(),
+        PreflightUdpBindTarget::Resolved {
+            interface_name,
+            interface_index,
+        } => crate::tunnel::common::bind_resolved::<tokio::net::UdpSocket>(
+            bind_addr,
+            interface_name,
+            Some(interface_index),
+            Some(global_ctx.net_ns.clone()),
+            remote_addr.is_ipv6(),
+            global_ctx.get_flags().socket_mark,
+        ),
+    }
+    .map_err(crate::tunnel::mark_local_bind_error)?;
+
+    Ok(socket)
+}
+
 fn suspicious_interface_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name.starts_with("utun")
@@ -129,7 +196,10 @@ fn native_interface_inspection_active() -> bool {
     ))
 }
 
-async fn source_interface_signal(global_ctx: &ArcGlobalCtx, ip: IpAddr) -> Option<(String, bool)> {
+fn source_interface_signal(
+    snapshot: Option<&UnderlayInterfaceSnapshot>,
+    ip: IpAddr,
+) -> Option<(String, bool)> {
     // Mihomo/sing-tun invalidates its interface cache from the platform network
     // monitor instead of enumerating interfaces on every dial. Mobile VPN hosts
     // likewise own network changes and socket protection. Besides duplicating
@@ -137,51 +207,53 @@ async fn source_interface_signal(global_ctx: &ArcGlobalCtx, ip: IpAddr) -> Optio
     // every reconnect preflight into packet-socket and /proc/sysfs retries.
     // The hard managed-IP guards above remain active on every platform; this
     // optional interface-name signal only contributes a soft breaker strike.
-    if !native_interface_inspection_active() {
-        return None;
-    }
-
-    for iface in IPCollector::collect_interfaces(global_ctx.net_ns.clone(), false).await {
-        if !iface.ips.iter().any(|network| network.ip() == ip) {
-            continue;
-        }
-
-        let suspicious =
-            iface.is_point_to_point() || suspicious_interface_name(iface.name.as_str());
-        return Some((iface.name, suspicious));
-    }
-
-    None
+    let interface = snapshot?.interface_for(&ip)?;
+    let suspicious =
+        interface.is_point_to_point || suspicious_interface_name(interface.name.as_str());
+    Some((interface.name.clone(), suspicious))
 }
 
-async fn bind_device_sources(
+fn bind_device_sources(
     global_ctx: &ArcGlobalCtx,
     remote_addr: SocketAddr,
-) -> Vec<SocketAddr> {
+    snapshot: Option<&UnderlayInterfaceSnapshot>,
+) -> Result<Vec<SocketAddr>, Error> {
     if !global_ctx.get_flags().bind_device || !native_interface_inspection_active() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    // A cached empty or removed source can otherwise block every reconnect
-    // for the advertisement cache lifetime after a network transition.
-    let ips = global_ctx
-        .get_ip_collector()
-        .collect_local_ip_addrs_now()
-        .await;
+    let snapshot = snapshot.ok_or_else(|| {
+        Error::InvalidUrl("underlay interface snapshot is unavailable".to_owned())
+    })?;
+    if snapshot.has_unmapped_fallback_for(remote_addr.is_ipv4()) {
+        return Err(Error::InvalidUrl(format!(
+            "underlay {} fallback has no interface identity",
+            if remote_addr.is_ipv4() {
+                "IPv4"
+            } else {
+                "IPv6"
+            }
+        )));
+    }
+
+    let ips = &snapshot.ip_list;
     if remote_addr.is_ipv4() {
-        ips.interface_ipv4s
-            .into_iter()
+        Ok(ips
+            .interface_ipv4s
+            .iter()
+            .copied()
             .filter_map(|ip| {
                 let ip = Ipv4Addr::from(ip);
                 let ip_addr = IpAddr::V4(ip);
                 (!should_block_underlay_ip(global_ctx, ip_addr))
                     .then_some(SocketAddrV4::new(ip, 0).into())
             })
-            .collect()
+            .collect())
     } else {
-        ips.interface_ipv6s
-            .into_iter()
-            .chain(ips.public_ipv6)
+        Ok(ips
+            .interface_ipv6s
+            .iter()
+            .copied()
             .filter_map(|ip| {
                 let ip = std::net::Ipv6Addr::from(ip);
                 let ip_addr = IpAddr::V6(ip);
@@ -189,7 +261,7 @@ async fn bind_device_sources(
                     && !should_block_underlay_ip(global_ctx, ip_addr))
                 .then_some(SocketAddrV6::new(ip, 0, 0, 0).into())
             })
-            .collect()
+            .collect())
     }
 }
 
@@ -200,13 +272,9 @@ async fn validate_connected_udp_source(
     key: UnderlayBreakerKey,
     scheme: IpScheme,
     scope: UnderlayBreakerScope,
+    snapshot: Option<&UnderlayInterfaceSnapshot>,
 ) -> Result<(), Error> {
-    let socket = crate::tunnel::common::bind::<tokio::net::UdpSocket>()
-        .addr(bind_addr)
-        .net_ns(global_ctx.net_ns.clone())
-        .only_v6(remote_addr.is_ipv6())
-        .maybe_socket_mark(global_ctx.get_flags().socket_mark)
-        .call()?;
+    let socket = bind_preflight_udp_source(global_ctx, remote_addr, bind_addr, snapshot)?;
     socket.connect(remote_addr).await?;
 
     let local_ip = socket.local_addr()?.ip();
@@ -226,7 +294,7 @@ async fn validate_connected_udp_source(
         )));
     }
 
-    match source_interface_signal(global_ctx, local_ip).await {
+    match source_interface_signal(snapshot, local_ip) {
         Some((ifname, true)) => {
             global_ctx.record_underlay_breaker_strike(
                 key,
@@ -265,11 +333,73 @@ async fn validate_connected_udp_source(
     Ok(())
 }
 
-pub async fn sanitize_underlay_candidate(
+fn stale_interface_error(error: &Error) -> bool {
+    let io_error = match error {
+        Error::TunnelError(error) => crate::tunnel::local_bind_io_error(error),
+        _ => return false,
+    };
+    io_error.is_some_and(crate::tunnel::is_stale_interface_io_error)
+}
+
+async fn run_bounded_stale_preflight_recovery<
+    S,
+    E,
+    Validate,
+    ValidateFuture,
+    Refresh,
+    RefreshFuture,
+>(
+    mut snapshot: S,
+    mut validate: Validate,
+    mut refresh: Refresh,
+    mut should_refresh: impl FnMut(&E, &S) -> bool,
+) -> Result<S, E>
+where
+    S: Clone,
+    Validate: FnMut(S) -> ValidateFuture,
+    ValidateFuture: std::future::Future<Output = Result<(), E>>,
+    Refresh: FnMut(S) -> RefreshFuture,
+    RefreshFuture: std::future::Future<Output = Result<S, E>>,
+{
+    for retry in 0..=1 {
+        match validate(snapshot.clone()).await {
+            Ok(()) => return Ok(snapshot),
+            Err(error) if retry == 0 && should_refresh(&error, &snapshot) => {
+                snapshot = refresh(snapshot).await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("bounded stale preflight loop always returns")
+}
+
+async fn collect_attempt_snapshot(
+    global_ctx: &ArcGlobalCtx,
+    remote_addr: SocketAddr,
+) -> Result<Option<Arc<UnderlayInterfaceSnapshot>>, Error> {
+    if !native_interface_inspection_active()
+        || (!global_ctx.get_flags().bind_device && !global_ctx.get_flags().underlay_candidate_guard)
+    {
+        return Ok(None);
+    }
+
+    let collector = global_ctx.get_ip_collector();
+    let mut snapshot = collector.collect_underlay_snapshot().await?;
+    if global_ctx.get_flags().bind_device
+        && snapshot.has_unmapped_fallback_for(remote_addr.is_ipv4())
+    {
+        collector.invalidate_underlay_snapshot_generation(snapshot.generation);
+        snapshot = collector.collect_underlay_snapshot().await?;
+    }
+    Ok(Some(snapshot))
+}
+
+async fn sanitize_underlay_candidate_with_snapshot(
     global_ctx: &ArcGlobalCtx,
     remote_addr: SocketAddr,
     scheme: IpScheme,
     scope: UnderlayBreakerScope,
+    snapshot: Option<&UnderlayInterfaceSnapshot>,
 ) -> Result<(), Error> {
     if historical_guarded_ip(global_ctx, remote_addr.ip()) {
         return Err(Error::InvalidUrl(format!(
@@ -296,7 +426,7 @@ pub async fn sanitize_underlay_candidate(
         )));
     }
 
-    let bind_sources = bind_device_sources(global_ctx, remote_addr).await;
+    let bind_sources = bind_device_sources(global_ctx, remote_addr, snapshot)?;
     if !bind_sources.is_empty() {
         let mut last_error = None;
         for bind_addr in bind_sources {
@@ -307,6 +437,7 @@ pub async fn sanitize_underlay_candidate(
                 key.clone(),
                 scheme,
                 scope,
+                snapshot,
             )
             .await
             {
@@ -340,8 +471,53 @@ pub async fn sanitize_underlay_candidate(
         key,
         scheme,
         scope,
+        snapshot,
     )
     .await
+}
+
+async fn sanitize_underlay_candidate_with_recovery(
+    global_ctx: &ArcGlobalCtx,
+    remote_addr: SocketAddr,
+    scheme: IpScheme,
+    scope: UnderlayBreakerScope,
+) -> Result<Option<Arc<UnderlayInterfaceSnapshot>>, Error> {
+    let snapshot = collect_attempt_snapshot(global_ctx, remote_addr).await?;
+    run_bounded_stale_preflight_recovery(
+        snapshot,
+        |snapshot| async move {
+            sanitize_underlay_candidate_with_snapshot(
+                global_ctx,
+                remote_addr,
+                scheme,
+                scope,
+                snapshot.as_deref(),
+            )
+            .await
+        },
+        |snapshot| async move {
+            let stale_snapshot = snapshot
+                .as_ref()
+                .expect("stale preflight refresh requires an owned snapshot");
+            global_ctx
+                .get_ip_collector()
+                .invalidate_underlay_snapshot_generation(stale_snapshot.generation);
+            collect_attempt_snapshot(global_ctx, remote_addr).await
+        },
+        |error, snapshot| stale_interface_error(error) && snapshot.is_some(),
+    )
+    .await
+}
+
+pub async fn sanitize_underlay_candidate(
+    global_ctx: &ArcGlobalCtx,
+    remote_addr: SocketAddr,
+    scheme: IpScheme,
+    scope: UnderlayBreakerScope,
+) -> Result<(), Error> {
+    sanitize_underlay_candidate_with_recovery(global_ctx, remote_addr, scheme, scope)
+        .await
+        .map(|_| ())
 }
 
 pub async fn prepare_underlay_attempt(
@@ -358,14 +534,16 @@ pub async fn prepare_underlay_attempt(
     }
     keys.push(endpoint_key);
 
-    let guard = global_ctx
+    let mut guard = global_ctx
         .try_begin_underlay_attempt(&keys)
         .map_err(|error| {
             Error::InvalidUrl(format!(
                 "underlay candidate {remote_addr} is temporarily gated: {error}"
             ))
         })?;
-    sanitize_underlay_candidate(global_ctx, remote_addr, scheme, scope).await?;
+    let snapshot =
+        sanitize_underlay_candidate_with_recovery(global_ctx, remote_addr, scheme, scope).await?;
+    guard.set_underlay_snapshot(snapshot);
     Ok(guard)
 }
 
@@ -387,9 +565,17 @@ fn is_local_virtual_ipv4(global_ctx: &ArcGlobalCtx, ip: Ipv4Addr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::{
+        io,
+        net::{IpAddr, Ipv4Addr, Ipv6Addr},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use super::*;
+    use crate::tunnel::{TunnelError, mark_local_bind_error};
 
     #[test]
     fn native_interface_inspection_matches_platform_ownership() {
@@ -427,6 +613,157 @@ mod tests {
     #[test]
     fn parse_exclude_cidrs_rejects_invalid_items() {
         assert!(parse_exclude_cidrs("198.18.0.0/15,bad-cidr").is_err());
+    }
+
+    fn stale_local_bind_error() -> Error {
+        Error::TunnelError(mark_local_bind_error(TunnelError::IOError(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "synthetic stale local bind",
+        ))))
+    }
+
+    #[tokio::test]
+    async fn stale_preflight_refreshes_and_revalidates_at_most_once() {
+        let validation_calls = Arc::new(AtomicUsize::new(0));
+        let refresh_calls = Arc::new(AtomicUsize::new(0));
+        let result = run_bounded_stale_preflight_recovery(
+            Some(1_u64),
+            {
+                let validation_calls = validation_calls.clone();
+                move |snapshot| {
+                    let validation_calls = validation_calls.clone();
+                    async move {
+                        let call = validation_calls.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(snapshot, Some(if call == 0 { 1 } else { 2 }));
+                        Err(stale_local_bind_error())
+                    }
+                }
+            },
+            {
+                let refresh_calls = refresh_calls.clone();
+                move |snapshot| {
+                    let refresh_calls = refresh_calls.clone();
+                    async move {
+                        assert_eq!(snapshot, Some(1));
+                        refresh_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(Some(2))
+                    }
+                }
+            },
+            |error, snapshot| stale_interface_error(error) && snapshot.is_some(),
+        )
+        .await;
+
+        assert!(stale_interface_error(&result.unwrap_err()));
+        assert_eq!(validation_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
+
+        let ordinary_validation_calls = Arc::new(AtomicUsize::new(0));
+        let ordinary_refresh_calls = Arc::new(AtomicUsize::new(0));
+        let ordinary_result = run_bounded_stale_preflight_recovery(
+            Some(1_u64),
+            {
+                let validation_calls = ordinary_validation_calls.clone();
+                move |_| {
+                    let validation_calls = validation_calls.clone();
+                    async move {
+                        validation_calls.fetch_add(1, Ordering::SeqCst);
+                        Err(Error::TunnelError(TunnelError::IOError(io::Error::new(
+                            io::ErrorKind::AddrNotAvailable,
+                            "ordinary connect error",
+                        ))))
+                    }
+                }
+            },
+            {
+                let refresh_calls = ordinary_refresh_calls.clone();
+                move |_| {
+                    let refresh_calls = refresh_calls.clone();
+                    async move {
+                        refresh_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(Some(2))
+                    }
+                }
+            },
+            |error, snapshot| stale_interface_error(error) && snapshot.is_some(),
+        )
+        .await;
+
+        assert!(!stale_interface_error(&ordinary_result.unwrap_err()));
+        assert_eq!(ordinary_validation_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(ordinary_refresh_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn preflight_bind_target_uses_snapshot_identity_or_explicit_wildcard() {
+        let interface = pnet::datalink::NetworkInterface {
+            name: "en-test0".to_owned(),
+            description: String::new(),
+            index: 4,
+            mac: None,
+            ips: vec![
+                "192.0.2.10/24".parse().unwrap(),
+                "2001:db8::10/64".parse().unwrap(),
+            ],
+            flags: 0,
+        };
+        let snapshot = crate::common::network::IPCollector::build_underlay_snapshot(
+            &[interface.clone()],
+            &[interface],
+            None,
+            None,
+        );
+
+        assert_eq!(
+            select_preflight_udp_bind_target("192.0.2.10:0".parse().unwrap(), Some(&snapshot))
+                .unwrap(),
+            PreflightUdpBindTarget::Resolved {
+                interface_name: "en-test0".to_owned(),
+                interface_index: std::num::NonZeroU32::new(4).unwrap(),
+            }
+        );
+        assert_eq!(
+            select_preflight_udp_bind_target("[2001:db8::10]:0".parse().unwrap(), Some(&snapshot))
+                .unwrap(),
+            PreflightUdpBindTarget::Resolved {
+                interface_name: "en-test0".to_owned(),
+                interface_index: std::num::NonZeroU32::new(4).unwrap(),
+            }
+        );
+        assert_eq!(
+            select_preflight_udp_bind_target("0.0.0.0:0".parse().unwrap(), None).unwrap(),
+            PreflightUdpBindTarget::Wildcard
+        );
+        assert_eq!(
+            select_preflight_udp_bind_target("[::]:0".parse().unwrap(), None).unwrap(),
+            PreflightUdpBindTarget::Wildcard
+        );
+        assert!(
+            select_preflight_udp_bind_target("198.51.100.10:0".parse().unwrap(), Some(&snapshot))
+                .is_err()
+        );
+
+        let zero_index_interface = pnet::datalink::NetworkInterface {
+            name: "en-zero".to_owned(),
+            description: String::new(),
+            index: 0,
+            mac: None,
+            ips: vec!["198.51.100.10/24".parse().unwrap()],
+            flags: 0,
+        };
+        let zero_index_snapshot = crate::common::network::IPCollector::build_underlay_snapshot(
+            &[zero_index_interface.clone()],
+            &[zero_index_interface],
+            None,
+            None,
+        );
+        assert!(
+            select_preflight_udp_bind_target(
+                "198.51.100.10:0".parse().unwrap(),
+                Some(&zero_index_snapshot)
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

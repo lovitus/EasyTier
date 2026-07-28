@@ -11,8 +11,8 @@ use tokio::{
 
 use super::common::{StealthFramedReader, StealthTcpZCPacketToBytes};
 use super::{
-    IpVersion, Tunnel, TunnelError, TunnelListener,
-    common::{FramedReader, FramedWriter, TunnelWrapper, wait_for_connect_futures},
+    IpVersion, ResolvedBindAddr, Tunnel, TunnelError, TunnelListener,
+    common::{FramedReader, FramedWriter, TunnelWrapper, wait_for_bound_connect_futures},
 };
 
 const TCP_MTU_BYTES: usize = 2000;
@@ -303,7 +303,7 @@ async fn authenticate_stealth_stream(
 pub struct TcpTunnelConnector {
     addr: url::Url,
 
-    bind_addrs: Vec<SocketAddr>,
+    bind_addrs: Vec<ResolvedBindAddr>,
     ip_version: IpVersion,
     resolved_addr: Option<SocketAddr>,
     socket_mark: Option<u32>,
@@ -372,23 +372,35 @@ impl TcpTunnelConnector {
     ) -> Result<TcpStream, super::TunnelError> {
         let futures = FuturesUnordered::new();
 
-        for bind_addr in self.bind_addrs.iter() {
-            tracing::info!(?bind_addr, ?addr, "bind addr");
-            match bind::<TcpSocket>()
-                .addr(*bind_addr)
-                .only_v6(true)
-                .maybe_socket_mark(self.socket_mark)
-                .call()
-            {
+        let mut last_bind_error = None;
+        for bind_addr in &self.bind_addrs {
+            tracing::info!(bind_addr = ?bind_addr.addr, ?addr, "bind addr");
+            let socket = match bind_addr.interface_name.as_ref() {
+                Some(name) => crate::tunnel::common::bind_resolved::<TcpSocket>(
+                    bind_addr.addr,
+                    name.clone(),
+                    bind_addr.interface_index,
+                    None,
+                    true,
+                    self.socket_mark,
+                ),
+                None => bind::<TcpSocket>()
+                    .addr(bind_addr.addr)
+                    .only_v6(true)
+                    .maybe_socket_mark(self.socket_mark)
+                    .call(),
+            };
+            match socket {
                 Ok(socket) => futures.push(socket.connect(addr)),
                 Err(error) => {
-                    tracing::error!(?bind_addr, ?addr, ?error, "bind addr fail");
+                    tracing::error!(bind_addr = ?bind_addr.addr, ?addr, ?error, "bind addr fail");
+                    last_bind_error = Some(error);
                     continue;
                 }
             }
         }
 
-        wait_for_connect_futures(futures).await
+        wait_for_bound_connect_futures(futures, last_bind_error).await
     }
 
     async fn connect_stream(&self, addr: SocketAddr) -> Result<TcpStream, TunnelError> {
@@ -450,6 +462,10 @@ impl super::TunnelConnector for TcpTunnelConnector {
     }
 
     fn set_bind_addrs(&mut self, addrs: Vec<SocketAddr>) {
+        self.bind_addrs = addrs.into_iter().map(ResolvedBindAddr::auto).collect();
+    }
+
+    fn set_resolved_bind_addrs(&mut self, addrs: Vec<ResolvedBindAddr>) {
         self.bind_addrs = addrs;
     }
 

@@ -42,6 +42,119 @@ struct CachedInterfaceIndex {
     refreshed_at: Instant,
 }
 
+#[cfg(test)]
+mod resolved_bind_contract_tests {
+    use std::{
+        io,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        num::NonZeroU32,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use futures::{FutureExt, stream::FuturesUnordered};
+
+    use super::*;
+    use crate::tunnel::{local_bind_io_error, mark_local_bind_error};
+
+    #[test]
+    fn resolved_bind_target_skips_auto_enumeration() {
+        let calls = AtomicUsize::new(0);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let resolved = ResolvedBindDev {
+            name: "en-test0".to_owned(),
+            index: NonZeroU32::new(17),
+        };
+
+        assert_eq!(
+            resolved_interface_index_with(&resolved, |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(NonZeroU32::new(99).unwrap())
+            })
+            .unwrap(),
+            NonZeroU32::new(17).unwrap()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let custom = resolve_bind_dev_with(&addr, BindDev::Custom("en-test0".to_owned()), |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            None
+        })
+        .unwrap();
+        assert_eq!(custom.name, "en-test0");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let automatic = resolve_bind_dev_with(
+            &SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 0),
+            BindDev::Auto,
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Some("en-test1".to_owned())
+            },
+        )
+        .unwrap();
+        assert_eq!(automatic.name, "en-test1");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn multi_bind_preserves_success_and_types_only_empty_bind_failure() {
+        let empty = FuturesUnordered::<futures::future::Ready<Result<u8, io::Error>>>::new();
+        let error = wait_for_bound_connect_futures(
+            empty,
+            Some(TunnelError::IOError(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "test bind failure",
+            ))),
+        )
+        .await
+        .unwrap_err();
+        assert!(local_bind_io_error(&error).is_some());
+
+        let with_success = FuturesUnordered::new();
+        with_success.push(async { Ok::<_, io::Error>(7_u8) }.boxed());
+        let value = wait_for_bound_connect_futures(
+            with_success,
+            Some(TunnelError::IOError(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "test bind failure",
+            ))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(value, 7);
+
+        let failed_connects = FuturesUnordered::new();
+        failed_connects.push(
+            async {
+                Err::<u8, io::Error>(io::Error::new(
+                    io::ErrorKind::AddrNotAvailable,
+                    "remote connect failure",
+                ))
+            }
+            .boxed(),
+        );
+        let connect_error = wait_for_bound_connect_futures(
+            failed_connects,
+            Some(TunnelError::IOError(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "earlier bind failure",
+            ))),
+        )
+        .await
+        .unwrap_err();
+        assert!(local_bind_io_error(&connect_error).is_none());
+
+        let ordinary = mark_local_bind_error(TunnelError::IOError(io::Error::new(
+            io::ErrorKind::NotFound,
+            "not an interface failure",
+        )));
+        assert!(local_bind_io_error(&ordinary).is_some());
+        assert!(!crate::tunnel::is_stale_interface_io_error(
+            local_bind_io_error(&ordinary).unwrap()
+        ));
+    }
+}
+
 #[cfg(any(test, target_os = "ios", target_os = "macos"))]
 #[derive(Debug, Default)]
 struct InterfaceIndexCache {
@@ -123,15 +236,14 @@ fn cached_interface_index(interface: &str) -> std::io::Result<std::num::NonZeroU
         .resolve_with(interface, Instant::now(), resolve_interface_index)
 }
 
-/// Refresh cached Darwin interface indices after an observed network change.
-///
-/// The five-second lookup TTL remains a fallback for missed platform events.
+/// Invalidate cached Darwin interface indices after an observed network change.
 #[cfg(any(target_os = "ios", target_os = "macos"))]
-pub(crate) fn refresh_interface_index_cache() {
+pub(crate) fn invalidate_interface_index_cache() {
     interface_index_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .refresh_with(Instant::now(), resolve_interface_index);
+        .entries
+        .clear();
 }
 
 pub struct TunnelWrapper<R, W> {
@@ -617,6 +729,22 @@ where
     Err(last_err.unwrap_or(TunnelError::Shutdown))
 }
 
+pub(crate) async fn wait_for_bound_connect_futures<Fut, Ret, E>(
+    futures: FuturesUnordered<Fut>,
+    last_bind_error: Option<TunnelError>,
+) -> Result<Ret, TunnelError>
+where
+    Fut: Future<Output = Result<Ret, E>> + Send,
+    E: std::error::Error + Into<TunnelError> + Send + 'static,
+{
+    if futures.is_empty() {
+        return Err(last_bind_error
+            .map(crate::tunnel::mark_local_bind_error)
+            .unwrap_or(TunnelError::Shutdown));
+    }
+    wait_for_connect_futures(futures).await
+}
+
 // region bind
 
 pub trait Bindable: Sized {
@@ -662,14 +790,19 @@ impl Bindable for UdpSocket {
 fn setup_socket2_ext(
     socket2_socket: &socket2::Socket,
     bind_addr: &SocketAddr,
-    #[allow(unused_variables)] bind_dev: Option<String>,
+    #[allow(unused_variables)] bind_dev: Option<ResolvedBindDev>,
     only_v6: bool,
     socket_mark: Option<u32>,
 ) -> Result<(), TunnelError> {
     #[cfg(target_os = "windows")]
     {
         let is_udp = matches!(socket2_socket.r#type()?, socket2::Type::DGRAM);
-        crate::arch::windows::setup_socket_for_win(socket2_socket, bind_addr, bind_dev, is_udp)?;
+        crate::arch::windows::setup_socket_for_win(
+            socket2_socket,
+            bind_addr,
+            bind_dev.as_ref().map(|dev| dev.name.clone()),
+            is_udp,
+        )?;
     }
 
     if bind_addr.is_ipv6() {
@@ -702,9 +835,10 @@ fn setup_socket2_ext(
     // linux/mac does not use interface of bind_addr to send packet, so we need to bind device
     // win can handle this with bind correctly
     #[cfg(any(target_os = "ios", target_os = "macos"))]
-    if let Some(dev_name) = bind_dev {
+    if let Some(dev) = bind_dev {
         // use IP_BOUND_IF to bind device
-        let dev_idx = cached_interface_index(&dev_name)?;
+        let dev_idx = resolved_interface_index_with(&dev, cached_interface_index)?;
+        let dev_name = dev.name;
         tracing::trace!(?dev_idx, ?dev_name, "bind device");
         if bind_addr.is_ipv4() {
             socket2_socket.bind_device_by_index_v4(Some(dev_idx))?;
@@ -719,7 +853,8 @@ fn setup_socket2_ext(
         target_os = "linux",
         target_env = "ohos"
     ))]
-    if let Some(dev_name) = bind_dev {
+    if let Some(dev) = bind_dev {
+        let dev_name = dev.name;
         tracing::trace!(dev_name = ?dev_name, "bind device");
         socket2_socket.bind_device(Some(dev_name.as_bytes()))?;
     }
@@ -758,15 +893,40 @@ pub enum BindDev {
     Custom(String),
 }
 
-fn resolve_bind_dev(addr: &SocketAddr, dev: BindDev) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedBindDev {
+    name: String,
+    index: Option<std::num::NonZeroU32>,
+}
+
+fn resolve_bind_dev_with(
+    addr: &SocketAddr,
+    dev: BindDev,
+    resolver: impl FnOnce(&IpAddr) -> Option<String>,
+) -> Option<ResolvedBindDev> {
     match dev {
         // Binding a loopback address already pins the socket to the loopback
         // path. SO_BINDTODEVICE is redundant there and requires privileges
         // that ordinary Android VPN applications do not have.
         BindDev::Auto if addr.ip().is_loopback() => None,
-        BindDev::Auto => get_interface_name_by_ip(&addr.ip()),
+        BindDev::Auto => resolver(&addr.ip()).map(|name| ResolvedBindDev { name, index: None }),
         BindDev::Disabled => None,
-        BindDev::Custom(dev) => Some(dev),
+        BindDev::Custom(name) => Some(ResolvedBindDev { name, index: None }),
+    }
+}
+
+fn resolve_bind_dev(addr: &SocketAddr, dev: BindDev) -> Option<ResolvedBindDev> {
+    resolve_bind_dev_with(addr, dev, get_interface_name_by_ip)
+}
+
+#[cfg(any(test, target_os = "ios", target_os = "macos"))]
+fn resolved_interface_index_with(
+    dev: &ResolvedBindDev,
+    fallback: impl FnOnce(&str) -> std::io::Result<std::num::NonZeroU32>,
+) -> std::io::Result<std::num::NonZeroU32> {
+    match dev.index {
+        Some(index) => Ok(index),
+        None => fallback(&dev.name),
     }
 }
 
@@ -821,6 +981,24 @@ pub fn bind<B: Bindable>(
 ) -> Result<B, TunnelError> {
     let _g = net_ns.map(|n| n.guard());
     let dev = resolve_bind_dev(&addr, dev);
+    let socket = socket2::Socket::new(socket2::Domain::for_address(addr), B::TYPE, B::PROTOCOL)?;
+    setup_socket2_ext(&socket, &addr, dev, only_v6, socket_mark)?;
+    B::finalize(socket)
+}
+
+pub(crate) fn bind_resolved<B: Bindable>(
+    addr: SocketAddr,
+    interface_name: String,
+    interface_index: Option<std::num::NonZeroU32>,
+    net_ns: Option<NetNS>,
+    only_v6: bool,
+    socket_mark: Option<u32>,
+) -> Result<B, TunnelError> {
+    let _g = net_ns.map(|n| n.guard());
+    let dev = Some(ResolvedBindDev {
+        name: interface_name,
+        index: interface_index,
+    });
     let socket = socket2::Socket::new(socket2::Domain::for_address(addr), B::TYPE, B::PROTOCOL)?;
     setup_socket2_ext(&socket, &addr, dev, only_v6, socket_mark)?;
     B::finalize(socket)

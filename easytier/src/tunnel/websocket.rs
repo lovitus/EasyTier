@@ -1,6 +1,6 @@
 use super::{
-    FromUrl, IpVersion, Tunnel, TunnelConnector, TunnelError, TunnelListener,
-    common::{TunnelWrapper, wait_for_connect_futures},
+    FromUrl, IpVersion, ResolvedBindAddr, Tunnel, TunnelConnector, TunnelError, TunnelListener,
+    common::{TunnelWrapper, wait_for_bound_connect_futures},
     insecure_tls::{get_insecure_tls_cert, init_crypto_provider},
     packet_def::{ZCPacket, ZCPacketType},
 };
@@ -410,7 +410,7 @@ pub struct WsTunnelConnector {
     ip_version: IpVersion,
     resolved_addr: Option<SocketAddr>,
 
-    bind_addrs: Vec<SocketAddr>,
+    bind_addrs: Vec<ResolvedBindAddr>,
     socket_mark: Option<u32>,
     stealth_candidate: Arc<crate::tunnel::stealth::OuterSessionState>,
     stealth_mode: WsStealthMode,
@@ -587,41 +587,53 @@ impl WsTunnelConnector {
     ) -> Result<Box<dyn Tunnel>, super::TunnelError> {
         let futures = FuturesUnordered::new();
 
-        for bind_addr in self.bind_addrs.iter() {
-            tracing::info!(?bind_addr, ?addr, "bind addr");
-            match self.bind_socket(*bind_addr) {
+        let mut last_bind_error = None;
+        for bind_addr in &self.bind_addrs {
+            tracing::info!(bind_addr = ?bind_addr.addr, ?addr, "bind addr");
+            match self.bind_socket(bind_addr) {
                 Ok(socket) => futures.push(Self::connect_with_mode(
                     self.addr.clone(),
                     addr,
-                    *bind_addr,
+                    bind_addr.clone(),
                     socket,
                     self.socket_mark,
                     self.stealth_mode,
                     self.stealth_candidate.clone(),
                 )),
                 Err(error) => {
-                    tracing::error!(?bind_addr, ?addr, ?error, "bind addr fail");
+                    tracing::error!(bind_addr = ?bind_addr.addr, ?addr, ?error, "bind addr fail");
+                    last_bind_error = Some(error);
                     continue;
                 }
             }
         }
 
-        wait_for_connect_futures(futures).await
+        wait_for_bound_connect_futures(futures, last_bind_error).await
     }
 
-    fn bind_socket(&self, bind_addr: SocketAddr) -> Result<TcpSocket, TunnelError> {
-        bind()
-            .addr(bind_addr)
-            .only_v6(true)
-            .maybe_socket_mark(self.socket_mark)
-            .call()
+    fn bind_socket(&self, bind_addr: &ResolvedBindAddr) -> Result<TcpSocket, TunnelError> {
+        match bind_addr.interface_name.as_ref() {
+            Some(name) => crate::tunnel::common::bind_resolved::<TcpSocket>(
+                bind_addr.addr,
+                name.clone(),
+                bind_addr.interface_index,
+                None,
+                true,
+                self.socket_mark,
+            ),
+            None => bind()
+                .addr(bind_addr.addr)
+                .only_v6(true)
+                .maybe_socket_mark(self.socket_mark)
+                .call(),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn connect_with_mode(
         addr_url: url::Url,
         addr: SocketAddr,
-        bind_addr: SocketAddr,
+        bind_addr: ResolvedBindAddr,
         socket: TcpSocket,
         socket_mark: Option<u32>,
         mode: WsStealthMode,
@@ -645,11 +657,22 @@ impl WsTunnelConnector {
                     ?addr,
                     "WS stealth attempt failed, retrying legacy wire format"
                 );
-                let socket = bind()
-                    .addr(bind_addr)
-                    .only_v6(true)
-                    .maybe_socket_mark(socket_mark)
-                    .call()?;
+                let socket = match bind_addr.interface_name {
+                    Some(name) => crate::tunnel::common::bind_resolved::<TcpSocket>(
+                        bind_addr.addr,
+                        name,
+                        bind_addr.interface_index,
+                        None,
+                        true,
+                        socket_mark,
+                    ),
+                    None => bind()
+                        .addr(bind_addr.addr)
+                        .only_v6(true)
+                        .maybe_socket_mark(socket_mark)
+                        .call(),
+                }
+                .map_err(crate::tunnel::mark_local_bind_error)?;
                 Self::connect_with(addr_url, addr, socket, None).await
             }
         }
@@ -679,6 +702,10 @@ impl TunnelConnector for WsTunnelConnector {
     }
 
     fn set_bind_addrs(&mut self, addrs: Vec<SocketAddr>) {
+        self.bind_addrs = addrs.into_iter().map(ResolvedBindAddr::auto).collect();
+    }
+
+    fn set_resolved_bind_addrs(&mut self, addrs: Vec<ResolvedBindAddr>) {
         self.bind_addrs = addrs;
     }
 

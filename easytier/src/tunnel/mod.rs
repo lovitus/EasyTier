@@ -92,6 +92,74 @@ pub enum TunnelError {
     TunError(String),
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("local bind error: {source}")]
+pub(crate) struct LocalBindError {
+    #[source]
+    source: std::io::Error,
+}
+
+impl LocalBindError {
+    fn new(source: std::io::Error) -> Self {
+        Self { source }
+    }
+
+    pub(crate) fn source_io_error(&self) -> &std::io::Error {
+        &self.source
+    }
+}
+
+pub(crate) fn mark_local_bind_error(error: TunnelError) -> TunnelError {
+    match error {
+        TunnelError::IOError(source) => {
+            TunnelError::Anyhow(anyhow::Error::new(LocalBindError::new(source)))
+        }
+        error => error,
+    }
+}
+
+pub(crate) fn local_bind_io_error(error: &TunnelError) -> Option<&std::io::Error> {
+    let TunnelError::Anyhow(error) = error else {
+        return None;
+    };
+    error
+        .downcast_ref::<LocalBindError>()
+        .map(LocalBindError::source_io_error)
+}
+
+pub(crate) fn is_stale_interface_io_error(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::AddrNotAvailable {
+        return true;
+    }
+
+    #[cfg(unix)]
+    return matches!(
+        error.raw_os_error(),
+        Some(nix::libc::ENXIO | nix::libc::ENODEV | nix::libc::EADDRNOTAVAIL)
+    );
+
+    #[cfg(not(unix))]
+    false
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct ResolvedBindAddr {
+    pub(crate) addr: SocketAddr,
+    pub(crate) interface_name: Option<String>,
+    pub(crate) interface_index: Option<std::num::NonZeroU32>,
+}
+
+impl ResolvedBindAddr {
+    pub(crate) fn auto(addr: SocketAddr) -> Self {
+        Self {
+            addr,
+            interface_name: None,
+            interface_index: None,
+        }
+    }
+}
+
 pub type StreamT = packet_def::ZCPacket;
 pub type StreamItem = Result<StreamT, TunnelError>;
 pub type SinkItem = packet_def::ZCPacket;
@@ -149,6 +217,10 @@ pub trait TunnelConnector: Send {
     async fn connect(&mut self) -> Result<Box<dyn Tunnel>, TunnelError>;
     fn remote_url(&self) -> url::Url;
     fn set_bind_addrs(&mut self, _addrs: Vec<SocketAddr>) {}
+    #[doc(hidden)]
+    fn set_resolved_bind_addrs(&mut self, addrs: Vec<ResolvedBindAddr>) {
+        self.set_bind_addrs(addrs.into_iter().map(|addr| addr.addr).collect());
+    }
     fn set_ip_version(&mut self, _ip_version: IpVersion) {}
     fn set_resolved_addr(&mut self, _addr: SocketAddr) {}
     /// Linux SO_MARK to apply to outbound sockets. `None` leaves SO_MARK

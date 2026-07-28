@@ -1,4 +1,14 @@
-use std::{net::IpAddr, ops::Deref, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    net::IpAddr,
+    ops::Deref,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 #[cfg(target_os = "windows")]
 use network_interface::{
@@ -17,6 +27,382 @@ use crate::proto::peer_rpc::GetIpListResponse;
 use super::{netns::NetNS, stun::StunInfoCollectorTrait};
 
 pub const CACHED_IP_LIST_TIMEOUT_SEC: u64 = 60;
+const UNDERLAY_SNAPSHOT_TTL: Duration = Duration::from_secs(5);
+const UNDERLAY_SNAPSHOT_REFRESH_ATTEMPTS: usize = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnderlayInterfaceIdentity {
+    pub(crate) name: String,
+    pub(crate) index: u32,
+    pub(crate) is_point_to_point: bool,
+}
+
+#[cfg(test)]
+mod underlay_snapshot_contract_tests {
+    use std::{
+        net::{Ipv4Addr, Ipv6Addr},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use pnet::datalink::NetworkInterface;
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    fn interface(name: &str, index: u32, ips: &[&str]) -> NetworkInterface {
+        NetworkInterface {
+            name: name.to_owned(),
+            description: String::new(),
+            index,
+            mac: None,
+            ips: ips.iter().map(|ip| ip.parse().unwrap()).collect(),
+            flags: 0,
+        }
+    }
+
+    fn snapshot_with_interface(name: &str, index: u32, addr: &str) -> UnderlayInterfaceSnapshot {
+        let iface = interface(name, index, &[addr]);
+        IPCollector::build_underlay_snapshot(&[iface.clone()], &[iface], None, None)
+    }
+
+    #[test]
+    fn snapshot_preserves_sources_first_match_and_fallback_families() {
+        let primary = interface("en-test0", 4, &["192.0.2.10/24", "2001:db8::10/64"]);
+        let duplicate = interface(
+            "tun-test0",
+            9,
+            &["192.0.2.10/24", "2001:db8::10/64", "10.44.0.1/24"],
+        );
+        let all = vec![primary.clone(), duplicate];
+        let snapshot = IPCollector::build_underlay_snapshot(
+            &all,
+            &[primary],
+            Some(Ipv4Addr::new(192, 0, 2, 10)),
+            Some("2001:db8::10".parse::<Ipv6Addr>().unwrap()),
+        );
+
+        assert!(
+            snapshot
+                .ip_list
+                .interface_ipv4s
+                .contains(&Ipv4Addr::new(192, 0, 2, 10).into())
+        );
+        assert!(
+            !snapshot
+                .ip_list
+                .interface_ipv4s
+                .contains(&Ipv4Addr::new(10, 44, 0, 1).into())
+        );
+        assert!(
+            snapshot
+                .ip_list
+                .interface_ipv6s
+                .contains(&"2001:db8::10".parse::<Ipv6Addr>().unwrap().into())
+        );
+        let ipv4: IpAddr = "192.0.2.10".parse().unwrap();
+        let resolved = snapshot.interface_for(&ipv4).unwrap();
+        assert_eq!(resolved.name, "en-test0");
+        assert_eq!(resolved.index, 4);
+        assert!(!snapshot.has_unmapped_fallback_for(true));
+        assert!(!snapshot.has_unmapped_fallback_for(false));
+    }
+
+    #[test]
+    fn unmapped_fallback_is_tracked_per_address_family() {
+        let iface = interface("en-test0", 4, &["192.0.2.10/24"]);
+        let snapshot = IPCollector::build_underlay_snapshot(
+            &[iface.clone()],
+            &[iface],
+            Some(Ipv4Addr::new(192, 0, 2, 10)),
+            Some("2001:db8::99".parse().unwrap()),
+        );
+
+        assert!(!snapshot.has_unmapped_fallback_for(true));
+        assert!(snapshot.has_unmapped_fallback_for(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_consumers_publish_once_per_stable_epoch_and_ttl() {
+        let cache = Arc::new(UnderlaySnapshotCache::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let now = Instant::now();
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let cache = cache.clone();
+            let calls = calls.clone();
+            tasks.push(tokio::spawn(async move {
+                cache
+                    .get_or_refresh_at(now, move || {
+                        let calls = calls.clone();
+                        async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            snapshot_with_interface("en-test0", 4, "192.0.2.10/24")
+                        }
+                    })
+                    .await
+            }));
+        }
+        let first = tasks.remove(0).await.unwrap().unwrap();
+        for task in tasks {
+            assert!(Arc::ptr_eq(&first, &task.await.unwrap().unwrap()));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let before_ttl = cache
+            .get_or_refresh_at(now + Duration::from_millis(4_999), || async {
+                panic!("fresh snapshot must not be recollected before the TTL")
+            })
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &before_ttl));
+
+        let after_ttl = cache
+            .get_or_refresh_at(now + Duration::from_secs(5), {
+                let calls = calls.clone();
+                move || {
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        snapshot_with_interface("en-test1", 12, "198.51.100.10/24")
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &after_ttl));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inflight_invalidation_discards_old_epoch_and_owner_cancellation_recovers() {
+        let cache = Arc::new(UnderlaySnapshotCache::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let now = Instant::now();
+
+        let owner = {
+            let cache = cache.clone();
+            let calls = calls.clone();
+            let started = started.clone();
+            let release = release.clone();
+            tokio::spawn(async move {
+                cache
+                    .get_or_refresh_at(now, move || {
+                        let call = calls.fetch_add(1, Ordering::SeqCst);
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            if call == 0 {
+                                started.notify_one();
+                                release.notified().await;
+                                snapshot_with_interface("stale", 1, "192.0.2.1/24")
+                            } else {
+                                snapshot_with_interface("current", 2, "192.0.2.2/24")
+                            }
+                        }
+                    })
+                    .await
+            })
+        };
+        started.notified().await;
+        cache.invalidate();
+        release.notify_waiters();
+        let current = tokio::time::timeout(Duration::from_secs(2), owner)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let current_ip: IpAddr = "192.0.2.2".parse().unwrap();
+        assert_eq!(current.interface_for(&current_ip).unwrap().name, "current");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let cancelled_cache = Arc::new(UnderlaySnapshotCache::new());
+        let cancelled_started = Arc::new(Notify::new());
+        let cancelled_owner = {
+            let cache = cancelled_cache.clone();
+            let started = cancelled_started.clone();
+            tokio::spawn(async move {
+                cache
+                    .get_or_refresh_at(Instant::now(), move || {
+                        let started = started.clone();
+                        async move {
+                            started.notify_one();
+                            std::future::pending::<UnderlayInterfaceSnapshot>().await
+                        }
+                    })
+                    .await
+            })
+        };
+        cancelled_started.notified().await;
+        // Cancellation-safety contract: `abort()` schedules the owner future
+        // for cancellation, and dropping that future releases `_refresh`.
+        // Start the contender immediately so this test exercises a waiter
+        // recovering from an aborted refresh owner. Awaiting the aborted
+        // `JoinHandle` here would serialize away the race this test protects;
+        // the timeout below proves that the waiter is eventually released.
+        cancelled_owner.abort();
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(2),
+            cancelled_cache.get_or_refresh_at(Instant::now(), || async {
+                snapshot_with_interface("recovered", 3, "192.0.2.3/24")
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let recovered_ip: IpAddr = "192.0.2.3".parse().unwrap();
+        assert_eq!(
+            recovered.interface_for(&recovered_ip).unwrap().name,
+            "recovered"
+        );
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct UnderlayInterfaceSnapshot {
+    pub(crate) ip_list: GetIpListResponse,
+    pub(crate) generation: u64,
+    interfaces_by_addr: HashMap<IpAddr, UnderlayInterfaceIdentity>,
+    unmapped_fallbacks: Vec<IpAddr>,
+}
+
+impl UnderlayInterfaceSnapshot {
+    pub(crate) fn interface_for(&self, ip: &IpAddr) -> Option<&UnderlayInterfaceIdentity> {
+        self.interfaces_by_addr.get(ip)
+    }
+
+    pub(crate) fn unmapped_fallbacks(&self) -> &[IpAddr] {
+        &self.unmapped_fallbacks
+    }
+
+    pub(crate) fn has_unmapped_fallback_for(&self, is_ipv4: bool) -> bool {
+        self.unmapped_fallbacks
+            .iter()
+            .any(|ip| ip.is_ipv4() == is_ipv4)
+    }
+}
+
+struct CachedUnderlaySnapshot {
+    snapshot: Arc<UnderlayInterfaceSnapshot>,
+    epoch: u64,
+    collected_at: Instant,
+}
+
+struct UnderlaySnapshotCache {
+    state: RwLock<Option<CachedUnderlaySnapshot>>,
+    refresh: Mutex<()>,
+    epoch: AtomicU64,
+    next_generation: AtomicU64,
+    invalidated_through_generation: AtomicU64,
+}
+
+impl UnderlaySnapshotCache {
+    fn new() -> Self {
+        Self {
+            state: RwLock::new(None),
+            refresh: Mutex::new(()),
+            epoch: AtomicU64::new(0),
+            next_generation: AtomicU64::new(0),
+            invalidated_through_generation: AtomicU64::new(0),
+        }
+    }
+
+    fn invalidate(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn invalidate_generation(&self, generation: u64) {
+        self.invalidated_through_generation
+            .fetch_max(generation, Ordering::AcqRel);
+    }
+
+    fn is_fresh(&self, cached: &CachedUnderlaySnapshot, now: Instant, epoch: u64) -> bool {
+        cached.epoch == epoch
+            && cached.snapshot.generation
+                > self.invalidated_through_generation.load(Ordering::Acquire)
+            && now.saturating_duration_since(cached.collected_at) < UNDERLAY_SNAPSHOT_TTL
+    }
+
+    async fn get_or_refresh_at<F, Fut>(
+        &self,
+        now: Instant,
+        mut collect: F,
+    ) -> anyhow::Result<Arc<UnderlayInterfaceSnapshot>>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = UnderlayInterfaceSnapshot>,
+    {
+        for _ in 0..UNDERLAY_SNAPSHOT_REFRESH_ATTEMPTS {
+            let epoch = self.epoch.load(Ordering::Acquire);
+            if let Some(cached) = self.state.read().await.as_ref()
+                && self.is_fresh(cached, now, epoch)
+            {
+                return Ok(cached.snapshot.clone());
+            }
+
+            let _refresh = self.refresh.lock().await;
+            let epoch = self.epoch.load(Ordering::Acquire);
+            if let Some(cached) = self.state.read().await.as_ref()
+                && self.is_fresh(cached, now, epoch)
+            {
+                return Ok(cached.snapshot.clone());
+            }
+
+            let mut snapshot = collect().await;
+            // Concurrency contract: this epoch observation is the successful
+            // refresh's linearization point. An invalidation observed here
+            // discards the collection. An invalidation immediately after this
+            // point is ordered after this refresh: this caller may receive the
+            // snapshot, while the cached entry retains the old epoch and is
+            // rejected by every later lookup. That is the same unavoidable
+            // boundary as a network event arriving immediately after a caller
+            // receives any valid snapshot; it is not an old refresh
+            // overwriting a newer event.
+            if self.epoch.load(Ordering::Acquire) != epoch {
+                continue;
+            }
+
+            snapshot.generation = self
+                .next_generation
+                .fetch_add(1, Ordering::AcqRel)
+                .wrapping_add(1);
+            let snapshot = Arc::new(snapshot);
+            *self.state.write().await = Some(CachedUnderlaySnapshot {
+                snapshot: snapshot.clone(),
+                epoch,
+                collected_at: now,
+            });
+            return Ok(snapshot);
+        }
+
+        anyhow::bail!("underlay interface snapshot changed repeatedly during collection")
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct UnderlaySnapshotGenerationLease {
+    cache: Arc<UnderlaySnapshotCache>,
+    generation: u64,
+}
+
+impl UnderlaySnapshotGenerationLease {
+    pub(crate) fn invalidate(&self) {
+        self.cache.invalidate_generation(self.generation);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_invalidated(&self) -> bool {
+        self.cache
+            .invalidated_through_generation
+            .load(Ordering::Acquire)
+            >= self.generation
+    }
+}
 
 struct InterfaceFilter {
     iface: NetworkInterface,
@@ -201,6 +587,7 @@ pub async fn local_ipv6() -> std::io::Result<std::net::Ipv6Addr> {
 pub struct IPCollector {
     cached_ip_list: Arc<RwLock<GetIpListResponse>>,
     collect_ip_task: Mutex<JoinSet<()>>,
+    underlay_snapshot: Arc<UnderlaySnapshotCache>,
     net_ns: NetNS,
     stun_info_collector: Arc<Box<dyn StunInfoCollectorTrait>>,
 }
@@ -210,6 +597,7 @@ impl IPCollector {
         Self {
             cached_ip_list: Arc::new(RwLock::new(GetIpListResponse::default())),
             collect_ip_task: Mutex::new(JoinSet::new()),
+            underlay_snapshot: Arc::new(UnderlaySnapshotCache::new()),
             net_ns,
             stun_info_collector: Arc::new(Box::new(stun_info_collector)),
         }
@@ -277,26 +665,78 @@ impl IPCollector {
         Self::do_collect_local_ip_addrs(self.net_ns.clone()).await
     }
 
-    pub async fn collect_interfaces(net_ns: NetNS, filter: bool) -> Vec<NetworkInterface> {
+    pub(crate) async fn collect_underlay_snapshot(
+        &self,
+    ) -> anyhow::Result<Arc<UnderlayInterfaceSnapshot>> {
+        self.underlay_snapshot
+            .get_or_refresh_at(Instant::now(), || {
+                Self::do_collect_underlay_snapshot(self.net_ns.clone())
+            })
+            .await
+    }
+
+    pub(crate) fn invalidate_underlay_snapshot(&self) {
+        self.underlay_snapshot.invalidate();
+    }
+
+    pub(crate) fn invalidate_underlay_snapshot_generation(&self, generation: u64) {
+        self.underlay_snapshot.invalidate_generation(generation);
+    }
+
+    pub(crate) fn underlay_snapshot_generation_lease(
+        &self,
+        generation: u64,
+    ) -> UnderlaySnapshotGenerationLease {
+        UnderlaySnapshotGenerationLease {
+            cache: self.underlay_snapshot.clone(),
+            generation,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn collect_underlay_snapshot_with<F, Fut>(
+        &self,
+        now: Instant,
+        collect: F,
+    ) -> anyhow::Result<Arc<UnderlayInterfaceSnapshot>>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = UnderlayInterfaceSnapshot>,
+    {
+        self.underlay_snapshot.get_or_refresh_at(now, collect).await
+    }
+
+    async fn collect_interfaces_raw(net_ns: NetNS) -> Vec<NetworkInterface> {
         let _g = net_ns.guard();
         #[cfg(target_os = "windows")]
         let ifaces = Self::collect_interfaces_windows();
         #[cfg(not(target_os = "windows"))]
         let ifaces = pnet::datalink::interfaces();
-        let mut ret = vec![];
+        ifaces
+    }
+
+    async fn filter_collected_interfaces(
+        net_ns: NetNS,
+        ifaces: &[NetworkInterface],
+        filter: bool,
+    ) -> Vec<NetworkInterface> {
+        let _g = net_ns.guard();
+        let mut ret = Vec::with_capacity(ifaces.len());
         for iface in ifaces {
             let f = InterfaceFilter {
                 iface: iface.clone(),
             };
-
             if filter && !f.filter_iface().await {
                 continue;
             }
-
-            ret.push(iface);
+            ret.push(iface.clone());
         }
-
         ret
+    }
+
+    pub async fn collect_interfaces(net_ns: NetNS, filter: bool) -> Vec<NetworkInterface> {
+        let ifaces = Self::collect_interfaces_raw(net_ns.clone()).await;
+        Self::filter_collected_interfaces(net_ns, &ifaces, filter).await
     }
 
     #[cfg(target_os = "windows")]
@@ -426,5 +866,93 @@ impl IPCollector {
         }
 
         ret
+    }
+
+    pub(crate) fn build_underlay_snapshot(
+        ifaces: &[NetworkInterface],
+        filtered_ifaces: &[NetworkInterface],
+        fallback_ipv4: Option<std::net::Ipv4Addr>,
+        fallback_ipv6: Option<std::net::Ipv6Addr>,
+    ) -> UnderlayInterfaceSnapshot {
+        let mut ip_list = GetIpListResponse::default();
+        let mut interfaces_by_addr = HashMap::new();
+
+        for iface in ifaces {
+            let identity = UnderlayInterfaceIdentity {
+                name: iface.name.clone(),
+                index: iface.index,
+                is_point_to_point: iface.is_point_to_point(),
+            };
+            for network in &iface.ips {
+                interfaces_by_addr
+                    .entry(network.ip())
+                    .or_insert_with(|| identity.clone());
+            }
+        }
+
+        for iface in filtered_ifaces {
+            for network in &iface.ips {
+                let ip = network.ip();
+                if let IpAddr::V4(ipv4) = ip
+                    && !ip.is_loopback()
+                    && !ip.is_multicast()
+                {
+                    ip_list.interface_ipv4s.push(ipv4.into());
+                }
+            }
+        }
+
+        for iface in ifaces {
+            for network in &iface.ips {
+                if let IpAddr::V6(ipv6) = network.ip()
+                    && !ipv6.is_multicast()
+                    && !ipv6.is_loopback()
+                    && !ipv6.is_unicast_link_local()
+                {
+                    ip_list.interface_ipv6s.push(ipv6.into());
+                }
+            }
+        }
+
+        let mut unmapped_fallbacks = Vec::new();
+        if let Some(ipv4) = fallback_ipv4 {
+            let ip = IpAddr::V4(ipv4);
+            if !ip_list.interface_ipv4s.contains(&ipv4.into()) {
+                ip_list.interface_ipv4s.push(ipv4.into());
+            }
+            if !interfaces_by_addr.contains_key(&ip) {
+                unmapped_fallbacks.push(ip);
+            }
+        }
+        if let Some(ipv6) = fallback_ipv6 {
+            let ip = IpAddr::V6(ipv6);
+            if !ip_list.interface_ipv6s.contains(&ipv6.into()) {
+                ip_list.interface_ipv6s.push(ipv6.into());
+            }
+            if !interfaces_by_addr.contains_key(&ip) {
+                unmapped_fallbacks.push(ip);
+            }
+        }
+
+        UnderlayInterfaceSnapshot {
+            ip_list,
+            generation: 0,
+            interfaces_by_addr,
+            unmapped_fallbacks,
+        }
+    }
+
+    async fn do_collect_underlay_snapshot(net_ns: NetNS) -> UnderlayInterfaceSnapshot {
+        let ifaces = Self::collect_interfaces_raw(net_ns.clone()).await;
+        let filtered_ifaces =
+            Self::filter_collected_interfaces(net_ns.clone(), &ifaces, true).await;
+        // Preserve the existing namespace semantics of
+        // `do_collect_local_ip_addrs`: route-derived fallback probes must run
+        // inside the collector's NetNS, not the process default namespace.
+        let (fallback_ipv4, fallback_ipv6) = {
+            let _g = net_ns.guard();
+            (local_ipv4().await.ok(), local_ipv6().await.ok())
+        };
+        Self::build_underlay_snapshot(&ifaces, &filtered_ifaces, fallback_ipv4, fallback_ipv6)
     }
 }
