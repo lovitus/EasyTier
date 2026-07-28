@@ -706,17 +706,6 @@ impl PolicyProxyConfig {
     }
 
     fn validate_envelope_inner(&self, require_active_source: bool) -> anyhow::Result<()> {
-        if self.enabled
-            && matches!(
-                self.backend,
-                Some(PolicyProxyBackend::Off | PolicyProxyBackend::Mihomo)
-            )
-        {
-            anyhow::bail!(
-                "policy_proxy enabled=true selects the legacy Leaf backend and conflicts with backend={}",
-                self.backend.as_ref().unwrap().as_str()
-            );
-        }
         Self::validate_source_pair(
             self.config_file.as_ref(),
             self.config_inline.as_ref(),
@@ -3172,18 +3161,23 @@ leaf_executable = "easytier-leaf-worker"
         assert!(explicit_mihomo.is_mihomo_enabled());
         assert!(!explicit_mihomo.is_leaf_enabled());
 
-        let conflicting_legacy_flag = PolicyProxyConfig {
-            backend: Some(PolicyProxyBackend::Mihomo),
-            enabled: true,
-            ..Default::default()
-        };
-        assert!(
-            conflicting_legacy_flag
-                .validate_envelope()
-                .unwrap_err()
-                .to_string()
-                .contains("conflicts with backend=mihomo")
-        );
+        for backend in [
+            PolicyProxyBackend::Off,
+            PolicyProxyBackend::Mihomo,
+            PolicyProxyBackend::Leaf,
+        ] {
+            for enabled in [false, true] {
+                let policy = PolicyProxyConfig {
+                    backend: Some(backend.clone()),
+                    enabled,
+                    config_inline: Some("version: 1\nrules: [MATCH,DIRECT]".to_owned()),
+                    mihomo_config_inline: Some("rules: [MATCH,DIRECT]".to_owned()),
+                    ..Default::default()
+                };
+                assert_eq!(policy.effective_backend(), backend);
+                policy.validate_envelope().unwrap();
+            }
+        }
     }
 
     #[test]

@@ -1311,9 +1311,9 @@ impl NetworkConfig {
             .get_credential_file()
             .map(|path| path.to_string_lossy().into_owned());
         if let Some(policy) = config.get_policy_proxy_config() {
-            // Preserve the legacy Leaf selector verbatim. Reporting Mihomo as
-            // enabled=true creates a conflicting envelope on the next save.
-            result.enable_policy_proxy = Some(policy.enabled);
+            // The explicit backend owns selection. Keep the legacy boolean as
+            // a normalized compatibility projection for older clients.
+            result.enable_policy_proxy = Some(policy.is_leaf_enabled());
             result.policy_proxy_backend = policy
                 .backend
                 .as_ref()
@@ -1519,6 +1519,7 @@ mod tests {
             network_secret: Some("secret".to_string()),
             networking_method: Some(crate::proto::api::manage::NetworkingMethod::Standalone as i32),
             policy_proxy_backend: Some("mihomo".to_string()),
+            enable_policy_proxy: Some(true),
             policy_config_inline: Some("version: 1\nrules: [MATCH,DIRECT]\n".to_string()),
             policy_mihomo_config_inline: Some("rules: []\n".to_string()),
             policy_mihomo_executable: Some("easytier-mihomo".to_string()),

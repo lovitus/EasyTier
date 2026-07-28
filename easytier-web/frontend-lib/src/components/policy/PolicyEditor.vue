@@ -49,6 +49,7 @@ const props = defineProps<{
   api?: Api.RemoteClient
   yamlOnly?: boolean
   readOnly?: boolean
+  hideBackendSelector?: boolean
   runtimeInfo?: NetworkInstanceRunningInfo
 }>()
 const { t } = useI18n()
@@ -78,7 +79,6 @@ const policyBackend = computed<PolicyProxyBackend>({
   get: () => configuredPolicyBackend(config.value),
   set: backend => setPolicyBackend(backend),
 })
-applyPolicyBackend(config.value, configuredPolicyBackend(config.value))
 const mihomoRuntimeStatus = computed(() => props.runtimeInfo?.mihomo_status)
 const neutralMeshEntryStatus = computed(() => props.runtimeInfo?.neutral_mesh_entry_status)
 const policyBackendOptions = computed(() => {
@@ -693,7 +693,7 @@ onMounted(() => {
       {{ t('policy.editor.outbound_load_failed') }}: {{ outboundError }}
     </Message>
 
-    <div class="flex flex-col gap-2">
+    <div v-if="!props.hideBackendSelector" class="flex flex-col gap-2">
       <label for="policy-backend-selector" class="font-semibold">{{ t('policy_proxy_backend') }}</label>
       <SelectButton id="policy-backend-selector" data-testid="policy-backend-selector"
         :model-value="policyBackend" :options="policyBackendOptions" option-label="label"

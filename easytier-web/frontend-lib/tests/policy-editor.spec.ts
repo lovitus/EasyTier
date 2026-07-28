@@ -138,6 +138,7 @@ function mountEditor(
   options: {
     yamlOnly?: boolean
     readOnly?: boolean
+    hideBackendSelector?: boolean
     runtimeInfo?: NetworkInstanceRunningInfo
   } = {},
 ) {
@@ -175,6 +176,19 @@ async function expandRow(wrapper: ReturnType<typeof mountEditor>['wrapper'], tes
 }
 
 describe('PolicyEditor', () => {
+  it('can hide backend selection without mutating a conflicting legacy flag on mount', () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.policy_proxy_backend = 'mihomo'
+    config.enable_policy_proxy = true
+    config.policy_mihomo_config_file = '/managed/mihomo.yaml'
+    const { model, wrapper } = mountEditor(config, undefined, { hideBackendSelector: true })
+
+    expect(wrapper.find('[data-testid="policy-backend-selector"]').exists()).toBe(false)
+    expect(model.policy_proxy_backend).toBe('mihomo')
+    expect(model.enable_policy_proxy).toBe(true)
+    expect(model.policy_mihomo_config_file).toBe('/managed/mihomo.yaml')
+  })
+
   it('makes the focused YAML controls read-only in view mode', () => {
     const inline = DEFAULT_NETWORK_CONFIG()
     inline.enable_policy_proxy = true
@@ -242,7 +256,7 @@ describe('PolicyEditor', () => {
     await nextTick()
 
     expect(model).toMatchObject({
-      enable_policy_proxy: false,
+      enable_policy_proxy: true,
       policy_proxy_backend: 'mihomo',
       policy_config_inline: 'version: 1\nrules: ["MATCH,DIRECT"]\n',
       policy_mihomo_config_inline: 'proxies: [native-mihomo]',

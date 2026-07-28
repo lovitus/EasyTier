@@ -1139,6 +1139,7 @@ onUnmounted(() => {
                 <Divider />
 
                 <Config :cur-network="currentNetworkConfig" :api="props.api" :config-invalid="!currentNetworkConfig"
+                    :hide-policy-backend-selector="true"
                     :policy-runtime-info="currentNetworkStatusInfo?.detail"
                     @run-network="saveAndRunNewNetwork"></Config>
             </div>
@@ -1208,6 +1209,7 @@ onUnmounted(() => {
             <PolicyEditor v-else-if="policyYamlDialogBackend === 'leaf' && leafPolicyConfigDraft"
                 v-model="leafPolicyConfigDraft" :api="props.api"
                 yaml-only :read-only="policyYamlReadOnly"
+                :hide-backend-selector="true"
                 :runtime-info="currentNetworkStatusInfo?.detail" />
             <template #footer>
                 <Button :label="t(policyYamlReadOnly ? 'web.common.close' : 'web.common.cancel')"

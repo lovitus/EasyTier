@@ -420,11 +420,24 @@ describe('RemoteManagement config save', () => {
     }))
     api.validate_config = vi.fn(async () => ({ policy_diagnostics: [] }))
 
+    const EmbeddedConfigStub = defineComponent({
+      name: 'Config',
+      props: {
+        hidePolicyBackendSelector: Boolean,
+      },
+      setup(props) {
+        return () => h('div', {
+          'data-testid': 'embedded-config',
+          'data-hide-policy-backend-selector': String(props.hidePolicyBackendSelector),
+        })
+      },
+    })
+
     const wrapper = mount(RemoteManagement, {
       props: { api, instanceId: INSTANCE_ID },
       global: {
         stubs: {
-          Config: true,
+          Config: EmbeddedConfigStub,
           ConfigEditDialog: true,
           MihomoYamlEditor: true,
           PolicyEditor: true,
@@ -435,6 +448,9 @@ describe('RemoteManagement config save', () => {
 
     try {
       await settleRemoteManagement()
+
+      expect(wrapper.get('[data-testid="embedded-config"]')
+        .attributes('data-hide-policy-backend-selector')).toBe('true')
 
       const backend = wrapper.find('[data-testid="policy-home-backend"]')
       expect(backend.exists()).toBe(true)

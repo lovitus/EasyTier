@@ -23,6 +23,7 @@ const props = defineProps<{
   configInvalid?: boolean
   hostname?: string
   policyRuntimeInfo?: NetworkInstanceRunningInfo
+  hidePolicyBackendSelector?: boolean
 }>()
 
 defineEmits(['runNetwork'])
@@ -608,7 +609,8 @@ const instanceRecvBpsLimitInput = computed<string>({
 
           <Panel :header="t('policy.editor.title')" toggleable collapsed>
             <PolicyEditor v-model="curNetwork" :api="props.api"
-              :runtime-info="props.policyRuntimeInfo" />
+              :runtime-info="props.policyRuntimeInfo"
+              :hide-backend-selector="props.hidePolicyBackendSelector" />
           </Panel>
 
           <Divider />
