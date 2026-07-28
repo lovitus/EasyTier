@@ -2375,6 +2375,7 @@ dependencies = [
  "derivative",
  "derive_builder",
  "derive_more 2.1.1",
+ "dunce",
  "easytier-policy",
  "easytier-socks-egress",
  "encoding",

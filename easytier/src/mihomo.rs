@@ -1809,6 +1809,20 @@ fn create_private_directory(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn canonicalize_mihomo_home(path: &Path) -> std::io::Result<PathBuf> {
+    // Mihomo v1.19.29 (e26714a181ac0e2fa803453c0a8e9a9ce94e31cb)
+    // stores `-d` verbatim in constant/path.go::SetHomeDir. Its
+    // path::MMDB/ASN/GeoIP/GeoSite helpers then join file names with Go's
+    // slash-only path.Join instead of filepath.Join. A Windows
+    // `\\?\C:\...` path from std::fs::canonicalize consequently becomes the
+    // invalid mixed form `\\?\C:\.../geoip.metadb`. Keep canonical symlink
+    // resolution while returning the conventional child-process path form.
+    #[cfg(windows)]
+    return dunce::canonicalize(path);
+    #[cfg(not(windows))]
+    fs::canonicalize(path)
+}
+
 fn prepare_managed_home(base: &Path, instance_id: uuid::Uuid) -> anyhow::Result<PathBuf> {
     match fs::symlink_metadata(base) {
         Ok(metadata) => ensure!(
@@ -1821,13 +1835,13 @@ fn prepare_managed_home(base: &Path, instance_id: uuid::Uuid) -> anyhow::Result<
         }
         Err(error) => return Err(error.into()),
     }
-    let normalized_base = fs::canonicalize(base)
+    let normalized_base = canonicalize_mihomo_home(base)
         .with_context(|| format!("failed to normalize Mihomo managed base {}", base.display()))?;
     let runtime_root = normalized_base.join("mihomo-runtime");
     create_private_directory(&runtime_root)?;
     let home = runtime_root.join(instance_id.simple().to_string());
     create_private_directory(&home)?;
-    let normalized_home = fs::canonicalize(&home)
+    let normalized_home = canonicalize_mihomo_home(&home)
         .with_context(|| format!("failed to normalize Mihomo managed home {}", home.display()))?;
     ensure!(
         normalized_home.starts_with(&normalized_base),
@@ -2380,7 +2394,7 @@ rules:
         let base = tempfile::tempdir().unwrap();
         let instance_id = uuid::Uuid::new_v4();
         let home = prepare_managed_home(base.path(), instance_id).unwrap();
-        assert!(home.starts_with(base.path().canonicalize().unwrap()));
+        assert!(home.starts_with(canonicalize_mihomo_home(base.path()).unwrap()));
         assert!(home.ends_with(instance_id.simple().to_string()));
 
         let run_path = {
@@ -2390,6 +2404,20 @@ rules:
         };
         assert!(!run_path.exists());
         assert!(home.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_home_uses_a_mihomo_compatible_windows_path() {
+        let base = tempfile::tempdir().unwrap();
+        let home = prepare_managed_home(base.path(), uuid::Uuid::new_v4()).unwrap();
+
+        assert!(
+            !home.to_string_lossy().starts_with(r"\\?\"),
+            "Mihomo v1.19.29 joins Geo paths incorrectly below a verbatim Windows home: {}",
+            home.display()
+        );
+        assert!(home.join("geoip.metadb").is_absolute());
     }
 
     #[cfg(unix)]
