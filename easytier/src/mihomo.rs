@@ -1269,40 +1269,35 @@ async fn validate_runtime_config(config: &MihomoSupervisorConfig) -> anyhow::Res
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_command(&mut command);
-    let child = command.spawn().with_context(|| {
+    let mut child = command.spawn().with_context(|| {
         format!(
             "failed to execute Mihomo validator {}",
             config.executable.display()
         )
     })?;
-    let mut child = ManagedChild::attach(child, &config.executable).await?;
     let stdout = child
-        .child_mut()
         .stdout
         .take()
         .context("Mihomo validator stdout pipe is unavailable")?;
     let stderr = child
-        .child_mut()
         .stderr
         .take()
         .context("Mihomo validator stderr pipe is unavailable")?;
     let stdout_diagnostics = tokio::spawn(read_bounded_diagnostics(stdout));
     let stderr_diagnostics = tokio::spawn(read_bounded_diagnostics(stderr));
-    let status = match tokio::time::timeout(config.restart.validation_timeout, child.wait()).await {
-        Ok(status) => status.context("failed waiting for Mihomo config validation")?,
-        Err(_) => {
-            child.terminate(config.restart.stop_timeout).await;
-            let _ = stdout_diagnostics.await;
-            let _ = stderr_diagnostics.await;
-            anyhow::bail!("Mihomo config validation timed out");
-        }
-    };
+    let validation = wait_for_mihomo_validator(
+        &mut child,
+        config.restart.validation_timeout,
+        config.restart.stop_timeout,
+    )
+    .await;
     let stdout = stdout_diagnostics
         .await
         .context("Mihomo validator stdout task failed")??;
     let stderr = stderr_diagnostics
         .await
         .context("Mihomo validator stderr task failed")??;
+    let status = validation?;
     let diagnostic = format_validator_diagnostic(&stdout, &stderr);
     ensure!(
         status.success(),
@@ -1310,6 +1305,75 @@ async fn validate_runtime_config(config: &MihomoSupervisorConfig) -> anyhow::Res
         diagnostic
     );
     Ok(())
+}
+
+async fn wait_for_mihomo_validator(
+    child: &mut tokio::process::Child,
+    validation_timeout: Duration,
+    stop_timeout: Duration,
+) -> anyhow::Result<std::process::ExitStatus> {
+    match tokio::time::timeout(validation_timeout, child.wait()).await {
+        Ok(status) => status.context("failed waiting for Mihomo config validation"),
+        Err(_) => {
+            let _ = child.start_kill();
+            match tokio::time::timeout(stop_timeout, child.wait()).await {
+                Ok(status) => {
+                    status.context("failed reaping timed-out Mihomo config validator")?;
+                }
+                Err(_) => {
+                    // Match the long-running sidecar fallback: SIGKILL and wait
+                    // without leaving a child owned by Core. `kill()` includes
+                    // the wait needed to reap the process on Unix.
+                    let _ = child.kill().await;
+                }
+            }
+            anyhow::bail!("Mihomo config validation timed out")
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod mihomo_validator_lifecycle_tests {
+    use super::*;
+
+    fn shell_child(script: &str) -> tokio::process::Child {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_command(&mut command);
+        command.spawn().unwrap()
+    }
+
+    #[tokio::test]
+    async fn short_lived_validator_is_reaped_after_normal_exit() {
+        let mut child = shell_child("exit 0");
+        let status =
+            wait_for_mihomo_validator(&mut child, Duration::from_secs(1), Duration::from_secs(1))
+                .await
+                .unwrap();
+
+        assert!(status.success());
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn timed_out_validator_is_killed_and_reaped() {
+        let mut child = shell_child("sleep 30");
+        let error = wait_for_mihomo_validator(
+            &mut child,
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(child.try_wait().unwrap().is_some());
+    }
 }
 
 fn format_validator_diagnostic(stdout: &[u8], stderr: &[u8]) -> String {
