@@ -20,11 +20,11 @@
 //!   loopback TCP instead of the unauthenticated named-pipe controller on
 //!   Windows.
 //! - `main.go` accepts `-f` and validates with `-t`.
-//! - `constant/path.go::{SetHomeDir,path.Resolve}` resolves relative paths
-//!   against `-d`. The generated YAML may live in the private runtime
-//!   directory, but both validation and execution retain the source config
-//!   directory as Mihomo home. Mihomo may consequently create its documented
-//!   cache/database files there; EasyTier never changes the source YAML.
+//! - `constant/path.go::{SetHomeDir,path.Resolve,IsSafePath}` resolves relative
+//!   paths and enforces `external-ui` safety against `-d`. Following Clash
+//!   Verge Rev's generated-config model, EasyTier treats a user-selected file
+//!   as a read-only import source and always runs Mihomo from an instance-local
+//!   managed home. The source YAML itself is never changed.
 
 use std::{
     collections::BTreeSet,
@@ -222,6 +222,132 @@ impl MihomoConfigSource {
     fn conflicts_with_runtime_path(&self, runtime_path: &Path) -> bool {
         matches!(self, Self::File(path) if path == runtime_path)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ManagedSourceIdentity {
+    canonical_path: String,
+    modified_secs: u64,
+    modified_nanos: u32,
+    bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ManagedSourceCache {
+    identity: ManagedSourceIdentity,
+    contents: String,
+}
+
+fn managed_source_identity(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> anyhow::Result<ManagedSourceIdentity> {
+    ensure!(
+        !metadata.file_type().is_symlink(),
+        "refusing symlink Mihomo source config {}",
+        path.display()
+    );
+    ensure!(
+        metadata.is_file(),
+        "Mihomo source config is not a regular file: {}",
+        path.display()
+    );
+    ensure!(
+        metadata.len() <= MAX_SOURCE_BYTES,
+        "Mihomo source config exceeds {MAX_SOURCE_BYTES} bytes"
+    );
+    let canonical = fs::canonicalize(path)
+        .with_context(|| format!("failed to normalize Mihomo config {}", path.display()))?;
+    let modified = metadata
+        .modified()
+        .context("Mihomo source modification time is unavailable")?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .context("Mihomo source modification time predates the Unix epoch")?;
+    Ok(ManagedSourceIdentity {
+        canonical_path: canonical.to_string_lossy().into_owned(),
+        modified_secs: modified.as_secs(),
+        modified_nanos: modified.subsec_nanos(),
+        bytes: metadata.len(),
+    })
+}
+
+fn read_managed_source_cache(path: &Path) -> Option<ManagedSourceCache> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() as u64 > MAX_SOURCE_BYTES.saturating_add(1024 * 1024) {
+        return None;
+    }
+    let cache = serde_json::from_slice::<ManagedSourceCache>(&bytes).ok()?;
+    (cache.contents.len() as u64 <= MAX_SOURCE_BYTES).then_some(cache)
+}
+
+fn normalized_missing_source_path(path: &Path) -> Option<String> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let parent = fs::canonicalize(absolute.parent()?).ok()?;
+    Some(
+        parent
+            .join(absolute.file_name()?)
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+fn load_managed_source(
+    source: &MihomoConfigSource,
+    managed_home: &Path,
+) -> anyhow::Result<LoadedMihomoConfig> {
+    let MihomoConfigSource::File(path) = source else {
+        return source.load();
+    };
+    let cache_path = managed_home.join("source-cache.json");
+    let cache = read_managed_source_cache(&cache_path);
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let requested = normalized_missing_source_path(path);
+            if let Some(cache) = cache
+                && requested.as_deref() == Some(cache.identity.canonical_path.as_str())
+            {
+                return Ok(LoadedMihomoConfig {
+                    label: cache.identity.canonical_path,
+                    contents: cache.contents.into(),
+                });
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "Mihomo source is unavailable and has no matching cache: {}",
+                    path.display()
+                )
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let identity = managed_source_identity(path, &metadata)?;
+    if let Some(cache) = cache
+        && cache.identity == identity
+    {
+        return Ok(LoadedMihomoConfig {
+            label: identity.canonical_path,
+            contents: cache.contents.into(),
+        });
+    }
+
+    let loaded = source.load()?;
+    let cache = ManagedSourceCache {
+        identity,
+        contents: loaded.as_str().to_owned(),
+    };
+    let serialized =
+        serde_json::to_string(&cache).context("failed to serialize Mihomo source cache")?;
+    write_runtime_copy(&cache_path, &serialized)?;
+    Ok(loaded)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -966,7 +1092,7 @@ impl MihomoSupervisor {
             status.state = MihomoProcessState::Validating;
             status.last_error = None;
         }
-        let source = self.config.source.load()?;
+        let source = load_managed_source(&self.config.source, &self.config.home_dir)?;
         self.config.overlay.resolve_controller_secret(&source)?;
         let compiled = compile_runtime_config(&source, &self.config.overlay)?;
         write_runtime_copy(&self.config.runtime_config, &compiled.yaml)?;
@@ -1094,14 +1220,14 @@ fn remove_stale_controller(controller: &MihomoPrivateController) -> anyhow::Resu
 async fn validate_runtime_config(config: &MihomoSupervisorConfig) -> anyhow::Result<()> {
     ensure!(
         config.home_dir.is_dir(),
-        "Mihomo source home does not exist: {}",
+        "Mihomo managed home does not exist: {}",
         config.home_dir.display()
     );
     let mut command = Command::new(&config.executable);
     command
         .args(mihomo_runtime_args(config, true))
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_command(&mut command);
     let child = command.spawn().with_context(|| {
@@ -1111,29 +1237,51 @@ async fn validate_runtime_config(config: &MihomoSupervisorConfig) -> anyhow::Res
         )
     })?;
     let mut child = ManagedChild::attach(child, &config.executable).await?;
+    let stdout = child
+        .child_mut()
+        .stdout
+        .take()
+        .context("Mihomo validator stdout pipe is unavailable")?;
     let stderr = child
         .child_mut()
         .stderr
         .take()
         .context("Mihomo validator stderr pipe is unavailable")?;
-    let diagnostics = tokio::spawn(read_bounded_diagnostics(stderr));
+    let stdout_diagnostics = tokio::spawn(read_bounded_diagnostics(stdout));
+    let stderr_diagnostics = tokio::spawn(read_bounded_diagnostics(stderr));
     let status = match tokio::time::timeout(config.restart.validation_timeout, child.wait()).await {
         Ok(status) => status.context("failed waiting for Mihomo config validation")?,
         Err(_) => {
             child.terminate(config.restart.stop_timeout).await;
-            let _ = diagnostics.await;
+            let _ = stdout_diagnostics.await;
+            let _ = stderr_diagnostics.await;
             anyhow::bail!("Mihomo config validation timed out");
         }
     };
-    let stderr = diagnostics
+    let stdout = stdout_diagnostics
         .await
-        .context("Mihomo validator diagnostic task failed")??;
+        .context("Mihomo validator stdout task failed")??;
+    let stderr = stderr_diagnostics
+        .await
+        .context("Mihomo validator stderr task failed")??;
+    let diagnostic = format_validator_diagnostic(&stdout, &stderr);
     ensure!(
         status.success(),
         "Mihomo rejected generated config: {}",
-        String::from_utf8_lossy(&stderr).trim()
+        diagnostic
     );
     Ok(())
+}
+
+fn format_validator_diagnostic(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    match (stdout.trim(), stderr.trim()) {
+        ("", "") => "validator exited without diagnostics".to_owned(),
+        (stdout, "") => stdout.to_owned(),
+        ("", stderr) => stderr.to_owned(),
+        (stdout, stderr) => format!("{stdout}\n{stderr}"),
+    }
 }
 
 async fn read_bounded_diagnostics(mut reader: impl AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
@@ -1500,14 +1648,9 @@ struct OwnedRuntimeDirectory {
 }
 
 impl OwnedRuntimeDirectory {
-    fn create(_instance_id: uuid::Uuid) -> anyhow::Result<Self> {
-        // Keep generated runtime configuration and health state in a short,
-        // private directory that is removed with the owned Mihomo process.
-        #[cfg(unix)]
-        let base = PathBuf::from("/tmp");
-        #[cfg(not(unix))]
-        let base = std::env::temp_dir();
-        let path = base.join(format!("etm-{}-{}", std::process::id(), random_suffix()));
+    fn create(managed_home: &Path) -> anyhow::Result<Self> {
+        cleanup_current_process_runtime_directories(managed_home)?;
+        let path = managed_home.join(format!("run-{}-{}", std::process::id(), random_suffix()));
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt as _;
@@ -1517,6 +1660,77 @@ impl OwnedRuntimeDirectory {
         fs::create_dir(&path)?;
         Ok(Self { path })
     }
+}
+
+fn cleanup_current_process_runtime_directories(managed_home: &Path) -> anyhow::Result<()> {
+    let prefix = format!("run-{}-", std::process::id());
+    for entry in fs::read_dir(managed_home)? {
+        let entry = entry?;
+        if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() || metadata.is_file() {
+            fs::remove_file(entry.path())?;
+        } else if metadata.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn create_private_directory(path: &Path) -> anyhow::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "refusing non-directory or symlink Mihomo managed path {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                builder.mode(0o700);
+            }
+            builder.create(path)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn prepare_managed_home(base: &Path, instance_id: uuid::Uuid) -> anyhow::Result<PathBuf> {
+    match fs::symlink_metadata(base) {
+        Ok(metadata) => ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "refusing non-directory or symlink Mihomo managed base {}",
+            base.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_private_directory(base)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let normalized_base = fs::canonicalize(base)
+        .with_context(|| format!("failed to normalize Mihomo managed base {}", base.display()))?;
+    let runtime_root = normalized_base.join("mihomo-runtime");
+    create_private_directory(&runtime_root)?;
+    let home = runtime_root.join(instance_id.simple().to_string());
+    create_private_directory(&home)?;
+    let normalized_home = fs::canonicalize(&home)
+        .with_context(|| format!("failed to normalize Mihomo managed home {}", home.display()))?;
+    ensure!(
+        normalized_home.starts_with(&normalized_base),
+        "Mihomo managed home escaped its configured base"
+    );
+    Ok(normalized_home)
 }
 
 impl Drop for OwnedRuntimeDirectory {
@@ -1530,7 +1744,7 @@ pub struct MihomoCoreStartRequest {
     pub instance_id: uuid::Uuid,
     pub executable: PathBuf,
     pub source: MihomoConfigSource,
-    pub home_dir: PathBuf,
+    pub managed_base_dir: PathBuf,
     pub tun_device: String,
     pub route_exclude_addresses: Vec<String>,
     pub controller_secret_override: Option<String>,
@@ -1754,13 +1968,14 @@ async fn start_owned_mihomo(
         request.instance_id,
     )?;
 
-    let runtime_directory = OwnedRuntimeDirectory::create(request.instance_id)?;
+    let managed_home = prepare_managed_home(&request.managed_base_dir, request.instance_id)?;
+    let runtime_directory = OwnedRuntimeDirectory::create(&managed_home)?;
     let dashboard_ui_path = prepare_bundled_zashboard(&runtime_directory.path)?;
     let controller = core_private_controller(&runtime_directory)?;
     let config = MihomoSupervisorConfig {
         executable: request.executable,
         source: request.source,
-        home_dir: request.home_dir,
+        home_dir: managed_home,
         runtime_config: runtime_directory.path.join("mihomo-runtime.yaml"),
         overlay: MihomoOverlay::new(
             request.tun_device,
@@ -1882,7 +2097,7 @@ rules:
     }
 
     #[test]
-    fn relative_provider_paths_and_source_home_are_preserved() {
+    fn relative_provider_paths_are_preserved_in_the_managed_runtime_copy() {
         let original = source(
             r#"
 proxy-providers:
@@ -1903,7 +2118,7 @@ rules:
         assert_eq!(before.get("proxy-providers"), after.get("proxy-providers"));
         assert_eq!(before.get("rule-providers"), after.get("rule-providers"));
 
-        let home = PathBuf::from("/source/config");
+        let home = PathBuf::from("/managed/mihomo/home");
         let config = MihomoSupervisorConfig {
             executable: "mihomo".into(),
             source: MihomoConfigSource::Inline {
@@ -2017,6 +2232,109 @@ rules:
     }
 
     #[test]
+    fn managed_home_and_ephemeral_run_directory_stay_under_the_configured_base() {
+        let base = tempfile::tempdir().unwrap();
+        let instance_id = uuid::Uuid::new_v4();
+        let home = prepare_managed_home(base.path(), instance_id).unwrap();
+        assert!(home.starts_with(base.path().canonicalize().unwrap()));
+        assert!(home.ends_with(instance_id.simple().to_string()));
+
+        let run_path = {
+            let runtime = OwnedRuntimeDirectory::create(&home).unwrap();
+            assert!(runtime.path.starts_with(&home));
+            runtime.path.clone()
+        };
+        assert!(!run_path.exists());
+        assert!(home.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_home_does_not_change_existing_application_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let base = tempfile::tempdir().unwrap();
+        fs::set_permissions(base.path(), fs::Permissions::from_mode(0o750)).unwrap();
+        let _home = prepare_managed_home(base.path(), uuid::Uuid::new_v4()).unwrap();
+
+        assert_eq!(
+            fs::metadata(base.path()).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_home_rejects_a_symlink_runtime_root() {
+        use std::os::unix::fs::symlink;
+
+        let base = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), base.path().join("mihomo-runtime")).unwrap();
+
+        let error = prepare_managed_home(base.path(), uuid::Uuid::new_v4()).unwrap_err();
+        assert!(error.to_string().contains("symlink Mihomo managed path"));
+    }
+
+    #[test]
+    fn managed_file_source_cache_survives_source_outage_and_refreshes_on_change() {
+        let base = tempfile::tempdir().unwrap();
+        let source_path = base.path().join("source.yaml");
+        fs::write(&source_path, "rules: []\n").unwrap();
+        let home = prepare_managed_home(base.path(), uuid::Uuid::new_v4()).unwrap();
+        let source = MihomoConfigSource::File(source_path.clone());
+
+        let first = load_managed_source(&source, &home).unwrap();
+        assert_eq!(first.as_str(), "rules: []\n");
+        fs::remove_file(&source_path).unwrap();
+        let cached = load_managed_source(&source, &home).unwrap();
+        assert_eq!(cached.as_str(), "rules: []\n");
+
+        fs::write(&source_path, "mode: rule\nrules: []\n").unwrap();
+        let refreshed = load_managed_source(&source, &home).unwrap();
+        assert_eq!(refreshed.as_str(), "mode: rule\nrules: []\n");
+    }
+
+    #[test]
+    fn corrupt_source_cache_is_rebuilt_from_the_available_source() {
+        let base = tempfile::tempdir().unwrap();
+        let source_path = base.path().join("source.yaml");
+        fs::write(&source_path, "rules: []\n").unwrap();
+        let home = prepare_managed_home(base.path(), uuid::Uuid::new_v4()).unwrap();
+        fs::write(home.join("source-cache.json"), "not json").unwrap();
+
+        let loaded = load_managed_source(&MihomoConfigSource::File(source_path), &home).unwrap();
+        assert_eq!(loaded.as_str(), "rules: []\n");
+        assert!(read_managed_source_cache(&home.join("source-cache.json")).is_some());
+    }
+
+    #[test]
+    fn current_process_stale_runtime_directory_is_removed_before_start() {
+        let home = tempfile::tempdir().unwrap();
+        let stale = home
+            .path()
+            .join(format!("run-{}-stale", std::process::id()));
+        fs::create_dir(&stale).unwrap();
+        fs::write(stale.join("partial"), "stale").unwrap();
+
+        let runtime = OwnedRuntimeDirectory::create(home.path()).unwrap();
+        assert!(!stale.exists());
+        assert!(runtime.path.exists());
+    }
+
+    #[test]
+    fn validator_diagnostic_keeps_stdout_and_stderr() {
+        assert_eq!(
+            format_validator_diagnostic(b"stdout detail\n", b"stderr detail\n"),
+            "stdout detail\nstderr detail"
+        );
+        assert_eq!(
+            format_validator_diagnostic(b"", b""),
+            "validator exited without diagnostics"
+        );
+    }
+
+    #[test]
     fn materialized_user_config_is_instance_local_and_preserves_legacy_inline() {
         let directory = tempfile::tempdir().unwrap();
         let instance_id = uuid::Uuid::new_v4();
@@ -2125,7 +2443,8 @@ rules:
 
     #[test]
     fn private_controller_is_loopback_only() {
-        let runtime = OwnedRuntimeDirectory::create(uuid::Uuid::new_v4()).unwrap();
+        let managed_home = tempfile::tempdir().unwrap();
+        let runtime = OwnedRuntimeDirectory::create(managed_home.path()).unwrap();
         let controller = core_private_controller(&runtime).unwrap();
         let MihomoPrivateController::Loopback(address) = controller else {
             panic!("the managed dashboard requires a loopback TCP controller");

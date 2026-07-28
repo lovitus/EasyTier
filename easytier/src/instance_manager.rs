@@ -55,18 +55,9 @@ fn ensure_policy_socket_mark(config: &TomlConfigLoader) -> anyhow::Result<Option
 fn build_mihomo_start_request(
     config: &TomlConfigLoader,
     policy: PolicyProxyConfig,
+    config_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<MihomoCoreStartRequest> {
     let resolved_file = policy.resolved_active_config_file();
-    let home_dir = if let Some(path) = resolved_file.as_ref() {
-        path.parent()
-            .ok_or_else(|| anyhow::anyhow!("Mihomo source config has no parent directory"))?
-            .to_owned()
-    } else {
-        policy
-            .source_dir
-            .clone()
-            .unwrap_or(std::env::current_dir().context("failed to resolve Mihomo source home")?)
-    };
     let source = if let Some(path) = resolved_file {
         MihomoConfigSource::File(path)
     } else if let Some(contents) = policy.active_config_inline().cloned() {
@@ -88,11 +79,18 @@ fn build_mihomo_start_request(
     }
     let instance_id = config.get_id();
     let compact_id = instance_id.simple().to_string();
+    // Match Clash Verge Rev's ownership model: an imported file is only a
+    // source. Mihomo always receives an EasyTier-owned, platform-neutral home
+    // and generated runtime copy. The temp fallback keeps standalone Core
+    // usable when no persistent --config-dir was supplied.
+    let managed_base_dir = config_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("easytier"));
     Ok(MihomoCoreStartRequest {
         instance_id,
         executable,
         source,
-        home_dir,
+        managed_base_dir,
         tun_device: format!("etm{}", &compact_id[..8]),
         route_exclude_addresses: route_exclude_addresses.into_keys().collect(),
         controller_secret_override: policy.mihomo_controller_secret.clone(),
@@ -638,7 +636,7 @@ mod mihomo_request_tests {
     use crate::common::config::{PolicyProxyBackend, PolicyProxyConfig};
 
     #[test]
-    fn core_request_uses_mesh_cidrs_source_home_and_unique_tun_name() {
+    fn core_request_uses_mesh_cidrs_managed_home_and_unique_tun_name() {
         let config = TomlConfigLoader::default();
         let instance_id = uuid::Uuid::new_v4();
         config.set_id(instance_id);
@@ -653,9 +651,11 @@ mod mihomo_request_tests {
             ..Default::default()
         };
 
-        let request = build_mihomo_start_request(&config, policy).unwrap();
+        let managed_base = tempfile::tempdir().unwrap();
+        let request =
+            build_mihomo_start_request(&config, policy, Some(managed_base.path())).unwrap();
         assert_eq!(request.instance_id, instance_id);
-        assert_eq!(request.home_dir, source_home.path());
+        assert_eq!(request.managed_base_dir, managed_base.path());
         assert_eq!(request.tun_device.len(), 11);
         assert!(request.tun_device.starts_with("etm"));
         assert!(
@@ -806,7 +806,11 @@ impl NetworkInstanceManager {
         let mihomo_request = if let Some(policy) = cfg.get_policy_proxy_config() {
             policy.validate_runtime_support()?;
             if policy.is_mihomo_enabled() {
-                Some(build_mihomo_start_request(&cfg, policy)?)
+                Some(build_mihomo_start_request(
+                    &cfg,
+                    policy,
+                    self.config_dir.as_deref(),
+                )?)
             } else {
                 None
             }
