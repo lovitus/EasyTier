@@ -85,8 +85,8 @@ mod snapshot_connector_contract_tests {
     ) -> UnderlayInterfaceSnapshot {
         let iface = interface(name, index, &[address]);
         IPCollector::build_underlay_snapshot(
-            &[iface.clone()],
-            &[iface],
+            std::slice::from_ref(&iface),
+            std::slice::from_ref(&iface),
             fallback_ipv4,
             fallback_ipv6,
         )

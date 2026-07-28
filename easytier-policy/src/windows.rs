@@ -38,24 +38,12 @@ pub fn windows_interface_owns_default_routes(
     let adapter = find_adapter(&adapters, interface)
         .ok_or_else(|| format!("Windows capture interface {interface:?} was not found"))?;
     let expected_index = adapter_interface_row(adapter)?.InterfaceIndex;
-
-    let mut destinations = vec![
-        IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
-        IpAddr::V4(Ipv4Addr::new(200, 1, 1, 1)),
-    ];
-    if include_ipv6 {
-        destinations.extend([
-            IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)),
-            IpAddr::V6(Ipv6Addr::new(0xc001, 0, 0, 0, 0, 0, 0, 1)),
-        ]);
-    }
-
-    for destination in destinations {
-        if best_interface_for(destination)? != expected_index {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    let routes = windows_capture_routes()?;
+    Ok(capture_routes_owned_by(
+        &routes,
+        expected_index,
+        include_ipv6,
+    ))
 }
 
 /// Snapshot every currently eligible physical underlay. Automatic mode uses
@@ -74,61 +62,137 @@ pub fn windows_underlay_environment_signature() -> Result<String, String> {
     Ok(candidate_environment_signature(&candidates))
 }
 
-fn best_interface_for(destination: IpAddr) -> Result<u32, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowsCaptureRoute {
+    prefix: IpAddr,
+    prefix_len: u8,
+    interface_index: u32,
+}
+
+fn required_capture_prefixes(include_ipv6: bool) -> Vec<(IpAddr, u8)> {
+    let mut prefixes = vec![
+        (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1),
+        (IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), 1),
+    ];
+    if include_ipv6 {
+        prefixes.extend([
+            (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 1),
+            (IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)), 1),
+        ]);
+    }
+    prefixes
+}
+
+fn capture_routes_owned_by(
+    routes: &[WindowsCaptureRoute],
+    expected_index: u32,
+    include_ipv6: bool,
+) -> bool {
+    required_capture_prefixes(include_ipv6)
+        .into_iter()
+        .all(|(prefix, prefix_len)| {
+            let mut matching = routes
+                .iter()
+                .filter(|route| route.prefix == prefix && route.prefix_len == prefix_len);
+            matching
+                .next()
+                .is_some_and(|route| route.interface_index == expected_index)
+                && matching.all(|route| route.interface_index == expected_index)
+        })
+}
+
+fn windows_capture_routes() -> Result<Vec<WindowsCaptureRoute>, String> {
     use windows_sys::Win32::{
-        NetworkManagement::IpHelper::GetBestInterfaceEx,
-        Networking::WinSock::{
-            AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, SOCKADDR, SOCKADDR_IN,
-            SOCKADDR_IN6,
-        },
+        NetworkManagement::IpHelper::{FreeMibTable, GetIpForwardTable2, MIB_IPFORWARD_TABLE2},
+        Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_INET},
     };
 
-    let mut index = 0;
-    let result = match destination {
-        IpAddr::V4(address) => {
-            let socket_address = SOCKADDR_IN {
-                sin_family: AF_INET,
-                sin_port: 0,
-                sin_addr: IN_ADDR {
-                    S_un: IN_ADDR_0 {
-                        S_addr: u32::from_ne_bytes(address.octets()),
-                    },
-                },
-                sin_zero: [0; 8],
-            };
-            unsafe {
-                GetBestInterfaceEx(
-                    std::ptr::from_ref(&socket_address).cast::<SOCKADDR>(),
-                    &mut index,
-                )
+    struct RouteTable(*mut MIB_IPFORWARD_TABLE2);
+
+    impl Drop for RouteTable {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { FreeMibTable(self.0.cast()) };
             }
         }
-        IpAddr::V6(address) => {
-            let socket_address = SOCKADDR_IN6 {
-                sin6_family: AF_INET6,
-                sin6_port: 0,
-                sin6_flowinfo: 0,
-                sin6_addr: IN6_ADDR {
-                    u: IN6_ADDR_0 {
-                        Byte: address.octets(),
-                    },
-                },
-                Anonymous: unsafe { std::mem::zeroed() },
-            };
-            unsafe {
-                GetBestInterfaceEx(
-                    std::ptr::from_ref(&socket_address).cast::<SOCKADDR>(),
-                    &mut index,
-                )
+    }
+
+    fn prefix_ip(address: &SOCKADDR_INET) -> Option<IpAddr> {
+        match unsafe { address.si_family } {
+            AF_INET => {
+                let bytes = unsafe { address.Ipv4.sin_addr.S_un.S_addr }.to_ne_bytes();
+                Some(IpAddr::V4(Ipv4Addr::from(bytes)))
             }
+            AF_INET6 => {
+                let bytes = unsafe { address.Ipv6.sin6_addr.u.Byte };
+                Some(IpAddr::V6(Ipv6Addr::from(bytes)))
+            }
+            _ => None,
         }
+    }
+
+    let mut table = std::ptr::null_mut();
+    let result = unsafe { GetIpForwardTable2(AF_UNSPEC, &mut table) };
+    if result != 0 {
+        return Err(format!(
+            "failed to enumerate the Windows route table: error {result}"
+        ));
+    }
+    let table = RouteTable(table);
+    if table.0.is_null() {
+        return Err("Windows returned an empty route-table pointer".to_owned());
+    }
+    let rows = unsafe {
+        std::slice::from_raw_parts((*table.0).Table.as_ptr(), (*table.0).NumEntries as usize)
     };
-    if result == 0 {
-        Ok(index)
-    } else {
-        Err(format!(
-            "failed to resolve the Windows route for {destination}: error {result}"
-        ))
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            Some(WindowsCaptureRoute {
+                prefix: prefix_ip(&row.DestinationPrefix.Prefix)?,
+                prefix_len: row.DestinationPrefix.PrefixLength,
+                interface_index: row.InterfaceIndex,
+            })
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod capture_route_tests {
+    use super::*;
+
+    fn route(prefix: &str, prefix_len: u8, interface_index: u32) -> WindowsCaptureRoute {
+        WindowsCaptureRoute {
+            prefix: prefix.parse().unwrap(),
+            prefix_len,
+            interface_index,
+        }
+    }
+
+    #[test]
+    fn exact_capture_routes_must_all_belong_to_expected_interface() {
+        let routes = [
+            route("0.0.0.0", 1, 7),
+            route("128.0.0.0", 1, 7),
+            route("::", 1, 7),
+            route("8000::", 1, 7),
+            route("1.1.1.1", 32, 3),
+        ];
+        assert!(capture_routes_owned_by(&routes, 7, true));
+        assert!(capture_routes_owned_by(&routes, 7, false));
+    }
+
+    #[test]
+    fn missing_or_competing_capture_route_fails_closed() {
+        let missing = [route("0.0.0.0", 1, 7)];
+        assert!(!capture_routes_owned_by(&missing, 7, false));
+
+        let competing = [
+            route("0.0.0.0", 1, 7),
+            route("0.0.0.0", 1, 9),
+            route("128.0.0.0", 1, 7),
+        ];
+        assert!(!capture_routes_owned_by(&competing, 7, false));
     }
 }
 

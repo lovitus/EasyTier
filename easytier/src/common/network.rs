@@ -3,13 +3,11 @@ use std::{
     future::Future,
     net::IpAddr,
     ops::Deref,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 
+use atomic_shim::AtomicU64;
 #[cfg(target_os = "windows")]
 use network_interface::{
     Addr as SystemAddr, NetworkInterface as SystemNetworkInterface, NetworkInterfaceConfig,
@@ -66,7 +64,12 @@ mod underlay_snapshot_contract_tests {
 
     fn snapshot_with_interface(name: &str, index: u32, addr: &str) -> UnderlayInterfaceSnapshot {
         let iface = interface(name, index, &[addr]);
-        IPCollector::build_underlay_snapshot(&[iface.clone()], &[iface], None, None)
+        IPCollector::build_underlay_snapshot(
+            std::slice::from_ref(&iface),
+            std::slice::from_ref(&iface),
+            None,
+            None,
+        )
     }
 
     #[test]
@@ -115,8 +118,8 @@ mod underlay_snapshot_contract_tests {
     fn unmapped_fallback_is_tracked_per_address_family() {
         let iface = interface("en-test0", 4, &["192.0.2.10/24"]);
         let snapshot = IPCollector::build_underlay_snapshot(
-            &[iface.clone()],
-            &[iface],
+            std::slice::from_ref(&iface),
+            std::slice::from_ref(&iface),
             Some(Ipv4Addr::new(192, 0, 2, 10)),
             Some("2001:db8::99".parse().unwrap()),
         );

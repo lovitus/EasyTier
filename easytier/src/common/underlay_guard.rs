@@ -708,8 +708,8 @@ mod tests {
             flags: 0,
         };
         let snapshot = crate::common::network::IPCollector::build_underlay_snapshot(
-            &[interface.clone()],
-            &[interface],
+            std::slice::from_ref(&interface),
+            std::slice::from_ref(&interface),
             None,
             None,
         );
@@ -752,8 +752,8 @@ mod tests {
             flags: 0,
         };
         let zero_index_snapshot = crate::common::network::IPCollector::build_underlay_snapshot(
-            &[zero_index_interface.clone()],
-            &[zero_index_interface],
+            std::slice::from_ref(&zero_index_interface),
+            std::slice::from_ref(&zero_index_interface),
             None,
             None,
         );

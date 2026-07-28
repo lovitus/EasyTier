@@ -691,17 +691,20 @@ impl GlobalCtx {
     }
 
     pub fn issue_event(&self, event: GlobalCtxEvent) {
-        if matches!(
+        let invalidates_interface_cache = matches!(
             event,
             GlobalCtxEvent::DhcpIpv4Changed(_, _)
                 | GlobalCtxEvent::DhcpIpv4Conflicted(_)
                 | GlobalCtxEvent::PublicIpv6Changed(_, _)
                 | GlobalCtxEvent::ConfigPatched(_)
-        ) {
-            if let Some(ip_collector) = self.ip_collector.lock().unwrap().as_ref().cloned() {
-                ip_collector.invalidate_underlay_snapshot();
-            }
-            #[cfg(any(target_os = "ios", target_os = "macos"))]
+        );
+        if invalidates_interface_cache
+            && let Some(ip_collector) = self.ip_collector.lock().unwrap().as_ref().cloned()
+        {
+            ip_collector.invalidate_underlay_snapshot();
+        }
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
+        if invalidates_interface_cache {
             crate::tunnel::common::invalidate_interface_index_cache();
         }
         if let Err(e) = self.event_bus.send(event.clone()) {
