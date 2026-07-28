@@ -350,6 +350,9 @@ impl WebClientService for InstanceManageRpcService {
             config_file,
             self.manager.get_config_dir().map(PathBuf::as_path),
         )?;
+        self.manager
+            .validate_mihomo_candidate(&config, req.contents.clone())
+            .await?;
         crate::mihomo::save_user_config(&path, &req.contents)?;
         Ok(crate::proto::common::Void {})
     }

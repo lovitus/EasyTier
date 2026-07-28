@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { Message, Textarea } from 'primevue'
+import { Message } from 'primevue'
 import { useI18n } from 'vue-i18n'
+import YamlCodeEditor from './YamlCodeEditor.vue'
 
 const contents = defineModel<string>({ required: true })
+const valid = defineModel<boolean>('valid', { default: true })
 defineProps<{
   filePath: string
   readOnly?: boolean
@@ -28,8 +30,7 @@ const { t } = useI18n()
     <label for="policy_mihomo_yaml_contents" class="font-semibold">
       {{ t('policy.editor.advanced_yaml') }}
     </label>
-    <Textarea id="policy_mihomo_yaml_contents" v-model="contents" rows="20"
-      auto-resize class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')"
-      :readonly="readOnly" data-testid="mihomo-yaml-contents" />
+    <YamlCodeEditor v-model="contents" v-model:valid="valid"
+      :read-only="readOnly" data-testid="mihomo-yaml-contents" />
   </div>
 </template>

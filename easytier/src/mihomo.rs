@@ -868,6 +868,14 @@ fn publish_runtime_copy(temporary_path: &Path, path: &Path) -> anyhow::Result<()
 }
 
 fn write_runtime_copy(path: &Path, yaml: &str) -> anyhow::Result<()> {
+    write_config_copy(path, yaml, None)
+}
+
+fn write_config_copy(
+    path: &Path,
+    yaml: &str,
+    existing_metadata: Option<&fs::Metadata>,
+) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Mihomo runtime config has no parent directory"))?;
@@ -901,9 +909,30 @@ fn write_runtime_copy(path: &Path, yaml: &str) -> anyhow::Result<()> {
     })?;
     let result = (|| -> anyhow::Result<()> {
         file.write_all(yaml.as_bytes())?;
+        #[cfg(unix)]
+        if let Some(metadata) = existing_metadata {
+            use std::os::fd::AsRawFd as _;
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+            let temporary_metadata = file.metadata()?;
+            if temporary_metadata.uid() != metadata.uid()
+                || temporary_metadata.gid() != metadata.gid()
+            {
+                nix::unistd::fchown(
+                    file.as_raw_fd(),
+                    Some(nix::unistd::Uid::from_raw(metadata.uid())),
+                    Some(nix::unistd::Gid::from_raw(metadata.gid())),
+                )
+                .context("failed to preserve Mihomo source owner")?;
+            }
+            file.set_permissions(fs::Permissions::from_mode(metadata.mode()))?;
+        }
         file.sync_all()?;
         drop(file);
-        publish_runtime_copy(&temporary_path, path)
+        publish_runtime_copy(&temporary_path, path)?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary_path);
@@ -923,14 +952,15 @@ pub fn save_user_config(path: &Path, contents: &str) -> anyhow::Result<()> {
         contents.len() as u64 <= MAX_SOURCE_BYTES,
         "Mihomo config exceeds {MAX_SOURCE_BYTES} bytes"
     );
-    if let Ok(metadata) = fs::symlink_metadata(path) {
+    let existing_metadata = fs::symlink_metadata(path).ok();
+    if let Some(metadata) = existing_metadata.as_ref() {
         ensure!(
             metadata.is_file() && !metadata.file_type().is_symlink(),
             "refusing non-regular Mihomo source config {}",
             path.display()
         );
     }
-    write_runtime_copy(path, contents)
+    write_config_copy(path, contents, existing_metadata.as_ref())
 }
 
 pub fn materialize_user_config(
@@ -1077,31 +1107,17 @@ impl MihomoSupervisor {
 
     pub async fn start(&mut self) -> anyhow::Result<()> {
         ensure!(self.task.is_none(), "Mihomo supervisor is already started");
-        ensure!(
-            !self
-                .config
-                .source
-                .conflicts_with_runtime_path(&self.config.runtime_config),
-            "Mihomo source and runtime config paths must differ"
-        );
-        validate_executable(&self.config.executable)?;
-        remove_stale_controller(&self.config.overlay.controller)?;
-
         {
             let mut status = self.status.write().await;
             status.state = MihomoProcessState::Validating;
             status.last_error = None;
         }
-        let source = load_managed_source(&self.config.source, &self.config.home_dir)?;
-        self.config.overlay.resolve_controller_secret(&source)?;
-        let compiled = compile_runtime_config(&source, &self.config.overlay)?;
-        write_runtime_copy(&self.config.runtime_config, &compiled.yaml)?;
-        validate_runtime_config(&self.config).await?;
+        let report = self.prepare_runtime_config().await?;
 
         {
             let mut status = self.status.write().await;
             status.state = MihomoProcessState::Starting;
-            status.overlay_report = Some(compiled.report);
+            status.overlay_report = Some(report);
         }
         let cancel = CancellationToken::new();
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -1128,6 +1144,29 @@ impl MihomoSupervisor {
                 anyhow::bail!("Mihomo supervisor exited before reporting readiness")
             }
         }
+    }
+
+    pub async fn validate_config(&mut self) -> anyhow::Result<()> {
+        ensure!(self.task.is_none(), "Mihomo supervisor is already started");
+        self.prepare_runtime_config().await.map(|_| ())
+    }
+
+    async fn prepare_runtime_config(&mut self) -> anyhow::Result<MihomoOverlayReport> {
+        ensure!(
+            !self
+                .config
+                .source
+                .conflicts_with_runtime_path(&self.config.runtime_config),
+            "Mihomo source and runtime config paths must differ"
+        );
+        validate_executable(&self.config.executable)?;
+        remove_stale_controller(&self.config.overlay.controller)?;
+        let source = load_managed_source(&self.config.source, &self.config.home_dir)?;
+        self.config.overlay.resolve_controller_secret(&source)?;
+        let compiled = compile_runtime_config(&source, &self.config.overlay)?;
+        write_runtime_copy(&self.config.runtime_config, &compiled.yaml)?;
+        validate_runtime_config(&self.config).await?;
+        Ok(compiled.report)
     }
 
     pub async fn stop(&mut self) {
@@ -1765,6 +1804,10 @@ enum CoreOwnerCommand {
         instance_id: uuid::Uuid,
         response: std_mpsc::SyncSender<anyhow::Result<()>>,
     },
+    Validate {
+        request: MihomoCoreStartRequest,
+        response: oneshot::Sender<anyhow::Result<()>>,
+    },
     Status {
         response: oneshot::Sender<MihomoCoreStatus>,
     },
@@ -1836,6 +1879,20 @@ impl MihomoCoreOwner {
         result
             .recv_timeout(OWNER_COMMAND_TIMEOUT)
             .map_err(|_| anyhow::anyhow!("Mihomo Core owner stop timed out"))?
+    }
+
+    pub async fn validate(&self, request: MihomoCoreStartRequest) -> anyhow::Result<()> {
+        let timeout = MihomoRestartPolicy::default().validation_timeout
+            + MihomoRestartPolicy::default().stop_timeout
+            + Duration::from_secs(5);
+        let (response, result) = oneshot::channel();
+        self.commands
+            .send(CoreOwnerCommand::Validate { request, response })
+            .map_err(|_| anyhow::anyhow!("Mihomo Core owner is unavailable"))?;
+        tokio::time::timeout(timeout, result)
+            .await
+            .map_err(|_| anyhow::anyhow!("Mihomo Core owner validation timed out"))?
+            .map_err(|_| anyhow::anyhow!("Mihomo Core owner validation response was dropped"))?
     }
 
     pub async fn status(&self) -> MihomoCoreStatus {
@@ -1922,6 +1979,10 @@ async fn core_owner_loop(mut commands: mpsc::UnboundedReceiver<CoreOwnerCommand>
                 let result = stop_owned_mihomo(&mut owned, instance_id).await;
                 let _ = response.send(result);
             }
+            CoreOwnerCommand::Validate { request, response } => {
+                let result = validate_owned_mihomo(owned.as_ref(), request).await;
+                let _ = response.send(result);
+            }
             CoreOwnerCommand::Status { response } => {
                 let status = match owned.as_ref() {
                     Some(owned) => MihomoCoreStatus {
@@ -1968,6 +2029,32 @@ async fn start_owned_mihomo(
         request.instance_id,
     )?;
 
+    let instance_id = request.instance_id;
+    let (mut supervisor, runtime_directory) = build_owned_supervisor(request)?;
+    supervisor.start().await?;
+    *owned = Some(OwnedMihomo {
+        instance_id,
+        supervisor,
+        _runtime_directory: runtime_directory,
+    });
+    Ok(())
+}
+
+async fn validate_owned_mihomo(
+    owned: Option<&OwnedMihomo>,
+    request: MihomoCoreStartRequest,
+) -> anyhow::Result<()> {
+    ensure_owner_available(
+        owned.map(|current| current.instance_id),
+        request.instance_id,
+    )?;
+    let (mut supervisor, _runtime_directory) = build_owned_supervisor(request)?;
+    supervisor.validate_config().await
+}
+
+fn build_owned_supervisor(
+    request: MihomoCoreStartRequest,
+) -> anyhow::Result<(MihomoSupervisor, OwnedRuntimeDirectory)> {
     let managed_home = prepare_managed_home(&request.managed_base_dir, request.instance_id)?;
     let runtime_directory = OwnedRuntimeDirectory::create(&managed_home)?;
     let dashboard_ui_path = prepare_bundled_zashboard(&runtime_directory.path)?;
@@ -1986,14 +2073,7 @@ async fn start_owned_mihomo(
         .with_dashboard_ui_path(dashboard_ui_path),
         restart: MihomoRestartPolicy::default(),
     };
-    let mut supervisor = MihomoSupervisor::new(config);
-    supervisor.start().await?;
-    *owned = Some(OwnedMihomo {
-        instance_id: request.instance_id,
-        supervisor,
-        _runtime_directory: runtime_directory,
-    });
-    Ok(())
+    Ok((MihomoSupervisor::new(config), runtime_directory))
 }
 
 fn ensure_owner_available(
@@ -2351,6 +2431,26 @@ rules:
                 .contains(&instance_id.simple().to_string())
         );
         assert_eq!(contents, "secret: original\nrules: []\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+            if nix::unistd::Uid::effective().is_root() {
+                nix::unistd::chown(
+                    &path,
+                    Some(nix::unistd::Uid::from_raw(65534)),
+                    Some(nix::unistd::Gid::from_raw(65534)),
+                )
+                .unwrap();
+            }
+            let before = fs::metadata(&path).unwrap();
+            save_user_config(&path, "secret: changed\nrules: []\n").unwrap();
+            let after = fs::metadata(&path).unwrap();
+            assert_eq!(after.mode() & 0o777, 0o640);
+            assert_eq!(after.uid(), before.uid());
+            assert_eq!(after.gid(), before.gid());
+        }
+        #[cfg(not(unix))]
         save_user_config(&path, "secret: changed\nrules: []\n").unwrap();
         assert_eq!(
             load_user_config(&path).unwrap(),
@@ -2398,6 +2498,46 @@ rules:
             ..Default::default()
         };
         assert_ne!(status.state, MihomoProcessState::Running);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn editor_validation_rejects_yaml_and_validator_failures_without_starting() {
+        fn request(base: &Path, executable: &str, contents: &str) -> MihomoCoreStartRequest {
+            MihomoCoreStartRequest {
+                instance_id: uuid::Uuid::new_v4(),
+                executable: executable.into(),
+                source: MihomoConfigSource::Inline {
+                    label: "edited Mihomo config".to_owned(),
+                    contents: Arc::from(contents),
+                },
+                managed_base_dir: base.to_owned(),
+                tun_device: "et-policy-test".to_owned(),
+                route_exclude_addresses: Vec::new(),
+                controller_secret_override: None,
+            }
+        }
+
+        let invalid_base = tempfile::tempdir().unwrap();
+        let (mut invalid, _runtime) = build_owned_supervisor(request(
+            invalid_base.path(),
+            "/bin/true",
+            "proxies: [{\"type”: \"socks5\"}]\n",
+        ))
+        .unwrap();
+        assert!(invalid.validate_config().await.is_err());
+        assert!(invalid.task.is_none());
+
+        let rejected_base = tempfile::tempdir().unwrap();
+        let (mut rejected, _runtime) = build_owned_supervisor(request(
+            rejected_base.path(),
+            "/bin/false",
+            "rules:\n  - MATCH,DIRECT\n",
+        ))
+        .unwrap();
+        let error = rejected.validate_config().await.unwrap_err().to_string();
+        assert!(error.contains("Mihomo rejected generated config"));
+        assert!(rejected.task.is_none());
     }
 
     #[test]

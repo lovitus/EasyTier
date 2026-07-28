@@ -50,6 +50,8 @@ const policyYamlDialogBackend = ref<PolicyYamlDialogBackend>();
 const leafPolicyConfigDraft = ref<NetworkTypes.NetworkConfig>();
 const mihomoPolicyConfigDraft = ref<NetworkTypes.NetworkConfig>();
 const mihomoYamlContents = ref('');
+const mihomoYamlValid = ref(true);
+const leafYamlValid = ref(true);
 const showPolicyYamlDialog = ref(false);
 let policyYamlDialogGeneration = 0;
 const policyConfigSaving = ref(false);
@@ -546,6 +548,8 @@ const resetPolicyYamlDialog = () => {
     leafPolicyConfigDraft.value = undefined;
     mihomoPolicyConfigDraft.value = undefined;
     mihomoYamlContents.value = '';
+    mihomoYamlValid.value = true;
+    leafYamlValid.value = true;
 }
 
 const closePolicyYamlDialog = () => {
@@ -586,7 +590,7 @@ const openPolicyYaml = async () => {
 }
 
 const savePolicyYaml = async () => {
-    if (policyYamlReadOnly.value || !policyYamlDialogBackend.value) {
+    if (policyYamlReadOnly.value || !policyYamlDialogBackend.value || policyConfigSaving.value) {
         return;
     }
     const backend = policyYamlDialogBackend.value;
@@ -598,8 +602,12 @@ const savePolicyYaml = async () => {
     }
     const draft = cloneNetworkConfig(sourceDraft);
     applyPolicyBackend(draft, backend);
+    policyConfigSaving.value = true;
     if (backend === 'mihomo') {
-        if (!props.api.save_mihomo_config) return;
+        if (!props.api.save_mihomo_config) {
+            policyConfigSaving.value = false;
+            return;
+        }
         try {
             await props.api.save_mihomo_config(draft, mihomoYamlContents.value);
             draft.policy_mihomo_config_inline = '';
@@ -610,9 +618,11 @@ const savePolicyYaml = async () => {
                 detail: t('web.device_management.mihomo_file_save_failed') + ': ' + errorDetail(error),
                 life: 10000,
             });
+            policyConfigSaving.value = false;
             return;
         }
     }
+    policyConfigSaving.value = false;
     if (await savePolicyConfig(draft)) {
         closePolicyYamlDialog();
     }
@@ -1204,10 +1214,12 @@ onUnmounted(() => {
             @hide="closePolicyYamlDialog">
             <MihomoYamlEditor v-if="policyYamlDialogBackend === 'mihomo' && mihomoPolicyConfigDraft"
                 v-model="mihomoYamlContents"
+                v-model:valid="mihomoYamlValid"
                 :file-path="mihomoPolicyConfigDraft.policy_mihomo_config_file ?? ''"
                 :read-only="policyYamlReadOnly" />
             <PolicyEditor v-else-if="policyYamlDialogBackend === 'leaf' && leafPolicyConfigDraft"
                 v-model="leafPolicyConfigDraft" :api="props.api"
+                v-model:yaml-valid="leafYamlValid"
                 yaml-only :read-only="policyYamlReadOnly"
                 :hide-backend-selector="true"
                 :runtime-info="currentNetworkStatusInfo?.detail" />
@@ -1217,6 +1229,8 @@ onUnmounted(() => {
                     :disabled="policyConfigSaving" @click="closePolicyYamlDialog" />
                 <Button v-if="!policyYamlReadOnly" :label="t('web.common.save')" icon="pi pi-save"
                     :loading="policyConfigSaving"
+                    :disabled="(policyYamlDialogBackend === 'mihomo' && !mihomoYamlValid)
+                        || (policyYamlDialogBackend === 'leaf' && !leafYamlValid)"
                     data-testid="policy-yaml-save" @click="savePolicyYaml" />
             </template>
         </Dialog>

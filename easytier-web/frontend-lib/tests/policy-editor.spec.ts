@@ -200,8 +200,7 @@ describe('PolicyEditor', () => {
       { yamlOnly: true, readOnly: true },
     )
 
-    expect(inlineWrapper.get<HTMLTextAreaElement>('#policy_config_inline_quick').element.readOnly)
-      .toBe(true)
+    expect(inlineWrapper.getComponent({ name: 'YamlCodeEditor' }).props('readOnly')).toBe(true)
     expect(inlineWrapper.get<HTMLSelectElement>('[data-stub="select-button"]').element.disabled)
       .toBe(true)
 
@@ -546,7 +545,8 @@ rules: ["MATCH,exit"]
     config.policy_config_inline = 'version: 1\nrules: ["MATCH,DIRECT"]\n'
     const { model, wrapper } = mountEditor(config)
 
-    await wrapper.find<HTMLTextAreaElement>('#policy_config_inline').setValue('version: [')
+    wrapper.getComponent({ name: 'YamlCodeEditor' })
+      .vm.$emit('update:modelValue', 'version: [')
     await nextTick()
 
     expect(model.policy_config_inline).toBe('version: [')

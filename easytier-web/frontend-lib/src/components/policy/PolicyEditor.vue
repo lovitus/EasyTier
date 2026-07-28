@@ -22,6 +22,7 @@ import {
   type PolicyProxyBackend,
 } from '../../types/networkCompat'
 import { canEnablePolicyProxy, policyRuntimeNotice } from './policyRuntimeSupport'
+import YamlCodeEditor from './YamlCodeEditor.vue'
 import {
   DEFAULT_POLICY_TEMPLATE,
   POLICY_SHADOWSOCKS_CIPHERS,
@@ -45,6 +46,7 @@ import {
 } from './managedRuleData'
 
 const config = defineModel<NetworkConfig>({ required: true })
+const yamlValid = defineModel<boolean>('yamlValid', { default: true })
 const props = defineProps<{
   api?: Api.RemoteClient
   yamlOnly?: boolean
@@ -678,9 +680,8 @@ onMounted(() => {
           {{ t('policy.editor.yaml_error') }}: {{ parseError }}
         </Message>
         <label for="policy_config_inline_quick" class="font-semibold">{{ t('policy.editor.advanced_yaml') }}</label>
-        <Textarea id="policy_config_inline_quick" v-model="config.policy_config_inline" rows="20" auto-resize
-          class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')"
-          :readonly="props.readOnly" />
+        <YamlCodeEditor id="policy_config_inline_quick" v-model="config.policy_config_inline" v-model:valid="yamlValid"
+          :read-only="props.readOnly" data-testid="leaf-yaml-contents" />
       </template>
       </div>
     </template>
@@ -1141,8 +1142,8 @@ onMounted(() => {
 
         <Panel :header="t('policy.editor.advanced_yaml')" toggleable collapsed>
           <label for="policy_config_inline" class="mb-2 block font-semibold">{{ fieldLabel('policy.editor.advanced_yaml', 'version: 1') }}</label>
-          <Textarea id="policy_config_inline" v-model="config.policy_config_inline" rows="16" auto-resize
-            class="w-full font-mono" :placeholder="t('policy_config_inline_placeholder')" />
+          <YamlCodeEditor id="policy_config_inline" v-model="config.policy_config_inline" v-model:valid="yamlValid" min-height="20rem"
+            data-testid="leaf-advanced-yaml-contents" />
         </Panel>
       </template>
     </div>

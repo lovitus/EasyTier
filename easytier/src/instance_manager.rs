@@ -845,6 +845,26 @@ impl NetworkInstanceManager {
         Ok(instance_id)
     }
 
+    pub async fn validate_mihomo_candidate(
+        &self,
+        cfg: &TomlConfigLoader,
+        contents: String,
+    ) -> anyhow::Result<()> {
+        let policy = cfg
+            .get_policy_proxy_config()
+            .ok_or_else(|| anyhow::anyhow!("Mihomo policy config is unavailable"))?;
+        anyhow::ensure!(
+            policy.is_mihomo_enabled(),
+            "selected policy backend is not Mihomo"
+        );
+        let mut request = build_mihomo_start_request(cfg, policy, self.config_dir.as_deref())?;
+        request.source = MihomoConfigSource::Inline {
+            label: format!("edited Mihomo config for network {}", cfg.get_id()),
+            contents: contents.into(),
+        };
+        self.mihomo_owner.validate(request).await
+    }
+
     pub fn retain_network_instance(
         &self,
         instance_ids: Vec<uuid::Uuid>,
