@@ -320,8 +320,18 @@ impl UnderlaySnapshotCache {
     }
 
     fn invalidate_generation(&self, generation: u64) {
-        self.invalidated_through_generation
-            .fetch_max(generation, Ordering::AcqRel);
+        let mut current = self.invalidated_through_generation.load(Ordering::Acquire);
+        while current < generation {
+            match self.invalidated_through_generation.compare_exchange_weak(
+                current,
+                generation,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn is_fresh(&self, cached: &CachedUnderlaySnapshot, now: Instant, epoch: u64) -> bool {

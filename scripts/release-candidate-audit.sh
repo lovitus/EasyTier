@@ -28,6 +28,12 @@ pass() {
 
 cd "$repo_root"
 
+if "$repo_root/scripts/pre-commit-check.sh"; then
+  pass "repository syntax and formatting gate"
+else
+  fail "repository syntax and formatting gate"
+fi
+
 evidence_sha="$(git rev-parse HEAD)"
 validated_sha="${VALIDATED_SHA:-$evidence_sha}"
 if ! git rev-parse "$validated_sha^{commit}" >/dev/null 2>&1; then
