@@ -28,6 +28,20 @@ Release candidate based on v3.0.6.
 - The release still carries the platform and policy-routing boundaries
   documented for v3.0.6.
 
+### Release evidence
+
+- Released on 2026-07-29 from
+  `50cf3de5a6179a05fd574f802814c154212b4b56`.
+- Core: `30426581269`
+- GUI: `30426583307`
+- Mobile: `30426585308`
+- OHOS: `30426587089`
+- Test: `30426588901`
+- Release: `30431643939`
+- Published assets: 46
+- The published macOS ARM64 DMG SHA-256 matched the exact formal GUI artifact
+  used for the real-device Zashboard lifecycle validation.
+
 ## v3.0.6
 
 Released on 2026-07-29 from
