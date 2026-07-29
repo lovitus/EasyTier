@@ -1051,6 +1051,10 @@ impl NetworkConfig {
             flags.disable_p2p = disable_p2p;
         }
 
+        if let Some(disable_p2p_storm_throttle) = self.disable_p2p_storm_throttle {
+            flags.disable_p2p_storm_throttle = disable_p2p_storm_throttle;
+        }
+
         if let Some(p2p_only) = self.p2p_only {
             flags.p2p_only = p2p_only;
         }
@@ -1347,6 +1351,7 @@ impl NetworkConfig {
         result.enable_quic_proxy = Some(flags.enable_quic_proxy);
         result.disable_quic_input = Some(flags.disable_quic_input);
         result.disable_p2p = Some(flags.disable_p2p);
+        result.disable_p2p_storm_throttle = Some(flags.disable_p2p_storm_throttle);
         result.p2p_only = Some(flags.p2p_only);
         result.lazy_p2p = Some(flags.lazy_p2p);
         result.bind_device = Some(flags.bind_device);
@@ -1458,6 +1463,7 @@ mod tests {
             enable_quic_proxy: Some(true),
             disable_tcp_hole_punching: Some(true),
             disable_sym_hole_punching: Some(true),
+            disable_p2p_storm_throttle: Some(true),
             ..Default::default()
         };
 
@@ -1467,6 +1473,7 @@ mod tests {
         assert!(dumped.contains("enable_quic_proxy = true"));
         assert!(dumped.contains("disable_tcp_hole_punching = true"));
         assert!(dumped.contains("disable_sym_hole_punching = true"));
+        assert!(dumped.contains("disable_p2p_storm_throttle = true"));
         Ok(())
     }
 
@@ -1828,6 +1835,7 @@ mod tests {
                 flags.enable_quic_proxy = rng.gen_bool(0.5);
                 flags.disable_quic_input = rng.gen_bool(0.3);
                 flags.disable_p2p = rng.gen_bool(0.2);
+                flags.disable_p2p_storm_throttle = rng.gen_bool(0.2);
                 flags.p2p_only = rng.gen_bool(0.2);
                 flags.lazy_p2p = rng.gen_bool(0.3);
                 flags.bind_device = rng.gen_bool(0.3);

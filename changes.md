@@ -1,5 +1,36 @@
 # EasyTier Changes
 
+## v3.0.8
+
+Release candidate based on v3.0.7.
+
+### Changes since v3.0.7
+
+- Add a bounded, per-network failure table for automatic P2P endpoints. Repeated
+  complete failures of the same peer, protocol, IP, and port cool down for
+  1, 2, 4, 8, then at most 10 minutes.
+- Apply the shared guard to Direct candidates, priority upgrade/fallback/probe,
+  UDP hole punching, and TCP simultaneous-open without changing their existing
+  scheduling or internal retry algorithms.
+- Preserve every first attempt, every new endpoint, all attempts within one
+  Direct candidate, and the existing UDP/TCP hole-punch backoff rounds needed
+  for broadcast, fanout, and port guessing.
+- Bound the table to 65,536 entries across 64 shards and keep it outside packet
+  send/receive hot paths.
+- Add the opt-out flag `disable_p2p_storm_throttle` to TOML, CLI, environment,
+  managed configuration, and GUI. It restores the former unrestricted retry
+  behavior and clears existing cooldown state.
+
+### Compatibility
+
+- `lazy_p2p`, `need_p2p`, `disable_p2p`, transport priority, protocol
+  upgrade/fallback/probe, relay, and disconnect-recovery decisions retain their
+  existing meaning.
+- Manual connectors, listeners, established tunnel traffic, DNS, STUN, policy
+  proxy traffic, and routing are outside this guard.
+- The opt-out flag defaults to false, so repeated-failure throttling is enabled
+  unless an operator explicitly disables it.
+
 ## v3.0.7
 
 Release candidate based on v3.0.6.

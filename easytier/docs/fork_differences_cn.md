@@ -129,6 +129,7 @@ v2.6.9 发布说明见 [release_notes/v2.6.9.md](release_notes/v2.6.9.md)。
 | `--transport-priority <rules>` | `ET_TRANSPORT_PRIORITY` | 重排 direct-connect 协议顺序。 | 格式必须是 `scope:proto,...;scope:proto,...`，例如 `global:quic,faketcp,ws,wg,udp,tcp`。 |
 | `--underlay-candidate-guard` | `ET_UNDERLAY_CANDIDATE_GUARD` | 过滤污染 underlay candidate。 | 默认开启；不改变 listener 绑定。 |
 | `--underlay-exclude-cidrs <cidrs>` | `ET_UNDERLAY_EXCLUDE_CIDRS` | 用户附加的排除 CIDR，会用于 IP 通告、direct candidate、hole-punch candidate，以及相关路由源 / bind-source 校验。 | 默认 `198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,fd65:6173:7974::/48,192.19.0.0/24`；这组常见 fake-IP 网段在 guard 开启时也是内置 base set，清空后仍保留运行态 EasyTier 虚拟地址过滤和内置 base set。 |
+| `--disable-p2p-storm-throttle` | `ET_DISABLE_P2P_STORM_THROTTLE` | 禁用自动 P2P endpoint 的重复失败冷却。 | 默认关闭。开启后恢复原有不受限的 Direct、probe、upgrade/fallback 与 UDP/TCP 打洞重试，不改变它们的调度和内部重试算法。 |
 | `--nic-backend <tun|veth|auto>` | 无 | 选择 Linux 虚拟 NIC 后端。 | 仅 Linux `tun` 构建的 CLI 提供；默认 `tun`，不序列化到 TOML/protobuf。 |
 
 上游原本就有 `--enable-kcp-proxy`、`--enable-quic-proxy`、

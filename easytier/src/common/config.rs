@@ -87,6 +87,7 @@ pub fn gen_default_flags() -> Flags {
         underlay_candidate_guard: true,
         underlay_exclude_cidrs: crate::common::underlay_guard::DEFAULT_UNDERLAY_EXCLUDE_CIDRS
             .to_string(),
+        disable_p2p_storm_throttle: false,
     }
 }
 
@@ -2196,6 +2197,7 @@ socket_mark = 66
         flags.enable_quic_proxy = true;
         flags.disable_tcp_hole_punching = true;
         flags.disable_sym_hole_punching = true;
+        flags.disable_p2p_storm_throttle = true;
         flags.multi_thread = false;
         flags.bind_device = false;
         flags.enable_ipv6 = false;
@@ -2210,6 +2212,7 @@ socket_mark = 66
         assert!(dumped.contains("enable_quic_proxy = true"));
         assert!(dumped.contains("disable_tcp_hole_punching = true"));
         assert!(dumped.contains("disable_sym_hole_punching = true"));
+        assert!(dumped.contains("disable_p2p_storm_throttle = true"));
         assert!(dumped.contains("multi_thread = false"));
         assert!(dumped.contains("bind_device = false"));
         assert!(dumped.contains("enable_ipv6 = false"));
@@ -2223,6 +2226,7 @@ socket_mark = 66
         assert!(reloaded_flags.enable_quic_proxy);
         assert!(reloaded_flags.disable_tcp_hole_punching);
         assert!(reloaded_flags.disable_sym_hole_punching);
+        assert!(reloaded_flags.disable_p2p_storm_throttle);
         assert!(!reloaded_flags.multi_thread);
         assert!(!reloaded_flags.bind_device);
         assert!(!reloaded_flags.enable_ipv6);

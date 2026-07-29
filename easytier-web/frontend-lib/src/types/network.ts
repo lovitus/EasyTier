@@ -91,6 +91,7 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     enable_quic_proxy: false,
     disable_quic_input: false,
     disable_p2p: false,
+    disable_p2p_storm_throttle: false,
     p2p_only: false,
     lazy_p2p: false,
     bind_device: true,

@@ -120,6 +120,7 @@ message NetworkConfig {
   optional string policy_mihomo_config_file = 83;
   optional string policy_mihomo_config_inline = 84;
   optional string policy_mihomo_controller_secret = 85;
+  optional bool disable_p2p_storm_throttle = 86;
 }
 
 message PortForwardConfig {

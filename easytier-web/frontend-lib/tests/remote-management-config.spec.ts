@@ -19,6 +19,7 @@ const BOOLEAN_CONFIG_FIELDS = [
   'enable_kcp_proxy',
   'disable_kcp_input',
   'disable_p2p',
+  'disable_p2p_storm_throttle',
   'bind_device',
   'no_tun',
   'enable_exit_node',

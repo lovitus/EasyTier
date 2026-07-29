@@ -42,6 +42,7 @@ const CONFIG_FLAG_FIELDS = [
   'disable_sym_hole_punching',
   'enable_magic_dns',
   'enable_private_mode',
+  'disable_p2p_storm_throttle',
 ] as const satisfies readonly (keyof NetworkConfig)[]
 
 const CONFIG_CHECKBOX_FIELDS = [

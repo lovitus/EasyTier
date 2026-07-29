@@ -107,6 +107,10 @@ message FlagsInConfig {
   // Comma-separated user CIDRs added to underlay_candidate_guard. Empty clears
   // only user CIDRs; built-in fake-IP and runtime EasyTier guards still apply.
   string underlay_exclude_cidrs = 50;
+  // Disable automatic P2P endpoint failure cooldowns. Existing protocol
+  // selection, probing, upgrade, fallback and hole-punch retry behavior then
+  // runs without the storm-throttle state table.
+  bool disable_p2p_storm_throttle = 51;
 }
 
 message RpcDescriptor {

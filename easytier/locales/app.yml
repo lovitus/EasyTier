@@ -163,6 +163,9 @@ core_clap:
   disable_p2p:
     en: "disable ordinary automatic p2p; still establish p2p with peers marked as need-p2p, and other peers should not proactively connect to this node"
     zh-CN: "禁用普通自动P2P；仍会与标记为 need-p2p 的节点建立P2P连接，其他节点不应主动与当前节点建立P2P"
+  disable_p2p_storm_throttle:
+    en: "disable repeated-failure throttling for automatic p2p endpoints and restore the original unrestricted retry behavior"
+    zh-CN: "禁用自动P2P端点的重复失败节流，恢复原有的不受限重试行为"
   p2p_only:
     en: "only communicate with peers that already establish p2p connection"
     zh-CN: "仅与已经建立P2P连接的对等节点通信"

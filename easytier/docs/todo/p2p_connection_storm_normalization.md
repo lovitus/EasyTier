@@ -2,7 +2,8 @@
 
 ## 状态
 
-**候选已实现，正在完成远端与实机验证；验证通过前不进入发布。**
+**核心候选 `bc829e58` 已完成远端与实机验证；新增兼容开关必须随最终发布快照重新完成
+`.160`、GUI 和正式 artifact 门禁。**
 
 上一版候选 `518bf8df` 只覆盖 TCP/UDP hole-punch initiator，明确排除了 Direct，
 因此没有覆盖实测风暴的主要来源，已经回退。当前候选从该回退基线重新实现，不继承
@@ -31,6 +32,22 @@
 
 已有代码仍是任务是否应当执行的唯一准入来源。失败表不读取当前连接是 stable、
 relay 还是失联，也不关心尝试来自冷启动、恢复、upgrade、fallback 或 probe。
+
+## 兼容开关
+
+提供一个实例级逃生开关，默认保持节流启用：
+
+```text
+TOML: [flags] disable_p2p_storm_throttle = true
+CLI:  --disable-p2p-storm-throttle
+ENV:  ET_DISABLE_P2P_STORM_THROTTLE=true
+GUI:  Disable P2P Storm Throttle
+```
+
+该开关只在 `P2pEndpointRetryTable` 的唯一判定入口生效，不散布到 Direct、UDP/TCP
+hole-punch 或 P2P 调度代码。开启时原子切换为无状态放行并清空旧冷却；`begin` 始终
+允许，后续成功或失败均不写表。再次关闭后从空表重新开始，旧冷却不会复活。这样开启
+开关的可观察行为等同于没有实现本失败冷却，不改变任何现有设置、协议尝试或内部重试。
 
 ## 实测边界
 
@@ -217,23 +234,31 @@ key，可立即尝试。TCP simultaneous-open 与 both-easy-symmetric 的 mapped
 12. BackOff 饱和门槛精确保留每种 hole-punch 的完整原始渐进序列。
 13. 所有既有设置准入、priority、upgrade、fallback、probe 和打洞测试保持原语义。
 14. 手工 connector、listener 和业务 tunnel 不访问此表。
+15. 兼容开关开启时重复失败始终放行、表保持为空；动态关闭后从第一阶段重新开始。
 
 ## 提交前候选清单
 
 ### 精确构建快照
 
-基线为 `707939a1`（净代码内容等同 `deed0cf2` 回退基线）。候选只包含：
+核心候选基线为 `707939a1`（净代码内容等同 `deed0cf2` 回退基线）。最终发布快照包含：
 
 - `common/p2p_endpoint_retry.rs` 及 `GlobalCtx` 私有持有点；
 - Direct 精确 endpoint lease；
 - UDP cone、symmetric-to-cone、both-easy-symmetric lease；
 - TCP simultaneous-open lease；
 - 既有 BackOff 饱和只读判断；
+- `disable_p2p_storm_throttle` 在 TOML、CLI/env、management protobuf 和 GUI 上的
+  完整配置链路；
+- 表内唯一原子 bypass、动态开启清表和重新关闭后从空表开始的契约；
+- Rust 配置 round-trip、CLI、managed config、GUI checkbox 和全字段 protobuf
+  round-trip 测试；
 - 同文件 focused tests；
 - 本 TODO 与独立性能探针。
 
-不包含依赖、`Cargo.lock`、协议生成物、公开 API、配置字段、workflow 或平台 `cfg`
-变更。提交前必须再次确认完整 diff 与 untracked 文件列表。
+新增 protobuf 字段固定为 `FlagsInConfig=51`、`NetworkConfig=86`，不复用已发布字段。
+TypeScript protobuf 在标准 frontend build 中从精确 schema 生成，不手工维护生成物。
+不包含依赖、`Cargo.lock`、workflow 或平台 `cfg` 变更。提交前必须再次确认完整 diff、
+schema 字段号、生成结果和 untracked 文件列表。
 
 ### `.160` 强制预检
 
@@ -257,6 +282,33 @@ UDP 24/24、TCP 4/4、设置契约 14/14。
 
 性能探针在 65,536 硬上限下采集满表查找、begin/fail/success、异常随机淘汰、分配和
 RSS；结果属于提交前机制门槛，不替代 immutable artifact 实机验证。
+
+兼容开关扩展必须在 `.160` 重新执行完整 `--locked --no-run`、endpoint/global
+context/config/CLI/launcher/managed-config focused tests，以及 frontend-lib
+protobuf codegen、Config/RemoteManagement Vitest、全字段 round-trip 和依赖顺序的
+frontend-lib、frontend、VPN plugin、GUI build。旧 `bc829e58` 的成功结果不能冒充
+新增 schema 和 GUI 的编译证据。
+
+### 兼容开关扩展预检证据（未提交工作树）
+
+已把包含开关的完整工作树同步到 `.160`，并完成以下门禁：
+
+- `cargo test --locked --no-run --package easytier --lib`：通过、无 warning；
+- `cargo test --locked --no-run --package easytier-web`：通过；
+- endpoint 表 8/8、开关启动/动态切换及 CLI 3/3、TOML 1/1、launcher
+  3/3、managed config 2/2：通过；
+- Direct 既定有效子集 17/17、Direct IPv6 3/3、UDP 24/24（另有 1 项原有
+  ignored）、TCP 4/4、connector 设置契约 14/14：通过；
+- frontend-lib protobuf codegen、Config/RemoteManagement Vitest 29/29、全字段
+  round-trip 7/7：通过；
+- frontend-lib、frontend、VPN plugin、GUI 按依赖顺序完成 production build。
+
+一次包含全部 Direct 测试的宽过滤仍复现原始 HEAD 已有的 3 个同机 IPv4 mock
+注册发现失败；它们未进入 endpoint guard，不能记作本开关回归，也不能记成通过。
+
+以上仅证明未提交源码的编译和契约。新增 Rust、protobuf 与 GUI 尚无新的 immutable
+candidate SHA、workflow artifact 或实机证据；因此最终发布仍须提交完整快照，并对
+该精确 SHA 重走要求的 artifact 和实机门禁。
 
 ### 必需 workflow 与实机证据
 
@@ -327,3 +379,61 @@ need_p2p=true
 - 新 endpoint 首次尝试不延迟；
 - upgrade、fallback、失联恢复、relay 和设置项语义无回退；
 - 任一门槛失败即停止候选，不提交正式发布。
+
+## 候选验证证据（`bc829e581540b1ffa188fded23546bd30a2e35f9`）
+
+本节是 immutable candidate 完成后的证据记录，不改变候选代码，也不触发新构建。
+
+### 构建、契约和边界
+
+- `.160` 的 `--locked --no-run` 无 warning；endpoint 表 7/7、Direct 17/17、
+  Direct IPv6 3/3、UDP 24/24、TCP 4/4、设置契约 14/14 通过。
+- 65,536 项压力下 RSS 约 10 MiB；满表 blocked lookup 约 965 万次/秒，
+  begin/fail/success 约 700 万次/秒，随机满表淘汰约 60.8 万次/秒；查表不在
+  packet send/recv 热路径。
+- profiling-beta run `30463656142`、macOS ARM64 GUI run `30463695099` 和自动触发的
+  Android Policy Candidate run `30463655993` 均在上述精确 SHA 成功。Linux 包的
+  内外层校验和、BUILD_INFO、SHA、target、static-pie 和符号已核验；macOS app 的
+  arm64 架构、可执行权限、deep/strict 签名和候选版本字符串已核验。
+- Android 设备不可用，因此本候选只有编译/打包证据，没有把 workflow 成功表述为
+  Android 实机功能证据。
+
+### macOS `.162` 正式 A/B
+
+发布版和候选版都通过 GUI 明确确认 `lazy_p2p=false, need_p2p=true` 后运行 720 个
+样本；最初一轮被 GUI 持久化值覆盖为 lazy 的采样已经作废，未进入下列比较。
+
+| 指标 | 发布版 | 候选版 | 变化 |
+|---|---:|---:|---:|
+| 平均活跃连接 | 284.94 | 99.68 | -65.0% |
+| 活跃连接中位数 | 293 | 78.5 | -73.2% |
+| 失败新连接率 | 4.234/s | 1.279/s | -69.8% |
+| GUI CPU | 2.25% | 1.05% | -53.3% |
+| Mihomo CPU | 4.63% | 1.89% | -59.2% |
+| 最后 180 样本平均活跃连接 | 262.77 | 72.37 | -72.5% |
+| 最后 180 样本新连接 | 803 | 117 | -85.4% |
+| 最后 180 秒 endpoint churn | 789 | 44 | -94.4% |
+
+候选早期 180 秒 endpoint churn 为 358，发布版为 704，且候选后段继续下降，因此
+不是把风暴平移到下一冷却阶段。两者早期观测到的唯一 endpoint 数分别为 75 和 78，
+候选没有通过放弃 endpoint 发现来换取较低连接数。
+
+测试后已通过 GUI 恢复 `lazy_p2p=true, need_p2p=false` 并重新运行发布版；运行配置
+SHA-256 与测试前备份完全一致，候选进程未运行。
+
+### Linux exact-artifact 场景
+
+- 两节点冷启动从 TCP 自动升级到 QUIC；连续约 15 分钟只有最初 TCP、QUIC 两次建立，
+  无协议跳动，双向 ping 20/20。
+- 三节点场景中两端经 relay 相识后建立 UDP/TCP/QUIC Direct；对一端公网地址注入
+  35 秒阻断时 Direct 消失、路由回到 `relay(2)`，解除后恢复 Direct TCP 和 QUIC。
+  注入期间底层 WAN 本身有丢包，因此这里只证明 relay 路由仍存在且能恢复，不声称
+  零丢包切换。
+- macOS 候选加入现有发布版 mesh 成功；公网短样本噪声较大，不据此声称 RTT/丢包
+  改善或回退。
+- peer 新增通告 listener/IP 的“新精确 key 立即允许”由 key 隔离契约测试覆盖。
+  当前 `--machine-id` 重启未保留 peer ID，不能把该实机重启误记为同 peer 证据。
+  未通告临时 NAT mapped endpoint 仍遵守前述最高 10 分钟发现边界。
+
+所有 Linux 测试核心、测试 TUN 和注入的防火墙规则均已清理；没有触发 Core、完整
+GUI、Mobile、OHOS、Test、tag 或 Release。

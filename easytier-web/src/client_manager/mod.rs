@@ -659,6 +659,7 @@ mod tests {
         assert_eq!(updated.enable_quic_proxy, Some(true));
         assert_eq!(updated.disable_quic_input, Some(true));
         assert_eq!(updated.disable_p2p, Some(true));
+        assert_eq!(updated.disable_p2p_storm_throttle, Some(true));
         assert_eq!(updated.p2p_only, Some(true));
         assert_eq!(updated.lazy_p2p, Some(true));
         assert_eq!(updated.relay_all_peer_rpc, Some(true));
@@ -739,6 +740,7 @@ mod tests {
             enable_quic_proxy: Some(true),
             disable_quic_input: Some(true),
             disable_p2p: Some(true),
+            disable_p2p_storm_throttle: Some(true),
             p2p_only: Some(true),
             lazy_p2p: Some(true),
             relay_all_peer_rpc: Some(true),

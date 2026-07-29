@@ -160,6 +160,7 @@ and are part of this fork's operator-facing surface.
 | `--transport-priority <rules>` | `ET_TRANSPORT_PRIORITY` | Reorder direct-connect underlays. | Format is `scope:proto,...;scope:proto,...`, for example `global:quic,faketcp,ws,udp,tcp`. |
 | `--underlay-candidate-guard` | `ET_UNDERLAY_CANDIDATE_GUARD` | Filter polluted underlay candidates. | Defaults to true; does not change listener binding. |
 | `--underlay-exclude-cidrs <cidrs>` | `ET_UNDERLAY_EXCLUDE_CIDRS` | User-added CIDRs excluded from IP advertisement, direct candidates, hole-punch candidates, and related route-source / bind-source checks. | Defaults to `198.18.0.0/15,fc00::/18,fdfe:dcba:9876::/48,fd65:6173:7974::/48,192.19.0.0/24`; these common fake-IP ranges are also a built-in base set while the guard is enabled, so empty keeps runtime EasyTier virtual-address filtering plus the built-in base set. |
+| `--disable-p2p-storm-throttle` | `ET_DISABLE_P2P_STORM_THROTTLE` | Disable repeated-failure cooldowns for automatic P2P endpoints. | Defaults to false. Enabling it restores the original unrestricted Direct, probe, upgrade/fallback and UDP/TCP hole-punch retry behavior without changing their scheduling or internal retry algorithms. |
 | `--nic-backend <tun|veth|auto>` | None | Select the Linux virtual NIC backend. | CLI-only in Linux `tun` builds; defaults to `tun` and is not serialized to TOML/protobuf. |
 
 Upstream-style proxy flags such as `--enable-kcp-proxy`, `--enable-quic-proxy`,

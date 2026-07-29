@@ -4,7 +4,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -105,6 +105,7 @@ impl P2pEndpointFailureUpdate {
 pub(crate) struct P2pEndpointRetryTable {
     shards: Vec<Mutex<HashMap<P2pEndpointKey, P2pEndpointRetryEntry>>>,
     shard_capacity: usize,
+    disabled: AtomicBool,
     next_revision: AtomicU64,
     started_at: Instant,
 }
@@ -114,22 +115,31 @@ impl std::fmt::Debug for P2pEndpointRetryTable {
         f.debug_struct("P2pEndpointRetryTable")
             .field("shards", &self.shards.len())
             .field("shard_capacity", &self.shard_capacity)
+            .field("disabled", &self.disabled.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
 
 impl Default for P2pEndpointRetryTable {
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }
 
 impl P2pEndpointRetryTable {
-    pub(crate) fn new() -> Self {
-        Self::with_limits(P2P_ENDPOINT_RETRY_SHARDS, P2P_ENDPOINT_RETRY_SHARD_CAPACITY)
+    pub(crate) fn new(disabled: bool) -> Self {
+        Self::with_limits_and_disabled(
+            P2P_ENDPOINT_RETRY_SHARDS,
+            P2P_ENDPOINT_RETRY_SHARD_CAPACITY,
+            disabled,
+        )
     }
 
     fn with_limits(shard_count: usize, shard_capacity: usize) -> Self {
+        Self::with_limits_and_disabled(shard_count, shard_capacity, false)
+    }
+
+    fn with_limits_and_disabled(shard_count: usize, shard_capacity: usize, disabled: bool) -> Self {
         assert!(shard_count.is_power_of_two());
         assert!(shard_capacity > 0);
         Self {
@@ -137,8 +147,33 @@ impl P2pEndpointRetryTable {
                 .map(|_| Mutex::new(HashMap::new()))
                 .collect(),
             shard_capacity,
+            disabled: AtomicBool::new(disabled),
             next_revision: AtomicU64::new(0),
             started_at: Instant::now(),
+        }
+    }
+
+    /// Toggle the compatibility escape hatch at the single shared decision
+    /// point. Enabling it also removes old cooldowns so disabling it again
+    /// starts from a clean table instead of resurrecting stale failures.
+    pub(crate) fn set_disabled(&self, disabled: bool) {
+        self.disabled.store(disabled, Ordering::Release);
+        if disabled {
+            for shard in &self.shards {
+                shard.lock().unwrap().clear();
+            }
+        }
+    }
+
+    fn is_disabled(&self) -> bool {
+        self.disabled.load(Ordering::Acquire)
+    }
+
+    fn bypassed_attempt(key: P2pEndpointKey) -> P2pEndpointAttempt {
+        P2pEndpointAttempt {
+            key,
+            // Revisions created by next_revision are never zero.
+            observed_revision: 0,
         }
     }
 
@@ -197,8 +232,17 @@ impl P2pEndpointRetryTable {
         key: P2pEndpointKey,
         now_millis: u64,
     ) -> Result<P2pEndpointAttempt, P2pEndpointCooldown> {
+        if self.is_disabled() {
+            return Ok(Self::bypassed_attempt(key));
+        }
+
         let shard_index = self.shard_index(&key);
         let mut shard = self.shards[shard_index].lock().unwrap();
+        // Serialize against set_disabled(true) clearing this shard. Whichever
+        // side wins, a disabled table cannot publish a new tracked attempt.
+        if self.is_disabled() {
+            return Ok(Self::bypassed_attempt(key));
+        }
         if let Some(entry) = shard.get_mut(&key) {
             entry.last_touched_millis = now_millis;
             if now_millis < entry.blocked_until_millis {
@@ -245,8 +289,15 @@ impl P2pEndpointRetryTable {
         attempt: P2pEndpointAttempt,
         now_millis: u64,
     ) -> Option<P2pEndpointFailureUpdate> {
+        if attempt.observed_revision == 0 || self.is_disabled() {
+            return None;
+        }
+
         let shard_index = self.shard_index(&attempt.key);
         let mut shard = self.shards[shard_index].lock().unwrap();
+        if self.is_disabled() {
+            return None;
+        }
         let entry = shard.get_mut(&attempt.key)?;
         if entry.revision != attempt.observed_revision {
             return None;
@@ -269,6 +320,9 @@ impl P2pEndpointRetryTable {
     }
 
     pub(crate) fn succeeded(&self, attempt: P2pEndpointAttempt) {
+        if attempt.observed_revision == 0 {
+            return;
+        }
         self.shards[self.shard_index(&attempt.key)]
             .lock()
             .unwrap()
@@ -408,5 +462,27 @@ mod tests {
         assert!(!table.shards[0].lock().unwrap().contains_key(&first_key));
         assert!(table.shards[0].lock().unwrap().contains_key(&second_key));
         assert!(table.shards[0].lock().unwrap().contains_key(&third_key));
+    }
+
+    #[test]
+    fn disabled_table_is_stateless_and_reenable_starts_clean() {
+        let table = P2pEndpointRetryTable::with_limits(1, 8);
+        let key = key(7, IpScheme::Udp, 1, 11010);
+
+        let attempt = table.begin_at(key, 0).unwrap();
+        table.failed_at(attempt, 0).unwrap();
+        assert!(table.begin_at(key, 1).is_err());
+
+        table.set_disabled(true);
+        assert_eq!(table.len(), 0);
+        let bypassed = table.begin_at(key, 1).unwrap();
+        assert_eq!(table.failed_at(bypassed, 1), None);
+        assert!(table.begin_at(key, 1).is_ok());
+        assert_eq!(table.len(), 0);
+
+        table.set_disabled(false);
+        let fresh = table.begin_at(key, 1).unwrap();
+        assert_eq!(table.failed_at(fresh, 1).unwrap().stage(), 1);
+        assert!(table.begin_at(key, 2).is_err());
     }
 }

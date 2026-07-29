@@ -624,6 +624,9 @@ impl GlobalCtx {
 
         let credential_storage_path = config_fs.get_credential_file();
         let credential_manager = Arc::new(CredentialManager::new(credential_storage_path));
+        let p2p_endpoint_retry = crate::common::p2p_endpoint_retry::P2pEndpointRetryTable::new(
+            flags.disable_p2p_storm_throttle,
+        );
 
         GlobalCtx {
             inst_name: config_fs.get_inst_name(),
@@ -658,7 +661,7 @@ impl GlobalCtx {
                 [ProtocolLoopSuppressionSlot::default(); PROTOCOL_LOOP_STATE_SLOTS],
             ),
             underlay_breaker: Mutex::new(UnderlayBreakerState::default()),
-            p2p_endpoint_retry: crate::common::p2p_endpoint_retry::P2pEndpointRetryTable::new(),
+            p2p_endpoint_retry,
 
             base_feature_flags: ArcSwap::new(Arc::new(base_feature_flags)),
 
@@ -941,6 +944,8 @@ impl GlobalCtx {
     pub fn set_flags(&self, flags: Flags) {
         self.config.set_flags(flags);
         let flags = self.config.get_flags();
+        self.p2p_endpoint_retry
+            .set_disabled(flags.disable_p2p_storm_throttle);
         self.feature_flags
             .store(Arc::new(Self::derive_feature_flags(
                 &flags,
@@ -1933,6 +1938,52 @@ pub mod tests {
         assert!(feature_flags.avoid_relay_data);
         assert!(feature_flags.is_public_server);
         assert!(!feature_flags.ipv6_public_addr_provider);
+    }
+
+    #[tokio::test]
+    async fn set_flags_updates_p2p_storm_throttle_without_stale_cooldown() {
+        let global_ctx = GlobalCtx::new(TomlConfigLoader::default());
+        let key = crate::common::p2p_endpoint_retry::P2pEndpointKey::new(
+            7,
+            IpScheme::Udp,
+            "203.0.113.7:11010".parse().unwrap(),
+        );
+
+        let attempt = global_ctx.p2p_endpoint_retry().begin(key).unwrap();
+        global_ctx.p2p_endpoint_retry().failed(attempt).unwrap();
+        assert!(global_ctx.p2p_endpoint_retry().begin(key).is_err());
+
+        let mut flags = global_ctx.get_flags();
+        flags.disable_p2p_storm_throttle = true;
+        global_ctx.set_flags(flags);
+        let bypassed = global_ctx.p2p_endpoint_retry().begin(key).unwrap();
+        assert_eq!(global_ctx.p2p_endpoint_retry().failed(bypassed), None);
+        assert!(global_ctx.p2p_endpoint_retry().begin(key).is_ok());
+
+        let mut flags = global_ctx.get_flags();
+        flags.disable_p2p_storm_throttle = false;
+        global_ctx.set_flags(flags);
+        let fresh = global_ctx.p2p_endpoint_retry().begin(key).unwrap();
+        global_ctx.p2p_endpoint_retry().failed(fresh).unwrap();
+        assert!(global_ctx.p2p_endpoint_retry().begin(key).is_err());
+    }
+
+    #[tokio::test]
+    async fn configured_p2p_storm_throttle_bypass_is_active_at_startup() {
+        let config = TomlConfigLoader::default();
+        let mut flags = config.get_flags();
+        flags.disable_p2p_storm_throttle = true;
+        config.set_flags(flags);
+        let global_ctx = GlobalCtx::new(config);
+        let key = crate::common::p2p_endpoint_retry::P2pEndpointKey::new(
+            7,
+            IpScheme::Tcp,
+            "203.0.113.8:11010".parse().unwrap(),
+        );
+
+        let bypassed = global_ctx.p2p_endpoint_retry().begin(key).unwrap();
+        assert_eq!(global_ctx.p2p_endpoint_retry().failed(bypassed), None);
+        assert!(global_ctx.p2p_endpoint_retry().begin(key).is_ok());
     }
 
     #[tokio::test]

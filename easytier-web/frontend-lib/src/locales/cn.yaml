@@ -124,6 +124,9 @@ quic_brutal_tx_mbps_placeholder: 可选；留空使用 BBR
 disable_p2p: 禁用 P2P
 disable_p2p_help: 禁用普通自动 P2P。开启 need-p2p 的节点仍可与当前节点建立 P2P。
 
+disable_p2p_storm_throttle: 禁用 P2P 风暴节流
+disable_p2p_storm_throttle_help: 禁用精确 peer 协议端点的重复失败冷却，恢复原有不受限的自动 P2P 重试行为。
+
 p2p_only: 仅 P2P
 p2p_only_help: 仅与已经建立P2P连接的对等节点通信，不通过其他节点中转。
 

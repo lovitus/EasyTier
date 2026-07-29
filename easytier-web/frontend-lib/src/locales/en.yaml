@@ -123,6 +123,9 @@ quic_brutal_tx_mbps_placeholder: Optional; leave blank to use BBR
 disable_p2p: Disable P2P
 disable_p2p_help: Disable ordinary automatic P2P. Nodes with need-p2p enabled can still establish P2P with this node.
 
+disable_p2p_storm_throttle: Disable P2P Storm Throttle
+disable_p2p_storm_throttle_help: Restore the original unrestricted automatic P2P retry behavior by disabling repeated-failure cooldowns for exact peer protocol endpoints.
+
 p2p_only: P2P Only
 p2p_only_help: Only communicate with peers that have already established P2P connections, do not relay through other nodes.
 

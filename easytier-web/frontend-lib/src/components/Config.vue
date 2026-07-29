@@ -95,6 +95,7 @@ const bool_flags: BoolFlag[] = [
   { field: 'enable_quic_proxy', help: 'enable_quic_proxy_help' },
   { field: 'disable_quic_input', help: 'disable_quic_input_help' },
   { field: 'disable_p2p', help: 'disable_p2p_help' },
+  { field: 'disable_p2p_storm_throttle', help: 'disable_p2p_storm_throttle_help' },
   { field: 'p2p_only', help: 'p2p_only_help' },
   { field: 'lazy_p2p', help: 'lazy_p2p_help' },
   { field: 'bind_device', help: 'bind_device_help' },

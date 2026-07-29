@@ -602,6 +602,15 @@ struct NetworkOptions {
 
     #[arg(
         long,
+        env = "ET_DISABLE_P2P_STORM_THROTTLE",
+        help = t!("core_clap.disable_p2p_storm_throttle").to_string(),
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    disable_p2p_storm_throttle: Option<bool>,
+
+    #[arg(
+        long,
         env = "ET_DISABLE_UDP_HOLE_PUNCHING",
         help = t!("core_clap.disable_udp_hole_punching").to_string(),
         num_args = 0..=1,
@@ -1307,6 +1316,9 @@ impl NetworkOptions {
             f.relay_network_whitelist = wl.join(" ");
         }
         f.disable_p2p = self.disable_p2p.unwrap_or(f.disable_p2p);
+        f.disable_p2p_storm_throttle = self
+            .disable_p2p_storm_throttle
+            .unwrap_or(f.disable_p2p_storm_throttle);
         f.p2p_only = self.p2p_only.unwrap_or(f.p2p_only);
         f.lazy_p2p = self.lazy_p2p.unwrap_or(f.lazy_p2p);
         f.disable_tcp_hole_punching = self
@@ -2135,6 +2147,23 @@ enabled = true
         assert_eq!(identity.network_secret, None);
         assert_eq!(identity.network_secret_digest, None);
         assert_eq!(cfg.get_hostname(), "override-host");
+    }
+
+    #[test]
+    fn cli_disable_p2p_storm_throttle_supports_true_and_false() {
+        for (argument, expected) in [
+            ("--disable-p2p-storm-throttle", true),
+            ("--disable-p2p-storm-throttle=false", false),
+        ] {
+            let cli = Cli::try_parse_from(["easytier-core", argument]).unwrap();
+            let config = TomlConfigLoader::default();
+            cli.network_options.merge_into(&config).unwrap();
+            assert_eq!(
+                config.get_flags().disable_p2p_storm_throttle,
+                expected,
+                "argument: {argument}"
+            );
+        }
     }
 
     #[test]

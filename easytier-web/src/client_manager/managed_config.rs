@@ -891,6 +891,7 @@ mod tests {
                 "no_tun": true,
                 "relay_all_peer_rpc": true,
                 "disable_udp_hole_punching": true,
+                "disable_p2p_storm_throttle": true,
                 "enable_private_mode": true,
                 "port_forwards": [{
                     "bind_ip": "127.0.0.1",
@@ -919,6 +920,7 @@ mod tests {
         assert_eq!(config.no_tun, Some(true));
         assert_eq!(config.relay_all_peer_rpc, Some(true));
         assert_eq!(config.disable_udp_hole_punching, Some(true));
+        assert_eq!(config.disable_p2p_storm_throttle, Some(true));
         assert_eq!(config.enable_private_mode, Some(true));
         assert_eq!(config.disable_sym_hole_punching, Some(true));
         assert_eq!(config.disable_tcp_hole_punching, Some(true));
@@ -934,6 +936,7 @@ mod tests {
         assert!(flags.relay_all_peer_rpc);
         assert!(flags.disable_tcp_hole_punching);
         assert!(flags.disable_udp_hole_punching);
+        assert!(flags.disable_p2p_storm_throttle);
         assert!(flags.disable_sym_hole_punching);
         assert_eq!(runtime_config.get_port_forwards().len(), 1);
     }
