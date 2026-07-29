@@ -21,8 +21,9 @@ use crate::{
     connector::udp_hole_punch::{
         common::{
             HOLE_PUNCH_PACKET_BODY_LEN, apply_hole_punch_socket_mark,
-            disable_udp_stealth_for_selected_listener, send_symmetric_hole_punch_packet,
-            should_request_udp_stealth, try_connect_with_socket,
+            begin_hole_punch_endpoint_attempt, disable_udp_stealth_for_selected_listener,
+            finish_hole_punch_endpoint_failure, finish_hole_punch_endpoint_success,
+            send_symmetric_hole_punch_packet, should_request_udp_stealth, try_connect_with_socket,
         },
         handle_rpc_result,
     },
@@ -416,6 +417,7 @@ impl PunchSymToConeHoleClient {
         last_port_idx: &mut usize,
         my_nat_info: UdpNatType,
         disable_udp_stealth: bool,
+        settle_endpoint_failure: bool,
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // Check if peer is blacklisted
         if self.blacklist.contains(&dst_peer_id) {
@@ -469,6 +471,12 @@ impl PunchSymToConeHoleClient {
             crate::tunnel::IpScheme::Udp,
         )
         .await?;
+        let endpoint_attempt = begin_hole_punch_endpoint_attempt(
+            &global_ctx,
+            remote_mapped_addr.into(),
+            dst_peer_id,
+            crate::tunnel::IpScheme::Udp,
+        )?;
         preflight.commit();
 
         // try direct connect first
@@ -483,6 +491,7 @@ impl PunchSymToConeHoleClient {
             )
             .await
             {
+                finish_hole_punch_endpoint_success(&global_ctx, endpoint_attempt);
                 return Ok(Some(tunnel));
             }
         }
@@ -504,9 +513,17 @@ impl PunchSymToConeHoleClient {
 
         let port_index = *last_port_idx as u32;
         let base_port_for_easy_sym = self.get_base_port_for_easy_sym(my_nat_info).await;
-        udp_array
+        if let Err(error) = udp_array
             .send_with_all(&packet, remote_mapped_addr.into())
-            .await?;
+            .await
+        {
+            finish_hole_punch_endpoint_failure(
+                &global_ctx,
+                endpoint_attempt,
+                settle_endpoint_failure,
+            );
+            return Err(error);
+        }
 
         if self.punch_predicablely.load(Ordering::Relaxed) && base_port_for_easy_sym.is_some() {
             let rpc_stub = self.get_rpc_stub(dst_peer_id).await;
@@ -520,7 +537,7 @@ impl PunchSymToConeHoleClient {
                     tid,
                 ),
             ));
-            let ret_tunnel = Self::check_hole_punch_result(
+            let ret_tunnel = match Self::check_hole_punch_result(
                 global_ctx.clone(),
                 &udp_array,
                 &packet,
@@ -529,11 +546,23 @@ impl PunchSymToConeHoleClient {
                 disable_udp_stealth,
                 &punch_task,
             )
-            .await?;
+            .await
+            {
+                Ok(ret_tunnel) => ret_tunnel,
+                Err(error) => {
+                    finish_hole_punch_endpoint_failure(
+                        &global_ctx,
+                        endpoint_attempt,
+                        settle_endpoint_failure,
+                    );
+                    return Err(error);
+                }
+            };
 
             let task_ret = punch_task.await;
             tracing::debug!(?ret_tunnel, ?task_ret, "predictable punch task got result");
             if let Some(tunnel) = ret_tunnel {
+                finish_hole_punch_endpoint_success(&global_ctx, endpoint_attempt);
                 return Ok(Some(tunnel));
             }
         }
@@ -548,8 +577,8 @@ impl PunchSymToConeHoleClient {
                 round,
                 port_index,
             )));
-        let ret_tunnel = Self::check_hole_punch_result(
-            global_ctx,
+        let ret_tunnel = match Self::check_hole_punch_result(
+            global_ctx.clone(),
             &udp_array,
             &packet,
             tid,
@@ -557,7 +586,18 @@ impl PunchSymToConeHoleClient {
             disable_udp_stealth,
             &punch_task,
         )
-        .await?;
+        .await
+        {
+            Ok(ret_tunnel) => ret_tunnel,
+            Err(error) => {
+                finish_hole_punch_endpoint_failure(
+                    &global_ctx,
+                    endpoint_attempt,
+                    settle_endpoint_failure,
+                );
+                return Err(error);
+            }
+        };
 
         let punch_task_result = punch_task.await;
         tracing::debug!(?punch_task_result, ?ret_tunnel, "punch task got result");
@@ -568,6 +608,15 @@ impl PunchSymToConeHoleClient {
             *last_port_idx = rand::random();
         }
 
+        if ret_tunnel.is_some() {
+            finish_hole_punch_endpoint_success(&global_ctx, endpoint_attempt);
+        } else {
+            finish_hole_punch_endpoint_failure(
+                &global_ctx,
+                endpoint_attempt,
+                settle_endpoint_failure,
+            );
+        }
         Ok(ret_tunnel)
     }
 }

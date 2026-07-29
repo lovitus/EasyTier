@@ -9,8 +9,9 @@ use crate::{
     common::{PeerId, upnp},
     connector::udp_hole_punch::common::{
         HOLE_PUNCH_PACKET_BODY_LEN, UdpSocketArray, apply_hole_punch_socket_mark,
-        disable_udp_stealth_for_selected_listener, should_request_udp_stealth,
-        try_connect_with_socket,
+        begin_hole_punch_endpoint_attempt, disable_udp_stealth_for_selected_listener,
+        finish_hole_punch_endpoint_failure, finish_hole_punch_endpoint_success,
+        should_request_udp_stealth, try_connect_with_socket,
     },
     connector::udp_hole_punch::handle_rpc_result,
     peers::peer_manager::PeerManager,
@@ -103,6 +104,7 @@ impl PunchConeHoleClient {
         &self,
         dst_peer_id: PeerId,
         disable_udp_stealth: bool,
+        settle_endpoint_failure: bool,
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // Check if peer is blacklisted
         if self.blacklist.contains(&dst_peer_id) {
@@ -159,6 +161,12 @@ impl PunchConeHoleClient {
             crate::tunnel::IpScheme::Udp,
         )
         .await?;
+        let endpoint_attempt = begin_hole_punch_endpoint_attempt(
+            &global_ctx,
+            remote_mapped_addr.into(),
+            dst_peer_id,
+            crate::tunnel::IpScheme::Udp,
+        )?;
         preflight.commit();
 
         let local_socket = {
@@ -199,7 +207,14 @@ impl PunchConeHoleClient {
                 .with_context(|| "failed to send hole punch packet from local")
         };
 
-        send_from_local().await?;
+        if let Err(error) = send_from_local().await {
+            finish_hole_punch_endpoint_failure(
+                &global_ctx,
+                endpoint_attempt,
+                settle_endpoint_failure,
+            );
+            return Err(error);
+        }
 
         let punch_task = AbortOnDropHandle::new(tokio::spawn(async move {
             if let Err(e) = rpc_stub
@@ -236,7 +251,14 @@ impl PunchConeHoleClient {
 
             let Some(socket) = udp_array.try_fetch_punched_socket(tid) else {
                 tracing::debug!("no punched socket found, send some more hole punch packets");
-                send_from_local().await?;
+                if let Err(error) = send_from_local().await {
+                    finish_hole_punch_endpoint_failure(
+                        &global_ctx,
+                        endpoint_attempt,
+                        settle_endpoint_failure,
+                    );
+                    return Err(error);
+                }
                 continue;
             };
 
@@ -253,6 +275,7 @@ impl PunchConeHoleClient {
                 {
                     Ok(tunnel) => {
                         tracing::info!(?tunnel, "hole punched");
+                        finish_hole_punch_endpoint_success(&global_ctx, endpoint_attempt);
                         return Ok(Some(tunnel));
                     }
                     Err(e) => {
@@ -262,6 +285,7 @@ impl PunchConeHoleClient {
             }
         }
 
+        finish_hole_punch_endpoint_failure(&global_ctx, endpoint_attempt, settle_endpoint_failure);
         Ok(None)
     }
 }
@@ -324,7 +348,7 @@ pub mod tests {
         reset_udp_port_mapping_attempts_for_test();
 
         let ret = PunchConeHoleClient::new(p_a.clone(), Arc::new(timedmap::TimedMap::new()))
-            .do_hole_punching(p_c.my_peer_id(), false)
+            .do_hole_punching(p_c.my_peer_id(), false, true)
             .await;
 
         assert!(ret.is_err());

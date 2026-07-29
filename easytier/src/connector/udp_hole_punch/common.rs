@@ -22,7 +22,9 @@ use crate::{
         global_ctx::{
             ArcGlobalCtx, UnderlayBreakerKey, UnderlayBreakerScope, UnderlayPreflightGuard,
         },
-        join_joinset_background, underlay_guard, upnp,
+        join_joinset_background,
+        p2p_endpoint_retry::{P2pEndpointAttempt, P2pEndpointCooldown, P2pEndpointKey},
+        underlay_guard, upnp,
     },
     peers::peer_manager::PeerManager,
     proto::common::NatType,
@@ -43,6 +45,80 @@ pub(crate) fn peer_hole_punch_is_blocked(
         scheme,
         UnderlayBreakerScope::HolePunch,
     )])
+}
+
+#[derive(Debug)]
+pub(crate) struct P2pEndpointCooledError {
+    key: P2pEndpointKey,
+    cooldown: P2pEndpointCooldown,
+}
+
+impl std::fmt::Display for P2pEndpointCooledError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "automatic P2P endpoint {} is cooling down for {} ms",
+            self.key.remote_addr(),
+            self.cooldown.remaining().as_millis()
+        )
+    }
+}
+
+impl std::error::Error for P2pEndpointCooledError {}
+
+pub(crate) fn is_p2p_endpoint_cooled_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<P2pEndpointCooledError>().is_some()
+}
+
+pub(crate) fn begin_hole_punch_endpoint_attempt(
+    global_ctx: &ArcGlobalCtx,
+    remote_addr: SocketAddr,
+    peer_id: PeerId,
+    scheme: crate::tunnel::IpScheme,
+) -> anyhow::Result<P2pEndpointAttempt> {
+    let key = P2pEndpointKey::new(peer_id, scheme, remote_addr);
+    match global_ctx.p2p_endpoint_retry().begin(key) {
+        Ok(attempt) => Ok(attempt),
+        Err(cooldown) => {
+            tracing::debug!(
+                ?peer_id,
+                ?remote_addr,
+                ?scheme,
+                stage = cooldown.stage(),
+                remaining_ms = cooldown.remaining().as_millis(),
+                "skip cooled automatic hole-punch endpoint"
+            );
+            Err(anyhow::Error::new(P2pEndpointCooledError { key, cooldown }))
+        }
+    }
+}
+
+pub(crate) fn finish_hole_punch_endpoint_success(
+    global_ctx: &ArcGlobalCtx,
+    attempt: P2pEndpointAttempt,
+) {
+    global_ctx.p2p_endpoint_retry().succeeded(attempt);
+}
+
+pub(crate) fn finish_hole_punch_endpoint_failure(
+    global_ctx: &ArcGlobalCtx,
+    attempt: P2pEndpointAttempt,
+    settle: bool,
+) {
+    if !settle {
+        return;
+    }
+    let key = attempt.key();
+    if let Some(update) = global_ctx.p2p_endpoint_retry().failed(attempt) {
+        tracing::debug!(
+            peer_id = key.peer_id(),
+            remote_addr = ?key.remote_addr(),
+            scheme = ?key.scheme(),
+            stage = update.stage(),
+            cooldown_secs = update.cooldown().as_secs(),
+            "automatic hole-punch endpoint entered failure cooldown"
+        );
+    }
 }
 
 pub(crate) async fn prepare_hole_punch_attempt(

@@ -12,8 +12,9 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::{
     common::{PeerId, stun::StunInfoCollectorTrait},
     connector::udp_hole_punch::common::{
-        HOLE_PUNCH_PACKET_BODY_LEN, UdpHolePunchListener,
-        disable_udp_stealth_for_selected_listener, negotiate_udp_listener_stealth,
+        HOLE_PUNCH_PACKET_BODY_LEN, UdpHolePunchListener, begin_hole_punch_endpoint_attempt,
+        disable_udp_stealth_for_selected_listener, finish_hole_punch_endpoint_failure,
+        finish_hole_punch_endpoint_success, negotiate_udp_listener_stealth,
         should_request_udp_stealth, try_connect_with_socket,
     },
     connector::udp_hole_punch::handle_rpc_result,
@@ -212,6 +213,8 @@ impl PunchBothEasySymHoleClient {
         peer_nat_info: UdpNatType,
         disable_udp_stealth: bool,
         is_busy: &mut bool,
+        last_remote_addr: &mut Option<SocketAddr>,
+        settle_endpoint_failure: bool,
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // Check if peer is blacklisted
         if self.blacklist.contains(&dst_peer_id) {
@@ -308,6 +311,7 @@ impl PunchBothEasySymHoleClient {
                 .port
                 .saturating_sub(DST_PORT_OFFSET as u32)
         };
+        *last_remote_addr = Some(remote_mapped_addr.into());
         let mut preflight = super::common::prepare_hole_punch_attempt(
             &global_ctx,
             remote_mapped_addr.into(),
@@ -315,6 +319,12 @@ impl PunchBothEasySymHoleClient {
             crate::tunnel::IpScheme::Udp,
         )
         .await?;
+        let endpoint_attempt = begin_hole_punch_endpoint_attempt(
+            &global_ctx,
+            remote_mapped_addr.into(),
+            dst_peer_id,
+            crate::tunnel::IpScheme::Udp,
+        )?;
         preflight.commit();
         tracing::debug!(
             ?remote_mapped_addr,
@@ -323,12 +333,20 @@ impl PunchBothEasySymHoleClient {
         );
 
         while now.elapsed().as_millis() < (REMOTE_WAIT_TIME_MS + 1000).into() {
-            udp_array
+            if let Err(error) = udp_array
                 .send_with_all(
                     &new_hole_punch_packet(tid, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes(),
                     remote_mapped_addr.into(),
                 )
-                .await?;
+                .await
+            {
+                finish_hole_punch_endpoint_failure(
+                    &global_ctx,
+                    endpoint_attempt,
+                    settle_endpoint_failure,
+                );
+                return Err(error);
+            }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -358,6 +376,7 @@ impl PunchBothEasySymHoleClient {
                 .await
                 {
                     Ok(tunnel) => {
+                        finish_hole_punch_endpoint_success(&global_ctx, endpoint_attempt);
                         return Ok(Some(tunnel));
                     }
                     Err(e) => {
@@ -366,9 +385,17 @@ impl PunchBothEasySymHoleClient {
                     }
                 }
             }
-            udp_array.add_new_socket(socket.socket).await?;
+            if let Err(error) = udp_array.add_new_socket(socket.socket).await {
+                finish_hole_punch_endpoint_failure(
+                    &global_ctx,
+                    endpoint_attempt,
+                    settle_endpoint_failure,
+                );
+                return Err(error);
+            }
         }
 
+        finish_hole_punch_endpoint_failure(&global_ctx, endpoint_attempt, settle_endpoint_failure);
         Ok(None)
     }
 }

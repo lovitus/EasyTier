@@ -23,6 +23,7 @@ use crate::{
             UnderlayBreakerStrikeKind, UnderlayBreakerTrace,
         },
         network::IPCollector,
+        p2p_endpoint_retry::{P2pEndpointAttempt, P2pEndpointKey},
         stun::StunInfoCollectorTrait,
         transport_priority::{
             PreferenceKey, TransportPathClass, TransportPriority, protocol_is_compiled,
@@ -76,6 +77,22 @@ struct DirectCandidate {
 }
 
 impl DirectCandidate {
+    fn endpoint(&self) -> Option<(IpScheme, SocketAddr)> {
+        let scheme = direct_ip_scheme_from_url(&self.url)?;
+        let ip = match self.url.host()? {
+            Host::Ipv4(ip) => IpAddr::V4(ip),
+            Host::Ipv6(ip) => IpAddr::V6(ip),
+            // `url` keeps numeric hosts as `Domain` for non-special schemes
+            // such as udp/quic/wg. Expanded candidates are nevertheless exact
+            // IP literals, so parse that representation before rejecting it.
+            Host::Domain(host) => host.parse().ok()?,
+        };
+        Some((
+            scheme,
+            SocketAddr::new(ip, mapped_listener_port(&self.url)?),
+        ))
+    }
+
     fn preference_key(&self, lan_order: &[String], wan_order: &[String]) -> PreferenceKey {
         let path = if self.is_lan {
             TransportPathClass::Lan
@@ -760,6 +777,8 @@ impl DirectConnectorManagerData {
         self: Arc<DirectConnectorManagerData>,
         dst_peer_id: PeerId,
         addr: String,
+        remote_addr: SocketAddr,
+        scheme: IpScheme,
         stealth_mode: DirectStealthMode,
         preference_key: Option<PreferenceKey>,
     ) -> Result<DirectAttemptOutcome, Error> {
@@ -775,6 +794,37 @@ impl DirectConnectorManagerData {
         if self.dst_listener_blacklist.contains(&blacklist_item) {
             return Err(Error::UrlInBlacklist);
         }
+
+        if preference_key.is_some_and(|target| self.preference_satisfied(dst_peer_id, target))
+            || (preference_key.is_none()
+                && self.peer_manager.has_directly_connected_conn(dst_peer_id))
+        {
+            return Ok(DirectAttemptOutcome::AlreadySatisfied);
+        }
+
+        // One lease covers this candidate's complete existing retry loop. Do
+        // not move this lookup into `do_try_connect_to_ip`: that would count
+        // protocol-internal retries as separate P2P failures.
+        let endpoint_attempt = match self
+            .global_ctx
+            .p2p_endpoint_retry()
+            .begin(P2pEndpointKey::new(dst_peer_id, scheme, remote_addr))
+        {
+            Ok(attempt) => attempt,
+            Err(cooldown) => {
+                tracing::debug!(
+                    ?dst_peer_id,
+                    ?remote_addr,
+                    ?scheme,
+                    stage = cooldown.stage(),
+                    remaining_ms = cooldown.remaining().as_millis(),
+                    "skip cooled automatic direct P2P endpoint"
+                );
+                return Err(Error::InvalidUrl(format!(
+                    "automatic P2P endpoint {remote_addr} is cooling down"
+                )));
+            }
+        };
 
         loop {
             if preference_key.is_some_and(|target| self.preference_satisfied(dst_peer_id, target))
@@ -793,6 +843,9 @@ impl DirectConnectorManagerData {
                 .await;
             tracing::debug!(?ret, ?dst_peer_id, ?addr, "try_connect_to_ip return");
             if ret.is_ok() {
+                self.global_ctx
+                    .p2p_endpoint_retry()
+                    .succeeded(endpoint_attempt);
                 return Ok(DirectAttemptOutcome::Connected(preference_key));
             }
             if matches!(ret, Err(DirectConnectAttemptError::Guarded(_))) {
@@ -803,6 +856,7 @@ impl DirectConnectorManagerData {
                 .is_err_and(DirectConnectAttemptError::is_self_loop_signal)
             {
                 self.blacklist_loop_target(dst_peer_id, &addr);
+                self.record_endpoint_failure(endpoint_attempt);
                 return Err(ret.unwrap_err().into_error());
             }
 
@@ -833,8 +887,27 @@ impl DirectConnectorManagerData {
                     &addr,
                     DIRECT_CONNECTOR_FAILURE_COOLDOWN_SEC,
                 );
+                self.record_endpoint_failure(endpoint_attempt);
                 return Err(ret.unwrap_err().into_error());
             }
+        }
+    }
+
+    fn record_endpoint_failure(&self, endpoint_attempt: P2pEndpointAttempt) {
+        let key = endpoint_attempt.key();
+        if let Some(update) = self
+            .global_ctx
+            .p2p_endpoint_retry()
+            .failed(endpoint_attempt)
+        {
+            tracing::debug!(
+                peer_id = key.peer_id(),
+                remote_addr = ?key.remote_addr(),
+                scheme = ?key.scheme(),
+                stage = update.stage(),
+                cooldown_secs = update.cooldown().as_secs(),
+                "automatic direct P2P endpoint entered failure cooldown"
+            );
         }
     }
 
@@ -1026,6 +1099,9 @@ impl DirectConnectorManagerData {
                         candidate.url.scheme(),
                     )
                 });
+                let (scheme, remote_addr) = candidate
+                    .endpoint()
+                    .expect("expanded direct candidate must have a concrete IP endpoint");
                 tasks.spawn(async move {
                     if !delay.is_zero() {
                         tokio::time::sleep(delay).await;
@@ -1034,6 +1110,8 @@ impl DirectConnectorManagerData {
                         this,
                         dst_peer_id,
                         candidate.url.to_string(),
+                        remote_addr,
+                        scheme,
                         stealth_mode,
                         preference_key,
                     )
@@ -1476,7 +1554,10 @@ mod tests {
     };
 
     use crate::{
-        common::{error::Error, global_ctx::tests::get_mock_global_ctx},
+        common::{
+            error::Error, global_ctx::tests::get_mock_global_ctx,
+            p2p_endpoint_retry::P2pEndpointKey,
+        },
         connector::direct::{
             DirectConnectorManager, DirectConnectorManagerData, DstListenerUrlBlackListItem,
         },
@@ -1565,6 +1646,39 @@ mod tests {
             mapped_listener_port(&"udp://127.0.0.1".parse().unwrap()),
             Some(11010)
         );
+    }
+
+    #[test]
+    fn expanded_direct_candidate_preserves_exact_endpoint_key() {
+        let udp_v4 = DirectCandidate {
+            url: "udp://203.0.113.7:31010".parse().unwrap(),
+            is_lan: false,
+        };
+        assert_eq!(
+            udp_v4.endpoint(),
+            Some((
+                IpScheme::Udp,
+                "203.0.113.7:31010".parse::<SocketAddr>().unwrap()
+            ))
+        );
+
+        let tcp_v6 = DirectCandidate {
+            url: "tcp://[2001:db8::7]:31011".parse().unwrap(),
+            is_lan: false,
+        };
+        assert_eq!(
+            tcp_v6.endpoint(),
+            Some((
+                IpScheme::Tcp,
+                "[2001:db8::7]:31011".parse::<SocketAddr>().unwrap()
+            ))
+        );
+
+        let unresolved = DirectCandidate {
+            url: "tcp://peer.example:31011".parse().unwrap(),
+            is_lan: false,
+        };
+        assert_eq!(unresolved.endpoint(), None);
     }
 
     #[test]
@@ -1791,6 +1905,31 @@ mod tests {
                     1,
                     "tcp://127.0.0.1:10222".parse().unwrap()
                 ))
+        );
+
+        // The four protocol-internal connect attempts above are one Direct
+        // candidate failure, so they produce only the first cooldown stage.
+        let cooldown = p_a
+            .get_global_ctx()
+            .p2p_endpoint_retry()
+            .begin(P2pEndpointKey::new(
+                1,
+                IpScheme::Tcp,
+                "127.0.0.1:10222".parse().unwrap(),
+            ))
+            .unwrap_err();
+        assert_eq!(cooldown.stage(), 1);
+
+        // A newly advertised port remains an independent candidate.
+        assert!(
+            p_a.get_global_ctx()
+                .p2p_endpoint_retry()
+                .begin(P2pEndpointKey::new(
+                    1,
+                    IpScheme::Tcp,
+                    "127.0.0.1:10223".parse().unwrap(),
+                ))
+                .is_ok()
         );
     }
 

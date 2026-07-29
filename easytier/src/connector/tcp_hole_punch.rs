@@ -14,11 +14,18 @@ use crate::{
         PeerId,
         global_ctx::{ProtocolLoopScope, UnderlayBreakerKey, UnderlayBreakerScope},
         join_joinset_background,
+        p2p_endpoint_retry::P2pEndpointKey,
         stun::StunInfoCollectorTrait,
         transport_priority::TransportPathClass,
         underlay_guard,
     },
-    connector::udp_hole_punch::BackOff,
+    connector::udp_hole_punch::{
+        BackOff,
+        common::{
+            begin_hole_punch_endpoint_attempt, finish_hole_punch_endpoint_failure,
+            finish_hole_punch_endpoint_success,
+        },
+    },
     peers::{
         peer_manager::PeerManager,
         peer_task::{PeerTaskLauncher, PeerTaskManager},
@@ -366,6 +373,7 @@ impl TcpHolePunchConnectorData {
 
     async fn punch_as_initiator(self: Arc<Self>, dst_peer_id: PeerId) -> Result<(), Error> {
         let mut backoff = BackOff::new(vec![1000, 1000, 4000, 8000]);
+        let mut last_remote_addr = None;
 
         loop {
             if self.loop_blacklist.contains(&dst_peer_id) {
@@ -381,8 +389,32 @@ impl TcpHolePunchConnectorData {
             {
                 break;
             }
+            let settle_endpoint_failure = backoff.is_saturated();
             backoff.sleep_for_next_backoff().await;
-            if self.do_punch_as_initiator(dst_peer_id).await.is_ok() {
+            if let Some(remote_addr) = last_remote_addr
+                && let Err(cooldown) = self
+                    .peer_mgr
+                    .get_global_ctx()
+                    .p2p_endpoint_retry()
+                    .begin(P2pEndpointKey::new(dst_peer_id, IpScheme::Tcp, remote_addr))
+            {
+                // TCP's address exchange starts the responder's connect loop.
+                // Re-check the last observed exact endpoint before that RPC so
+                // a cooled target does not keep creating remote fanout.
+                tracing::debug!(
+                    ?dst_peer_id,
+                    ?remote_addr,
+                    stage = cooldown.stage(),
+                    remaining_ms = cooldown.remaining().as_millis(),
+                    "skip cooled TCP hole-punch endpoint before RPC exchange"
+                );
+                continue;
+            }
+            if self
+                .do_punch_as_initiator(dst_peer_id, &mut last_remote_addr, settle_endpoint_failure)
+                .await
+                .is_ok()
+            {
                 break;
             }
 
@@ -399,7 +431,12 @@ impl TcpHolePunchConnectorData {
     }
 
     #[tracing::instrument(skip(self), fields(dst_peer_id), err)]
-    async fn do_punch_as_initiator(&self, dst_peer_id: PeerId) -> Result<(), Error> {
+    async fn do_punch_as_initiator(
+        &self,
+        dst_peer_id: PeerId,
+        last_remote_addr: &mut Option<SocketAddr>,
+        settle_endpoint_failure: bool,
+    ) -> Result<(), Error> {
         let global_ctx = self.peer_mgr.get_global_ctx();
         if self.loop_blacklist.contains(&dst_peer_id) {
             tracing::warn!(
@@ -468,11 +505,18 @@ impl TcpHolePunchConnectorData {
             .listener_mapped_addr
             .ok_or(anyhow::anyhow!("listener_mapped_addr is required"))?;
         let remote_mapped_addr: SocketAddr = remote_mapped_addr.into();
+        *last_remote_addr = Some(remote_mapped_addr);
         tracing::info!(
             dst_peer_id,
             ?remote_mapped_addr,
             "tcp hole punch initiator rpc returned"
         );
+        let endpoint_attempt = begin_hole_punch_endpoint_attempt(
+            &global_ctx,
+            remote_mapped_addr,
+            dst_peer_id,
+            IpScheme::Tcp,
+        )?;
 
         if let Ok(()) = try_connect_to_remote(
             self.peer_mgr.clone(),
@@ -485,6 +529,7 @@ impl TcpHolePunchConnectorData {
         )
         .await
         {
+            finish_hole_punch_endpoint_success(&global_ctx, endpoint_attempt);
             tracing::info!(
                 dst_peer_id,
                 local_port,
@@ -523,11 +568,32 @@ impl TcpHolePunchConnectorData {
             "tcp hole punch initiator listening"
         );
 
-        tokio::time::timeout(
+        let accept_result = tokio::time::timeout(
             Duration::from_secs(10),
             self.accept_loop(&mut listener, dst_peer_id),
         )
-        .await??;
+        .await;
+        match accept_result {
+            Ok(Ok(())) => {
+                finish_hole_punch_endpoint_success(&global_ctx, endpoint_attempt);
+            }
+            Ok(Err(error)) => {
+                finish_hole_punch_endpoint_failure(
+                    &global_ctx,
+                    endpoint_attempt,
+                    settle_endpoint_failure,
+                );
+                return Err(error);
+            }
+            Err(error) => {
+                finish_hole_punch_endpoint_failure(
+                    &global_ctx,
+                    endpoint_attempt,
+                    settle_endpoint_failure,
+                );
+                return Err(error.into());
+            }
+        }
 
         tracing::info!(
             dst_peer_id,

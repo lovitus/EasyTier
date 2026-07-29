@@ -15,8 +15,8 @@ use tokio::{sync::Mutex, task::JoinHandle};
 
 use crate::{
     common::{
-        PeerId, global_ctx::ProtocolLoopScope, stun::StunInfoCollectorTrait,
-        transport_priority::TransportPathClass,
+        PeerId, global_ctx::ProtocolLoopScope, p2p_endpoint_retry::P2pEndpointKey,
+        stun::StunInfoCollectorTrait, transport_priority::TransportPathClass,
     },
     peers::{
         peer_manager::PeerManager,
@@ -198,6 +198,15 @@ impl BackOff {
         self.current_idx = self.current_idx.saturating_sub(1);
     }
 
+    /// True only after the existing retry ramp has reached its final delay.
+    ///
+    /// Endpoint cooldown uses this boundary so it suppresses indefinite
+    /// steady-state retries without removing any of the protocol's original
+    /// warm-up rounds.
+    pub fn is_saturated(&self) -> bool {
+        self.current_idx == self.backoffs_ms.len() - 1
+    }
+
     pub async fn sleep_for_next_backoff(&mut self) {
         let backoff = self.next_backoff();
         if backoff > 0 {
@@ -326,6 +335,14 @@ impl UdpHoePunchConnectorData {
                 op(false);
                 false
             }
+            Err(e) if common::is_p2p_endpoint_cooled_error(&e) => {
+                // Address discovery is intentionally still allowed while an
+                // endpoint cools. Do not roll back BackOff (which would poll
+                // the RPC in a tight loop), and do not advance symmetric port
+                // rounds because no burst actually ran.
+                tracing::debug!(?e, "hole-punch endpoint is cooling down");
+                false
+            }
             Err(e) => {
                 tracing::info!("hole punching failed, err: {}", e);
                 op(true);
@@ -342,11 +359,16 @@ impl UdpHoePunchConnectorData {
             if self.loop_blacklist.contains(&task_info.dst_peer_id) {
                 break;
             }
+            let settle_endpoint_failure = backoff.is_saturated();
             backoff.sleep_for_next_backoff().await;
 
             let ret = self
                 .cone_client
-                .do_hole_punching(task_info.dst_peer_id, task_info.disable_udp_stealth)
+                .do_hole_punching(
+                    task_info.dst_peer_id,
+                    task_info.disable_udp_stealth,
+                    settle_endpoint_failure,
+                )
                 .await;
 
             if self
@@ -371,13 +393,14 @@ impl UdpHoePunchConnectorData {
             if self.loop_blacklist.contains(&task_info.dst_peer_id) {
                 break;
             }
+            let settle_endpoint_failure = backoff.is_saturated();
             backoff.sleep_for_next_backoff().await;
 
             // always try cone first
             if !RUN_TESTING.load(std::sync::atomic::Ordering::Relaxed) {
                 let ret = self
                     .cone_client
-                    .do_hole_punching(task_info.dst_peer_id, task_info.disable_udp_stealth)
+                    .do_hole_punching(task_info.dst_peer_id, task_info.disable_udp_stealth, false)
                     .await;
                 if self
                     .handle_punch_result(task_info.dst_peer_id, ret, None, None)
@@ -398,6 +421,7 @@ impl UdpHoePunchConnectorData {
                         &mut port_idx,
                         task_info.my_nat_type,
                         task_info.disable_udp_stealth,
+                        settle_endpoint_failure,
                     )
                     .await
             };
@@ -422,18 +446,20 @@ impl UdpHoePunchConnectorData {
     async fn both_easy_sym(self: Arc<Self>, task_info: PunchTaskInfo) -> Result<(), Error> {
         let mut backoff =
             BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000, 64000]);
+        let mut last_remote_addr = None;
 
         loop {
             if self.loop_blacklist.contains(&task_info.dst_peer_id) {
                 break;
             }
+            let settle_endpoint_failure = backoff.is_saturated();
             backoff.sleep_for_next_backoff().await;
 
             // always try cone first
             if !RUN_TESTING.load(std::sync::atomic::Ordering::Relaxed) {
                 let ret = self
                     .cone_client
-                    .do_hole_punching(task_info.dst_peer_id, task_info.disable_udp_stealth)
+                    .do_hole_punching(task_info.dst_peer_id, task_info.disable_udp_stealth, false)
                     .await;
                 if self
                     .handle_punch_result(task_info.dst_peer_id, ret, None, None)
@@ -441,6 +467,30 @@ impl UdpHoePunchConnectorData {
                 {
                     break;
                 }
+            }
+
+            if let Some(remote_addr) = last_remote_addr
+                && let Err(cooldown) =
+                    self.peer_mgr
+                        .get_global_ctx()
+                        .p2p_endpoint_retry()
+                        .begin(P2pEndpointKey::new(
+                            task_info.dst_peer_id,
+                            IpScheme::Udp,
+                            remote_addr,
+                        ))
+            {
+                // The both-easy RPC starts remote socket fanout before returning
+                // its mapped address. Once an exact endpoint has been observed,
+                // gate that RPC itself so cooling also suppresses responder work.
+                tracing::debug!(
+                    dst_peer_id = task_info.dst_peer_id,
+                    ?remote_addr,
+                    stage = cooldown.stage(),
+                    remaining_ms = cooldown.remaining().as_millis(),
+                    "skip cooled both-easy UDP endpoint before fanout RPC"
+                );
+                continue;
             }
 
             let mut is_busy = false;
@@ -456,6 +506,8 @@ impl UdpHoePunchConnectorData {
                         task_info.dst_nat_type,
                         task_info.disable_udp_stealth,
                         &mut is_busy,
+                        &mut last_remote_addr,
+                        settle_endpoint_failure,
                     )
                     .await
             };
@@ -740,7 +792,22 @@ pub mod tests {
     use crate::proto::common::NatType;
     use crate::tunnel::common::tests::wait_for_condition;
 
-    use super::{RUN_TESTING, UdpHolePunchConnector, UdpHolePunchPeerTaskLauncher};
+    use super::{BackOff, RUN_TESTING, UdpHolePunchConnector, UdpHolePunchPeerTaskLauncher};
+
+    #[test]
+    fn endpoint_cooldown_starts_only_after_existing_backoff_ramp() {
+        let delays = [1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000, 64000];
+        let mut backoff = BackOff::new(delays.to_vec());
+
+        for expected in &delays[..delays.len() - 1] {
+            assert!(!backoff.is_saturated());
+            assert_eq!(backoff.next_backoff(), *expected);
+        }
+
+        assert!(backoff.is_saturated());
+        assert_eq!(backoff.next_backoff(), 64000);
+        assert!(backoff.is_saturated());
+    }
 
     pub fn replace_stun_info_collector(peer_mgr: Arc<PeerManager>, udp_nat_type: NatType) {
         let collector = Box::new(MockStunInfoCollector { udp_nat_type });

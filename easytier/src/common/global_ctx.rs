@@ -419,6 +419,7 @@ pub struct GlobalCtx {
     flags: ArcSwap<Flags>,
     protocol_loop_suppression: Mutex<[ProtocolLoopSuppressionSlot; PROTOCOL_LOOP_STATE_SLOTS]>,
     underlay_breaker: Mutex<UnderlayBreakerState>,
+    p2p_endpoint_retry: crate::common::p2p_endpoint_retry::P2pEndpointRetryTable,
 
     // Runtime/base advertised feature flags before config-owned fields are
     // overlaid by set_flags. Keep this separate so config patches do not erase
@@ -657,6 +658,7 @@ impl GlobalCtx {
                 [ProtocolLoopSuppressionSlot::default(); PROTOCOL_LOOP_STATE_SLOTS],
             ),
             underlay_breaker: Mutex::new(UnderlayBreakerState::default()),
+            p2p_endpoint_retry: crate::common::p2p_endpoint_retry::P2pEndpointRetryTable::new(),
 
             base_feature_flags: ArcSwap::new(Arc::new(base_feature_flags)),
 
@@ -676,6 +678,12 @@ impl GlobalCtx {
 
     pub fn requested_nic_backend(&self) -> NicBackend {
         self.config.get_nic_backend()
+    }
+
+    pub(crate) fn p2p_endpoint_retry(
+        &self,
+    ) -> &crate::common::p2p_endpoint_retry::P2pEndpointRetryTable {
+        &self.p2p_endpoint_retry
     }
 
     pub fn resolved_nic_backend(&self) -> Option<NicBackend> {
