@@ -2,7 +2,6 @@ import { type Api, type NetworkTypes } from "easytier-frontend-lib";
 import { type } from "@tauri-apps/plugin-os";
 import * as backend from "~/composables/backend";
 import { prepareVpnService } from "~/composables/mobile_vpn";
-import { open } from "@tauri-apps/plugin-shell";
 
 export class GUIRemoteClient implements Api.RemoteClient {
     async validate_config(config: NetworkTypes.NetworkConfig): Promise<Api.ValidateConfigResponse> {
@@ -15,7 +14,7 @@ export class GUIRemoteClient implements Api.RemoteClient {
         await backend.saveMihomoConfig(config, contents);
     }
     async open_mihomo_dashboard(instanceId: string): Promise<void> {
-        await open(await backend.getMihomoDashboardUrl(instanceId));
+        await backend.openMihomoDashboard(instanceId);
     }
     async update_policy_rule_data(instanceId: string, resource: Api.PolicyRuleDataResource, sourceUrl?: string): Promise<Api.UpdatePolicyRuleDataResponse> {
         return backend.updatePolicyRuleData(instanceId, resource, sourceUrl);

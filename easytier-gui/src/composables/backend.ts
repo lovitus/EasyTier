@@ -120,6 +120,10 @@ export async function getMihomoDashboardUrl(instanceId: string) {
   return await invoke<string>('get_mihomo_dashboard_url', { instanceId })
 }
 
+export async function openMihomoDashboard(instanceId: string) {
+  await invoke('open_mihomo_dashboard', { instanceId })
+}
+
 export async function updatePolicyRuleData(instanceId: string, resource: string, sourceUrl?: string) {
   return await invoke<Api.UpdatePolicyRuleDataResponse>('update_policy_rule_data', {
     instanceId,

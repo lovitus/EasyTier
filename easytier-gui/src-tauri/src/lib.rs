@@ -368,6 +368,128 @@ async fn get_mihomo_dashboard_url(app: AppHandle, instance_id: String) -> Result
         .map_err(|e| e.to_string())
 }
 
+const MIHOMO_DASHBOARD_WINDOW_LABEL: &str = "mihomo-zashboard";
+const MIHOMO_DASHBOARD_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+#[derive(Default)]
+struct DashboardIdleGeneration(std::sync::atomic::AtomicU64);
+
+impl DashboardIdleGeneration {
+    fn cancel(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn schedule(&self) -> u64 {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+    }
+
+    fn should_close(&self, generation: u64, focused: bool) -> bool {
+        !focused && self.0.load(std::sync::atomic::Ordering::Relaxed) == generation
+    }
+}
+
+fn should_hide_instead_of_close(window_label: &str) -> bool {
+    window_label == "main"
+}
+
+#[tauri::command]
+async fn open_mihomo_dashboard(app: AppHandle, instance_id: String) -> Result<(), String> {
+    let instance_id = instance_id
+        .parse()
+        .map_err(|e: uuid::Error| e.to_string())?;
+    let url = get_client_manager!()?
+        .handle_get_mihomo_dashboard_url(app.clone(), instance_id)
+        .await
+        .map(|response| response.url)
+        .map_err(|e| e.to_string())?;
+    let url = tauri::Url::parse(&url).map_err(|e| e.to_string())?;
+
+    if let Some(window) = app.get_webview_window(MIHOMO_DASHBOARD_WINDOW_LABEL) {
+        window.navigate(url).map_err(|e| e.to_string())?;
+        window.show().map_err(|e| e.to_string())?;
+        if window.is_minimized().unwrap_or_default() {
+            window.unminimize().map_err(|e| e.to_string())?;
+        }
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        MIHOMO_DASHBOARD_WINDOW_LABEL,
+        tauri::WebviewUrl::External(url),
+    )
+    .title("EasyTier Zashboard")
+    .inner_size(1180.0, 760.0)
+    .min_inner_size(720.0, 480.0)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+    let idle_generation = std::sync::Arc::new(DashboardIdleGeneration::default());
+    window.on_window_event({
+        let idle_window = window.clone();
+        move |event| match event {
+            tauri::WindowEvent::Focused(true) => {
+                idle_generation.cancel();
+            }
+            tauri::WindowEvent::Focused(false) => {
+                let generation = idle_generation.schedule();
+                let idle_generation = idle_generation.clone();
+                let idle_window = idle_window.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(MIHOMO_DASHBOARD_IDLE_TIMEOUT).await;
+                    let focused = idle_window.is_focused().unwrap_or_default();
+                    if idle_generation.should_close(generation, focused) {
+                        let _ = idle_window.close();
+                    }
+                });
+            }
+            _ => {}
+        }
+    });
+    window.set_focus().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod dashboard_window_policy_tests {
+    use super::*;
+
+    #[test]
+    fn main_window_close_keeps_existing_background_behavior() {
+        assert!(should_hide_instead_of_close("main"));
+    }
+
+    #[test]
+    fn dashboard_and_future_auxiliary_windows_close_normally() {
+        assert!(!should_hide_instead_of_close(MIHOMO_DASHBOARD_WINDOW_LABEL));
+        assert!(!should_hide_instead_of_close("future-auxiliary-window"));
+    }
+
+    #[test]
+    fn idle_dashboard_closes_only_for_the_current_unfocused_generation() {
+        let idle = DashboardIdleGeneration::default();
+        let first = idle.schedule();
+        assert!(idle.should_close(first, false));
+        assert!(!idle.should_close(first, true));
+
+        idle.cancel();
+        assert!(!idle.should_close(first, false));
+
+        let second = idle.schedule();
+        let third = idle.schedule();
+        assert!(!idle.should_close(second, false));
+        assert!(idle.should_close(third, false));
+    }
+
+    #[test]
+    fn dashboard_idle_timeout_remains_bounded() {
+        assert_eq!(
+            MIHOMO_DASHBOARD_IDLE_TIMEOUT,
+            std::time::Duration::from_secs(15 * 60)
+        );
+    }
+}
+
 #[tauri::command]
 async fn update_policy_rule_data(
     app: AppHandle,
@@ -1566,6 +1688,7 @@ pub fn run_gui() -> std::process::ExitCode {
             open_mihomo_config,
             save_mihomo_config,
             get_mihomo_dashboard_url,
+            open_mihomo_dashboard,
             update_policy_rule_data,
             list_policy_rule_data_categories,
             list_policy_outbound_interfaces,
@@ -1584,9 +1707,11 @@ pub fn run_gui() -> std::process::ExitCode {
         .on_window_event(|_win, event| match event {
             #[cfg(not(target_os = "android"))]
             tauri::WindowEvent::CloseRequested { api, .. } => {
-                let _ = _win.hide();
-                let _ = set_dock_visibility(_win.app_handle().clone(), false);
-                api.prevent_close();
+                if should_hide_instead_of_close(_win.label()) {
+                    let _ = _win.hide();
+                    let _ = set_dock_visibility(_win.app_handle().clone(), false);
+                    api.prevent_close();
+                }
             }
             _ => {}
         })
