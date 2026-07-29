@@ -302,11 +302,10 @@ jobs:
               "$target" "$gost" "$gost_metadata"
             if [[ "$target" == *windows* ]]; then backend="leaf-portable"; fi
             if [[ "$target" != *freebsd* ]]; then
-              sidecar="$artifact_dir/easytier-hev-socks-egress$suffix"
-              test -f "$sidecar"
-              if [[ "$target" != *windows* ]]; then test -x "$sidecar"; fi
-              build_info="$artifact_dir/SOCKS_EGRESS_BUILD_INFO.txt"
-              test -f "$build_info"
+            sidecar="$artifact_dir/easytier-hev-socks-egress$suffix"
+            test -f "$sidecar"
+            build_info="$artifact_dir/SOCKS_EGRESS_BUILD_INFO.txt"
+            test -f "$build_info"
               grep -Fx "target=$target" "$build_info"
               grep -Fx "backend=$backend" "$build_info"
               python3 - "$sidecar" "$target" <<'PY'
@@ -331,10 +330,12 @@ jobs:
           if machine != wanted:
               raise SystemExit(f"release socks-egress machine mismatch: expected {wanted}, got {machine}")
           PY
-            fi
-            if [[ "$target" == *apple-darwin || "$target" == *freebsd* ]]; then
-              test -x "$artifact_dir/easytier-gost-guardian"
-            fi
+          fi
+          if [[ "$target" == *apple-darwin || "$target" == *freebsd* ]]; then
+            # download-artifact does not preserve Unix modes. The packaging
+            # step below restores 0755 for every shipped executable.
+            test -f "$artifact_dir/easytier-gost-guardian"
+          fi
           done
 
       - name: Fetch and verify corresponding Mihomo source
