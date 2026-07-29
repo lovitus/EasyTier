@@ -1,0 +1,71 @@
+# EasyTier Changes
+
+## v3.0.6
+
+Released on 2026-07-29 from
+`a8a11c076c75a109c1fd882a32b206a60b0bf60f`.
+
+### Major changes since v2.6.10
+
+- Added optional policy routing with three explicit backends: `off`, `mihomo`,
+  and the retained `leaf` compatibility backend.
+- Added the desktop and Unix Mihomo backend without parsing or rewriting user
+  proxy nodes, groups, rules, subscriptions, or provider semantics. EasyTier
+  validates a managed runtime copy while the user-selected YAML remains the
+  authoritative source.
+- Added a Core-owned GOST SOCKS5 mesh entry with TCP, UDP, bounded restart,
+  readiness checks, loopback process listeners, and parent-owned cleanup.
+  Mihomo can use standard SOCKS5 and `dialer-proxy` chains to enter the mesh.
+- Extended the Leaf compatibility backend with Shadowsocks/UoT, Trojan, VMess,
+  VLESS, WebSocket/TLS transport composition, bounded dual-stack FakeDNS,
+  GeoIP/GeoSite category indexing, port-range rules, DNS defaults, and
+  dual-stack native proxy endpoint handling.
+- Added compact policy editing, separate Leaf and Mihomo YAML state, backend
+  validation, local Zashboard access, runtime status, field examples, and
+  cached Geo category selection in the GUI.
+- Improved macOS policy DNS and interface-change recovery, scoped routing,
+  QUIC truncated-datagram handling, and interface snapshot reuse.
+- Improved Android Leaf/HEV ownership, DNS/network recovery, configuration
+  retention, FakeDNS, VPN capture, and lifecycle handling. Android and OHOS do
+  not enable the Mihomo backend.
+- Hardened child-process ownership, three-node timing, package provenance,
+  target architecture checks, workflow-pinned Mihomo/GOST payloads, and
+  release-time permission restoration.
+- Reused cached traffic metric handles on the Core hot path. Experimental GRO,
+  dual-TUN, large-window, and Leaf packet-batching attempts that did not meet
+  cross-host acceptance criteria are not included.
+
+### Measured candidate results
+
+- Linux nested Mihomo -> GOST -> mesh -> peer GOST TCP reached a five-run
+  median of `200.471 Mbit/s` for 32 MiB transfers, versus about `55 Mbit/s` on
+  the superseded userspace ingress.
+- UDP echoes of `64`, `1200`, and `8192` bytes passed before and after forced
+  GOST restart.
+- Normal shutdown removed GOST, Mihomo, SOCKS listeners, and TUN state.
+
+### Compatibility and known boundaries
+
+- Existing non-policy EasyTier use remains available. Leaf is retained for
+  compatibility but is deprecated for new desktop and Unix deployments.
+- Mihomo is not packaged for current MIPS, MIPSel, ARM/ARMv7, or LoongArch
+  targets whose mappings remain `needs_review`.
+- The macOS DMG is code-signed but not notarized.
+- A transient macOS `dscacheutil` zombie can be an upstream Mihomo grandchild;
+  EasyTier still reaps its directly managed Mihomo process.
+- The first Mihomo configuration validation may download Geo data. If the GUI
+  request times out while those files are still growing, wait for the download
+  to finish and save again.
+- Formal Windows compilation, packaging, installation, and payload inspection
+  passed. A clean end-to-end Windows policy-routing smoke was not completed
+  before release because the available routing host had another active TUN.
+
+### Release evidence
+
+- Core: `30412988643`
+- GUI: `30412990463`
+- Mobile: `30412992139`
+- OHOS: `30412993844`
+- Test: `30412995447`
+- Release: `30419459948`
+- Published assets: 46

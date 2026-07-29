@@ -526,7 +526,7 @@ web:
     view_policy_yaml: 查看 Policy YAML
     mihomo_file_api_unavailable: 当前客户端不支持编辑 Mihomo 文件
     mihomo_file_open_failed: 打开 Mihomo 配置文件失败
-    mihomo_file_save_failed: 保存 Mihomo 配置文件失败
+    mihomo_file_save_failed: 保存 Mihomo 配置文件失败。如果校验超时，Mihomo 可能仍在下载 Geo 数据；请等待下载完成后再次保存
     open_mihomo_dashboard: Zashboard
     mihomo_dashboard_failed: 打开 Zashboard 失败
     policy_saved_restart_required: Policy 配置已保存，重启该网络后生效

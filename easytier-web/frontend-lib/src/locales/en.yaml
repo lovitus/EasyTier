@@ -526,7 +526,7 @@ web:
     view_policy_yaml: View Policy YAML
     mihomo_file_api_unavailable: Mihomo file editing is unavailable through this client
     mihomo_file_open_failed: Failed to open Mihomo config file
-    mihomo_file_save_failed: Failed to save Mihomo config file
+    mihomo_file_save_failed: Failed to save Mihomo config file. If validation timed out, Mihomo may still be downloading Geo data; wait for the download to finish, then save again
     open_mihomo_dashboard: Zashboard
     mihomo_dashboard_failed: Failed to open Zashboard
     policy_saved_restart_required: Policy configuration saved; restart this network to apply it

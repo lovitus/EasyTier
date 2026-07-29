@@ -2019,6 +2019,12 @@ impl MihomoCoreOwner {
     /// Stop the process-wide supervisor before Core tears down its Tokio
     /// runtime. The owner lives in a `OnceLock`, so normal process shutdown
     /// cannot rely on `Drop` to reap the Mihomo child and its TUN.
+    ///
+    /// On macOS, Mihomo may launch `dscacheutil` as its own short-lived child.
+    /// That grandchild is not owned by EasyTier and cannot be reaped with
+    /// `waitpid` here. A transient `dscacheutil` zombie is therefore an
+    /// accepted upstream Mihomo limitation, not evidence that this owner
+    /// leaked its directly managed Mihomo process.
     pub fn shutdown(&self) -> anyhow::Result<()> {
         let thread = self
             .thread
