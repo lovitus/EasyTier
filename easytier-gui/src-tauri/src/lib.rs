@@ -1713,12 +1713,12 @@ pub fn run_gui() -> std::process::ExitCode {
         ])
         .on_window_event(|_win, event| match event {
             #[cfg(not(target_os = "android"))]
-            tauri::WindowEvent::CloseRequested { api, .. } => {
-                if should_hide_instead_of_close(_win.label()) {
-                    let _ = _win.hide();
-                    let _ = set_dock_visibility(_win.app_handle().clone(), false);
-                    api.prevent_close();
-                }
+            tauri::WindowEvent::CloseRequested { api, .. }
+                if should_hide_instead_of_close(_win.label()) =>
+            {
+                let _ = _win.hide();
+                let _ = set_dock_visibility(_win.app_handle().clone(), false);
+                api.prevent_close();
             }
             _ => {}
         })
