@@ -390,11 +390,7 @@ impl UdpSocketArray {
     }
 
     #[instrument(err)]
-    pub async fn send_with_all(
-        &self,
-        data: &[u8],
-        addr: SocketAddr,
-    ) -> Result<usize, anyhow::Error> {
+    pub async fn send_with_all(&self, data: &[u8], addr: SocketAddr) -> Result<(), anyhow::Error> {
         tracing::info!(?addr, "sending hole punching packet");
 
         let sockets = self
@@ -402,10 +398,6 @@ impl UdpSocketArray {
             .iter()
             .map(|s| s.value().clone())
             .collect::<Vec<_>>();
-        // Mihomo keeps one UDP flow per local socket/remote endpoint tuple.
-        // Retransmitting three packets on that tuple must not look like three
-        // new failed underlay attempts to the burst guard.
-        let attempted_sockets = sockets.len();
 
         for socket in sockets.iter() {
             for _ in 0..3 {
@@ -413,7 +405,7 @@ impl UdpSocketArray {
             }
         }
 
-        Ok(attempted_sockets)
+        Ok(())
     }
 
     #[instrument(ret(level = Level::DEBUG))]
@@ -967,25 +959,11 @@ mod tests {
     };
 
     use super::{
-        MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS, UdpHolePunchListener, UdpSocketArray,
+        MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS, UdpHolePunchListener,
         disable_udp_stealth_for_selected_listener, easytier_managed_local_addr_error,
         legacy_udp_hole_punch_is_rejected, negotiate_udp_listener_stealth,
         should_create_public_listener, should_retry_public_listener_selection,
     };
-
-    #[tokio::test]
-    async fn send_with_all_counts_socket_fanout_not_retransmit_packets() {
-        let udp_array = UdpSocketArray::new(2, get_mock_global_ctx());
-        udp_array.start().await.unwrap();
-        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-
-        let attempted_sockets = udp_array
-            .send_with_all(b"punch", receiver.local_addr().unwrap())
-            .await
-            .unwrap();
-
-        assert_eq!(attempted_sockets, 2);
-    }
 
     #[tokio::test]
     async fn local_addr_check_rejects_easytier_public_ipv6_route() {
