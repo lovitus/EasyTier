@@ -193,17 +193,18 @@ jobs:
           MIHOMO_RELEASE_MANIFEST: ${{ github.workspace }}/target/mihomo-release-manifest.json
         run: |
           set -euo pipefail
-          core_manifest_count=0
-          while IFS= read -r -d '' candidate_manifest; do
+          verify_core_manifest() {
+            local artifact_dir="$1"
+            local candidate_manifest="$artifact_dir/MIHOMO_RELEASE_MANIFEST.json"
+            if [[ ! -f "$candidate_manifest" ]]; then
+              echo "::error title=Missing Mihomo release manifest::$artifact_dir"
+              exit 1
+            fi
             cmp --silent "$MIHOMO_RELEASE_MANIFEST" "$candidate_manifest" || {
               echo "::error title=Mihomo version drift::$candidate_manifest differs from the immutable candidate manifest"
               exit 1
             }
-            core_manifest_count=$((core_manifest_count + 1))
-          done < <(
-            find release_assets -mindepth 2 -maxdepth 2 -type f \
-              -name 'MIHOMO_RELEASE_MANIFEST.json' -print0
-          )
+          }
           gui_manifest_count=0
           gui_targets=(
             x86_64-unknown-linux-gnu
@@ -227,7 +228,6 @@ jobs:
             }
             gui_manifest_count=$((gui_manifest_count + 1))
           done
-          test "$core_manifest_count" -eq 9
           test "$gui_manifest_count" -eq "${#gui_targets[@]}"
           declare -A mihomo_targets=(
             [easytier-linux-x86_64]=x86_64-unknown-linux-musl
@@ -243,6 +243,7 @@ jobs:
           for artifact in "${!mihomo_targets[@]}"; do
             artifact_dir=$(find release_assets -type d -name "$artifact" -print -quit)
             test -n "$artifact_dir"
+            verify_core_manifest "$artifact_dir"
             suffix=""
             if [[ "$artifact" == easytier-windows-* ]]; then suffix=".exe"; fi
             test -f "$artifact_dir/easytier-core$suffix"
@@ -268,6 +269,7 @@ jobs:
           do
             artifact_dir=$(find release_assets -type d -name "$artifact" -print -quit)
             test -n "$artifact_dir"
+            verify_core_manifest "$artifact_dir"
             test -f "$artifact_dir/MIHOMO_UNSUPPORTED.txt"
             if find "$artifact_dir" -maxdepth 1 -type f \
               -name 'easytier-mihomo*' -print -quit | grep -q .
