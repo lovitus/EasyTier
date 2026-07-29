@@ -7,6 +7,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
     common::{PeerId, upnp},
+    connector::punch_storm::{PunchBurstTrace, PunchStormGuard},
     connector::udp_hole_punch::common::{
         HOLE_PUNCH_PACKET_BODY_LEN, UdpSocketArray, apply_hole_punch_socket_mark,
         disable_udp_stealth_for_selected_listener, should_request_udp_stealth,
@@ -103,6 +104,8 @@ impl PunchConeHoleClient {
         &self,
         dst_peer_id: PeerId,
         disable_udp_stealth: bool,
+        burst_trace: &mut PunchBurstTrace,
+        storm_guard: &mut PunchStormGuard,
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // Check if peer is blacklisted
         if self.blacklist.contains(&dst_peer_id) {
@@ -151,6 +154,11 @@ impl PunchConeHoleClient {
         let remote_mapped_addr = resp.listener_mapped_addr.ok_or(anyhow::anyhow!(
             "select_punch_listener response missing listener_mapped_addr"
         ))?;
+        let remote_target = remote_mapped_addr.into();
+        let has_live_peer = self.peer_mgr.get_peer_map().has_peer(dst_peer_id);
+        if !burst_trace.begin_target(storm_guard, Instant::now(), has_live_peer, remote_target) {
+            return Ok(None);
+        }
 
         let mut preflight = super::common::prepare_hole_punch_attempt(
             &global_ctx,
@@ -199,7 +207,7 @@ impl PunchConeHoleClient {
                 .with_context(|| "failed to send hole punch packet from local")
         };
 
-        send_from_local().await?;
+        burst_trace.add_attempts(send_from_local().await?);
 
         let punch_task = AbortOnDropHandle::new(tokio::spawn(async move {
             if let Err(e) = rpc_stub
@@ -270,13 +278,18 @@ impl PunchConeHoleClient {
 pub mod tests {
     use std::sync::Arc;
 
+    use hotpath::instant::Instant;
+
     use crate::{
         common::upnp::{
             reset_udp_port_mapping_attempts_for_test, udp_port_mapping_attempts_for_test,
         },
-        connector::udp_hole_punch::{
-            UdpHolePunchConnector, cone::PunchConeHoleClient,
-            tests::create_mock_peer_manager_with_mock_stun,
+        connector::{
+            punch_storm::{PunchBurstTrace, PunchStormGuard},
+            udp_hole_punch::{
+                UdpHolePunchConnector, cone::PunchConeHoleClient,
+                tests::create_mock_peer_manager_with_mock_stun,
+            },
         },
         peers::tests::{connect_peer_manager, wait_route_appear, wait_route_appear_with_cost},
         proto::common::NatType,
@@ -323,8 +336,10 @@ pub mod tests {
 
         reset_udp_port_mapping_attempts_for_test();
 
+        let mut burst_trace = PunchBurstTrace::default();
+        let mut storm_guard = PunchStormGuard::new(Instant::now());
         let ret = PunchConeHoleClient::new(p_a.clone(), Arc::new(timedmap::TimedMap::new()))
-            .do_hole_punching(p_c.my_peer_id(), false)
+            .do_hole_punching(p_c.my_peer_id(), false, &mut burst_trace, &mut storm_guard)
             .await;
 
         assert!(ret.is_err());
