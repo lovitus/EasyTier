@@ -37,7 +37,6 @@ use crate::{
 };
 
 use crate::connector::{
-    punch_storm::{FAILURE_WINDOW, PunchBurstTrace, PunchStormGuard, SILENCE_DURATION},
     should_attempt_ranked_hole_punch, should_background_p2p_with_peer,
     should_downgrade_udp_stealth, should_try_p2p_with_peer,
 };
@@ -259,15 +258,13 @@ impl UdpHoePunchConnectorData {
         );
     }
 
-    #[tracing::instrument(skip(self, storm_guard, burst_trace))]
+    #[tracing::instrument(skip(self))]
     async fn handle_punch_result(
         &self,
         dst_peer_id: PeerId,
         ret: Result<Option<Box<dyn Tunnel>>, Error>,
         backoff: Option<&mut BackOff>,
         round: Option<&mut u32>,
-        storm_guard: Option<&mut PunchStormGuard>,
-        burst_trace: Option<&PunchBurstTrace>,
     ) -> bool {
         // Legacy fallback: production hole-punch paths no longer record
         // ProtocolLoopScope::HolePunch into GlobalCtx, so this branch is
@@ -321,31 +318,11 @@ impl UdpHoePunchConnectorData {
                     op(true);
                     false
                 } else {
-                    if let Some(guard) = storm_guard {
-                        guard.record_success(Instant::now());
-                    }
                     true
                 }
             }
             Ok(None) => {
-                if burst_trace.is_some_and(PunchBurstTrace::is_suppressed) {
-                    return false;
-                }
                 tracing::info!("hole punching failed, no punch tunnel");
-                if let (Some(guard), Some(trace)) = (storm_guard, burst_trace)
-                    && guard.record_failed_burst(Instant::now(), trace)
-                {
-                    tracing::warn!(
-                        dst_peer_id,
-                        protocol = "udp",
-                        target = ?trace.target(),
-                        window_failed_fanout = guard.failed_attempts_in_window(),
-                        burst_failed_fanout = trace.failed_attempts(),
-                        window_secs = FAILURE_WINDOW.as_secs(),
-                        silence_secs = SILENCE_DURATION.as_secs(),
-                        "repeated failed hole-punch target temporarily silenced"
-                    );
-                }
                 op(false);
                 false
             }
@@ -360,7 +337,6 @@ impl UdpHoePunchConnectorData {
     #[tracing::instrument(skip(self))]
     async fn cone_to_cone(self: Arc<Self>, task_info: PunchTaskInfo) -> Result<(), Error> {
         let mut backoff = BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000]);
-        let mut storm_guard = PunchStormGuard::new(Instant::now());
 
         loop {
             if self.loop_blacklist.contains(&task_info.dst_peer_id) {
@@ -368,26 +344,13 @@ impl UdpHoePunchConnectorData {
             }
             backoff.sleep_for_next_backoff().await;
 
-            let mut burst_trace = PunchBurstTrace::default();
             let ret = self
                 .cone_client
-                .do_hole_punching(
-                    task_info.dst_peer_id,
-                    task_info.disable_udp_stealth,
-                    &mut burst_trace,
-                    &mut storm_guard,
-                )
+                .do_hole_punching(task_info.dst_peer_id, task_info.disable_udp_stealth)
                 .await;
 
             if self
-                .handle_punch_result(
-                    task_info.dst_peer_id,
-                    ret,
-                    Some(&mut backoff),
-                    None,
-                    Some(&mut storm_guard),
-                    Some(&burst_trace),
-                )
+                .handle_punch_result(task_info.dst_peer_id, ret, Some(&mut backoff), None)
                 .await
             {
                 break;
@@ -403,35 +366,21 @@ impl UdpHoePunchConnectorData {
             BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000, 64000]);
         let mut round = 0;
         let mut port_idx = rand::random();
-        let mut storm_guard = PunchStormGuard::new(Instant::now());
 
         loop {
             if self.loop_blacklist.contains(&task_info.dst_peer_id) {
                 break;
             }
             backoff.sleep_for_next_backoff().await;
-            let mut burst_trace = PunchBurstTrace::default();
 
             // always try cone first
             if !RUN_TESTING.load(std::sync::atomic::Ordering::Relaxed) {
                 let ret = self
                     .cone_client
-                    .do_hole_punching(
-                        task_info.dst_peer_id,
-                        task_info.disable_udp_stealth,
-                        &mut burst_trace,
-                        &mut storm_guard,
-                    )
+                    .do_hole_punching(task_info.dst_peer_id, task_info.disable_udp_stealth)
                     .await;
                 if self
-                    .handle_punch_result(
-                        task_info.dst_peer_id,
-                        ret,
-                        None,
-                        None,
-                        Some(&mut storm_guard),
-                        None,
-                    )
+                    .handle_punch_result(task_info.dst_peer_id, ret, None, None)
                     .await
                 {
                     break;
@@ -449,8 +398,6 @@ impl UdpHoePunchConnectorData {
                         &mut port_idx,
                         task_info.my_nat_type,
                         task_info.disable_udp_stealth,
-                        &mut burst_trace,
-                        &mut storm_guard,
                     )
                     .await
             };
@@ -461,8 +408,6 @@ impl UdpHoePunchConnectorData {
                     ret,
                     Some(&mut backoff),
                     Some(&mut round),
-                    Some(&mut storm_guard),
-                    Some(&burst_trace),
                 )
                 .await
             {
@@ -477,35 +422,21 @@ impl UdpHoePunchConnectorData {
     async fn both_easy_sym(self: Arc<Self>, task_info: PunchTaskInfo) -> Result<(), Error> {
         let mut backoff =
             BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000, 64000]);
-        let mut storm_guard = PunchStormGuard::new(Instant::now());
 
         loop {
             if self.loop_blacklist.contains(&task_info.dst_peer_id) {
                 break;
             }
             backoff.sleep_for_next_backoff().await;
-            let mut burst_trace = PunchBurstTrace::default();
 
             // always try cone first
             if !RUN_TESTING.load(std::sync::atomic::Ordering::Relaxed) {
                 let ret = self
                     .cone_client
-                    .do_hole_punching(
-                        task_info.dst_peer_id,
-                        task_info.disable_udp_stealth,
-                        &mut burst_trace,
-                        &mut storm_guard,
-                    )
+                    .do_hole_punching(task_info.dst_peer_id, task_info.disable_udp_stealth)
                     .await;
                 if self
-                    .handle_punch_result(
-                        task_info.dst_peer_id,
-                        ret,
-                        None,
-                        None,
-                        Some(&mut storm_guard),
-                        None,
-                    )
+                    .handle_punch_result(task_info.dst_peer_id, ret, None, None)
                     .await
                 {
                     break;
@@ -525,8 +456,6 @@ impl UdpHoePunchConnectorData {
                         task_info.dst_nat_type,
                         task_info.disable_udp_stealth,
                         &mut is_busy,
-                        &mut burst_trace,
-                        &mut storm_guard,
                     )
                     .await
             };
@@ -534,14 +463,7 @@ impl UdpHoePunchConnectorData {
             if is_busy {
                 backoff.rollback();
             } else if self
-                .handle_punch_result(
-                    task_info.dst_peer_id,
-                    ret,
-                    Some(&mut backoff),
-                    None,
-                    Some(&mut storm_guard),
-                    Some(&burst_trace),
-                )
+                .handle_punch_result(task_info.dst_peer_id, ret, Some(&mut backoff), None)
                 .await
             {
                 break;

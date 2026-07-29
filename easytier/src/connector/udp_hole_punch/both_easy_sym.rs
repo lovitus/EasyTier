@@ -11,15 +11,12 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
     common::{PeerId, stun::StunInfoCollectorTrait},
-    connector::udp_hole_punch::handle_rpc_result,
-    connector::{
-        punch_storm::{PunchBurstTrace, PunchStormGuard},
-        udp_hole_punch::common::{
-            HOLE_PUNCH_PACKET_BODY_LEN, UdpHolePunchListener,
-            disable_udp_stealth_for_selected_listener, negotiate_udp_listener_stealth,
-            should_request_udp_stealth, try_connect_with_socket,
-        },
+    connector::udp_hole_punch::common::{
+        HOLE_PUNCH_PACKET_BODY_LEN, UdpHolePunchListener,
+        disable_udp_stealth_for_selected_listener, negotiate_udp_listener_stealth,
+        should_request_udp_stealth, try_connect_with_socket,
     },
+    connector::udp_hole_punch::handle_rpc_result,
     peers::peer_manager::PeerManager,
     proto::{
         peer_rpc::{
@@ -207,7 +204,7 @@ impl PunchBothEasySymHoleClient {
         }
     }
 
-    #[tracing::instrument(ret, skip(self, is_busy, burst_trace, storm_guard))]
+    #[tracing::instrument(ret)]
     pub(crate) async fn do_hole_punching(
         &self,
         dst_peer_id: PeerId,
@@ -215,8 +212,6 @@ impl PunchBothEasySymHoleClient {
         peer_nat_info: UdpNatType,
         disable_udp_stealth: bool,
         is_busy: &mut bool,
-        burst_trace: &mut PunchBurstTrace,
-        storm_guard: &mut PunchStormGuard,
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // Check if peer is blacklisted
         if self.blacklist.contains(&dst_peer_id) {
@@ -234,11 +229,9 @@ impl PunchBothEasySymHoleClient {
         ) {
             anyhow::bail!("udp hole punch peer is gated by underlay breaker");
         }
-        // This socket array must be listening before the RPC: the remote side
-        // starts sending immediately and its first packets are part of the
-        // existing both-symmetric algorithm.
         let udp_array = UdpSocketArray::new(UDP_ARRAY_SIZE_FOR_BOTH_EASY_SYM, global_ctx.clone());
         udp_array.start().await?;
+
         let use_stealth = should_request_udp_stealth(&global_ctx, disable_udp_stealth);
         let cur_mapped_addr = global_ctx
             .get_stun_info_collector()
@@ -315,11 +308,6 @@ impl PunchBothEasySymHoleClient {
                 .port
                 .saturating_sub(DST_PORT_OFFSET as u32)
         };
-        let remote_target = remote_mapped_addr.into();
-        let has_live_peer = self.peer_mgr.get_peer_map().has_peer(dst_peer_id);
-        if !burst_trace.begin_target(storm_guard, Instant::now(), has_live_peer, remote_target) {
-            return Ok(None);
-        }
         let mut preflight = super::common::prepare_hole_punch_attempt(
             &global_ctx,
             remote_mapped_addr.into(),
@@ -334,18 +322,13 @@ impl PunchBothEasySymHoleClient {
             "start send hole punch packet for both easy sym"
         );
 
-        let mut counted_socket_fanout = false;
         while now.elapsed().as_millis() < (REMOTE_WAIT_TIME_MS + 1000).into() {
-            let attempts = udp_array
+            udp_array
                 .send_with_all(
                     &new_hole_punch_packet(tid, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes(),
                     remote_mapped_addr.into(),
                 )
                 .await?;
-            if !counted_socket_fanout {
-                burst_trace.add_attempts(attempts);
-                counted_socket_fanout = true;
-            }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 

@@ -18,10 +18,7 @@ use crate::{
         transport_priority::TransportPathClass,
         underlay_guard,
     },
-    connector::{
-        punch_storm::{FAILURE_WINDOW, PunchBurstTrace, PunchStormGuard, SILENCE_DURATION},
-        udp_hole_punch::BackOff,
-    },
+    connector::udp_hole_punch::BackOff,
     peers::{
         peer_manager::PeerManager,
         peer_task::{PeerTaskLauncher, PeerTaskManager},
@@ -369,7 +366,6 @@ impl TcpHolePunchConnectorData {
 
     async fn punch_as_initiator(self: Arc<Self>, dst_peer_id: PeerId) -> Result<(), Error> {
         let mut backoff = BackOff::new(vec![1000, 1000, 4000, 8000]);
-        let mut storm_guard = PunchStormGuard::new(Instant::now());
 
         loop {
             if self.loop_blacklist.contains(&dst_peer_id) {
@@ -386,28 +382,8 @@ impl TcpHolePunchConnectorData {
                 break;
             }
             backoff.sleep_for_next_backoff().await;
-
-            let mut burst_trace = PunchBurstTrace::default();
-            let ret = self
-                .do_punch_as_initiator(dst_peer_id, &mut burst_trace, &mut storm_guard)
-                .await;
-            if burst_trace.is_suppressed() {
-                continue;
-            }
-            if ret.is_ok() {
+            if self.do_punch_as_initiator(dst_peer_id).await.is_ok() {
                 break;
-            }
-            if storm_guard.record_failed_burst(Instant::now(), &burst_trace) {
-                tracing::warn!(
-                    dst_peer_id,
-                    protocol = "tcp",
-                    target = ?burst_trace.target(),
-                    window_failed_fanout = storm_guard.failed_attempts_in_window(),
-                    burst_failed_fanout = burst_trace.failed_attempts(),
-                    window_secs = FAILURE_WINDOW.as_secs(),
-                    silence_secs = SILENCE_DURATION.as_secs(),
-                    "repeated failed hole-punch target temporarily silenced"
-                );
             }
 
             if self.blacklist.contains(&dst_peer_id) {
@@ -422,13 +398,8 @@ impl TcpHolePunchConnectorData {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, burst_trace, storm_guard), fields(dst_peer_id), err)]
-    async fn do_punch_as_initiator(
-        &self,
-        dst_peer_id: PeerId,
-        burst_trace: &mut PunchBurstTrace,
-        storm_guard: &mut PunchStormGuard,
-    ) -> Result<(), Error> {
+    #[tracing::instrument(skip(self), fields(dst_peer_id), err)]
+    async fn do_punch_as_initiator(&self, dst_peer_id: PeerId) -> Result<(), Error> {
         let global_ctx = self.peer_mgr.get_global_ctx();
         if self.loop_blacklist.contains(&dst_peer_id) {
             tracing::warn!(
@@ -497,22 +468,12 @@ impl TcpHolePunchConnectorData {
             .listener_mapped_addr
             .ok_or(anyhow::anyhow!("listener_mapped_addr is required"))?;
         let remote_mapped_addr: SocketAddr = remote_mapped_addr.into();
-        let has_live_peer = self.peer_mgr.get_peer_map().has_peer(dst_peer_id);
-        if !burst_trace.begin_target(
-            storm_guard,
-            Instant::now(),
-            has_live_peer,
-            remote_mapped_addr,
-        ) {
-            return Ok(());
-        }
         tracing::info!(
             dst_peer_id,
             ?remote_mapped_addr,
             "tcp hole punch initiator rpc returned"
         );
 
-        burst_trace.add_attempts(1);
         if let Ok(()) = try_connect_to_remote(
             self.peer_mgr.clone(),
             remote_mapped_addr,

@@ -18,16 +18,13 @@ use tracing::Level;
 
 use crate::{
     common::{PeerId, global_ctx::ArcGlobalCtx, stun::StunInfoCollectorTrait},
-    connector::{
-        punch_storm::{PunchBurstTrace, PunchStormGuard},
-        udp_hole_punch::{
-            common::{
-                HOLE_PUNCH_PACKET_BODY_LEN, apply_hole_punch_socket_mark,
-                disable_udp_stealth_for_selected_listener, send_symmetric_hole_punch_packet,
-                should_request_udp_stealth, try_connect_with_socket,
-            },
-            handle_rpc_result,
+    connector::udp_hole_punch::{
+        common::{
+            HOLE_PUNCH_PACKET_BODY_LEN, apply_hole_punch_socket_mark,
+            disable_udp_stealth_for_selected_listener, send_symmetric_hole_punch_packet,
+            should_request_udp_stealth, try_connect_with_socket,
         },
+        handle_rpc_result,
     },
     peers::peer_manager::PeerManager,
     proto::{
@@ -411,10 +408,7 @@ impl PunchSymToConeHoleClient {
         Ok(ret_tunnel)
     }
 
-    #[tracing::instrument(
-        err(level = Level::ERROR),
-        skip(self, burst_trace, storm_guard)
-    )]
+    #[tracing::instrument(err(level = Level::ERROR), skip(self))]
     pub(crate) async fn do_hole_punching(
         &self,
         dst_peer_id: PeerId,
@@ -422,8 +416,6 @@ impl PunchSymToConeHoleClient {
         last_port_idx: &mut usize,
         my_nat_info: UdpNatType,
         disable_udp_stealth: bool,
-        burst_trace: &mut PunchBurstTrace,
-        storm_guard: &mut PunchStormGuard,
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // Check if peer is blacklisted
         if self.blacklist.contains(&dst_peer_id) {
@@ -439,6 +431,7 @@ impl PunchSymToConeHoleClient {
         ) {
             anyhow::bail!("udp hole punch peer is gated by underlay breaker");
         }
+        let udp_array = self.prepare_udp_array().await?;
         let use_stealth = should_request_udp_stealth(&global_ctx, disable_udp_stealth);
 
         let rpc_stub = self
@@ -468,13 +461,7 @@ impl PunchSymToConeHoleClient {
         let remote_mapped_addr = resp.listener_mapped_addr.ok_or(anyhow::anyhow!(
             "select_punch_listener response missing listener_mapped_addr"
         ))?;
-        let remote_target = remote_mapped_addr.into();
-        let has_live_peer = self.peer_mgr.get_peer_map().has_peer(dst_peer_id);
-        if !burst_trace.begin_target(storm_guard, Instant::now(), has_live_peer, remote_target) {
-            return Ok(None);
-        }
 
-        let udp_array = self.prepare_udp_array().await?;
         let mut preflight = super::common::prepare_hole_punch_attempt(
             &global_ctx,
             remote_mapped_addr.into(),
@@ -517,10 +504,9 @@ impl PunchSymToConeHoleClient {
 
         let port_index = *last_port_idx as u32;
         let base_port_for_easy_sym = self.get_base_port_for_easy_sym(my_nat_info).await;
-        let attempts = udp_array
+        udp_array
             .send_with_all(&packet, remote_mapped_addr.into())
             .await?;
-        burst_trace.add_attempts(attempts);
 
         if self.punch_predicablely.load(Ordering::Relaxed) && base_port_for_easy_sym.is_some() {
             let rpc_stub = self.get_rpc_stub(dst_peer_id).await;
