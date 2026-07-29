@@ -393,6 +393,7 @@ fn should_hide_instead_of_close(window_label: &str) -> bool {
 }
 
 #[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn open_mihomo_dashboard(app: AppHandle, instance_id: String) -> Result<(), String> {
     let instance_id = instance_id
         .parse()
@@ -448,6 +449,12 @@ async fn open_mihomo_dashboard(app: AppHandle, instance_id: String) -> Result<()
         }
     });
     window.set_focus().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+async fn open_mihomo_dashboard(_app: AppHandle, _instance_id: String) -> Result<(), String> {
+    Err("Mihomo dashboard is unavailable on mobile platforms".to_owned())
 }
 
 #[cfg(test)]
