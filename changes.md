@@ -1,5 +1,33 @@
 # EasyTier Changes
 
+## v3.0.7
+
+Release candidate based on v3.0.6.
+
+### Changes since v3.0.6
+
+- Open Mihomo Zashboard in one EasyTier-managed webview window instead of the
+  operating system's default browser. This avoids the Windows
+  `ShellExecuteExW` failure that could surface as DLL initialization error and
+  `os error 1223`.
+- Repeated Zashboard requests reuse, navigate, show, unminimize, and focus the
+  existing window rather than creating duplicate windows.
+- Closing Zashboard destroys only that auxiliary window. The main GUI keeps
+  its existing close-to-background behavior.
+- An unfocused Zashboard window closes after 15 minutes. The timeout is driven
+  by focus events and generation cancellation; it adds no polling loop and
+  does not change the GUI's existing background throttling.
+- The Zashboard window receives no Tauri plugin capability. Mihomo's controller
+  remains loopback-only and the existing runtime URL/secret generation is
+  unchanged.
+
+### Compatibility
+
+- Core networking, Mihomo lifecycle/configuration, GOST, Leaf, Android, and
+  OHOS behavior are unchanged from v3.0.6.
+- The release still carries the platform and policy-routing boundaries
+  documented for v3.0.6.
+
 ## v3.0.6
 
 Released on 2026-07-29 from

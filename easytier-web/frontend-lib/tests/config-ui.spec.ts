@@ -453,6 +453,7 @@ describe('Config.vue network config projection', () => {
   it('round-trips policy settings and keeps file and inline sources exclusive', async () => {
     const config = makeConfig()
     config.enable_policy_proxy = true
+    config.policy_proxy_backend = 'leaf'
     config.policy_leaf_tun_fast_path = true
     config.policy_config_file = 'policy/default.yaml'
     config.policy_outbound_interface = 'eth0'
@@ -645,7 +646,11 @@ describe('Config.vue network config projection', () => {
     for (const [field, value] of originalFlagValues) {
       const expectedValue = !value
       expect(curNetwork[field], `${field} should update config`).toBe(expectedValue)
-      expect(backend[field], `${field} should be preserved in backend JSON`).toBe(expectedValue)
+      const expectedBackendValue = field === 'enable_policy_proxy'
+        ? curNetwork.policy_proxy_backend === 'leaf'
+        : expectedValue
+      expect(backend[field], `${field} should be preserved in backend JSON`)
+        .toBe(expectedBackendValue)
     }
   })
 

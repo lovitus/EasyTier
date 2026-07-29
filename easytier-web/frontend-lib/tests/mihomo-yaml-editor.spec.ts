@@ -9,19 +9,19 @@ vi.mock('vue-i18n', () => ({
   }),
 }))
 
-const TextareaStub = defineComponent({
-  name: 'Textarea',
+const YamlCodeEditorStub = defineComponent({
+  name: 'YamlCodeEditor',
   inheritAttrs: false,
   props: {
     modelValue: String,
-    readonly: Boolean,
+    readOnly: Boolean,
   },
   emits: ['update:modelValue'],
   setup(props, { attrs, emit }) {
     return () => h('textarea', {
       ...attrs,
       value: props.modelValue,
-      readonly: props.readonly,
+      readonly: props.readOnly,
       onInput: (event: Event) =>
         emit('update:modelValue', (event.target as HTMLTextAreaElement).value),
     })
@@ -38,7 +38,7 @@ describe('MihomoYamlEditor', () => {
       global: {
         stubs: {
           Message: true,
-          Textarea: TextareaStub,
+          YamlCodeEditor: YamlCodeEditorStub,
         },
       },
     })
@@ -61,7 +61,7 @@ describe('MihomoYamlEditor', () => {
       global: {
         stubs: {
           Message: true,
-          Textarea: TextareaStub,
+          YamlCodeEditor: YamlCodeEditorStub,
         },
       },
     })
