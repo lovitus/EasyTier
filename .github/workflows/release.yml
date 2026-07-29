@@ -13,6 +13,11 @@ on:
         type: boolean
         default: true
         required: true
+      artifact_sha:
+        description: 'Validated commit that produced the formal artifacts'
+        type: string
+        default: ''
+        required: false
 
 permissions:
   contents: write
@@ -23,6 +28,37 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve immutable release source
+        id: release-source
+        env:
+          REQUESTED_SHA: ${{ inputs.artifact_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          release_sha="${REQUESTED_SHA:-${WORKFLOW_SHA}}"
+          if [[ ! "${release_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Invalid artifact SHA::Expected a full 40-character commit SHA"
+            exit 1
+          fi
+          git cat-file -e "${release_sha}^{commit}"
+          if [[ "${release_sha}" != "${WORKFLOW_SHA}" ]]; then
+            git merge-base --is-ancestor "${release_sha}" "${WORKFLOW_SHA}" || {
+              echo "::error title=Invalid artifact ancestry::${release_sha} is not an ancestor of ${WORKFLOW_SHA}"
+              exit 1
+            }
+            mapfile -t changed_files < <(
+              git diff --name-only "${release_sha}" "${WORKFLOW_SHA}"
+            )
+            if [[ "${#changed_files[@]}" -ne 1 || "${changed_files[0]}" != ".github/workflows/release.yml" ]]; then
+              echo "::error title=Artifact source mismatch::Only release.yml may differ from the validated artifact commit"
+              printf 'Changed file: %s\n' "${changed_files[@]}"
+              exit 1
+            fi
+          fi
+          echo "sha=${release_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Validate release version
         env:
@@ -56,7 +92,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
+          SHA: ${{ steps.release-source.outputs.sha }}
         run: |
           set -euo pipefail
 
@@ -358,7 +394,7 @@ jobs:
           draft: false
           prerelease: false
           make_latest: ${{ inputs.make_latest }}
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ steps.release-source.outputs.sha }}
           body_path: ./easytier/docs/release_notes/${{ inputs.version }}.md
           generate_release_notes: false
           fail_on_unmatched_files: true
