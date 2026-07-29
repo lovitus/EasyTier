@@ -158,17 +158,15 @@ jobs:
         run: |
           set -euo pipefail
           core_manifest_count=0
-          while IFS= read -r -d '' artifact_dir; do
-            candidate_manifest="$artifact_dir/MIHOMO_RELEASE_MANIFEST.json"
-            test -f "$candidate_manifest"
+          while IFS= read -r -d '' candidate_manifest; do
             cmp --silent "$MIHOMO_RELEASE_MANIFEST" "$candidate_manifest" || {
               echo "::error title=Mihomo version drift::$candidate_manifest differs from the immutable candidate manifest"
               exit 1
             }
             core_manifest_count=$((core_manifest_count + 1))
           done < <(
-            find release_assets -mindepth 1 -maxdepth 1 -type d \
-              -name 'easytier-*' -print0
+            find release_assets -mindepth 2 -maxdepth 2 -type f \
+              -name 'MIHOMO_RELEASE_MANIFEST.json' -print0
           )
           gui_manifest_count=0
           gui_targets=(
@@ -193,7 +191,7 @@ jobs:
             }
             gui_manifest_count=$((gui_manifest_count + 1))
           done
-          test "$core_manifest_count" -gt 0
+          test "$core_manifest_count" -eq 9
           test "$gui_manifest_count" -eq "${#gui_targets[@]}"
           declare -A mihomo_targets=(
             [easytier-linux-x86_64]=x86_64-unknown-linux-musl
