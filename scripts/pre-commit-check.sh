@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+"$repo_root/scripts/check-command-environment.sh"
+
 for required_command in actionlint bash git jq rustup; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     printf 'missing required pre-commit command: %s\n' "$required_command" >&2
