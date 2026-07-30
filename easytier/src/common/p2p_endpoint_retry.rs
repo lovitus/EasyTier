@@ -4,10 +4,12 @@ use std::{
     net::SocketAddr,
     sync::{
         Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
+
+use atomic_shim::AtomicU64;
 
 use crate::{common::PeerId, tunnel::IpScheme};
 
