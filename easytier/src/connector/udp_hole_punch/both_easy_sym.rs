@@ -205,6 +205,10 @@ impl PunchBothEasySymHoleClient {
         }
     }
 
+    // This is the boundary of one complete hole-punch event. Keep its borrowed
+    // output state and endpoint-failure settlement explicit; grouping them only
+    // to satisfy the argument-count lint would obscure the attempt lifecycle.
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(ret)]
     pub(crate) async fn do_hole_punching(
         &self,
