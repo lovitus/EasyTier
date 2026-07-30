@@ -40,6 +40,9 @@ use futures::{SinkExt, StreamExt, stream::FuturesUnordered};
 use rand::RngCore;
 use tokio::{net::UdpSocket, sync::Mutex, task::JoinSet};
 
+#[cfg(test)]
+use tokio::sync::Notify;
+
 const MAX_PACKET: usize = 2048;
 const WG_STEALTH_FALLBACK_TIMEOUT: Duration = Duration::from_secs(1);
 const WG_STEALTH_OUTER_SEND_DELAY: Duration = Duration::from_secs(1);
@@ -606,6 +609,29 @@ impl WgPeer {
 type ConnSender = tokio::sync::mpsc::UnboundedSender<Box<dyn Tunnel>>;
 type ConnReceiver = tokio::sync::mpsc::UnboundedReceiver<Box<dyn Tunnel>>;
 
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct WgExistingPeerDispatchHook {
+    armed: AtomicBool,
+    captured: Notify,
+    release: Notify,
+    dispatched: Notify,
+}
+
+#[cfg(test)]
+impl WgExistingPeerDispatchHook {
+    fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    async fn pause_after_capture(&self, captured_existing: bool) {
+        if captured_existing && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.captured.notify_one();
+            self.release.notified().await;
+        }
+    }
+}
+
 pub struct WgTunnelListener {
     addr: url::Url,
     config: WgConfig,
@@ -620,6 +646,8 @@ pub struct WgTunnelListener {
 
     tasks: JoinSet<()>,
     socket_mark: Option<u32>,
+    #[cfg(test)]
+    existing_peer_dispatch_hook: Option<Arc<WgExistingPeerDispatchHook>>,
 }
 
 impl WgTunnelListener {
@@ -639,6 +667,8 @@ impl WgTunnelListener {
 
             tasks: JoinSet::new(),
             socket_mark: None,
+            #[cfg(test)]
+            existing_peer_dispatch_hook: None,
         }
     }
 
@@ -648,6 +678,11 @@ impl WgTunnelListener {
 
     pub fn set_stealth(&mut self, stealth: Arc<crate::tunnel::stealth::OuterSessionState>) {
         self.stealth = stealth;
+    }
+
+    #[cfg(test)]
+    fn set_existing_peer_dispatch_hook(&mut self, hook: Arc<WgExistingPeerDispatchHook>) {
+        self.existing_peer_dispatch_hook = Some(hook);
     }
 
     fn get_udp_socket(&self) -> Arc<UdpSocket> {
@@ -661,6 +696,7 @@ impl WgTunnelListener {
         peer_map: Arc<DashMap<SocketAddr, Arc<WgPeer>>>,
         stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
         stealth_replay: Arc<WgStealthReplayGuard>,
+        #[cfg(test)] existing_peer_dispatch_hook: Option<Arc<WgExistingPeerDispatchHook>>,
     ) {
         let mut tasks = JoinSet::new();
 
@@ -686,6 +722,10 @@ impl WgTunnelListener {
             tracing::trace!(?n, ?addr, "Received bytes from peer");
 
             let existing = peer_map.get(&addr).map(|peer| peer.clone());
+            #[cfg(test)]
+            if let Some(hook) = existing_peer_dispatch_hook.as_ref() {
+                hook.pause_after_capture(existing.is_some()).await;
+            }
             let mut connection_stealth = None;
             let mut replace_existing = false;
             let plaintext = if let Some(peer) = &existing {
@@ -786,8 +826,14 @@ impl WgTunnelListener {
                 continue;
             }
 
-            let peer = peer_map.get(&addr).unwrap().clone();
+            let Some(peer) = existing else {
+                continue;
+            };
             let _ = peer.handle_packet_from_peer(&plaintext).await;
+            #[cfg(test)]
+            if let Some(hook) = existing_peer_dispatch_hook.as_ref() {
+                hook.dispatched.notify_one();
+            }
         }
     }
 }
@@ -816,6 +862,8 @@ impl TunnelListener for WgTunnelListener {
             self.wg_peer_map.clone(),
             self.stealth.clone(),
             self.stealth_replay.clone(),
+            #[cfg(test)]
+            self.existing_peer_dispatch_hook.clone(),
         ));
 
         Ok(())
@@ -1355,6 +1403,41 @@ pub mod tests {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
         assert_eq!(0, listener.wg_peer_map.len());
+    }
+
+    #[tokio::test]
+    async fn wg_listener_survives_peer_cleanup_between_lookup_and_dispatch() {
+        let (server_cfg, _client_cfg) = create_wg_config();
+        let hook = Arc::new(WgExistingPeerDispatchHook::default());
+        let mut listener =
+            WgTunnelListener::new("wg://127.0.0.1:0".parse().unwrap(), server_cfg.clone());
+        listener.set_existing_peer_dispatch_hook(hook.clone());
+        listener.listen().await.unwrap();
+
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote_addr = sender.local_addr().unwrap();
+        let listener_addr = listener.get_udp_socket().local_addr().unwrap();
+        let mut peer = WgPeer::new(listener.get_udp_socket(), server_cfg, remote_addr, None);
+        let _tunnel = peer.start_and_get_tunnel();
+        listener.wg_peer_map.insert(remote_addr, Arc::new(peer));
+
+        hook.arm();
+        sender.send_to(&[0; 4], listener_addr).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), hook.captured.notified())
+            .await
+            .expect("listener did not capture the existing peer");
+
+        assert!(listener.wg_peer_map.remove(&remote_addr).is_some());
+        hook.release.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(1), hook.dispatched.notified())
+            .await
+            .expect("listener did not dispatch through the captured peer");
+        assert!(
+            listener.tasks.try_join_next().is_none(),
+            "WG listener task exited unexpectedly"
+        );
+        assert!(!listener.wg_peer_map.contains_key(&remote_addr));
     }
 
     #[tokio::test]

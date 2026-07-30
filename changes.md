@@ -1,5 +1,28 @@
 # EasyTier Changes
 
+## v3.0.9
+
+Release candidate based on v3.0.8.
+
+### Changes since v3.0.8
+
+- Fix a long-standing WireGuard listener race where concurrent peer cleanup
+  could remove a session between packet classification and dispatch, causing
+  the process-wide panic handler to terminate EasyTier.
+- Keep the already captured `Arc<WgPeer>` alive for the in-flight datagram
+  instead of performing a second fallible peer-table lookup.
+- Cover both ordinary `wg://` listeners and the WireGuard VPN Portal, which
+  share the same listener implementation.
+- Add a deterministic regression test that removes the peer after the listener
+  captures it and before dispatch resumes.
+
+### Compatibility
+
+- WireGuard session expiry, stopped-session cleanup, handshake replacement,
+  stealth framing, listener configuration, and subsequent reconnect behavior
+  are unchanged.
+- TCP, UDP, WS/WSS, QUIC/QUIC-Brutal, and FakeTCP are unaffected.
+
 ## v3.0.8
 
 Release candidate based on v3.0.7.
