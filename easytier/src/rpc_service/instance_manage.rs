@@ -371,6 +371,21 @@ impl WebClientService for InstanceManageRpcService {
         })
     }
 
+    async fn control_mihomo_runtime(
+        &self,
+        _: BaseController,
+        req: crate::proto::api::manage::ControlMihomoRuntimeRequest,
+    ) -> Result<crate::proto::common::Void, rpc_types::error::Error> {
+        let _mutation_guard = self.remote_mutation_lock.lock().await;
+        let instance_id = req
+            .inst_id
+            .ok_or_else(|| anyhow::anyhow!("network instance id is required"))?
+            .into();
+        self.manager
+            .control_mihomo_runtime(instance_id, req.action.as_str())?;
+        Ok(crate::proto::common::Void::default())
+    }
+
     async fn update_policy_rule_data(
         &self,
         _: BaseController,

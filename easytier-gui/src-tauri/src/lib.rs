@@ -310,6 +310,21 @@ async fn update_network_config_state(
 }
 
 #[tauri::command]
+async fn control_mihomo_runtime(
+    app: AppHandle,
+    instance_id: String,
+    action: String,
+) -> Result<(), String> {
+    let instance_id = instance_id
+        .parse()
+        .map_err(|e: uuid::Error| e.to_string())?;
+    get_client_manager!()?
+        .handle_control_mihomo_runtime(app, instance_id, action)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn save_network_config(app: AppHandle, cfg: NetworkConfig) -> Result<(), String> {
     let instance_id = cfg
         .instance_id()
@@ -1690,6 +1705,7 @@ pub fn run_gui() -> std::process::ExitCode {
             list_network_instance_ids,
             remove_network_instance,
             update_network_config_state,
+            control_mihomo_runtime,
             save_network_config,
             validate_config,
             open_mihomo_config,

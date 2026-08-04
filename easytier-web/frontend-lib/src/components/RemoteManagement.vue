@@ -55,6 +55,7 @@ const leafYamlValid = ref(true);
 const showPolicyYamlDialog = ref(false);
 let policyYamlDialogGeneration = 0;
 const policyConfigSaving = ref(false);
+const mihomoPreparingInstanceId = ref<string>();
 const policyBackendSelectorGeneration = ref(0);
 const policyRuntimePlatform = ref<string | undefined>(undefined);
 const leafRuntimeSupported = ref<boolean | undefined>(undefined);
@@ -489,6 +490,10 @@ const policyRuntimeRunning = computed(() => {
     }
     return false;
 });
+const policyRuntimePreparing = computed(() =>
+    currentPolicyBackend.value === 'mihomo'
+    && mihomoPreparingInstanceId.value === selectedInstanceId.value?.uuid
+);
 
 const loadMihomoConfigFile = async (
     config: NetworkTypes.NetworkConfig,
@@ -608,6 +613,8 @@ const savePolicyYaml = async () => {
             policyConfigSaving.value = false;
             return;
         }
+        const preparingInstanceId = draft.instance_id;
+        mihomoPreparingInstanceId.value = preparingInstanceId;
         try {
             await props.api.save_mihomo_config(draft, mihomoYamlContents.value);
             draft.policy_mihomo_config_inline = '';
@@ -620,6 +627,11 @@ const savePolicyYaml = async () => {
             });
             policyConfigSaving.value = false;
             return;
+        } finally {
+            if (mihomoPreparingInstanceId.value === preparingInstanceId) {
+                mihomoPreparingInstanceId.value = undefined;
+            }
+            void loadCurrentNetworkInfo();
         }
     }
     policyConfigSaving.value = false;
@@ -640,6 +652,27 @@ const openMihomoDashboard = async () => {
             detail: t('web.device_management.mihomo_dashboard_failed') + ': ' + errorDetail(error),
             life: 10000,
         });
+    }
+}
+const mihomoRuntimeActionPending = ref(false)
+const mihomoRuntimeOwned = computed(() => Boolean(currentNetworkStatusInfo.value?.detail?.mihomo_status))
+
+const controlMihomoRuntime = async (action: Api.MihomoRuntimeAction) => {
+    const instanceId = selectedInstanceId.value?.uuid
+    if (!instanceId || !props.api.control_mihomo_runtime || mihomoRuntimeActionPending.value) return
+    mihomoRuntimeActionPending.value = true
+    try {
+        await props.api.control_mihomo_runtime(instanceId, action)
+    } catch (error) {
+        toast.add({
+            severity: 'error',
+            summary: 'Error',
+            detail: t('web.device_management.mihomo_runtime_action_failed') + ': ' + errorDetail(error),
+            life: 10000,
+        })
+    } finally {
+        mihomoRuntimeActionPending.value = false
+        void loadCurrentNetworkInfo()
     }
 }
 const newNetwork = async () => {
@@ -1108,10 +1141,12 @@ onUnmounted(() => {
                     data-testid="policy-home-backend"
                     @update:model-value="setPolicyRoutingBackend($event as PolicyProxyBackend)" />
                 <Tag v-if="currentPolicyBackend !== 'off'"
-                    :severity="policyRuntimeRunning ? 'success' : 'secondary'"
-                    :value="t(policyRuntimeRunning
-                        ? 'web.device_management.policy_runtime_running'
-                        : 'web.device_management.policy_runtime_stopped')"
+                    :severity="policyRuntimePreparing ? 'info' : (policyRuntimeRunning ? 'success' : 'secondary')"
+                    :value="t(policyRuntimePreparing
+                        ? 'web.device_management.policy_runtime_preparing'
+                        : (policyRuntimeRunning
+                            ? 'web.device_management.policy_runtime_running'
+                            : 'web.device_management.policy_runtime_stopped'))"
                     data-testid="policy-runtime-status" />
                 <Button :icon="policyYamlReadOnly ? 'pi pi-eye' : 'pi pi-file-edit'" severity="secondary" size="small"
                     :label="t(policyYamlReadOnly
@@ -1124,6 +1159,21 @@ onUnmounted(() => {
                     :label="t('web.device_management.open_mihomo_dashboard')"
                     :disabled="!props.api.open_mihomo_dashboard"
                     data-testid="policy-open-mihomo-dashboard" @click="openMihomoDashboard" />
+                <Button v-if="currentPolicyBackend === 'mihomo' && props.api.control_mihomo_runtime && !mihomoRuntimeOwned"
+                    icon="pi pi-play" severity="secondary" size="small"
+                    :label="t('web.device_management.start_mihomo_runtime')"
+                    :disabled="networkIsDisabled || mihomoRuntimeActionPending"
+                    data-testid="policy-start-mihomo-runtime" @click="controlMihomoRuntime('start')" />
+                <Button v-if="currentPolicyBackend === 'mihomo' && props.api.control_mihomo_runtime && mihomoRuntimeOwned"
+                    icon="pi pi-stop" severity="secondary" size="small"
+                    :label="t('web.device_management.stop_mihomo_runtime')"
+                    :disabled="networkIsDisabled || mihomoRuntimeActionPending"
+                    data-testid="policy-stop-mihomo-runtime" @click="controlMihomoRuntime('stop')" />
+                <Button v-if="currentPolicyBackend === 'mihomo' && props.api.control_mihomo_runtime && mihomoRuntimeOwned"
+                    icon="pi pi-refresh" severity="secondary" size="small"
+                    :label="t('web.device_management.restart_mihomo_runtime')"
+                    :disabled="networkIsDisabled || mihomoRuntimeActionPending"
+                    data-testid="policy-restart-mihomo-runtime" @click="controlMihomoRuntime('restart')" />
             </div>
         </div>
 
@@ -1226,7 +1276,7 @@ onUnmounted(() => {
             <template #footer>
                 <Button :label="t(policyYamlReadOnly ? 'web.common.close' : 'web.common.cancel')"
                     severity="secondary" text
-                    :disabled="policyConfigSaving" @click="closePolicyYamlDialog" />
+                    @click="closePolicyYamlDialog" />
                 <Button v-if="!policyYamlReadOnly" :label="t('web.common.save')" icon="pi pi-save"
                     :loading="policyConfigSaving"
                     :disabled="(policyYamlDialogBackend === 'mihomo' && !mihomoYamlValid)

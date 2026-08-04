@@ -212,6 +212,9 @@ policy_mihomo_controller_secret_placeholder: 留空则使用 YAML 中的 secret
 policy_mihomo_config_path_example: "示例：/etc/easytier/mihomo.yaml"
 policy_mihomo_config_path_required: Mihomo 使用此原生 YAML 文件；路径为空时，编辑器会创建实例独立的 autogen.yaml。
 policy_runtime_status: 运行状态
+policy_mihomo_version: Mihomo 版本
+policy_mihomo_listen_ports: 监听端口
+policy_mihomo_tun_device: TUN 设备
 policy_runtime_running: 运行中
 policy_runtime_stopped: 已停止
 policy_runtime_pid: 进程 ID
@@ -531,9 +534,14 @@ web:
     mihomo_file_open_failed: 打开 Mihomo 配置文件失败
     mihomo_file_save_failed: 保存 Mihomo 配置文件失败。如果校验超时，Mihomo 可能仍在下载 Geo 数据；请等待下载完成后再次保存
     open_mihomo_dashboard: Zashboard
+    start_mihomo_runtime: 启动 Mihomo
+    stop_mihomo_runtime: 停止 Mihomo
+    restart_mihomo_runtime: 重启 Mihomo
+    mihomo_runtime_action_failed: Mihomo 运行时控制失败
     mihomo_dashboard_failed: 打开 Zashboard 失败
     policy_saved_restart_required: Policy 配置已保存，重启该网络后生效
     policy_save_failed: 保存 Policy 配置失败
+    policy_runtime_preparing: 策略运行环境准备中
     policy_runtime_running: 策略运行中
     policy_runtime_stopped: 策略已停止
     import_config: 导入配置

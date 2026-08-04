@@ -16,6 +16,9 @@ export class GUIRemoteClient implements Api.RemoteClient {
     async open_mihomo_dashboard(instanceId: string): Promise<void> {
         await backend.openMihomoDashboard(instanceId);
     }
+    async control_mihomo_runtime(instanceId: string, action: Api.MihomoRuntimeAction): Promise<void> {
+        await backend.controlMihomoRuntime(instanceId, action);
+    }
     async update_policy_rule_data(instanceId: string, resource: Api.PolicyRuleDataResource, sourceUrl?: string): Promise<Api.UpdatePolicyRuleDataResponse> {
         return backend.updatePolicyRuleData(instanceId, resource, sourceUrl);
     }

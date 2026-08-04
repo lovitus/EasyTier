@@ -95,7 +95,7 @@ where
             .ok_or(RemoteClientError::ClientNotFound)?;
         client
             .save_mihomo_config(
-                BaseController::default(),
+                run_network_controller(),
                 SaveMihomoConfigRequest {
                     config: Some(config),
                     contents,
@@ -122,6 +122,28 @@ where
                 },
             )
             .await
+            .map_err(RemoteClientError::RpcError)
+    }
+
+    async fn handle_control_mihomo_runtime(
+        &self,
+        identify: T,
+        inst_id: Uuid,
+        action: String,
+    ) -> Result<(), RemoteClientError<E>> {
+        let client = self
+            .get_rpc_client(identify)
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        client
+            .control_mihomo_runtime(
+                run_network_controller(),
+                crate::proto::api::manage::ControlMihomoRuntimeRequest {
+                    inst_id: Some(inst_id.into()),
+                    action,
+                },
+            )
+            .await
+            .map(|_| ())
             .map_err(RemoteClientError::RpcError)
     }
 

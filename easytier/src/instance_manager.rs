@@ -88,6 +88,7 @@ fn build_mihomo_start_request(
         .unwrap_or_else(|| std::env::temp_dir().join("easytier"));
     Ok(MihomoCoreStartRequest {
         instance_id,
+        ownership_token: uuid::Uuid::new_v4(),
         executable,
         source,
         managed_base_dir,
@@ -127,6 +128,11 @@ fn mihomo_status_proto(
         owner_instance_id: status
             .owner_instance_id
             .map(|instance_id| instance_id.to_string()),
+        version: status.process.version.clone(),
+        mixed_port: status.process.mixed_port.map(u32::from),
+        http_port: status.process.http_port.map(u32::from),
+        socks_port: status.process.socks_port.map(u32::from),
+        tun_device: status.process.tun_device.clone(),
     }
 }
 
@@ -684,7 +690,7 @@ impl Drop for DaemonGuard {
 
 pub struct NetworkInstanceManager {
     instance_map: Arc<DashMap<uuid::Uuid, NetworkInstance>>,
-    instance_stop_tasks: Arc<DashMap<uuid::Uuid, AbortOnDropHandle<()>>>,
+    instance_stop_tasks: Arc<DashMap<uuid::Uuid, InstanceStopTask>>,
     stop_check_notifier: Arc<tokio::sync::Notify>,
     instance_error_messages: Arc<DashMap<uuid::Uuid, String>>,
     config_dir: Option<PathBuf>,
@@ -694,6 +700,12 @@ pub struct NetworkInstanceManager {
     #[cfg(feature = "mesh-socks-egress")]
     _mesh_entry_lease: Option<CoreMeshEntryLease>,
     nic_backend: NicBackend,
+}
+
+struct InstanceStopTask {
+    generation: uuid::Uuid,
+    mihomo_ownership_token: Arc<std::sync::RwLock<Option<uuid::Uuid>>>,
+    _handle: AbortOnDropHandle<()>,
 }
 
 impl Default for NetworkInstanceManager {
@@ -746,7 +758,11 @@ impl NetworkInstanceManager {
         self.remote_mutation_lock.clone()
     }
 
-    fn start_instance_task(&self, instance_id: uuid::Uuid) -> Result<(), anyhow::Error> {
+    fn start_instance_task(
+        &self,
+        instance_id: uuid::Uuid,
+        initial_mihomo_ownership_token: Option<uuid::Uuid>,
+    ) -> Result<(), anyhow::Error> {
         if tokio::runtime::Handle::try_current().is_err() {
             return Err(anyhow::anyhow!(
                 "tokio runtime not found, cannot start instance task"
@@ -764,31 +780,58 @@ impl NetworkInstanceManager {
         let instance_stop_tasks = self.instance_stop_tasks.clone();
         let instance_error_messages = self.instance_error_messages.clone();
         let mihomo_owner = self.mihomo_owner.clone();
+        let task_generation = uuid::Uuid::new_v4();
+        let mihomo_ownership_token =
+            Arc::new(std::sync::RwLock::new(initial_mihomo_ownership_token));
+        let task_mihomo_ownership_token = mihomo_ownership_token.clone();
+        let (registered, wait_until_registered) = tokio::sync::oneshot::channel();
 
         let stop_check_notifier = self.stop_check_notifier.clone();
+        let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+            if wait_until_registered.await.is_err() {
+                return;
+            }
+            let Some(instance_stop_notifier) = instance_stop_notifier else {
+                return;
+            };
+            let _t = instance_event_receiver
+                .map(|event| AbortOnDropHandle::new(handle_event(instance_id, event)));
+            instance_stop_notifier.notified().await;
+            if let Some(instance) = instance_map.get(&instance_id)
+                && let Some(error) = instance.get_latest_error_msg()
+            {
+                log::error!(%error, "instance {} stopped", instance_id);
+                instance_error_messages.insert(instance_id, error);
+            }
+            // An overwritten instance keeps the same UUID. Its delayed stop
+            // notification must not tear down the replacement's Mihomo.
+            let ownership_token = task_mihomo_ownership_token
+                .read()
+                .map(|token| *token)
+                .unwrap_or_default();
+            if let Some(ownership_token) = ownership_token
+                && let Err(error) = mihomo_owner.stop_if_owned(instance_id, ownership_token)
+            {
+                log::error!(%error, "failed to stop Mihomo owner for instance {}", instance_id);
+            }
+            stop_check_notifier.notify_one();
+            if let dashmap::mapref::entry::Entry::Occupied(entry) =
+                instance_stop_tasks.entry(instance_id)
+                && entry.get().generation == task_generation
+            {
+                entry.remove();
+            }
+            instance_stop_tasks.shrink_to_fit();
+        }));
         self.instance_stop_tasks.insert(
             instance_id,
-            AbortOnDropHandle::new(tokio::spawn(async move {
-                let Some(instance_stop_notifier) = instance_stop_notifier else {
-                    return;
-                };
-                let _t = instance_event_receiver
-                    .map(|event| AbortOnDropHandle::new(handle_event(instance_id, event)));
-                instance_stop_notifier.notified().await;
-                if let Some(instance) = instance_map.get(&instance_id)
-                    && let Some(error) = instance.get_latest_error_msg()
-                {
-                    log::error!(%error, "instance {} stopped", instance_id);
-                    instance_error_messages.insert(instance_id, error);
-                }
-                if let Err(error) = mihomo_owner.stop(instance_id) {
-                    log::error!(%error, "failed to stop Mihomo owner for instance {}", instance_id);
-                }
-                stop_check_notifier.notify_one();
-                instance_stop_tasks.remove(&instance_id);
-                instance_stop_tasks.shrink_to_fit();
-            })),
+            InstanceStopTask {
+                generation: task_generation,
+                mihomo_ownership_token,
+                _handle: handle,
+            },
         );
+        let _ = registered.send(());
         Ok(())
     }
 
@@ -821,6 +864,9 @@ impl NetworkInstanceManager {
             anyhow::bail!("--no-tun conflicts with --nic-backend veth/auto");
         }
         let instance_id = cfg.get_id();
+        let mihomo_ownership_token = mihomo_request
+            .as_ref()
+            .map(|request| request.ownership_token);
         if self.instance_map.contains_key(&instance_id) {
             anyhow::bail!("instance {} already exists", instance_id);
         }
@@ -837,7 +883,9 @@ impl NetworkInstanceManager {
         }
 
         self.instance_map.insert(instance_id, instance);
-        if watch_event && let Err(error) = self.start_instance_task(instance_id) {
+        if watch_event
+            && let Err(error) = self.start_instance_task(instance_id, mihomo_ownership_token)
+        {
             self.instance_map.remove(&instance_id);
             let _ = self.mihomo_owner.stop(instance_id);
             return Err(error);
@@ -863,6 +911,67 @@ impl NetworkInstanceManager {
             contents: contents.into(),
         };
         self.mihomo_owner.validate(request).await
+    }
+
+    pub fn control_mihomo_runtime(
+        &self,
+        instance_id: uuid::Uuid,
+        action: &str,
+    ) -> anyhow::Result<()> {
+        let ownership_token = self
+            .instance_stop_tasks
+            .get(&instance_id)
+            .map(|task| task.mihomo_ownership_token.clone())
+            .ok_or_else(|| anyhow::anyhow!("network instance {} is not running", instance_id))?;
+
+        if action == "stop" || action == "restart" {
+            self.mihomo_owner.stop(instance_id)?;
+            *ownership_token
+                .write()
+                .map_err(|_| anyhow::anyhow!("Mihomo ownership state is unavailable"))? = None;
+            if action == "stop" {
+                return Ok(());
+            }
+        } else if action != "start" {
+            anyhow::bail!("unsupported Mihomo runtime action: {action}");
+        }
+
+        let instance = self
+            .instance_map
+            .get(&instance_id)
+            .ok_or_else(|| anyhow::anyhow!("network instance {} is not running", instance_id))?;
+        let config = instance.get_config();
+        drop(instance);
+        let policy = config
+            .get_policy_proxy_config()
+            .ok_or_else(|| anyhow::anyhow!("Mihomo policy config is unavailable"))?;
+        anyhow::ensure!(
+            policy.is_mihomo_enabled(),
+            "network instance does not use the Mihomo policy backend"
+        );
+        let request = build_mihomo_start_request(&config, policy, self.config_dir.as_deref())?;
+        let new_token = request.ownership_token;
+        *ownership_token
+            .write()
+            .map_err(|_| anyhow::anyhow!("Mihomo ownership state is unavailable"))? =
+            Some(new_token);
+
+        if let Err(error) = self.mihomo_owner.start(request) {
+            *ownership_token
+                .write()
+                .map_err(|_| anyhow::anyhow!("Mihomo ownership state is unavailable"))? = None;
+            return Err(error);
+        }
+
+        let task_still_owns_instance = self
+            .instance_stop_tasks
+            .get(&instance_id)
+            .is_some_and(|task| Arc::ptr_eq(&task.mihomo_ownership_token, &ownership_token));
+        if !self.instance_map.contains_key(&instance_id) || !task_still_owns_instance {
+            self.mihomo_owner.stop_if_owned(instance_id, new_token)?;
+            anyhow::bail!("network instance stopped while Mihomo was starting");
+        }
+        Ok(())
     }
 
     pub fn retain_network_instance(

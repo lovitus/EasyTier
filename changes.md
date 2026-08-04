@@ -1,5 +1,36 @@
 # EasyTier Changes
 
+## v3.0.10
+
+Release candidate based on v3.0.9.
+
+### Changes since v3.0.9
+
+- Add runtime-only Mihomo start, stop, and restart controls without changing
+  the persisted policy backend or either backend's YAML configuration.
+- Show the existing Mihomo runtime version, mixed/HTTP/SOCKS ports, and active
+  TUN device in the compact policy status panel without adding controller
+  polling.
+- Show `Policy Runtime Preparing` while Mihomo validates a configuration or
+  downloads its own Geo resources, then converge to the existing running,
+  stopped, or error state.
+- Preserve Mihomo ownership across automatic network restarts and runtime
+  controls so a delayed stop task cannot terminate a newer replacement
+  process.
+- Route Mihomo configuration saves through the existing network controller so
+  a running instance is restarted consistently after a validated save.
+
+### Compatibility and boundaries
+
+- Runtime controls are intentionally temporary. A manually stopped Mihomo
+  starts again on the next normal EasyTier network start.
+- Leaf and Mihomo remain separate backends with separate configuration and
+  lifecycle state. This release does not translate or merge their YAML.
+- Status details reuse the readiness response already collected by EasyTier;
+  no new periodic Mihomo API connection or resource sampler is introduced.
+- Existing mesh, GOST mesh entry, routes, DNS policy, proxy definitions, and
+  Mihomo configuration semantics are unchanged.
+
 ## v3.0.9
 
 Release candidate based on v3.0.8.

@@ -1068,6 +1068,11 @@ pub struct MihomoStatus {
     pub last_exit: Option<String>,
     pub last_error: Option<String>,
     pub overlay_report: Option<MihomoOverlayReport>,
+    pub version: Option<String>,
+    pub mixed_port: Option<u16>,
+    pub http_port: Option<u16>,
+    pub socks_port: Option<u16>,
+    pub tun_device: Option<String>,
 }
 
 impl Default for MihomoStatus {
@@ -1080,7 +1085,22 @@ impl Default for MihomoStatus {
             last_exit: None,
             last_error: None,
             overlay_report: None,
+            version: None,
+            mixed_port: None,
+            http_port: None,
+            socks_port: None,
+            tun_device: None,
         }
+    }
+}
+
+impl MihomoStatus {
+    fn clear_readiness_snapshot(&mut self) {
+        self.version = None;
+        self.mixed_port = None;
+        self.http_port = None;
+        self.socks_port = None;
+        self.tun_device = None;
     }
 }
 
@@ -1510,16 +1530,18 @@ fn active_tun_device_matches(actual_device: &str, expected_device: &str, is_maco
     is_numbered_macos_utun(actual_device)
 }
 
-fn validate_active_tun(response: &[u8], expected_device: &str) -> anyhow::Result<()> {
-    let active: serde_json::Value = serde_json::from_slice(response)?;
+fn validate_active_tun(
+    response: &serde_json::Value,
+    expected_device: &str,
+) -> anyhow::Result<String> {
     ensure!(
-        active
+        response
             .pointer("/tun/enable")
             .and_then(|value| value.as_bool())
             == Some(true),
         "Mihomo controller reports TUN disabled"
     );
-    let actual_device = active
+    let actual_device = response
         .pointer("/tun/device")
         .and_then(|value| value.as_str())
         .context("Mihomo controller response is missing the active TUN device")?;
@@ -1527,35 +1549,60 @@ fn validate_active_tun(response: &[u8], expected_device: &str) -> anyhow::Result
         active_tun_device_matches(actual_device, expected_device, cfg!(target_os = "macos")),
         "Mihomo controller reports an unexpected TUN device"
     );
-    Ok(())
+    Ok(actual_device.to_owned())
 }
 
-async fn probe_readiness(config: &MihomoSupervisorConfig) -> anyhow::Result<()> {
-    let version = controller_get(config, "/version").await?;
-    let version: serde_json::Value = serde_json::from_slice(&version)?;
-    ensure!(
-        version
-            .get("version")
-            .and_then(|value| value.as_str())
-            .is_some(),
-        "Mihomo controller version response is missing version"
-    );
+#[derive(Debug)]
+struct MihomoReadinessSnapshot {
+    version: String,
+    mixed_port: Option<u16>,
+    http_port: Option<u16>,
+    socks_port: Option<u16>,
+    tun_device: String,
+}
+
+fn controller_port(config: &serde_json::Value, name: &str) -> Option<u16> {
+    config
+        .get(name)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+}
+
+async fn probe_readiness(
+    config: &MihomoSupervisorConfig,
+) -> anyhow::Result<MihomoReadinessSnapshot> {
+    let version_response = controller_get(config, "/version").await?;
+    let version_response: serde_json::Value = serde_json::from_slice(&version_response)?;
+    let version = version_response
+        .get("version")
+        .and_then(|value| value.as_str())
+        .context("Mihomo controller version response is missing version")?
+        .to_owned();
 
     let active = controller_get(config, "/configs/").await?;
-    validate_active_tun(&active, &config.overlay.tun_device)
+    let active: serde_json::Value = serde_json::from_slice(&active)?;
+    let tun_device = validate_active_tun(&active, &config.overlay.tun_device)?;
+    Ok(MihomoReadinessSnapshot {
+        version,
+        mixed_port: controller_port(&active, "mixed-port"),
+        http_port: controller_port(&active, "port"),
+        socks_port: controller_port(&active, "socks-port"),
+        tun_device,
+    })
 }
 
 async fn probe_readiness_until(
     config: &MihomoSupervisorConfig,
     cancel: &CancellationToken,
     deadline: tokio::time::Instant,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<MihomoReadinessSnapshot>> {
     tokio::select! {
         _ = cancel.cancelled() => anyhow::bail!("Mihomo start cancelled"),
         result = tokio::time::timeout_at(deadline, probe_readiness(config)) => {
             match result {
-                Ok(Ok(())) => Ok(true),
-                Ok(Err(_)) => Ok(false),
+                Ok(Ok(snapshot)) => Ok(Some(snapshot)),
+                Ok(Err(_)) => Ok(None),
                 Err(_) => anyhow::bail!("Mihomo private controller/TUN readiness timed out"),
             }
         }
@@ -1566,14 +1613,14 @@ async fn wait_for_readiness(
     child: &mut ManagedChild,
     config: &MihomoSupervisorConfig,
     cancel: &CancellationToken,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<MihomoReadinessSnapshot> {
     let deadline = tokio::time::Instant::now() + config.restart.readiness_timeout;
     loop {
         if let Some(exit) = child.try_wait()? {
             anyhow::bail!("Mihomo exited before readiness: {exit}");
         }
-        if probe_readiness_until(config, cancel, deadline).await? {
-            return Ok(());
+        if let Some(snapshot) = probe_readiness_until(config, cancel, deadline).await? {
+            return Ok(snapshot);
         }
         ensure!(
             tokio::time::Instant::now() < deadline,
@@ -1601,6 +1648,7 @@ async fn run_supervisor(
             let mut current = status.write().await;
             current.state = MihomoProcessState::Starting;
             current.pid = None;
+            current.clear_readiness_snapshot();
         }
         let mut child = match spawn_mihomo(&config).await {
             Ok(child) => child,
@@ -1625,29 +1673,33 @@ async fn run_supervisor(
             let mut current = status.write().await;
             current.pid = child.id();
         }
-        if let Err(error) = wait_for_readiness(&mut child, &config, &cancel).await {
-            stop_child(&mut child, config.restart.stop_timeout).await;
-            if cancel.is_cancelled() {
-                let mut current = status.write().await;
-                current.state = MihomoProcessState::Stopped;
-                current.pid = None;
-                return;
+        let readiness = match wait_for_readiness(&mut child, &config, &cancel).await {
+            Ok(readiness) => readiness,
+            Err(error) => {
+                stop_child(&mut child, config.restart.stop_timeout).await;
+                if cancel.is_cancelled() {
+                    let mut current = status.write().await;
+                    current.state = MihomoProcessState::Stopped;
+                    current.pid = None;
+                    current.clear_readiness_snapshot();
+                    return;
+                }
+                if fail_or_retry(
+                    &config,
+                    &status,
+                    &cancel,
+                    &mut ready,
+                    &mut consecutive_failures,
+                    &mut total_restarts,
+                    format!("{error:#}"),
+                )
+                .await
+                {
+                    return;
+                }
+                continue;
             }
-            if fail_or_retry(
-                &config,
-                &status,
-                &cancel,
-                &mut ready,
-                &mut consecutive_failures,
-                &mut total_restarts,
-                format!("{error:#}"),
-            )
-            .await
-            {
-                return;
-            }
-            continue;
-        }
+        };
 
         {
             let mut current = status.write().await;
@@ -1655,6 +1707,11 @@ async fn run_supervisor(
             current.started_at = Some(SystemTime::now());
             current.restart_count = total_restarts;
             current.last_error = None;
+            current.version = Some(readiness.version);
+            current.mixed_port = readiness.mixed_port;
+            current.http_port = readiness.http_port;
+            current.socks_port = readiness.socks_port;
+            current.tun_device = Some(readiness.tun_device);
         }
         if let Some(ready) = ready.take() {
             let _ = ready.send(Ok(()));
@@ -1667,6 +1724,7 @@ async fn run_supervisor(
                 let mut current = status.write().await;
                 current.state = MihomoProcessState::Stopped;
                 current.pid = None;
+                current.clear_readiness_snapshot();
                 return;
             }
             result = child.wait() => result,
@@ -1679,6 +1737,7 @@ async fn run_supervisor(
             let mut current = status.write().await;
             current.pid = None;
             current.last_exit = Some(exit_description.clone());
+            current.clear_readiness_snapshot();
         }
         if running_since.elapsed() >= config.restart.stable_uptime {
             consecutive_failures = 0;
@@ -1859,6 +1918,7 @@ impl Drop for OwnedRuntimeDirectory {
 #[derive(Debug, Clone)]
 pub struct MihomoCoreStartRequest {
     pub instance_id: uuid::Uuid,
+    pub ownership_token: uuid::Uuid,
     pub executable: PathBuf,
     pub source: MihomoConfigSource,
     pub managed_base_dir: PathBuf,
@@ -1880,6 +1940,7 @@ enum CoreOwnerCommand {
     },
     Stop {
         instance_id: uuid::Uuid,
+        expected_ownership_token: Option<uuid::Uuid>,
         response: std_mpsc::SyncSender<anyhow::Result<()>>,
     },
     Validate {
@@ -1898,6 +1959,7 @@ enum CoreOwnerCommand {
 
 struct OwnedMihomo {
     instance_id: uuid::Uuid,
+    ownership_token: uuid::Uuid,
     supervisor: MihomoSupervisor,
     _runtime_directory: OwnedRuntimeDirectory,
 }
@@ -1947,10 +2009,27 @@ impl MihomoCoreOwner {
     }
 
     pub fn stop(&self, instance_id: uuid::Uuid) -> anyhow::Result<()> {
+        self.stop_matching(instance_id, None)
+    }
+
+    pub(crate) fn stop_if_owned(
+        &self,
+        instance_id: uuid::Uuid,
+        ownership_token: uuid::Uuid,
+    ) -> anyhow::Result<()> {
+        self.stop_matching(instance_id, Some(ownership_token))
+    }
+
+    fn stop_matching(
+        &self,
+        instance_id: uuid::Uuid,
+        expected_ownership_token: Option<uuid::Uuid>,
+    ) -> anyhow::Result<()> {
         let (response, result) = std_mpsc::sync_channel(1);
         self.commands
             .send(CoreOwnerCommand::Stop {
                 instance_id,
+                expected_ownership_token,
                 response,
             })
             .map_err(|_| anyhow::anyhow!("Mihomo Core owner is unavailable"))?;
@@ -2058,9 +2137,11 @@ async fn core_owner_loop(mut commands: mpsc::UnboundedReceiver<CoreOwnerCommand>
             }
             CoreOwnerCommand::Stop {
                 instance_id,
+                expected_ownership_token,
                 response,
             } => {
-                let result = stop_owned_mihomo(&mut owned, instance_id).await;
+                let result =
+                    stop_owned_mihomo(&mut owned, instance_id, expected_ownership_token).await;
                 let _ = response.send(result);
             }
             CoreOwnerCommand::Validate { request, response } => {
@@ -2114,10 +2195,12 @@ async fn start_owned_mihomo(
     )?;
 
     let instance_id = request.instance_id;
+    let ownership_token = request.ownership_token;
     let (mut supervisor, runtime_directory) = build_owned_supervisor(request)?;
     supervisor.start().await?;
     *owned = Some(OwnedMihomo {
         instance_id,
+        ownership_token,
         supervisor,
         _runtime_directory: runtime_directory,
     });
@@ -2179,17 +2262,33 @@ fn ensure_owner_available(
 async fn stop_owned_mihomo(
     owned: &mut Option<OwnedMihomo>,
     instance_id: uuid::Uuid,
+    expected_ownership_token: Option<uuid::Uuid>,
 ) -> anyhow::Result<()> {
     let Some(current) = owned.as_ref() else {
         return Ok(());
     };
-    if current.instance_id != instance_id {
+    if !owner_stop_matches(
+        current.instance_id,
+        current.ownership_token,
+        instance_id,
+        expected_ownership_token,
+    ) {
         return Ok(());
     }
     if let Some(mut current) = owned.take() {
         current.supervisor.stop().await;
     }
     Ok(())
+}
+
+fn owner_stop_matches(
+    current_instance_id: uuid::Uuid,
+    current_ownership_token: uuid::Uuid,
+    requested_instance_id: uuid::Uuid,
+    expected_ownership_token: Option<uuid::Uuid>,
+) -> bool {
+    current_instance_id == requested_instance_id
+        && expected_ownership_token.is_none_or(|token| token == current_ownership_token)
 }
 
 fn core_private_controller(
@@ -2604,6 +2703,7 @@ rules:
         fn request(base: &Path, executable: &str, contents: &str) -> MihomoCoreStartRequest {
             MihomoCoreStartRequest {
                 instance_id: uuid::Uuid::new_v4(),
+                ownership_token: uuid::Uuid::new_v4(),
                 executable: executable.into(),
                 source: MihomoConfigSource::Inline {
                     label: "edited Mihomo config".to_owned(),
@@ -2643,8 +2743,9 @@ rules:
         let response =
             b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"tun\":{\"enable\":true,\"device\":\"et-policy-test\"}}";
         let body = parse_controller_response(response).unwrap();
-        validate_active_tun(&body, "et-policy-test").unwrap();
-        assert!(validate_active_tun(&body, "wrong-device").is_err());
+        let active: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        validate_active_tun(&active, "et-policy-test").unwrap();
+        assert!(validate_active_tun(&active, "wrong-device").is_err());
         assert!(
             parse_controller_response(
                 b"HTTP/1.0 401 Unauthorized\r\n\r\n{\"message\":\"unauthorized\"}"
@@ -2677,6 +2778,32 @@ rules:
         assert!(ensure_owner_available(None, first).is_ok());
         assert!(ensure_owner_available(Some(first), first).is_err());
         assert!(ensure_owner_available(Some(first), uuid::Uuid::new_v4()).is_err());
+    }
+
+    #[test]
+    fn stale_owner_token_cannot_stop_replacement_for_same_instance() {
+        let instance_id = uuid::Uuid::new_v4();
+        let old_token = uuid::Uuid::new_v4();
+        let replacement_token = uuid::Uuid::new_v4();
+
+        assert!(!owner_stop_matches(
+            instance_id,
+            replacement_token,
+            instance_id,
+            Some(old_token),
+        ));
+        assert!(owner_stop_matches(
+            instance_id,
+            replacement_token,
+            instance_id,
+            Some(replacement_token),
+        ));
+        assert!(owner_stop_matches(
+            instance_id,
+            replacement_token,
+            instance_id,
+            None,
+        ));
     }
 
     #[test]

@@ -211,6 +211,9 @@ policy_mihomo_controller_secret_placeholder: Leave empty to use the YAML secret
 policy_mihomo_config_path_example: "Example: /etc/easytier/mihomo.yaml"
 policy_mihomo_config_path_required: Mihomo uses this native YAML file. The editor creates an instance-local autogen.yaml when the path is empty.
 policy_runtime_status: Runtime status
+policy_mihomo_version: Mihomo version
+policy_mihomo_listen_ports: Listen ports
+policy_mihomo_tun_device: TUN device
 policy_runtime_running: Running
 policy_runtime_stopped: Stopped
 policy_runtime_pid: Process ID
@@ -531,9 +534,14 @@ web:
     mihomo_file_open_failed: Failed to open Mihomo config file
     mihomo_file_save_failed: Failed to save Mihomo config file. If validation timed out, Mihomo may still be downloading Geo data; wait for the download to finish, then save again
     open_mihomo_dashboard: Zashboard
+    start_mihomo_runtime: Start Mihomo
+    stop_mihomo_runtime: Stop Mihomo
+    restart_mihomo_runtime: Restart Mihomo
+    mihomo_runtime_action_failed: Failed to control Mihomo runtime
     mihomo_dashboard_failed: Failed to open Zashboard
     policy_saved_restart_required: Policy configuration saved; restart this network to apply it
     policy_save_failed: Failed to save policy configuration
+    policy_runtime_preparing: Policy Runtime Preparing
     policy_runtime_running: Policy Runtime Running
     policy_runtime_stopped: Policy Runtime Stopped
     import_config: Import Config

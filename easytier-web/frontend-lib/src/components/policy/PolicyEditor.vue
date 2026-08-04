@@ -83,6 +83,15 @@ const policyBackend = computed<PolicyProxyBackend>({
 })
 const mihomoRuntimeStatus = computed(() => props.runtimeInfo?.mihomo_status)
 const neutralMeshEntryStatus = computed(() => props.runtimeInfo?.neutral_mesh_entry_status)
+const mihomoListenPorts = computed(() => {
+  const status = mihomoRuntimeStatus.value
+  if (!status) return ''
+  return [
+    status.mixed_port ? `mixed ${status.mixed_port}` : '',
+    status.http_port ? `http ${status.http_port}` : '',
+    status.socks_port ? `socks ${status.socks_port}` : '',
+  ].filter(Boolean).join(' · ')
+})
 const policyBackendOptions = computed(() => {
   const platform = outboundInfo.value?.platform?.trim().toLowerCase()
   const leafSupported = canEnablePolicyProxy(outboundInfo.value)
@@ -739,6 +748,15 @@ onMounted(() => {
       </div>
       <div class="text-sm" data-testid="mihomo-restart-count">
         {{ t('policy_runtime_restart_count') }}: {{ mihomoRuntimeStatus?.restart_count ?? 0 }}
+      </div>
+      <div v-if="mihomoRuntimeStatus?.version" class="text-sm">
+        {{ t('policy_mihomo_version') }}: {{ mihomoRuntimeStatus.version }}
+      </div>
+      <div v-if="mihomoListenPorts" class="text-sm" data-testid="mihomo-listen-ports">
+        {{ t('policy_mihomo_listen_ports') }}: {{ mihomoListenPorts }}
+      </div>
+      <div v-if="mihomoRuntimeStatus?.tun_device" class="text-sm">
+        {{ t('policy_mihomo_tun_device') }}: {{ mihomoRuntimeStatus.tun_device }}
       </div>
       <div v-if="neutralMeshEntryStatus" class="text-sm" data-testid="mesh-entry-status">
         {{ t('policy_mesh_entry') }}:

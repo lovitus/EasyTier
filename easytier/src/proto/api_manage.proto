@@ -165,6 +165,11 @@ message MihomoProcessStatus {
   optional string last_exit = 4;
   optional string last_error = 5;
   optional string owner_instance_id = 6;
+  optional string version = 7;
+  optional uint32 mixed_port = 8;
+  optional uint32 http_port = 9;
+  optional uint32 socks_port = 10;
+  optional string tun_device = 11;
 }
 
 message NeutralMeshEntryStatus {
@@ -237,6 +242,11 @@ message SaveMihomoConfigRequest {
 message GetMihomoDashboardUrlRequest { common.UUID inst_id = 1; }
 
 message GetMihomoDashboardUrlResponse { string url = 1; }
+
+message ControlMihomoRuntimeRequest {
+  common.UUID inst_id = 1;
+  string action = 2;
+}
 
 message ListPolicyRuleDataCategoriesRequest {
   common.UUID inst_id = 1;
@@ -314,6 +324,7 @@ service WebClientService {
   rpc SaveMihomoConfig(SaveMihomoConfigRequest) returns (common.Void) {}
   rpc GetMihomoDashboardUrl(GetMihomoDashboardUrlRequest)
       returns (GetMihomoDashboardUrlResponse) {}
+  rpc ControlMihomoRuntime(ControlMihomoRuntimeRequest) returns (common.Void) {}
   rpc UpdatePolicyRuleData(UpdatePolicyRuleDataRequest)
       returns (UpdatePolicyRuleDataResponse) {}
   rpc ListPolicyRuleDataCategories(ListPolicyRuleDataCategoriesRequest)

@@ -707,7 +707,13 @@ describe('RemoteManagement config save', () => {
       await nextTick()
       editor.vm.$emit('update:modelValue', 'secret: changed\nrules: []\n')
       await nextTick()
+      const saveRequest = deferred<void>()
+      api.save_mihomo_config = vi.fn(() => saveRequest.promise)
       await wrapper.get('[data-testid="policy-yaml-save"]').trigger('click')
+      await settleAsync()
+      expect(wrapper.get('[data-testid="policy-runtime-status"]').attributes('data-value'))
+        .toBe('web.device_management.policy_runtime_preparing')
+      saveRequest.resolve()
       await settleAsync()
       expect(api.save_mihomo_config).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -715,6 +721,8 @@ describe('RemoteManagement config save', () => {
         }),
         'secret: changed\nrules: []\n',
       )
+      expect(wrapper.get('[data-testid="policy-runtime-status"]').attributes('data-value'))
+        .toBe('web.device_management.policy_runtime_stopped')
 
       await wrapper.get('[data-testid="policy-home-backend"]').setValue('leaf')
       await settleAsync()

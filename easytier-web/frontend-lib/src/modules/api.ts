@@ -101,6 +101,7 @@ export interface RemoteClient {
     open_mihomo_config?(config: NetworkConfig, materialize: boolean): Promise<OpenMihomoConfigResponse>;
     save_mihomo_config?(config: NetworkConfig, contents: string): Promise<void>;
     open_mihomo_dashboard?(inst_id: string): Promise<void>;
+    control_mihomo_runtime?(inst_id: string, action: MihomoRuntimeAction): Promise<void>;
     update_policy_rule_data?(inst_id: string, resource: PolicyRuleDataResource, source_url?: string): Promise<UpdatePolicyRuleDataResponse>;
     list_policy_rule_data_categories?(inst_id: string, resource: PolicyRuleDataResource, expected_sha256?: string, path?: string): Promise<ListPolicyRuleDataCategoriesResponse>;
     list_policy_outbound_interfaces?(): Promise<ListPolicyOutboundInterfacesResponse>;
@@ -115,3 +116,5 @@ export interface RemoteClient {
     parse_config(toml_config: string): Promise<ParseConfigResponse>;
     get_network_metas(instance_ids: string[]): Promise<GetNetworkMetasResponse>;
 }
+
+export type MihomoRuntimeAction = 'start' | 'stop' | 'restart';

@@ -120,6 +120,10 @@ export async function getMihomoDashboardUrl(instanceId: string) {
   return await invoke<string>('get_mihomo_dashboard_url', { instanceId })
 }
 
+export async function controlMihomoRuntime(instanceId: string, action: 'start' | 'stop' | 'restart') {
+  await invoke('control_mihomo_runtime', { instanceId, action })
+}
+
 export async function openMihomoDashboard(instanceId: string) {
   await invoke('open_mihomo_dashboard', { instanceId })
 }
