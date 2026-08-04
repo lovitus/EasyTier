@@ -31,6 +31,20 @@ Release candidate based on v3.0.9.
 - Existing mesh, GOST mesh entry, routes, DNS policy, proxy definitions, and
   Mihomo configuration semantics are unchanged.
 
+### Release evidence
+
+- Released on 2026-08-05 from
+  `0d12ae94cb8ed201e7cfd8d900c86fe9faf9b1b5`.
+- Core: `30901533013`
+- GUI: `30901533179`
+- Mobile: `30901533191`
+- OHOS: `30901532849`
+- Test: `30901446097`
+- Release: `30931222964`
+- Published assets: 46
+- Linux and macOS exact-artifact lifecycle checks passed. Runtime-only Mihomo
+  controls preserved both the source YAML and persisted instance configuration.
+
 ## v3.0.9
 
 Release candidate based on v3.0.8.
