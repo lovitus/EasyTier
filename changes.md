@@ -20,6 +20,26 @@
 - Older Core responses without `bind_address` retain the previous bare-port
   fallback instead of inventing a listener scope.
 
+### Release evidence
+
+- Released on 2026-08-05 from
+  `e7df81ac224d651c96e3ec364b9bf77cf058886b`.
+- macOS ARM64 candidate: `30970695966`
+- Core: `30972848643`
+- GUI: `30972850215`
+- Mobile: `30972851874`
+- OHOS: `30972853408`
+- Test: `30972855093`
+- Release: `30976894399`
+- Published assets: 46
+- The macOS exact artifact displayed `mixed *:7890`, all-interface bind scope,
+  TUN `utun20`, and Mesh SOCKS `127.0.0.1:11080`, matching the authenticated
+  Mihomo `/configs` response. Runtime stop/start preserved both user files,
+  and Exit removed GUI, Mihomo, GOST, guardian, and TUN state.
+- The published Linux x86_64 asset matched GitHub SHA-256
+  `a8d4cd04fd970d44605980c4938236a559ba848dabd666558a110658b9831299`;
+  its `3.0.11-e7df81ac` Core passed listener, GOST, and cleanup smoke testing.
+
 ## v3.0.10
 
 Release candidate based on v3.0.9.
