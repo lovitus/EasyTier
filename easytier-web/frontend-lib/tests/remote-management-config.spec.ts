@@ -172,6 +172,14 @@ vi.mock('primevue', async () => {
     },
   })
 
+  const PopoverStub = defineComponent({
+    name: 'Popover',
+    setup(_, { expose, slots }) {
+      expose({ toggle: vi.fn() })
+      return () => h('div', { 'data-stub': 'popover' }, slots.default?.())
+    },
+  })
+
   return {
     Button: ButtonStub,
     Checkbox: CheckboxStub,
@@ -181,6 +189,7 @@ vi.mock('primevue', async () => {
     IftaLabel: PassThrough,
     Menu: MenuStub,
     Message: PassThrough,
+    Popover: PopoverStub,
     Select: SelectStub,
     SelectButton: SelectButtonStub,
     Tag: PassThrough,

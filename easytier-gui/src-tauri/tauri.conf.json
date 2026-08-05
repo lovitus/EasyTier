@@ -17,7 +17,7 @@
     "createUpdaterArtifacts": false
   },
   "productName": "easytier-gui",
-  "version": "3.0.10",
+  "version": "3.0.11",
   "identifier": "com.kkrainbow.easytier",
   "plugins": {
     "shell": {

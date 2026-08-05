@@ -1,5 +1,25 @@
 # EasyTier Changes
 
+## v3.0.11
+
+### Changes since v3.0.10
+
+- Add a compact read-only Mihomo runtime information popover immediately after
+  Zashboard.
+- Show the controller-reported Mihomo version, PID, restart count, active TUN,
+  Mesh SOCKS entry, and mixed/HTTP/SOCKS listener endpoints.
+- Include the exact active `bind-address` returned by Mihomo `/configs`, so
+  endpoints distinguish `127.0.0.1`, `0.0.0.0`, `*` (all interfaces), IPv6,
+  and custom bind values instead of displaying a bare port.
+
+### Compatibility
+
+- The information is read-only and reuses the existing readiness snapshot and
+  GUI status refresh. No Mihomo hot-update request, controller polling loop, or
+  configuration write is added.
+- Older Core responses without `bind_address` retain the previous bare-port
+  fallback instead of inventing a listener scope.
+
 ## v3.0.10
 
 Release candidate based on v3.0.9.

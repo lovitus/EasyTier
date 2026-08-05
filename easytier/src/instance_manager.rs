@@ -133,6 +133,7 @@ fn mihomo_status_proto(
         http_port: status.process.http_port.map(u32::from),
         socks_port: status.process.socks_port.map(u32::from),
         tun_device: status.process.tun_device.clone(),
+        bind_address: status.process.bind_address.clone(),
     }
 }
 

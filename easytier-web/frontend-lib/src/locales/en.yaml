@@ -213,6 +213,8 @@ policy_mihomo_config_path_required: Mihomo uses this native YAML file. The edito
 policy_runtime_status: Runtime status
 policy_mihomo_version: Mihomo version
 policy_mihomo_listen_ports: Listen ports
+policy_mihomo_bind_address: Bind scope
+policy_mihomo_bind_all: all interfaces
 policy_mihomo_tun_device: TUN device
 policy_runtime_running: Running
 policy_runtime_stopped: Stopped
@@ -534,6 +536,7 @@ web:
     mihomo_file_open_failed: Failed to open Mihomo config file
     mihomo_file_save_failed: Failed to save Mihomo config file. If validation timed out, Mihomo may still be downloading Geo data; wait for the download to finish, then save again
     open_mihomo_dashboard: Zashboard
+    mihomo_runtime_info: Mihomo runtime information
     start_mihomo_runtime: Start Mihomo
     stop_mihomo_runtime: Stop Mihomo
     restart_mihomo_runtime: Restart Mihomo

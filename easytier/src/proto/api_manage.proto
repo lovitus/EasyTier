@@ -170,6 +170,7 @@ message MihomoProcessStatus {
   optional uint32 http_port = 9;
   optional uint32 socks_port = 10;
   optional string tun_device = 11;
+  optional string bind_address = 12;
 }
 
 message NeutralMeshEntryStatus {

@@ -5,15 +5,16 @@
 //! the policy TUN envelope, anti-loop exclusions/rules, a private controller,
 //! and the Mihomo child process.
 //!
-//! Reference semantics were checked against the maintainer's Mihomo checkout
-//! at `0a87b94845ef908c15f8495871e4cd8e33116328`:
+//! Reference semantics were checked against the release-pinned Mihomo source
+//! at `e26714a181ac0e2fa803453c0a8e9a9ce94e31cb`:
 //! - `config/config.go::{RawTun,RawConfig}` defines the overlaid YAML fields.
 //! - `rules/parser.go::ParseRule` accepts PROCESS-NAME, PROCESS-NAME-REGEX,
 //!   and PROCESS-NAME-WILDCARD.
 //! - `hub/route/server.go::router` puts `/version` and `/configs/` behind
 //!   Bearer authentication for the TCP controller.
-//! - `hub/route/configs.go::getConfigs` returns the active `tun.enable` and
-//!   `tun.device` values used by the readiness check.
+//! - `hub/route/configs.go::getConfigs` and `config/config.go::General` return
+//!   the active `bind-address`, listener ports, `tun.enable`, and `tun.device`
+//!   values used by the read-only readiness snapshot.
 //! - `hub/route/server.go::{startUnix,startPipe}` deliberately constructs its
 //!   handler with an empty secret. Unix safety therefore comes from a socket
 //!   inside EasyTier's mode-0700 runtime directory. Core uses authenticated
@@ -1073,6 +1074,7 @@ pub struct MihomoStatus {
     pub http_port: Option<u16>,
     pub socks_port: Option<u16>,
     pub tun_device: Option<String>,
+    pub bind_address: Option<String>,
 }
 
 impl Default for MihomoStatus {
@@ -1090,6 +1092,7 @@ impl Default for MihomoStatus {
             http_port: None,
             socks_port: None,
             tun_device: None,
+            bind_address: None,
         }
     }
 }
@@ -1101,6 +1104,7 @@ impl MihomoStatus {
         self.http_port = None;
         self.socks_port = None;
         self.tun_device = None;
+        self.bind_address = None;
     }
 }
 
@@ -1559,6 +1563,7 @@ struct MihomoReadinessSnapshot {
     http_port: Option<u16>,
     socks_port: Option<u16>,
     tun_device: String,
+    bind_address: Option<String>,
 }
 
 fn controller_port(config: &serde_json::Value, name: &str) -> Option<u16> {
@@ -1567,6 +1572,42 @@ fn controller_port(config: &serde_json::Value, name: &str) -> Option<u16> {
         .and_then(serde_json::Value::as_u64)
         .and_then(|port| u16::try_from(port).ok())
         .filter(|port| *port != 0)
+}
+
+fn controller_bind_address(config: &serde_json::Value) -> Option<String> {
+    config
+        .get("bind-address")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|address| !address.is_empty())
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod readiness_snapshot_tests {
+    use super::{controller_bind_address, controller_port};
+
+    #[test]
+    fn controller_snapshot_preserves_actual_bind_scope_and_enabled_ports() {
+        let active = serde_json::json!({
+            "bind-address": "*",
+            "mixed-port": 7890,
+            "port": 0,
+            "socks-port": 1080,
+        });
+
+        assert_eq!(controller_bind_address(&active).as_deref(), Some("*"));
+        assert_eq!(controller_port(&active, "mixed-port"), Some(7890));
+        assert_eq!(controller_port(&active, "port"), None);
+        assert_eq!(controller_port(&active, "socks-port"), Some(1080));
+
+        let loopback = serde_json::json!({ "bind-address": "127.0.0.1" });
+        assert_eq!(
+            controller_bind_address(&loopback).as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(controller_bind_address(&serde_json::json!({})), None);
+    }
 }
 
 async fn probe_readiness(
@@ -1589,6 +1630,7 @@ async fn probe_readiness(
         http_port: controller_port(&active, "port"),
         socks_port: controller_port(&active, "socks-port"),
         tun_device,
+        bind_address: controller_bind_address(&active),
     })
 }
 
@@ -1712,6 +1754,7 @@ async fn run_supervisor(
             current.http_port = readiness.http_port;
             current.socks_port = readiness.socks_port;
             current.tun_device = Some(readiness.tun_device);
+            current.bind_address = readiness.bind_address;
         }
         if let Some(ready) = ready.take() {
             let _ = ready.send(Ok(()));

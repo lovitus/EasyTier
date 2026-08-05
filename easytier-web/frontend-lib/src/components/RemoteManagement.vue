@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Button, ConfirmPopup, Dialog, Divider, IftaLabel, Menu, Message, Select, SelectButton, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
+import { Button, ConfirmPopup, Dialog, Divider, IftaLabel, Menu, Message, Popover, Select, SelectButton, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
 import { computed, onMounted, onUnmounted, Ref, ref, shallowRef, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import * as Api from '../modules/api';
@@ -7,6 +7,7 @@ import * as Utils from '../modules/utils';
 import * as NetworkTypes from '../types/network';
 import { type MenuItem } from 'primevue/menuitem';
 import { normalizeRunningInfo } from '../modules/statusDisplay';
+import { formatMihomoListenPorts } from '../modules/mihomoRuntimeDisplay';
 import MihomoYamlEditor from './policy/MihomoYamlEditor.vue';
 import PolicyEditor from './policy/PolicyEditor.vue';
 import { DEFAULT_POLICY_TEMPLATE } from './policy/policyDocument';
@@ -465,6 +466,10 @@ const currentPolicyBackend = computed<PolicyProxyBackend>(() => {
     if (!currentNetworkConfig.value) return 'off';
     return configuredPolicyBackend(currentNetworkConfig.value);
 });
+const mihomoRuntimeStatus = computed(() => currentNetworkStatusInfo.value?.detail?.mihomo_status);
+const neutralMeshEntryStatus = computed(() => currentNetworkStatusInfo.value?.detail?.neutral_mesh_entry_status);
+const mihomoRuntimeInfoPopover = ref();
+const mihomoListenPorts = computed(() => formatMihomoListenPorts(mihomoRuntimeStatus.value));
 const policyBackendOptions = computed(() => {
     const leafSupported = leafRuntimeSupported.value ?? true;
     return [
@@ -483,7 +488,7 @@ const policyBackendOptions = computed(() => {
 });
 const policyRuntimeRunning = computed(() => {
     if (currentPolicyBackend.value === 'mihomo') {
-        return currentNetworkStatusInfo.value?.detail?.mihomo_status?.state === 'running';
+        return mihomoRuntimeStatus.value?.state === 'running';
     }
     if (currentPolicyBackend.value === 'leaf') {
         return Boolean(currentNetworkStatusInfo.value?.detail?.policy_runtime_running);
@@ -655,7 +660,7 @@ const openMihomoDashboard = async () => {
     }
 }
 const mihomoRuntimeActionPending = ref(false)
-const mihomoRuntimeOwned = computed(() => Boolean(currentNetworkStatusInfo.value?.detail?.mihomo_status))
+const mihomoRuntimeOwned = computed(() => Boolean(mihomoRuntimeStatus.value))
 
 const controlMihomoRuntime = async (action: Api.MihomoRuntimeAction) => {
     const instanceId = selectedInstanceId.value?.uuid
@@ -1159,6 +1164,56 @@ onUnmounted(() => {
                     :label="t('web.device_management.open_mihomo_dashboard')"
                     :disabled="!props.api.open_mihomo_dashboard"
                     data-testid="policy-open-mihomo-dashboard" @click="openMihomoDashboard" />
+                <Button v-if="currentPolicyBackend === 'mihomo' && mihomoRuntimeStatus"
+                    icon="pi pi-info-circle" severity="secondary" size="small"
+                    :aria-label="t('web.device_management.mihomo_runtime_info')"
+                    v-tooltip="t('web.device_management.mihomo_runtime_info')"
+                    data-testid="policy-mihomo-runtime-info"
+                    @click="mihomoRuntimeInfoPopover.toggle($event)" />
+                <Popover ref="mihomoRuntimeInfoPopover">
+                    <div class="grid min-w-64 grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm"
+                        data-testid="policy-mihomo-runtime-info-content">
+                        <span class="text-surface-500">{{ t('policy_runtime_status') }}</span>
+                        <strong>{{ mihomoRuntimeStatus?.state }}</strong>
+                        <template v-if="mihomoRuntimeStatus?.version">
+                            <span class="text-surface-500">{{ t('policy_mihomo_version') }}</span>
+                            <span>{{ mihomoRuntimeStatus.version }}</span>
+                        </template>
+                        <template v-if="mihomoRuntimeStatus?.pid">
+                            <span class="text-surface-500">{{ t('policy_runtime_pid') }}</span>
+                            <span>{{ mihomoRuntimeStatus.pid }}</span>
+                        </template>
+                        <span class="text-surface-500">{{ t('policy_runtime_restart_count') }}</span>
+                        <span>{{ mihomoRuntimeStatus?.restart_count ?? 0 }}</span>
+                        <template v-if="mihomoListenPorts">
+                            <span class="text-surface-500">{{ t('policy_mihomo_listen_ports') }}</span>
+                            <span>{{ mihomoListenPorts }}</span>
+                        </template>
+                        <template v-if="mihomoRuntimeStatus?.bind_address">
+                            <span class="text-surface-500">{{ t('policy_mihomo_bind_address') }}</span>
+                            <span>
+                                {{ mihomoRuntimeStatus.bind_address }}
+                                <template v-if="mihomoRuntimeStatus.bind_address === '*'">
+                                    ({{ t('policy_mihomo_bind_all') }})
+                                </template>
+                            </span>
+                        </template>
+                        <template v-if="mihomoRuntimeStatus?.tun_device">
+                            <span class="text-surface-500">{{ t('policy_mihomo_tun_device') }}</span>
+                            <span>{{ mihomoRuntimeStatus.tun_device }}</span>
+                        </template>
+                        <template v-if="neutralMeshEntryStatus">
+                            <span class="text-surface-500">{{ t('policy_mesh_entry') }}</span>
+                            <span>
+                                {{ neutralMeshEntryStatus.state }}
+                                <template v-if="neutralMeshEntryStatus.endpoint">
+                                    · {{ neutralMeshEntryStatus.endpoint }}
+                                </template>
+                                · {{ neutralMeshEntryStatus.backend }}
+                            </span>
+                        </template>
+                    </div>
+                </Popover>
                 <Button v-if="currentPolicyBackend === 'mihomo' && props.api.control_mihomo_runtime && !mihomoRuntimeOwned"
                     icon="pi pi-play" severity="secondary" size="small"
                     :label="t('web.device_management.start_mihomo_runtime')"
