@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Button, ConfirmPopup, Dialog, Divider, IftaLabel, Menu, Message, Popover, Select, SelectButton, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
+import { Button, ConfirmPopup, Dialog, Divider, IftaLabel, InputText, Menu, Message, Popover, Select, SelectButton, Tag, useConfirm, useToast, type VirtualScrollerLazyEvent } from 'primevue';
 import { computed, onMounted, onUnmounted, Ref, ref, shallowRef, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import * as Api from '../modules/api';
@@ -56,6 +56,9 @@ const leafYamlValid = ref(true);
 const showPolicyYamlDialog = ref(false);
 let policyYamlDialogGeneration = 0;
 const policyConfigSaving = ref(false);
+const showMihomoGeoxTools = ref(false);
+const mihomoGeoxPreparing = ref(false);
+const mihomoGeoxSocksUrl = ref('');
 const mihomoPreparingInstanceId = ref<string>();
 const policyBackendSelectorGeneration = ref(0);
 const policyRuntimePlatform = ref<string | undefined>(undefined);
@@ -564,8 +567,44 @@ const resetPolicyYamlDialog = () => {
 
 const closePolicyYamlDialog = () => {
     policyYamlDialogGeneration += 1;
+    showMihomoGeoxTools.value = false;
     showPolicyYamlDialog.value = false;
     resetPolicyYamlDialog();
+}
+
+const prepareMihomoGeoxResources = async (proxyMode: Api.MihomoGeoxProxyMode) => {
+    if (!mihomoPolicyConfigDraft.value || !props.api.prepare_mihomo_geox_resources || mihomoGeoxPreparing.value) {
+        return;
+    }
+    const proxyUrl = proxyMode === 'socks5' ? mihomoGeoxSocksUrl.value.trim() : undefined;
+    if (proxyMode === 'socks5' && !proxyUrl) {
+        return;
+    }
+    mihomoGeoxPreparing.value = true;
+    try {
+        const response = await props.api.prepare_mihomo_geox_resources(
+            cloneNetworkConfig(mihomoPolicyConfigDraft.value),
+            mihomoYamlContents.value,
+            proxyMode,
+            proxyUrl,
+        );
+        showMihomoGeoxTools.value = false;
+        toast.add({
+            severity: 'success',
+            summary: t('web.common.success'),
+            detail: t('web.device_management.mihomo_geox_prepare_success', { count: response.resources.length }),
+            life: 5000,
+        });
+    } catch (error) {
+        toast.add({
+            severity: 'error',
+            summary: 'Error',
+            detail: t('web.device_management.mihomo_geox_prepare_failed') + ': ' + errorDetail(error),
+            life: 10000,
+        });
+    } finally {
+        mihomoGeoxPreparing.value = false;
+    }
 }
 
 const openPolicyYaml = async () => {
@@ -1335,9 +1374,37 @@ onUnmounted(() => {
                 <Button v-if="!policyYamlReadOnly" :label="t('web.common.save')" icon="pi pi-save"
                     :loading="policyConfigSaving"
                     :disabled="(policyYamlDialogBackend === 'mihomo' && !mihomoYamlValid)
-                        || (policyYamlDialogBackend === 'leaf' && !leafYamlValid)"
+                        || (policyYamlDialogBackend === 'leaf' && !leafYamlValid)
+                        || mihomoGeoxPreparing"
                     data-testid="policy-yaml-save" @click="savePolicyYaml" />
+                <Button v-if="!policyYamlReadOnly && policyYamlDialogBackend === 'mihomo'"
+                    icon="pi pi-wrench" severity="secondary" outlined
+                    :aria-label="t('web.device_management.mihomo_geox_tools')"
+                    :disabled="!props.api.prepare_mihomo_geox_resources || !mihomoYamlValid || policyConfigSaving || mihomoGeoxPreparing"
+                    data-testid="mihomo-geox-tools" @click="showMihomoGeoxTools = true" />
             </template>
+        </Dialog>
+
+        <Dialog v-model:visible="showMihomoGeoxTools" modal
+            :header="t('web.device_management.mihomo_geox_tools')"
+            class="w-[min(34rem,95vw)]" data-testid="mihomo-geox-tools-dialog">
+            <Message severity="info" :closable="false">
+                {{ t('web.device_management.mihomo_geox_tools_help') }}
+            </Message>
+            <div class="mt-4 flex flex-col gap-3">
+                <Button :label="t('web.device_management.mihomo_geox_use_system_proxy')"
+                    icon="pi pi-desktop" :loading="mihomoGeoxPreparing"
+                    data-testid="mihomo-geox-system" @click="prepareMihomoGeoxResources('system')" />
+                <IftaLabel>
+                    <InputText id="mihomo_geox_socks_url" v-model="mihomoGeoxSocksUrl"
+                        class="w-full" placeholder="socks5h://127.0.0.1:1080" />
+                    <label for="mihomo_geox_socks_url">{{ t('web.device_management.mihomo_geox_socks_url') }}</label>
+                </IftaLabel>
+                <Button :label="t('web.device_management.mihomo_geox_use_socks')"
+                    icon="pi pi-cloud-download" severity="secondary"
+                    :loading="mihomoGeoxPreparing" :disabled="!mihomoGeoxSocksUrl.trim()"
+                    data-testid="mihomo-geox-socks" @click="prepareMihomoGeoxResources('socks5')" />
+            </div>
         </Dialog>
     </div>
 </template>

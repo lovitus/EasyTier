@@ -223,6 +223,17 @@ class WebRemoteClient implements Api.RemoteClient {
             contents,
         });
     }
+    async prepare_mihomo_geox_resources(config: NetworkTypes.NetworkConfig, contents: string, proxyMode: Api.MihomoGeoxProxyMode, proxyUrl?: string): Promise<Api.PrepareMihomoGeoxResourcesResponse> {
+        return await this.client.post<any, Api.PrepareMihomoGeoxResourcesResponse>(
+            `/machines/${this.machine_id}/mihomo-config/geox`,
+            {
+                config: NetworkTypes.toBackendNetworkConfig(config),
+                contents,
+                proxy_mode: proxyMode,
+                proxy_url: proxyUrl,
+            },
+        );
+    }
     async open_mihomo_dashboard(instanceId: string): Promise<void> {
         const response = await this.client.get<any, { url: string }>(
             `/machines/${this.machine_id}/networks/${instanceId}/mihomo-dashboard`,

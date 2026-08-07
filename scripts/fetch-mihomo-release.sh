@@ -157,6 +157,7 @@ resolved = {
     "published_at": release["published_at"],
     "license": template["license"],
     "license_file": template["license_file"],
+    "geox_defaults": template["geox_defaults"],
     "source_distribution": {
         "commit": commit,
         "archive": {

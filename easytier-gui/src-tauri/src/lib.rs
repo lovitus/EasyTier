@@ -7,8 +7,9 @@ mod vpn_stop_dispatch;
 use anyhow::Context;
 use easytier::proto::api::manage::{
     CollectNetworkInfoResponse, ListPolicyOutboundInterfacesResponse,
-    ListPolicyRuleDataCategoriesResponse, OpenMihomoConfigResponse, UpdatePolicyRuleDataResponse,
-    ValidateConfigResponse, WebClientService, WebClientServiceClientFactory,
+    ListPolicyRuleDataCategoriesResponse, OpenMihomoConfigResponse,
+    PrepareMihomoGeoxResourcesResponse, UpdatePolicyRuleDataResponse, ValidateConfigResponse,
+    WebClientService, WebClientServiceClientFactory,
 };
 use easytier::rpc_service::remote_client::{
     GetNetworkMetasResponse, ListNetworkInstanceIdsJsonResp, ListNetworkProps, RemoteClientManager,
@@ -367,6 +368,20 @@ async fn save_mihomo_config(
 ) -> Result<(), String> {
     get_client_manager!()?
         .handle_save_mihomo_config(app, config, contents)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn prepare_mihomo_geox_resources(
+    app: AppHandle,
+    config: NetworkConfig,
+    contents: String,
+    proxy_mode: String,
+    proxy_url: Option<String>,
+) -> Result<PrepareMihomoGeoxResourcesResponse, String> {
+    get_client_manager!()?
+        .handle_prepare_mihomo_geox_resources(app, config, contents, proxy_mode, proxy_url)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1710,6 +1725,7 @@ pub fn run_gui() -> std::process::ExitCode {
             validate_config,
             open_mihomo_config,
             save_mihomo_config,
+            prepare_mihomo_geox_resources,
             get_mihomo_dashboard_url,
             open_mihomo_dashboard,
             update_policy_rule_data,

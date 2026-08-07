@@ -32,7 +32,7 @@ use std::{
     ffi::OsString,
     fmt,
     fs::{self, OpenOptions},
-    io::Write as _,
+    io::{Read as _, Write as _},
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
@@ -58,11 +58,369 @@ use crate::managed_child::{ManagedChild, configure_command};
 use std::net::{Ipv4Addr, TcpListener};
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_GEOX_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_CONTROLLER_RESPONSE_BYTES: u64 = 1024 * 1024;
 const MAX_VALIDATION_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const OWNER_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_TAILSCALE_ROUTES: &[&str] = &["100.64.0.0/10", "fd7a:115c:a1e0::/48"];
 const DEFAULT_AUTOGEN_CONFIG: &str = "mode: rule\nrules:\n  - MATCH,DIRECT\n";
+const MIHOMO_DISTRIBUTION_MANIFEST: &str = include_str!("../resources/mihomo/manifest.json");
+
+#[derive(Debug, Clone, Deserialize)]
+struct MihomoGeoxDefault {
+    url: String,
+    file_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MihomoDistributionManifest {
+    geox_defaults: std::collections::BTreeMap<String, MihomoGeoxDefault>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MihomoGeoxProxy {
+    System,
+    Socks5(String),
+    #[cfg(test)]
+    Direct,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MihomoPreparedGeoxResource {
+    pub resource: String,
+    pub path: PathBuf,
+    pub source_url: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone)]
+struct MihomoGeoxResourcePlan {
+    resource: String,
+    path: PathBuf,
+    source_url: String,
+}
+
+#[derive(Debug)]
+struct InstalledGeoxResource {
+    target: PathBuf,
+    backup: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+pub struct MihomoGeoxInstall {
+    installed: Vec<InstalledGeoxResource>,
+    prepared: Vec<MihomoPreparedGeoxResource>,
+    committed: bool,
+}
+
+impl MihomoGeoxInstall {
+    pub fn commit(mut self) -> Vec<MihomoPreparedGeoxResource> {
+        self.committed = true;
+        for installed in &self.installed {
+            if let Some(backup) = &installed.backup {
+                let _ = fs::remove_file(backup);
+            }
+        }
+        std::mem::take(&mut self.prepared)
+    }
+}
+
+impl Drop for MihomoGeoxInstall {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for installed in self.installed.iter().rev() {
+            let _ = fs::remove_file(&installed.target);
+            if let Some(backup) = &installed.backup {
+                let _ = fs::rename(backup, &installed.target);
+            }
+        }
+    }
+}
+
+fn configured_geox_url(root: &Mapping, resource: &str) -> anyhow::Result<Option<String>> {
+    let Some(geox) = root.get(yaml_key("geox-url")) else {
+        return Ok(None);
+    };
+    let geox = geox
+        .as_mapping()
+        .ok_or_else(|| anyhow::anyhow!("Mihomo geox-url must be a YAML mapping"))?;
+    let Some(value) = geox.get(yaml_key(resource)) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Mihomo geox-url.{resource} must be a string"))?;
+    ensure!(
+        !value.trim().is_empty(),
+        "Mihomo geox-url.{resource} is empty"
+    );
+    Ok(Some(value.to_owned()))
+}
+
+fn collect_mihomo_rule_kinds(value: &Value, kinds: &mut BTreeSet<String>) {
+    match value {
+        Value::String(rule) => {
+            if let Some(kind) = rule.split(',').next() {
+                kinds.insert(kind.trim().to_ascii_uppercase());
+            }
+        }
+        Value::Sequence(values) => {
+            for value in values {
+                collect_mihomo_rule_kinds(value, kinds);
+            }
+        }
+        Value::Mapping(values) => {
+            for value in values.values() {
+                collect_mihomo_rule_kinds(value, kinds);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn plan_mihomo_geox_resources(
+    contents: &str,
+    managed_home: &Path,
+) -> anyhow::Result<Vec<MihomoGeoxResourcePlan>> {
+    let document: Value = serde_yaml::from_str(contents).context("failed to parse Mihomo YAML")?;
+    let root = document
+        .as_mapping()
+        .ok_or_else(|| anyhow::anyhow!("Mihomo config root must be a YAML mapping"))?;
+    let mut kinds = BTreeSet::new();
+    if let Some(rules) = root.get(yaml_key("rules")) {
+        collect_mihomo_rule_kinds(rules, &mut kinds);
+    }
+    if let Some(sub_rules) = root.get(yaml_key("sub-rules")) {
+        collect_mihomo_rule_kinds(sub_rules, &mut kinds);
+    }
+    let geodata_mode = match root.get(yaml_key("geodata-mode")) {
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => anyhow::bail!("Mihomo geodata-mode must be a boolean"),
+        None => false,
+    };
+    let manifest: MihomoDistributionManifest =
+        serde_json::from_str(MIHOMO_DISTRIBUTION_MANIFEST)
+            .context("invalid bundled Mihomo distribution manifest")?;
+    let mut requested = Vec::new();
+    if kinds.contains("GEOSITE") || kinds.contains("SRC-GEOSITE") {
+        requested.push(("geosite", "geosite"));
+    }
+    if kinds.contains("GEOIP") || kinds.contains("SRC-GEOIP") {
+        requested.push(if geodata_mode {
+            ("geoip", "geoip")
+        } else {
+            ("mmdb", "mmdb")
+        });
+    }
+    if kinds.contains("IP-ASN") || kinds.contains("SRC-IP-ASN") {
+        requested.push(("asn", "asn"));
+    }
+    ensure!(
+        !requested.is_empty(),
+        "Mihomo config has no inline GEOIP, GEOSITE, or IP-ASN rules requiring GeoX data"
+    );
+    requested
+        .into_iter()
+        .map(|(resource, geox_key)| {
+            let default = manifest
+                .geox_defaults
+                .get(resource)
+                .ok_or_else(|| anyhow::anyhow!("missing bundled Mihomo {resource} default"))?;
+            let source_url =
+                configured_geox_url(root, geox_key)?.unwrap_or_else(|| default.url.clone());
+            let url = url::Url::parse(&source_url)
+                .with_context(|| format!("invalid Mihomo geox-url.{geox_key}"))?;
+            ensure!(
+                matches!(url.scheme(), "http" | "https"),
+                "Mihomo geox-url.{geox_key} must use http or https"
+            );
+            Ok(MihomoGeoxResourcePlan {
+                resource: resource.to_owned(),
+                path: managed_home.join(&default.file_name),
+                source_url,
+            })
+        })
+        .collect()
+}
+
+fn geox_http_client(proxy: &MihomoGeoxProxy) -> anyhow::Result<reqwest::blocking::Client> {
+    let mut builder = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(180))
+        .user_agent(concat!("EasyTier/", env!("CARGO_PKG_VERSION")));
+    if let MihomoGeoxProxy::Socks5(proxy_url) = proxy {
+        let parsed = url::Url::parse(proxy_url).context("invalid SOCKS5 proxy URL")?;
+        ensure!(
+            matches!(parsed.scheme(), "socks5" | "socks5h"),
+            "custom GeoX proxy must use socks5 or socks5h"
+        );
+        ensure!(
+            parsed.host_str().is_some() && parsed.port().is_some(),
+            "custom GeoX proxy requires a host and port"
+        );
+        builder = builder
+            .no_proxy()
+            .proxy(reqwest::Proxy::all(proxy_url).context("invalid SOCKS5 proxy URL")?);
+    }
+    #[cfg(test)]
+    if matches!(proxy, MihomoGeoxProxy::Direct) {
+        builder = builder.no_proxy();
+    }
+    builder.build().context("failed to create GeoX HTTP client")
+}
+
+fn rollback_installed_geox(installed: &[InstalledGeoxResource]) {
+    for item in installed.iter().rev() {
+        let _ = fs::remove_file(&item.target);
+        if let Some(backup) = &item.backup {
+            let _ = fs::rename(backup, &item.target);
+        }
+    }
+}
+
+fn download_mihomo_geox_resources(
+    plans: Vec<MihomoGeoxResourcePlan>,
+    proxy: MihomoGeoxProxy,
+) -> anyhow::Result<MihomoGeoxInstall> {
+    let client = geox_http_client(&proxy)?;
+    let mut downloads = Vec::new();
+    for plan in plans {
+        let temporary = plan.path.with_file_name(format!(
+            ".{}.{}.part",
+            plan.path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("geox"),
+            uuid::Uuid::new_v4()
+        ));
+        let result = (|| -> anyhow::Result<u64> {
+            let mut response = client
+                .get(&plan.source_url)
+                .send()
+                .with_context(|| format!("failed to download Mihomo {} data", plan.resource))?
+                .error_for_status()
+                .with_context(|| {
+                    format!("Mihomo {} data server rejected the request", plan.resource)
+                })?;
+            if let Some(length) = response.content_length() {
+                ensure!(
+                    length <= MAX_GEOX_RESOURCE_BYTES,
+                    "Mihomo {} data exceeds {} bytes",
+                    plan.resource,
+                    MAX_GEOX_RESOURCE_BYTES
+                );
+            }
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .with_context(|| format!("failed to create {}", temporary.display()))?;
+            let mut limited = (&mut response).take(MAX_GEOX_RESOURCE_BYTES + 1);
+            let size = std::io::copy(&mut limited, &mut file)
+                .with_context(|| format!("failed to write Mihomo {} data", plan.resource))?;
+            ensure!(
+                size <= MAX_GEOX_RESOURCE_BYTES,
+                "Mihomo {} data exceeds {} bytes",
+                plan.resource,
+                MAX_GEOX_RESOURCE_BYTES
+            );
+            ensure!(size > 0, "Mihomo {} data is empty", plan.resource);
+            file.sync_all()
+                .with_context(|| format!("failed to sync {}", temporary.display()))?;
+            Ok(size)
+        })();
+        match result {
+            Ok(size) => downloads.push((plan, temporary, size)),
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                for (_, path, _) in downloads {
+                    let _ = fs::remove_file(path);
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    let mut installed = Vec::new();
+    let mut prepared = Vec::new();
+    for (plan, temporary, size) in &downloads {
+        let backup_result = (|| -> anyhow::Result<Option<PathBuf>> {
+            match fs::symlink_metadata(&plan.path) {
+                Ok(metadata) => {
+                    ensure!(
+                        metadata.is_file() && !metadata.file_type().is_symlink(),
+                        "refusing non-regular Mihomo GeoX target {}",
+                        plan.path.display()
+                    );
+                    let backup = plan.path.with_file_name(format!(
+                        ".{}.{}.backup",
+                        plan.path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("geox"),
+                        uuid::Uuid::new_v4()
+                    ));
+                    fs::rename(&plan.path, &backup).with_context(|| {
+                        format!("failed to preserve existing {}", plan.path.display())
+                    })?;
+                    Ok(Some(backup))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            }
+        })();
+        let backup = match backup_result {
+            Ok(backup) => backup,
+            Err(error) => {
+                for (_, pending, _) in &downloads {
+                    let _ = fs::remove_file(pending);
+                }
+                rollback_installed_geox(&installed);
+                return Err(error);
+            }
+        };
+        if let Err(error) = fs::rename(&temporary, &plan.path) {
+            if let Some(backup) = &backup {
+                let _ = fs::rename(backup, &plan.path);
+            }
+            for (_, pending, _) in &downloads {
+                let _ = fs::remove_file(pending);
+            }
+            rollback_installed_geox(&installed);
+            return Err(error)
+                .with_context(|| format!("failed to install Mihomo {} data", plan.resource));
+        }
+        installed.push(InstalledGeoxResource {
+            target: plan.path.clone(),
+            backup,
+        });
+        prepared.push(MihomoPreparedGeoxResource {
+            resource: plan.resource.clone(),
+            path: plan.path.clone(),
+            source_url: plan.source_url.clone(),
+            size: *size,
+        });
+    }
+    Ok(MihomoGeoxInstall {
+        installed,
+        prepared,
+        committed: false,
+    })
+}
+
+pub async fn prepare_mihomo_geox_resources(
+    request: &MihomoCoreStartRequest,
+    contents: &str,
+    proxy: MihomoGeoxProxy,
+) -> anyhow::Result<MihomoGeoxInstall> {
+    let managed_home = prepare_managed_home(&request.managed_base_dir, request.instance_id)?;
+    let plans = plan_mihomo_geox_resources(contents, &managed_home)?;
+    tokio::task::spawn_blocking(move || download_mihomo_geox_resources(plans, proxy))
+        .await
+        .context("Mihomo GeoX preparation task failed")?
+}
 
 const RESERVED_PROCESS_RULES: &[&str] = &[
     "PROCESS-NAME,io.tailscale.ipn.macsys.network-extension,DIRECT",
@@ -2347,6 +2705,133 @@ fn core_private_controller(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geox_plan_uses_mihomo_defaults_without_explicit_urls() {
+        let home = tempfile::tempdir().unwrap();
+        let plans = plan_mihomo_geox_resources(
+            "geodata-mode: false\nrules:\n  - GEOSITE,cn,DIRECT\n  - GEOIP,CN,DIRECT\n  - IP-ASN,13335,DIRECT\n",
+            home.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            plans
+                .iter()
+                .map(|plan| (plan.resource.as_str(), plan.path.file_name().unwrap()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("geosite", std::ffi::OsStr::new("GeoSite.dat")),
+                ("mmdb", std::ffi::OsStr::new("geoip.metadb")),
+                ("asn", std::ffi::OsStr::new("ASN.mmdb")),
+            ]
+        );
+        assert!(
+            plans
+                .iter()
+                .all(|plan| plan.source_url.starts_with("https://"))
+        );
+    }
+
+    #[test]
+    fn geox_plan_honors_geodata_mode_urls_and_sub_rules() {
+        let home = tempfile::tempdir().unwrap();
+        let plans = plan_mihomo_geox_resources(
+            "geodata-mode: true\ngeox-url:\n  geoip: https://example.test/custom.dat\nsub-rules:\n  child:\n    - GEOIP,US,DIRECT\n",
+            home.path(),
+        )
+        .unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].resource, "geoip");
+        assert_eq!(plans[0].path.file_name().unwrap(), "GeoIP.dat");
+        assert_eq!(plans[0].source_url, "https://example.test/custom.dat");
+    }
+
+    #[test]
+    fn geox_plan_rejects_configs_without_geo_rules() {
+        let home = tempfile::tempdir().unwrap();
+        let error = plan_mihomo_geox_resources("rules:\n  - MATCH,DIRECT\n", home.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no inline GEOIP, GEOSITE, or IP-ASN"));
+    }
+
+    #[test]
+    fn geox_install_rolls_back_until_validation_commits() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("GeoSite.dat");
+        let backup = home.path().join(".GeoSite.dat.backup");
+        fs::write(&target, b"new").unwrap();
+        fs::write(&backup, b"old").unwrap();
+        let install = MihomoGeoxInstall {
+            installed: vec![InstalledGeoxResource {
+                target: target.clone(),
+                backup: Some(backup.clone()),
+            }],
+            prepared: Vec::new(),
+            committed: false,
+        };
+        drop(install);
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn geox_install_commit_keeps_validated_file() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("GeoSite.dat");
+        let backup = home.path().join(".GeoSite.dat.backup");
+        fs::write(&target, b"new").unwrap();
+        fs::write(&backup, b"old").unwrap();
+        let prepared = MihomoPreparedGeoxResource {
+            resource: "geosite".to_owned(),
+            path: target.clone(),
+            source_url: "https://example.test/geosite.dat".to_owned(),
+            size: 3,
+        };
+        let install = MihomoGeoxInstall {
+            installed: vec![InstalledGeoxResource {
+                target: target.clone(),
+                backup: Some(backup.clone()),
+            }],
+            prepared: vec![prepared.clone()],
+            committed: false,
+        };
+        assert_eq!(install.commit(), vec![prepared]);
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn geox_download_uses_transactional_installation() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnew-geox",
+                )
+                .unwrap();
+        });
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("GeoSite.dat");
+        fs::write(&target, b"old-geox").unwrap();
+        let plans = plan_mihomo_geox_resources(
+            &format!(
+                "geox-url:\n  geosite: http://{address}/geosite.dat\nrules:\n  - GEOSITE,cn,DIRECT\n"
+            ),
+            home.path(),
+        )
+        .unwrap();
+        let install = download_mihomo_geox_resources(plans, MihomoGeoxProxy::Direct).unwrap();
+        server.join().unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new-geox");
+        assert_eq!(install.prepared[0].size, 8);
+        drop(install);
+        assert_eq!(fs::read(&target).unwrap(), b"old-geox");
+    }
 
     fn overlay() -> MihomoOverlay {
         MihomoOverlay::test_only(

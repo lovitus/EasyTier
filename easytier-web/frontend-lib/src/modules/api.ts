@@ -28,6 +28,17 @@ export interface OpenMihomoConfigResponse {
     created: boolean;
 }
 
+export type MihomoGeoxProxyMode = 'system' | 'socks5';
+
+export interface PrepareMihomoGeoxResourcesResponse {
+    resources: Array<{
+        resource: string;
+        path: string;
+        source_url: string;
+        size: number | string;
+    }>;
+}
+
 export interface ListPolicyRuleDataCategoriesResponse {
     resource: PolicyRuleDataResource;
     sha256: string;
@@ -100,6 +111,7 @@ export interface RemoteClient {
     validate_config(config: NetworkConfig): Promise<ValidateConfigResponse>;
     open_mihomo_config?(config: NetworkConfig, materialize: boolean): Promise<OpenMihomoConfigResponse>;
     save_mihomo_config?(config: NetworkConfig, contents: string): Promise<void>;
+    prepare_mihomo_geox_resources?(config: NetworkConfig, contents: string, proxy_mode: MihomoGeoxProxyMode, proxy_url?: string): Promise<PrepareMihomoGeoxResourcesResponse>;
     open_mihomo_dashboard?(inst_id: string): Promise<void>;
     control_mihomo_runtime?(inst_id: string, action: MihomoRuntimeAction): Promise<void>;
     update_policy_rule_data?(inst_id: string, resource: PolicyRuleDataResource, source_url?: string): Promise<UpdatePolicyRuleDataResponse>;

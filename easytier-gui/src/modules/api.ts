@@ -13,6 +13,9 @@ export class GUIRemoteClient implements Api.RemoteClient {
     async save_mihomo_config(config: NetworkTypes.NetworkConfig, contents: string): Promise<void> {
         await backend.saveMihomoConfig(config, contents);
     }
+    async prepare_mihomo_geox_resources(config: NetworkTypes.NetworkConfig, contents: string, proxyMode: Api.MihomoGeoxProxyMode, proxyUrl?: string): Promise<Api.PrepareMihomoGeoxResourcesResponse> {
+        return await backend.prepareMihomoGeoxResources(config, contents, proxyMode, proxyUrl);
+    }
     async open_mihomo_dashboard(instanceId: string): Promise<void> {
         await backend.openMihomoDashboard(instanceId);
     }

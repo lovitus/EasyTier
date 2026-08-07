@@ -8,6 +8,24 @@
   },
   "license": "GPL-3.0-only",
   "license_file": "easytier/resources/policy-rule-data/METACUBEX-GPL-3.0.txt",
+  "geox_defaults": {
+    "geoip": {
+      "url": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat",
+      "file_name": "GeoIP.dat"
+    },
+    "geosite": {
+      "url": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat",
+      "file_name": "GeoSite.dat"
+    },
+    "mmdb": {
+      "url": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb",
+      "file_name": "geoip.metadb"
+    },
+    "asn": {
+      "url": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb",
+      "file_name": "ASN.mmdb"
+    }
+  },
   "targets": {
     "x86_64-unknown-linux-musl": {
       "status": "supported",

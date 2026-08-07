@@ -535,6 +535,13 @@ web:
     mihomo_file_api_unavailable: Mihomo file editing is unavailable through this client
     mihomo_file_open_failed: Failed to open Mihomo config file
     mihomo_file_save_failed: Failed to save Mihomo config file. If validation timed out, Mihomo may still be downloading Geo data; wait for the download to finish, then save again
+    mihomo_geox_tools: Repair GeoX Resources
+    mihomo_geox_tools_help: Resolve GEOIP, GEOSITE, and IP-ASN rules in the current draft and prefetch the required data into Mihomo's managed directory without modifying YAML.
+    mihomo_geox_use_system_proxy: Prefetch and validate through system proxy
+    mihomo_geox_socks_url: "Custom SOCKS5, for example socks5h://127.0.0.1:1080"
+    mihomo_geox_use_socks: Prefetch and validate through custom SOCKS5
+    mihomo_geox_prepare_success: "Prefetched and validated {count} resource(s)"
+    mihomo_geox_prepare_failed: Failed to repair Mihomo GeoX resources
     open_mihomo_dashboard: Zashboard
     mihomo_runtime_info: Mihomo runtime information
     start_mihomo_runtime: Start Mihomo

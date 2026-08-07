@@ -914,6 +914,30 @@ impl NetworkInstanceManager {
         self.mihomo_owner.validate(request).await
     }
 
+    pub async fn prepare_mihomo_geox_resources(
+        &self,
+        cfg: &TomlConfigLoader,
+        contents: String,
+        proxy: crate::mihomo::MihomoGeoxProxy,
+    ) -> anyhow::Result<Vec<crate::mihomo::MihomoPreparedGeoxResource>> {
+        let policy = cfg
+            .get_policy_proxy_config()
+            .ok_or_else(|| anyhow::anyhow!("Mihomo policy config is unavailable"))?;
+        anyhow::ensure!(
+            policy.is_mihomo_enabled(),
+            "selected policy backend is not Mihomo"
+        );
+        let mut request = build_mihomo_start_request(cfg, policy, self.config_dir.as_deref())?;
+        request.source = MihomoConfigSource::Inline {
+            label: format!("edited Mihomo config for network {}", cfg.get_id()),
+            contents: contents.clone().into(),
+        };
+        let install =
+            crate::mihomo::prepare_mihomo_geox_resources(&request, &contents, proxy).await?;
+        self.mihomo_owner.validate(request).await?;
+        Ok(install.commit())
+    }
+
     pub fn control_mihomo_runtime(
         &self,
         instance_id: uuid::Uuid,

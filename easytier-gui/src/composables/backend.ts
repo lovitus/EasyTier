@@ -116,6 +116,20 @@ export async function saveMihomoConfig(cfg: NetworkConfig, contents: string) {
   })
 }
 
+export async function prepareMihomoGeoxResources(
+  cfg: NetworkConfig,
+  contents: string,
+  proxyMode: Api.MihomoGeoxProxyMode,
+  proxyUrl?: string,
+) {
+  return await invoke<Api.PrepareMihomoGeoxResourcesResponse>('prepare_mihomo_geox_resources', {
+    config: NetworkTypes.toBackendNetworkConfig(cfg),
+    contents,
+    proxyMode,
+    proxyUrl,
+  })
+}
+
 export async function getMihomoDashboardUrl(instanceId: string) {
   return await invoke<string>('get_mihomo_dashboard_url', { instanceId })
 }

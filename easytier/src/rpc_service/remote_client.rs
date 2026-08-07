@@ -11,21 +11,30 @@ use crate::{
             ListNetworkInstanceRequest, ListPolicyOutboundInterfacesRequest,
             ListPolicyOutboundInterfacesResponse, ListPolicyRuleDataCategoriesRequest,
             ListPolicyRuleDataCategoriesResponse, NetworkConfig, NetworkMeta,
-            OpenMihomoConfigRequest, OpenMihomoConfigResponse, RunNetworkInstanceRequest,
-            SaveMihomoConfigRequest, UpdatePolicyRuleDataRequest, UpdatePolicyRuleDataResponse,
-            ValidateConfigRequest, ValidateConfigResponse, WebClientService,
+            OpenMihomoConfigRequest, OpenMihomoConfigResponse, PrepareMihomoGeoxResourcesRequest,
+            PrepareMihomoGeoxResourcesResponse, RunNetworkInstanceRequest, SaveMihomoConfigRequest,
+            UpdatePolicyRuleDataRequest, UpdatePolicyRuleDataResponse, ValidateConfigRequest,
+            ValidateConfigResponse, WebClientService,
         },
         rpc_types::controller::BaseController,
     },
 };
 
 const RUN_NETWORK_RPC_TIMEOUT_MS: i32 = 190_000;
+const MIHOMO_GEOX_RPC_TIMEOUT_MS: i32 = 500_000;
 
 fn run_network_controller() -> BaseController {
     // Starting a Mihomo-backed network may validate and download missing Geo data.
     // Keep short RPCs at the 5s default, but allow the Core owner's bounded 180s start.
     BaseController {
         timeout_ms: RUN_NETWORK_RPC_TIMEOUT_MS,
+        ..Default::default()
+    }
+}
+
+fn mihomo_geox_controller() -> BaseController {
+    BaseController {
+        timeout_ms: MIHOMO_GEOX_RPC_TIMEOUT_MS,
         ..Default::default()
     }
 }
@@ -103,6 +112,31 @@ where
             )
             .await
             .map(|_| ())
+            .map_err(RemoteClientError::RpcError)
+    }
+
+    async fn handle_prepare_mihomo_geox_resources(
+        &self,
+        identify: T,
+        config: NetworkConfig,
+        contents: String,
+        proxy_mode: String,
+        proxy_url: Option<String>,
+    ) -> Result<PrepareMihomoGeoxResourcesResponse, RemoteClientError<E>> {
+        let client = self
+            .get_rpc_client(identify)
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        client
+            .prepare_mihomo_geox_resources(
+                mihomo_geox_controller(),
+                PrepareMihomoGeoxResourcesRequest {
+                    config: Some(config),
+                    contents,
+                    proxy_mode,
+                    proxy_url,
+                },
+            )
+            .await
             .map_err(RemoteClientError::RpcError)
     }
 

@@ -64,6 +64,14 @@ struct SaveMihomoConfigJsonReq {
     contents: String,
 }
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct PrepareMihomoGeoxResourcesJsonReq {
+    config: NetworkConfig,
+    contents: String,
+    proxy_mode: String,
+    proxy_url: Option<String>,
+}
+
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
 struct UpdatePolicyRuleDataJsonReq {
     source_url: Option<String>,
@@ -193,6 +201,25 @@ impl NetworkApi {
             .await
             .map_err(convert_error)?;
         Ok(StatusCode::NO_CONTENT)
+    }
+
+    async fn handle_prepare_mihomo_geox_resources(
+        auth_session: AuthSession,
+        State(client_mgr): AppState,
+        Path(machine_id): Path<uuid::Uuid>,
+        Json(payload): Json<PrepareMihomoGeoxResourcesJsonReq>,
+    ) -> Result<Json<PrepareMihomoGeoxResourcesResponse>, HttpHandleError> {
+        Ok(client_mgr
+            .handle_prepare_mihomo_geox_resources(
+                (Self::get_user_id(&auth_session)?, machine_id),
+                payload.config,
+                payload.contents,
+                payload.proxy_mode,
+                payload.proxy_url,
+            )
+            .await
+            .map_err(convert_error)?
+            .into())
     }
 
     async fn handle_get_mihomo_dashboard_url(
@@ -538,6 +565,10 @@ impl NetworkApi {
             .route(
                 "/api/v1/machines/:machine-id/mihomo-config",
                 post(Self::handle_open_mihomo_config).put(Self::handle_save_mihomo_config),
+            )
+            .route(
+                "/api/v1/machines/:machine-id/mihomo-config/geox",
+                post(Self::handle_prepare_mihomo_geox_resources),
             )
             .route(
                 "/api/v1/machines/:machine-id/networks/:inst-id/mihomo-dashboard",

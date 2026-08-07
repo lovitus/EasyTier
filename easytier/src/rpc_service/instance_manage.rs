@@ -25,10 +25,12 @@ use crate::{
                 ListPolicyRuleDataCategoriesRequest, ListPolicyRuleDataCategoriesResponse,
                 NetworkInstanceRunningInfoMap, NetworkMeta, OpenMihomoConfigRequest,
                 OpenMihomoConfigResponse, PolicyConfigDiagnostic, PolicyOutboundInterface,
-                RetainNetworkInstanceRequest, RetainNetworkInstanceResponse,
-                RunNetworkInstanceRequest, RunNetworkInstanceResponse, SaveMihomoConfigRequest,
-                UpdatePolicyRuleDataRequest, UpdatePolicyRuleDataResponse, ValidateConfigRequest,
-                ValidateConfigResponse, WebClientService,
+                PrepareMihomoGeoxResourcesRequest, PrepareMihomoGeoxResourcesResponse,
+                PreparedMihomoGeoxResource, RetainNetworkInstanceRequest,
+                RetainNetworkInstanceResponse, RunNetworkInstanceRequest,
+                RunNetworkInstanceResponse, SaveMihomoConfigRequest, UpdatePolicyRuleDataRequest,
+                UpdatePolicyRuleDataResponse, ValidateConfigRequest, ValidateConfigResponse,
+                WebClientService,
             },
         },
         rpc_types::{self, controller::BaseController},
@@ -355,6 +357,40 @@ impl WebClientService for InstanceManageRpcService {
             .await?;
         crate::mihomo::save_user_config(&path, &req.contents)?;
         Ok(crate::proto::common::Void {})
+    }
+
+    async fn prepare_mihomo_geox_resources(
+        &self,
+        _: BaseController,
+        req: PrepareMihomoGeoxResourcesRequest,
+    ) -> Result<PrepareMihomoGeoxResourcesResponse, rpc_types::error::Error> {
+        let _mutation_guard = self.remote_mutation_lock.lock().await;
+        let config = req
+            .config
+            .ok_or_else(|| anyhow::anyhow!("network config is required"))?
+            .gen_config()?;
+        let proxy = match req.proxy_mode.as_str() {
+            "system" => crate::mihomo::MihomoGeoxProxy::System,
+            "socks5" => crate::mihomo::MihomoGeoxProxy::Socks5(
+                req.proxy_url
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("SOCKS5 proxy URL is required"))?,
+            ),
+            mode => return Err(anyhow::anyhow!("unsupported GeoX proxy mode: {mode}").into()),
+        };
+        let resources = self
+            .manager
+            .prepare_mihomo_geox_resources(&config, req.contents, proxy)
+            .await?
+            .into_iter()
+            .map(|resource| PreparedMihomoGeoxResource {
+                resource: resource.resource,
+                path: resource.path.to_string_lossy().into_owned(),
+                source_url: resource.source_url,
+                size: resource.size,
+            })
+            .collect();
+        Ok(PrepareMihomoGeoxResourcesResponse { resources })
     }
 
     async fn get_mihomo_dashboard_url(

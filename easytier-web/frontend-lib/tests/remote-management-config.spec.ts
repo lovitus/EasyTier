@@ -151,6 +151,21 @@ vi.mock('primevue', async () => {
     },
   })
 
+  const InputTextStub = defineComponent({
+    name: 'InputText',
+    props: {
+      modelValue: String,
+    },
+    emits: ['update:modelValue'],
+    setup(props, { attrs, emit }) {
+      return () => h('input', {
+        ...attrs,
+        value: props.modelValue,
+        onInput: (event: Event) => emit('update:modelValue', (event.target as HTMLInputElement).value),
+      })
+    },
+  })
+
   const DialogStub = defineComponent({
     name: 'Dialog',
     props: {
@@ -187,6 +202,7 @@ vi.mock('primevue', async () => {
     Dialog: DialogStub,
     Divider: PassThrough,
     IftaLabel: PassThrough,
+    InputText: InputTextStub,
     Menu: MenuStub,
     Message: PassThrough,
     Popover: PopoverStub,
@@ -271,6 +287,7 @@ function makeStatusApi(getNetworkInfo: ReturnType<typeof vi.fn>) {
     })),
     open_mihomo_config: vi.fn(),
     save_mihomo_config: vi.fn(),
+    prepare_mihomo_geox_resources: vi.fn(),
     open_mihomo_dashboard: vi.fn(),
     list_network_instance_ids: vi.fn(async () => ({
       disabled_inst_ids: [],
@@ -714,6 +731,30 @@ describe('RemoteManagement config save', () => {
         .toBeDefined()
       editor.vm.$emit('update:valid', true)
       await nextTick()
+      editor.vm.$emit('update:modelValue', 'secret: changed\nrules: []\n')
+      await nextTick()
+      editor.vm.$emit('update:modelValue', 'rules:\n  - GEOSITE,cn,DIRECT\n')
+      await nextTick()
+      api.prepare_mihomo_geox_resources = vi.fn(async () => ({
+        resources: [{
+          resource: 'geosite',
+          path: '/managed/mihomo/GeoSite.dat',
+          source_url: 'https://example.test/geosite.dat',
+          size: 123,
+        }],
+      }))
+      await wrapper.get('[data-testid="mihomo-geox-tools"]').trigger('click')
+      await nextTick()
+      await wrapper.get('#mihomo_geox_socks_url').setValue('socks5h://127.0.0.1:11080')
+      await wrapper.get('[data-testid="mihomo-geox-socks"]').trigger('click')
+      await settleAsync()
+      expect(api.prepare_mihomo_geox_resources).toHaveBeenCalledWith(
+        expect.objectContaining({ policy_mihomo_config_file: '/managed/mihomo/autogen.yaml' }),
+        'rules:\n  - GEOSITE,cn,DIRECT\n',
+        'socks5',
+        'socks5h://127.0.0.1:11080',
+      )
+      expect(api.save_mihomo_config).not.toHaveBeenCalled()
       editor.vm.$emit('update:modelValue', 'secret: changed\nrules: []\n')
       await nextTick()
       const saveRequest = deferred<void>()
