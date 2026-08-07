@@ -381,7 +381,7 @@ fn download_mihomo_geox_resources(
                 return Err(error);
             }
         };
-        if let Err(error) = fs::rename(&temporary, &plan.path) {
+        if let Err(error) = fs::rename(temporary, &plan.path) {
             if let Some(backup) = &backup {
                 let _ = fs::rename(backup, &plan.path);
             }
