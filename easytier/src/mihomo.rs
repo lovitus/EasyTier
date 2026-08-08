@@ -26,9 +26,13 @@
 //!   Verge Rev's generated-config model, EasyTier treats a user-selected file
 //!   as a read-only import source and always runs Mihomo from an instance-local
 //!   managed home. The source YAML itself is never changed.
+//! - `rules/provider/parse.go::ParseRuleProvider` resolves HTTP rule-provider
+//!   caches to an explicit path relative to `-d`, or to
+//!   `rules/<md5(url)>` when `path` is omitted. The explicit repair helper
+//!   mirrors that layout but never changes Mihomo's normal update lifecycle.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fmt,
     fs::{self, OpenOptions},
@@ -58,7 +62,7 @@ use crate::managed_child::{ManagedChild, configure_command};
 use std::net::{Ipv4Addr, TcpListener};
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_GEOX_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_MIHOMO_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_CONTROLLER_RESPONSE_BYTES: u64 = 1024 * 1024;
 const MAX_VALIDATION_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const OWNER_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
@@ -94,10 +98,12 @@ pub struct MihomoPreparedGeoxResource {
 }
 
 #[derive(Debug, Clone)]
-struct MihomoGeoxResourcePlan {
+struct MihomoResourcePlan {
     resource: String,
     path: PathBuf,
     source_url: String,
+    headers: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
+    max_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -180,10 +186,200 @@ fn collect_mihomo_rule_kinds(value: &Value, kinds: &mut BTreeSet<String>) {
     }
 }
 
+fn mihomo_rule_provider_headers(
+    provider_name: &str,
+    provider: &Mapping,
+) -> anyhow::Result<Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>> {
+    let Some(value) = provider.get(yaml_key("header")) else {
+        return Ok(Vec::new());
+    };
+    let mapping = value.as_mapping().ok_or_else(|| {
+        anyhow::anyhow!("Mihomo rule-provider {provider_name}.header must be a mapping")
+    })?;
+    let mut headers = Vec::new();
+    for (name, values) in mapping {
+        let name = name.as_str().ok_or_else(|| {
+            anyhow::anyhow!("Mihomo rule-provider {provider_name} header name must be a string")
+        })?;
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .with_context(|| format!("invalid Mihomo rule-provider {provider_name} header name"))?;
+        let values = match values {
+            Value::String(value) => vec![value.as_str()],
+            Value::Sequence(values) => values
+                .iter()
+                .map(|value| {
+                    value.as_str().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Mihomo rule-provider {provider_name} header values must be strings"
+                        )
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?,
+            _ => anyhow::bail!(
+                "Mihomo rule-provider {provider_name} header value must be a string or sequence"
+            ),
+        };
+        for value in values {
+            headers.push((
+                name.clone(),
+                reqwest::header::HeaderValue::from_str(value).with_context(|| {
+                    format!("invalid Mihomo rule-provider {provider_name} header value")
+                })?,
+            ));
+        }
+    }
+    Ok(headers)
+}
+
+fn mihomo_rule_provider_size_limit(provider_name: &str, provider: &Mapping) -> anyhow::Result<u64> {
+    let Some(value) = provider.get(yaml_key("size-limit")) else {
+        return Ok(MAX_MIHOMO_RESOURCE_BYTES);
+    };
+    let limit = match value {
+        Value::Number(value) => value.as_i64().ok_or_else(|| {
+            anyhow::anyhow!("Mihomo rule-provider {provider_name}.size-limit exceeds int64")
+        })?,
+        Value::String(value) => value.parse::<i64>().with_context(|| {
+            format!("Mihomo rule-provider {provider_name}.size-limit must be an integer")
+        })?,
+        _ => anyhow::bail!("Mihomo rule-provider {provider_name}.size-limit must be an integer"),
+    };
+    Ok(if limit > 0 {
+        (limit as u64).min(MAX_MIHOMO_RESOURCE_BYTES)
+    } else {
+        MAX_MIHOMO_RESOURCE_BYTES
+    })
+}
+
+fn mihomo_rule_provider_path(
+    managed_home: &Path,
+    source_url: &str,
+    configured_path: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let default_path;
+    let configured_path = match configured_path.filter(|path| !path.is_empty()) {
+        Some(path) => Path::new(path),
+        None => {
+            default_path =
+                PathBuf::from("rules").join(format!("{:x}", md5::compute(source_url.as_bytes())));
+            &default_path
+        }
+    };
+    let relative = if configured_path.is_absolute() {
+        configured_path
+            .strip_prefix(managed_home)
+            .with_context(|| {
+                format!(
+                    "Mihomo rule-provider path {} is outside the managed directory",
+                    configured_path.display()
+                )
+            })?
+    } else {
+        configured_path
+    };
+    let mut target = managed_home.to_path_buf();
+    for component in relative.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(component) => target.push(component),
+            _ => anyhow::bail!(
+                "Mihomo rule-provider path {} escapes the managed directory",
+                configured_path.display()
+            ),
+        }
+    }
+    ensure!(
+        target != managed_home && target.file_name().is_some(),
+        "Mihomo rule-provider path must name a file"
+    );
+    Ok(target)
+}
+
+fn plan_mihomo_rule_provider_resources(
+    root: &Mapping,
+    managed_home: &Path,
+) -> anyhow::Result<Vec<MihomoResourcePlan>> {
+    let Some(value) = root.get(yaml_key("rule-providers")) else {
+        return Ok(Vec::new());
+    };
+    let providers = value
+        .as_mapping()
+        .ok_or_else(|| anyhow::anyhow!("Mihomo rule-providers must be a YAML mapping"))?;
+    let mut plans = Vec::new();
+    for (name, value) in providers {
+        let name = name
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Mihomo rule-provider name must be a non-empty string")
+            })?;
+        let provider = value
+            .as_mapping()
+            .ok_or_else(|| anyhow::anyhow!("Mihomo rule-provider {name} must be a YAML mapping"))?;
+        let provider_type = provider
+            .get(yaml_key("type"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("Mihomo rule-provider {name}.type must be a string"))?;
+        if provider_type != "http" {
+            continue;
+        }
+        let source_url = provider
+            .get(yaml_key("url"))
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Mihomo rule-provider {name}.url is required"))?;
+        let parsed = url::Url::parse(source_url)
+            .with_context(|| format!("invalid Mihomo rule-provider {name}.url"))?;
+        ensure!(
+            matches!(parsed.scheme(), "http" | "https"),
+            "Mihomo rule-provider {name}.url must use http or https"
+        );
+        let configured_path = match provider.get(yaml_key("path")) {
+            Some(value) => Some(value.as_str().ok_or_else(|| {
+                anyhow::anyhow!("Mihomo rule-provider {name}.path must be a string")
+            })?),
+            None => None,
+        };
+        plans.push(MihomoResourcePlan {
+            resource: format!("rule-provider:{name}"),
+            path: mihomo_rule_provider_path(managed_home, source_url, configured_path)?,
+            source_url: source_url.to_owned(),
+            headers: mihomo_rule_provider_headers(name, provider)?,
+            max_bytes: mihomo_rule_provider_size_limit(name, provider)?,
+        });
+    }
+    plans.sort_by(|left, right| left.resource.cmp(&right.resource));
+    Ok(plans)
+}
+
+fn deduplicate_mihomo_resource_plans(
+    plans: Vec<MihomoResourcePlan>,
+) -> anyhow::Result<Vec<MihomoResourcePlan>> {
+    let mut indexes = BTreeMap::new();
+    let mut unique: Vec<MihomoResourcePlan> = Vec::new();
+    for plan in plans {
+        if let Some(index) = indexes.get(&plan.path).copied() {
+            let existing: &mut MihomoResourcePlan = &mut unique[index];
+            ensure!(
+                existing.source_url == plan.source_url && existing.headers == plan.headers,
+                "Mihomo resources {} and {} conflict at {}",
+                existing.resource,
+                plan.resource,
+                plan.path.display()
+            );
+            existing.max_bytes = existing.max_bytes.min(plan.max_bytes);
+            continue;
+        }
+        indexes.insert(plan.path.clone(), unique.len());
+        unique.push(plan);
+    }
+    Ok(unique)
+}
+
 fn plan_mihomo_geox_resources(
     contents: &str,
     managed_home: &Path,
-) -> anyhow::Result<Vec<MihomoGeoxResourcePlan>> {
+) -> anyhow::Result<Vec<MihomoResourcePlan>> {
     let document: Value = serde_yaml::from_str(contents).context("failed to parse Mihomo YAML")?;
     let root = document
         .as_mapping()
@@ -217,11 +413,7 @@ fn plan_mihomo_geox_resources(
     if kinds.contains("IP-ASN") || kinds.contains("SRC-IP-ASN") {
         requested.push(("asn", "asn"));
     }
-    ensure!(
-        !requested.is_empty(),
-        "Mihomo config has no inline GEOIP, GEOSITE, or IP-ASN rules requiring GeoX data"
-    );
-    requested
+    let mut plans = requested
         .into_iter()
         .map(|(resource, geox_key)| {
             let default = manifest
@@ -236,13 +428,21 @@ fn plan_mihomo_geox_resources(
                 matches!(url.scheme(), "http" | "https"),
                 "Mihomo geox-url.{geox_key} must use http or https"
             );
-            Ok(MihomoGeoxResourcePlan {
+            Ok(MihomoResourcePlan {
                 resource: resource.to_owned(),
                 path: managed_home.join(&default.file_name),
                 source_url,
+                headers: Vec::new(),
+                max_bytes: MAX_MIHOMO_RESOURCE_BYTES,
             })
         })
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    plans.extend(plan_mihomo_rule_provider_resources(root, managed_home)?);
+    ensure!(
+        !plans.is_empty(),
+        "Mihomo config has no GeoX or HTTP rule-provider resources to prefetch"
+    );
+    deduplicate_mihomo_resource_plans(plans)
 }
 
 fn geox_http_client(proxy: &MihomoGeoxProxy) -> anyhow::Result<reqwest::blocking::Client> {
@@ -254,11 +454,11 @@ fn geox_http_client(proxy: &MihomoGeoxProxy) -> anyhow::Result<reqwest::blocking
         let parsed = url::Url::parse(proxy_url).context("invalid SOCKS5 proxy URL")?;
         ensure!(
             matches!(parsed.scheme(), "socks5" | "socks5h"),
-            "custom GeoX proxy must use socks5 or socks5h"
+            "custom Mihomo resource proxy must use socks5 or socks5h"
         );
         ensure!(
             parsed.host_str().is_some() && parsed.port().is_some(),
-            "custom GeoX proxy requires a host and port"
+            "custom Mihomo resource proxy requires a host and port"
         );
         builder = builder
             .no_proxy()
@@ -268,7 +468,46 @@ fn geox_http_client(proxy: &MihomoGeoxProxy) -> anyhow::Result<reqwest::blocking
     if matches!(proxy, MihomoGeoxProxy::Direct) {
         builder = builder.no_proxy();
     }
-    builder.build().context("failed to create GeoX HTTP client")
+    builder
+        .build()
+        .context("failed to create Mihomo resource HTTP client")
+}
+
+fn prepare_managed_resource_parent(managed_home: &Path, target: &Path) -> anyhow::Result<()> {
+    let relative = target.strip_prefix(managed_home).with_context(|| {
+        format!(
+            "Mihomo resource target {} is outside the managed directory",
+            target.display()
+        )
+    })?;
+    let root = fs::symlink_metadata(managed_home)
+        .with_context(|| format!("failed to inspect {}", managed_home.display()))?;
+    ensure!(
+        root.is_dir() && !root.file_type().is_symlink(),
+        "Mihomo managed directory is not a real directory"
+    );
+    let mut current = managed_home.to_path_buf();
+    if let Some(parent) = relative.parent() {
+        for component in parent.components() {
+            let std::path::Component::Normal(component) = component else {
+                anyhow::bail!("Mihomo resource target escapes the managed directory");
+            };
+            current.push(component);
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) => ensure!(
+                    metadata.is_dir() && !metadata.file_type().is_symlink(),
+                    "refusing non-directory Mihomo resource parent {}",
+                    current.display()
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    fs::create_dir(&current)
+                        .with_context(|| format!("failed to create {}", current.display()))?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn rollback_installed_geox(installed: &[InstalledGeoxResource]) {
@@ -281,12 +520,14 @@ fn rollback_installed_geox(installed: &[InstalledGeoxResource]) {
 }
 
 fn download_mihomo_geox_resources(
-    plans: Vec<MihomoGeoxResourcePlan>,
+    plans: Vec<MihomoResourcePlan>,
     proxy: MihomoGeoxProxy,
+    managed_home: &Path,
 ) -> anyhow::Result<MihomoGeoxInstall> {
     let client = geox_http_client(&proxy)?;
     let mut downloads = Vec::new();
     for plan in plans {
+        prepare_managed_resource_parent(managed_home, &plan.path)?;
         let temporary = plan.path.with_file_name(format!(
             ".{}.{}.part",
             plan.path
@@ -296,20 +537,26 @@ fn download_mihomo_geox_resources(
             uuid::Uuid::new_v4()
         ));
         let result = (|| -> anyhow::Result<u64> {
-            let mut response = client
-                .get(&plan.source_url)
+            let mut request = client.get(&plan.source_url);
+            for (name, value) in &plan.headers {
+                request = request.header(name, value);
+            }
+            let mut response = request
                 .send()
-                .with_context(|| format!("failed to download Mihomo {} data", plan.resource))?
+                .with_context(|| format!("failed to download Mihomo {} resource", plan.resource))?
                 .error_for_status()
                 .with_context(|| {
-                    format!("Mihomo {} data server rejected the request", plan.resource)
+                    format!(
+                        "Mihomo {} resource server rejected the request",
+                        plan.resource
+                    )
                 })?;
             if let Some(length) = response.content_length() {
                 ensure!(
-                    length <= MAX_GEOX_RESOURCE_BYTES,
-                    "Mihomo {} data exceeds {} bytes",
+                    length <= plan.max_bytes,
+                    "Mihomo {} resource exceeds {} bytes",
                     plan.resource,
-                    MAX_GEOX_RESOURCE_BYTES
+                    plan.max_bytes
                 );
             }
             let mut file = OpenOptions::new()
@@ -317,16 +564,16 @@ fn download_mihomo_geox_resources(
                 .create_new(true)
                 .open(&temporary)
                 .with_context(|| format!("failed to create {}", temporary.display()))?;
-            let mut limited = (&mut response).take(MAX_GEOX_RESOURCE_BYTES + 1);
+            let mut limited = (&mut response).take(plan.max_bytes + 1);
             let size = std::io::copy(&mut limited, &mut file)
-                .with_context(|| format!("failed to write Mihomo {} data", plan.resource))?;
+                .with_context(|| format!("failed to write Mihomo {} resource", plan.resource))?;
             ensure!(
-                size <= MAX_GEOX_RESOURCE_BYTES,
-                "Mihomo {} data exceeds {} bytes",
+                size <= plan.max_bytes,
+                "Mihomo {} resource exceeds {} bytes",
                 plan.resource,
-                MAX_GEOX_RESOURCE_BYTES
+                plan.max_bytes
             );
-            ensure!(size > 0, "Mihomo {} data is empty", plan.resource);
+            ensure!(size > 0, "Mihomo {} resource is empty", plan.resource);
             file.sync_all()
                 .with_context(|| format!("failed to sync {}", temporary.display()))?;
             Ok(size)
@@ -351,7 +598,7 @@ fn download_mihomo_geox_resources(
                 Ok(metadata) => {
                     ensure!(
                         metadata.is_file() && !metadata.file_type().is_symlink(),
-                        "refusing non-regular Mihomo GeoX target {}",
+                        "refusing non-regular Mihomo resource target {}",
                         plan.path.display()
                     );
                     let backup = plan.path.with_file_name(format!(
@@ -390,7 +637,7 @@ fn download_mihomo_geox_resources(
             }
             rollback_installed_geox(&installed);
             return Err(error)
-                .with_context(|| format!("failed to install Mihomo {} data", plan.resource));
+                .with_context(|| format!("failed to install Mihomo {} resource", plan.resource));
         }
         installed.push(InstalledGeoxResource {
             target: plan.path.clone(),
@@ -417,9 +664,9 @@ pub async fn prepare_mihomo_geox_resources(
 ) -> anyhow::Result<MihomoGeoxInstall> {
     let managed_home = prepare_managed_home(&request.managed_base_dir, request.instance_id)?;
     let plans = plan_mihomo_geox_resources(contents, &managed_home)?;
-    tokio::task::spawn_blocking(move || download_mihomo_geox_resources(plans, proxy))
+    tokio::task::spawn_blocking(move || download_mihomo_geox_resources(plans, proxy, &managed_home))
         .await
-        .context("Mihomo GeoX preparation task failed")?
+        .context("Mihomo resource preparation task failed")?
 }
 
 const RESERVED_PROCESS_RULES: &[&str] = &[
@@ -2752,7 +2999,81 @@ mod tests {
         let error = plan_mihomo_geox_resources("rules:\n  - MATCH,DIRECT\n", home.path())
             .unwrap_err()
             .to_string();
-        assert!(error.contains("no inline GEOIP, GEOSITE, or IP-ASN"));
+        assert!(error.contains("no GeoX or HTTP rule-provider resources"));
+    }
+
+    #[test]
+    fn rule_provider_plan_matches_mihomo_paths_headers_and_limits() {
+        let home = tempfile::tempdir().unwrap();
+        let default_url = "https://example.test/default.yaml";
+        let plans = plan_mihomo_geox_resources(
+            &format!(
+                "rule-providers:\n  default:\n    type: http\n    behavior: domain\n    format: yaml\n    url: {default_url}\n  explicit:\n    type: http\n    behavior: classical\n    format: text\n    url: https://example.test/explicit.txt\n    path: ./rules/explicit.txt\n    size-limit: 4096\n    header:\n      Authorization:\n        - Bearer test\n  local:\n    type: file\n    behavior: domain\n    path: ./rules/local.yaml\n  embedded:\n    type: inline\n    behavior: domain\n    payload: [example.com]\nrules:\n  - MATCH,DIRECT\n"
+            ),
+            home.path(),
+        )
+        .unwrap();
+        assert_eq!(plans.len(), 2);
+        let default = plans
+            .iter()
+            .find(|plan| plan.resource == "rule-provider:default")
+            .unwrap();
+        assert_eq!(
+            default.path,
+            home.path()
+                .join("rules")
+                .join(format!("{:x}", md5::compute(default_url.as_bytes())))
+        );
+        let explicit = plans
+            .iter()
+            .find(|plan| plan.resource == "rule-provider:explicit")
+            .unwrap();
+        assert_eq!(explicit.path, home.path().join("rules/explicit.txt"));
+        assert_eq!(explicit.max_bytes, 4096);
+        assert_eq!(explicit.headers.len(), 1);
+        assert_eq!(explicit.headers[0].0.as_str(), "authorization");
+        assert_eq!(explicit.headers[0].1, "Bearer test");
+    }
+
+    #[test]
+    fn rule_provider_plan_rejects_managed_directory_escape() {
+        let home = tempfile::tempdir().unwrap();
+        let error = plan_mihomo_geox_resources(
+            "rule-providers:\n  unsafe:\n    type: http\n    behavior: domain\n    url: https://example.test/rules.yaml\n    path: ../outside.yaml\n",
+            home.path(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("escapes the managed directory"));
+    }
+
+    #[test]
+    fn rule_provider_plan_combines_with_geox_in_one_transaction() {
+        let home = tempfile::tempdir().unwrap();
+        let plans = plan_mihomo_geox_resources(
+            "rule-providers:\n  domains:\n    type: http\n    behavior: domain\n    url: https://example.test/domains.yaml\nrules:\n  - GEOSITE,cn,DIRECT\n  - RULE-SET,domains,DIRECT\n",
+            home.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            plans
+                .iter()
+                .map(|plan| plan.resource.as_str())
+                .collect::<Vec<_>>(),
+            vec!["geosite", "rule-provider:domains"]
+        );
+    }
+
+    #[test]
+    fn rule_provider_plan_rejects_conflicting_targets() {
+        let home = tempfile::tempdir().unwrap();
+        let error = plan_mihomo_geox_resources(
+            "rule-providers:\n  first:\n    type: http\n    behavior: domain\n    url: https://example.test/first.yaml\n    path: rules/shared.yaml\n  second:\n    type: http\n    behavior: domain\n    url: https://example.test/second.yaml\n    path: rules/shared.yaml\n",
+            home.path(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("conflict at"));
     }
 
     #[test]
@@ -2825,12 +3146,96 @@ mod tests {
             home.path(),
         )
         .unwrap();
-        let install = download_mihomo_geox_resources(plans, MihomoGeoxProxy::Direct).unwrap();
+        let install =
+            download_mihomo_geox_resources(plans, MihomoGeoxProxy::Direct, home.path()).unwrap();
         server.join().unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"new-geox");
         assert_eq!(install.prepared[0].size, 8);
         drop(install);
         assert_eq!(fs::read(&target).unwrap(), b"old-geox");
+    }
+
+    #[test]
+    fn rule_provider_download_creates_mihomo_cache_and_forwards_headers() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let size = std::io::Read::read(&mut stream, &mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]).to_ascii_lowercase();
+            assert!(request.contains("authorization: bearer test"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 25\r\nConnection: close\r\n\r\npayload:\n  - example.com\n",
+                )
+                .unwrap();
+        });
+        let home = tempfile::tempdir().unwrap();
+        let plans = plan_mihomo_geox_resources(
+            &format!(
+                "rule-providers:\n  domains:\n    type: http\n    behavior: domain\n    format: yaml\n    url: http://{address}/domains.yaml\n    header:\n      Authorization: Bearer test\n"
+            ),
+            home.path(),
+        )
+        .unwrap();
+        let target = plans[0].path.clone();
+        let install =
+            download_mihomo_geox_resources(plans, MihomoGeoxProxy::Direct, home.path()).unwrap();
+        server.join().unwrap();
+        assert_eq!(install.prepared[0].resource, "rule-provider:domains");
+        assert_eq!(fs::read(&target).unwrap(), b"payload:\n  - example.com\n");
+        drop(install);
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn rule_provider_download_enforces_configured_size_limit() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n12345",
+                )
+                .unwrap();
+        });
+        let home = tempfile::tempdir().unwrap();
+        let plans = plan_mihomo_geox_resources(
+            &format!(
+                "rule-providers:\n  limited:\n    type: http\n    behavior: domain\n    url: http://{address}/limited.yaml\n    path: rules/limited.yaml\n    size-limit: 4\n"
+            ),
+            home.path(),
+        )
+        .unwrap();
+        let target = plans[0].path.clone();
+        let error = download_mihomo_geox_resources(plans, MihomoGeoxProxy::Direct, home.path())
+            .unwrap_err()
+            .to_string();
+        server.join().unwrap();
+        assert!(error.contains("exceeds 4 bytes"));
+        assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rule_provider_download_rejects_symlink_parent() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join("rules")).unwrap();
+        let plans = plan_mihomo_geox_resources(
+            "rule-providers:\n  unsafe:\n    type: http\n    behavior: domain\n    url: https://example.test/unsafe.yaml\n    path: rules/unsafe.yaml\n",
+            home.path(),
+        )
+        .unwrap();
+        let error = download_mihomo_geox_resources(plans, MihomoGeoxProxy::Direct, home.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("refusing non-directory Mihomo resource parent"));
+        assert!(!outside.path().join("unsafe.yaml").exists());
     }
 
     fn overlay() -> MihomoOverlay {

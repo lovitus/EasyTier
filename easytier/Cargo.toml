@@ -3,7 +3,7 @@ name = "easytier"
 description = "A full meshed p2p VPN, connecting all your devices in one network with one command."
 homepage = "https://github.com/EasyTier/EasyTier"
 repository = "https://github.com/EasyTier/EasyTier"
-version = "3.0.12"
+version = "3.0.13"
 edition.workspace = true
 rust-version.workspace = true
 authors = ["kkrainbow"]
@@ -29,6 +29,7 @@ name = "easytier"
 path = "src/lib.rs"
 
 [dependencies]
+md5 = "0.7"
 git-version = "0.3.9"
 
 tracing = { version = "0.1", features = ["log"] }

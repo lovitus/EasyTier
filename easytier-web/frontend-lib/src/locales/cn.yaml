@@ -535,13 +535,13 @@ web:
     mihomo_file_api_unavailable: 当前客户端不支持编辑 Mihomo 文件
     mihomo_file_open_failed: 打开 Mihomo 配置文件失败
     mihomo_file_save_failed: 保存 Mihomo 配置文件失败。如果校验超时，Mihomo 可能仍在下载 Geo 数据；请等待下载完成后再次保存
-    mihomo_geox_tools: GeoX 资源修复
-    mihomo_geox_tools_help: 解析当前草稿中的 GEOIP、GEOSITE 和 IP-ASN 规则，将所需数据预取到 Mihomo 管理目录；不会修改 YAML。
+    mihomo_geox_tools: 预取 Mihomo 初始资源
+    mihomo_geox_tools_help: 可选地解析当前草稿中的 GeoX 数据和 HTTP rule-provider，并预取到 Mihomo 管理目录；仅用于协助初始配置，不会修改 YAML 或正常更新逻辑。
     mihomo_geox_use_system_proxy: 使用系统代理预取并校验
     mihomo_geox_socks_url: "自定义 SOCKS5，例如 socks5h://127.0.0.1:1080"
     mihomo_geox_use_socks: 使用自定义 SOCKS5 预取并校验
     mihomo_geox_prepare_success: "已预取并通过 Mihomo 校验：{count} 个资源"
-    mihomo_geox_prepare_failed: Mihomo GeoX 资源修复失败
+    mihomo_geox_prepare_failed: Mihomo 资源预取失败
     open_mihomo_dashboard: Zashboard
     mihomo_runtime_info: Mihomo 运行信息
     start_mihomo_runtime: 启动 Mihomo

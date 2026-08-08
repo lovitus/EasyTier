@@ -733,13 +733,13 @@ describe('RemoteManagement config save', () => {
       await nextTick()
       editor.vm.$emit('update:modelValue', 'secret: changed\nrules: []\n')
       await nextTick()
-      editor.vm.$emit('update:modelValue', 'rules:\n  - GEOSITE,cn,DIRECT\n')
+      editor.vm.$emit('update:modelValue', 'rule-providers:\n  domains:\n    type: http\n    behavior: domain\n    url: https://example.test/domains.yaml\nrules:\n  - RULE-SET,domains,DIRECT\n')
       await nextTick()
       api.prepare_mihomo_geox_resources = vi.fn(async () => ({
         resources: [{
-          resource: 'geosite',
-          path: '/managed/mihomo/GeoSite.dat',
-          source_url: 'https://example.test/geosite.dat',
+          resource: 'rule-provider:domains',
+          path: '/managed/mihomo/rules/example',
+          source_url: 'https://example.test/domains.yaml',
           size: 123,
         }],
       }))
@@ -750,7 +750,7 @@ describe('RemoteManagement config save', () => {
       await settleAsync()
       expect(api.prepare_mihomo_geox_resources).toHaveBeenCalledWith(
         expect.objectContaining({ policy_mihomo_config_file: '/managed/mihomo/autogen.yaml' }),
-        'rules:\n  - GEOSITE,cn,DIRECT\n',
+        'rule-providers:\n  domains:\n    type: http\n    behavior: domain\n    url: https://example.test/domains.yaml\nrules:\n  - RULE-SET,domains,DIRECT\n',
         'socks5',
         'socks5h://127.0.0.1:11080',
       )
