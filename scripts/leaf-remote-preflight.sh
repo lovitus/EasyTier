@@ -119,20 +119,11 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 sync_snapshot() {
-  printf 'Syncing complete candidate snapshot to %s:%s\n' \
-    "$BUILDER_HOST" "$REMOTE_HOST_WORKSPACE"
-  rsync -a --delete \
-    --exclude '/.git/' \
-    --exclude '/target/' \
-    --exclude '/.artifacts/' \
-    --exclude '/.claude/' \
-    --exclude '/.corepack/' \
-    --exclude '/.envrc.local' \
-    --exclude 'node_modules/' \
-    --exclude '/easytier-gui/src-tauri/gen/' \
-    --exclude '/easytier-gui/src-tauri/.gradle/' \
-    -e "ssh ${SSH_OPTIONS[*]}" \
-    "$REPOSITORY_ROOT/" "$BUILDER_HOST:$REMOTE_HOST_WORKSPACE/"
+  BUILDER_HOST="$BUILDER_HOST" \
+  BUILDER_CONTAINER="$BUILDER_CONTAINER" \
+  BUILDER_HOST_WORKSPACE="$REMOTE_HOST_WORKSPACE" \
+  BUILDER_CONTAINER_WORKSPACE="$REMOTE_WORKSPACE" \
+    "$REPOSITORY_ROOT/scripts/remote-builder-sync.sh" --source
 }
 
 check_builder_idle() {
@@ -234,6 +225,7 @@ run_complete_test_binary() {
   fi
 }
 
+check_builder_idle
 sync_snapshot
 check_builder_idle
 run_no_run_build

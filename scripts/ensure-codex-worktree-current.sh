@@ -58,7 +58,7 @@ if [[ -z "$latest_tag" ]]; then
 fi
 
 target_ref="$latest_tag"
-release_branch="codex/${latest_tag#v}-release"
+release_branch="codex/${latest_tag}-release"
 remote_release_ref="refs/heads/$release_branch"
 remote_release=$(git ls-remote --heads origin "$remote_release_ref")
 if [[ -n "$remote_release" ]]; then
