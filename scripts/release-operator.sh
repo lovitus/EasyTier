@@ -16,8 +16,11 @@ Commands:
   builder-frontend            Incrementally prepare frozen frontend dependencies.
   builder-frontend-repair     Explicitly replace only known frontend dependencies.
   builder-preflight           Run the standard Rust and ordered frontend gates.
-  dispatch-core [SHA]         Dispatch Core once for the exact pushed SHA.
-  dispatch-rest [SHA]         After Core/MIPS/MIPSel pass, dispatch the other four.
+  dispatch-all [SHA]          Dispatch all five formal workflows in parallel, then
+                              monitor them and cancel the remainder on first failure.
+  monitor [SHA]               Monitor existing formal runs with the same fail-fast rule.
+  dispatch-core [SHA]         Optional diagnostic: dispatch only Core.
+  dispatch-rest [SHA]         Optional diagnostic: dispatch the other four after Core.
   dispatch-release VERSION [SHA]
                                Audit and dispatch EasyTier Release.
 
@@ -120,8 +123,80 @@ require_formal_success() {
   done
 }
 
+cancel_active_formal_runs() {
+  local sha="$1" workflow run status run_id
+  for workflow in "${FORMAL_WORKFLOWS[@]}"; do
+    run="$(latest_run_json "$workflow" "$sha")"
+    [[ -n "$run" ]] || continue
+    status="$(jq -r '.status' <<<"$run")"
+    case "$status" in
+      queued|in_progress|pending|requested|waiting)
+        run_id="$(jq -r '.databaseId' <<<"$run")"
+        gh run cancel "$run_id" --repo "$GH_REPO" || true
+        printf 'cancel requested for %s run %s\n' "$workflow" "$run_id"
+        ;;
+    esac
+  done
+}
+
+monitor_formal_runs() {
+  local sha="$1" workflow run status conclusion
+  local poll_seconds="${FORMAL_POLL_SECONDS:-30}"
+  local discovery_timeout="${FORMAL_DISCOVERY_TIMEOUT:-300}"
+  local discovery_started_at
+  local all_present all_success failed_summary
+
+  discovery_started_at="$(date +%s)"
+
+  while true; do
+    all_present=true
+    all_success=true
+    failed_summary=""
+
+    for workflow in "${FORMAL_WORKFLOWS[@]}"; do
+      run="$(latest_run_json "$workflow" "$sha")"
+      if [[ -z "$run" ]]; then
+        all_present=false
+        all_success=false
+        continue
+      fi
+
+      status="$(jq -r '.status' <<<"$run")"
+      conclusion="$(jq -r '.conclusion // ""' <<<"$run")"
+      if [[ "$status" != "completed" ]]; then
+        all_success=false
+      elif [[ "$conclusion" != "success" ]]; then
+        failed_summary="${workflow} run $(jq -r '.databaseId' <<<"$run") concluded ${conclusion:-unknown}"
+        break
+      fi
+    done
+
+    if [[ -n "$failed_summary" ]]; then
+      printf 'formal candidate failed: %s\n' "$failed_summary" >&2
+      cancel_active_formal_runs "$sha"
+      return 1
+    fi
+
+    if [[ "$all_present" != true ]] &&
+      (( $(date +%s) - discovery_started_at >= discovery_timeout )); then
+      printf 'formal candidate failed: not all five runs appeared within %ss\n' \
+        "$discovery_timeout" >&2
+      cancel_active_formal_runs "$sha"
+      return 1
+    fi
+
+    if [[ "$all_present" == true && "$all_success" == true ]]; then
+      require_core_cross_targets "$(successful_run_id core.yml "$sha")"
+      printf 'all five formal workflows succeeded for %s\n' "$sha"
+      return 0
+    fi
+
+    sleep "$poll_seconds"
+  done
+}
+
 main() {
-  local command="${1:-}" sha version core_run workflow
+  local command="${1:-}" sha version core_run workflow make_latest
   case "$command" in
     -h|--help|help|'') usage ;;
     status)
@@ -141,6 +216,28 @@ main() {
     builder-preflight)
       "$SCRIPT_DIR/leaf-remote-preflight.sh"
       "$SCRIPT_DIR/remote-frontend-preflight.sh"
+      ;;
+    dispatch-all)
+      need gh; need jq
+      sha="${2:-$(head_sha)}"
+      assert_clean_pushed_sha "$sha"
+      for workflow in "${FORMAL_WORKFLOWS[@]}"; do
+        ensure_not_dispatched "$workflow" "$sha"
+      done
+      for workflow in "${FORMAL_WORKFLOWS[@]}"; do
+        if ! gh workflow run "$workflow" --repo "$GH_REPO" --ref "$(current_branch)"; then
+          sleep 5
+          cancel_active_formal_runs "$sha"
+          die "failed to dispatch $workflow; remaining formal runs were canceled"
+        fi
+        printf 'dispatched %s at %s\n' "$workflow" "$sha"
+      done
+      monitor_formal_runs "$sha"
+      ;;
+    monitor)
+      need gh; need jq
+      sha="${2:-$(head_sha)}"
+      monitor_formal_runs "$sha"
       ;;
     dispatch-core)
       need gh; need jq
@@ -171,8 +268,10 @@ main() {
       require_formal_success "$sha"
       VALIDATED_SHA="$sha" "$SCRIPT_DIR/release-candidate-audit.sh" --release
       ensure_not_dispatched release.yml "$sha"
+      make_latest=true
+      [[ "$version" == *-* ]] && make_latest=false
       gh workflow run release.yml --repo "$GH_REPO" --ref "$(current_branch)" \
-        -f version="$version" -f make_latest=true -f artifact_sha="$sha"
+        -f version="$version" -f make_latest="$make_latest" -f artifact_sha="$sha"
       printf 'dispatched release.yml for %s at %s\n' "$version" "$sha"
       ;;
     *) usage >&2; exit 2 ;;

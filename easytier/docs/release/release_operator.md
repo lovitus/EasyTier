@@ -38,15 +38,21 @@ detached, unpushed or SHA-mismatched worktrees and refuse duplicate dispatches.
 
 ```bash
 scripts/release-operator.sh status
-scripts/release-operator.sh dispatch-core
-scripts/release-operator.sh dispatch-rest
+scripts/release-operator.sh dispatch-all
 scripts/release-operator.sh dispatch-release v3.0.15
 ```
 
-`dispatch-rest` requires successful Core MIPS and MIPSel jobs before it starts
-GUI, Mobile, OHOS and Test. `dispatch-release` requires all five formal workflows
-and the existing release-candidate audit. Artifact inspection and real-device
-approval remain required gates; this wrapper does not weaken or replace them.
+`dispatch-all` starts Core, GUI, Mobile, OHOS and Test for the same immutable SHA
+in parallel. It monitors all five and cancels every remaining queued or running
+workflow as soon as one concludes unsuccessfully. After all five succeed, it also
+checks the Core MIPS and MIPSel jobs. The older `dispatch-core` and `dispatch-rest`
+commands remain available only for targeted diagnostics.
+
+`dispatch-release` requires all five formal workflows and the existing
+release-candidate audit. Artifact inspection and real-device approval remain
+required gates; this wrapper does not weaken or replace them. A SemVer
+prerelease is automatically published with `prerelease=true` and
+`make_latest=false`; a stable version remains the default latest release.
 
 If a workflow already exists for the exact SHA, rerun that run explicitly rather
 than dispatching a duplicate. Documentation-only evidence updates use `[skip ci]`

@@ -68,8 +68,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error title=Invalid release version::Expected vMAJOR.MINOR.PATCH, got ${VERSION}"
+          if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "::error title=Invalid release version::Expected a v-prefixed SemVer, got ${VERSION}"
             exit 1
           fi
 
@@ -395,7 +395,7 @@ jobs:
         with:
           name: ${{ inputs.version }}
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(inputs.version, '-') }}
           make_latest: ${{ inputs.make_latest }}
           target_commitish: ${{ steps.release-source.outputs.sha }}
           body_path: ./easytier/docs/release_notes/${{ inputs.version }}.md

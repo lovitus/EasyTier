@@ -20,7 +20,11 @@ val policyCandidateBuild = providers.gradleProperty("easytierPolicyCandidate")
     ?.toBooleanStrictOrNull()
     ?: false
 
-val versionPattern = Regex("""^(\d+)\.(\d+)\.(\d+)$""")
+// Android's versionCode is numeric, but versionName may retain the full Cargo/Tauri
+// SemVer (including prerelease/build metadata) used by validation releases.
+val versionPattern = Regex(
+    """^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$""",
+)
 
 val tauriVersionName = tauriProperties.getProperty("tauri.android.versionName")?.ifBlank { null } ?: run {
     val tauriConfFile = file("../../../tauri.conf.json")
@@ -33,7 +37,7 @@ val tauriVersionName = tauriProperties.getProperty("tauri.android.versionName")?
 }
 
 val tauriVersionMatch = versionPattern.matchEntire(tauriVersionName)
-    ?: error("Android version must use x.y.z format, but got \"$tauriVersionName\"")
+    ?: error("Android version must use SemVer format, but got \"$tauriVersionName\"")
 
 val tauriVersionCode = if (tauriProperties.getProperty("tauri.android.versionName")?.ifBlank { null } != null) {
     val versionCodeProp = tauriProperties.getProperty("tauri.android.versionCode")
