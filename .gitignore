@@ -44,6 +44,7 @@ easytier-gui/src-tauri/*.sys
 
 .direnv
 .flake-profile
+/.codex-artifacts/
 
 # contrib
 go.sum
