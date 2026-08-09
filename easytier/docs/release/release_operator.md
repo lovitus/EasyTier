@@ -39,7 +39,7 @@ detached, unpushed or SHA-mismatched worktrees and refuse duplicate dispatches.
 ```bash
 scripts/release-operator.sh status
 scripts/release-operator.sh dispatch-all
-scripts/release-operator.sh dispatch-release v3.0.15
+scripts/release-operator.sh dispatch-release v3.0.15-1
 ```
 
 `dispatch-all` starts Core, GUI, Mobile, OHOS and Test for the same immutable SHA
@@ -53,6 +53,8 @@ release-candidate audit. Artifact inspection and real-device approval remain
 required gates; this wrapper does not weaken or replace them. A SemVer
 prerelease is automatically published with `prerelease=true` and
 `make_latest=false`; a stable version remains the default latest release.
+Cross-platform prereleases use one numeric identifier such as `3.0.15-1` because
+the Windows MSI bundler rejects textual or dotted prerelease identifiers.
 
 If a workflow already exists for the exact SHA, rerun that run explicitly rather
 than dispatching a duplicate. Documentation-only evidence updates use `[skip ci]`
