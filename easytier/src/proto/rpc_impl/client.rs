@@ -43,11 +43,8 @@ static CUR_TID: once_cell::sync::Lazy<atomic_shim::AtomicI64> =
 type RpcPacketSender = mpsc::UnboundedSender<RpcPacket>;
 type RpcPacketReceiver = mpsc::UnboundedReceiver<RpcPacket>;
 
-fn try_deliver_rpc_response(
-    sender: &RpcPacketSender,
-    packet: RpcPacket,
-) -> std::result::Result<(), RpcPacket> {
-    sender.send(packet).map_err(|err| err.0)
+fn try_deliver_rpc_response(sender: &RpcPacketSender, packet: RpcPacket) -> bool {
+    sender.send(packet).is_ok()
 }
 
 #[cfg(test)]
@@ -62,7 +59,7 @@ mod response_delivery_tests {
             ..Default::default()
         };
 
-        try_deliver_rpc_response(&sender, packet).unwrap();
+        assert!(try_deliver_rpc_response(&sender, packet));
 
         assert_eq!(receiver.try_recv().unwrap().transaction_id, 17);
     }
@@ -76,9 +73,7 @@ mod response_delivery_tests {
             ..Default::default()
         };
 
-        let stale = try_deliver_rpc_response(&sender, packet).unwrap_err();
-
-        assert_eq!(stale.transaction_id, 19);
+        assert!(!try_deliver_rpc_response(&sender, packet));
     }
 }
 
@@ -219,11 +214,8 @@ impl Client {
                         // Normal request drop order keeps this receiver alive,
                         // but a stale response must never abort the process if
                         // that lifecycle invariant changes or is violated.
-                        if let Err(err) =
-                            try_deliver_rpc_response(&inflight_request.sender, rpc_packet)
-                        {
+                        if !try_deliver_rpc_response(&inflight_request.sender, rpc_packet) {
                             tracing::warn!(
-                                ?err,
                                 ?key,
                                 "RPC response receiver is gone, removing inflight request"
                             );
