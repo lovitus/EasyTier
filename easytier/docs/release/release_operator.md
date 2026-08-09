@@ -28,7 +28,8 @@ scripts/release-operator.sh builder-preflight
 Source synchronization uses `rsync --delete-delay`: stale source is removed only
 after transfer succeeds. It never treats a lockfile change as permission to erase
 dependency directories. `builder-frontend` updates dependencies incrementally;
-the destructive but bounded repair path is always explicit.
+the destructive but bounded repair path is always explicit. Corepack uses a
+lockfile-hash-specific home, so a stale tool cache cannot poison a new candidate.
 
 ## Formal workflows
 

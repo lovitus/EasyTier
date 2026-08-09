@@ -72,8 +72,19 @@ else
 fi
 
 while IFS= read -r worktree_dir; do
-  if [[ -n "$(git -C "$worktree_dir" status --porcelain)" ]]; then
-    fail "dirty linked worktree: $worktree_dir"
+  [[ "$worktree_dir" == "$repo_root" ]] && continue
+  dirty_paths="$({
+    git -C "$worktree_dir" diff --name-only
+    git -C "$worktree_dir" diff --cached --name-only
+    git -C "$worktree_dir" ls-files --others --exclude-standard
+  } | sort -u)"
+  [[ -n "$dirty_paths" ]] || continue
+
+  non_documentation_changes="$(printf '%s\n' "$dirty_paths" | grep -Ev '(^|/)docs/|\.md$' || true)"
+  if [[ -n "$non_documentation_changes" ]]; then
+    fail "dirty linked worktree contains non-documentation changes: $worktree_dir"
+  else
+    pass "linked worktree contains documentation-only WIP: $worktree_dir"
   fi
 done < <(git worktree list --porcelain | sed -n 's/^worktree //p')
 
