@@ -38,6 +38,13 @@ test_versions() {
 test_workflow_sets() {
   assert_eq "${CANDIDATE_WORKFLOWS[*]}" "profiling-beta.yml android-policy-candidate.yml"
   assert_eq "${FORMAL_WORKFLOWS[*]}" "core.yml gui.yml mobile.yml ohos.yml test.yml"
+  unset ANDROID_CANDIDATE_MODE
+  configure_candidate_mode
+  assert_eq "${ACTIVE_CANDIDATE_WORKFLOWS[*]}" "profiling-beta.yml android-policy-candidate.yml"
+  ANDROID_CANDIDATE_MODE=skip configure_candidate_mode
+  assert_eq "${ACTIVE_CANDIDATE_WORKFLOWS[*]}" "profiling-beta.yml"
+  unset ANDROID_CANDIDATE_MODE
+  configure_candidate_mode
 }
 
 test_mips_gate() (

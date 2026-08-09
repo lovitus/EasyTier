@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 GH_REPO="${GH_REPO:-lovitus/EasyTier}"
 CANDIDATE_WORKFLOWS=(profiling-beta.yml android-policy-candidate.yml)
+ACTIVE_CANDIDATE_WORKFLOWS=("${CANDIDATE_WORKFLOWS[@]}")
 FORMAL_WORKFLOWS=(core.yml gui.yml mobile.yml ohos.yml test.yml)
 
 usage() {
@@ -32,6 +33,10 @@ Commands:
 Mutation commands refuse dirty, detached, unpushed, SHA-mismatched, or incomplete
 release inputs. Existing successful or active exact-SHA runs are reused. Existing
 failed runs fail closed instead of silently starting duplicates.
+
+Linux Profiling Beta is always required. Android Policy Candidate is required by
+default; set ANDROID_CANDIDATE_MODE=skip only when Android validation is outside
+the candidate scope, and record the explicit N/A or waiver in the matrix.
 EOF
 }
 
@@ -99,6 +104,14 @@ validate_cross_platform_version() {
     return
   fi
   return 1
+}
+
+configure_candidate_mode() {
+  case "${ANDROID_CANDIDATE_MODE:-required}" in
+    required) ACTIVE_CANDIDATE_WORKFLOWS=("${CANDIDATE_WORKFLOWS[@]}") ;;
+    skip) ACTIVE_CANDIDATE_WORKFLOWS=(profiling-beta.yml) ;;
+    *) die "ANDROID_CANDIDATE_MODE must be required or skip" ;;
+  esac
 }
 
 release_input_path() {
@@ -288,7 +301,7 @@ monitor_group() {
 }
 
 monitor_candidates() {
-  monitor_group "$1" candidate "${CANDIDATE_WORKFLOWS[@]}"
+  monitor_group "$1" candidate "${ACTIVE_CANDIDATE_WORKFLOWS[@]}"
 }
 
 monitor_formal() {
@@ -299,13 +312,13 @@ monitor_formal() {
 
 dispatch_candidates() {
   local sha="$1"
-  dispatch_group "$sha" candidate "${CANDIDATE_WORKFLOWS[@]}"
+  dispatch_group "$sha" candidate "${ACTIVE_CANDIDATE_WORKFLOWS[@]}"
   monitor_candidates "$sha"
 }
 
 dispatch_formal() {
   local sha="$1"
-  require_group_success "$sha" candidate "${CANDIDATE_WORKFLOWS[@]}"
+  require_group_success "$sha" candidate "${ACTIVE_CANDIDATE_WORKFLOWS[@]}"
   dispatch_group "$sha" formal "${FORMAL_WORKFLOWS[@]}"
   monitor_formal "$sha"
 }
@@ -333,7 +346,7 @@ Candidate SHA: resolved when the immutable candidate is committed.
 | Complete candidate diff and release inputs | BLOCKED | Record local audit and immutable SHA. |
 | \`.160\` locked no-run and focused tests | BLOCKED | Record exact commands and results. |
 | Linux profiling candidate | BLOCKED | Record exact-SHA run, hashes, build info and target. |
-| Android policy candidate | BLOCKED | Record exact-SHA run and package evidence. |
+| Android policy candidate | BLOCKED | Record exact-SHA run, or explicit N/A/waiver when Android validation is outside scope. |
 | Linux exact-artifact validation | BLOCKED | Record compatibility, lifecycle, cleanup and applicable network evidence. |
 | Android physical-device validation | BLOCKED | Record PASS or explicit WAIVED_BY_MAINTAINER; Mobile compilation is not a substitute. |
 | Formal Core including MIPS/MIPSel | BLOCKED | Record exact-SHA run and both cross-target jobs. |
@@ -348,6 +361,7 @@ EOF
 
 main() {
   local command="${1:-}" sha version core_run workflow make_latest
+  configure_candidate_mode
   case "$command" in
     -h|--help|help|'') usage ;;
     status)
@@ -384,14 +398,14 @@ main() {
       need gh; need jq
       sha="${2:-$(head_sha)}"
       assert_clean_pushed_sha "$sha"
-      require_group_success "$sha" candidate "${CANDIDATE_WORKFLOWS[@]}"
+      require_group_success "$sha" candidate "${ACTIVE_CANDIDATE_WORKFLOWS[@]}"
       dispatch_group "$sha" diagnostic core.yml
       ;;
     dispatch-rest)
       need gh; need jq
       sha="${2:-$(head_sha)}"
       assert_clean_pushed_sha "$sha"
-      require_group_success "$sha" candidate "${CANDIDATE_WORKFLOWS[@]}"
+      require_group_success "$sha" candidate "${ACTIVE_CANDIDATE_WORKFLOWS[@]}"
       core_run="$(successful_run_id core.yml "$sha")" || die "Core is not successful for $sha"
       require_core_cross_targets "$core_run"
       dispatch_group "$sha" diagnostic gui.yml mobile.yml ohos.yml test.yml
@@ -405,7 +419,7 @@ main() {
       [[ "${version#v}" == "$(cargo_version)" ]] || die "VERSION does not match Cargo version"
       sha="${3:-$(head_sha)}"
       assert_clean_pushed_sha "$sha"
-      require_group_success "$sha" candidate "${CANDIDATE_WORKFLOWS[@]}"
+      require_group_success "$sha" candidate "${ACTIVE_CANDIDATE_WORKFLOWS[@]}"
       require_group_success "$sha" formal "${FORMAL_WORKFLOWS[@]}"
       require_core_cross_targets "$(successful_run_id core.yml "$sha")"
       VALIDATED_SHA="$sha" "$SCRIPT_DIR/release-candidate-audit.sh" --release

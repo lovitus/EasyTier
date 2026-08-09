@@ -51,6 +51,15 @@ interrupted operator can safely run the same command again without duplicating
 work. `dispatch-all` is retained as an alias for this complete pipeline; it no
 longer bypasses candidate validation.
 
+Linux Profiling Beta is the mandatory optimized/debug artifact and automatic
+validation gate after the complete code batch and `.160` preflight. Android Policy
+Candidate runs in parallel by default. It may be omitted only when Android evidence
+is outside the candidate scope, using
+`ANDROID_CANDIDATE_MODE=skip scripts/release-operator.sh dispatch-pipeline`; the
+validation matrix must record the reason as `N/A` or an explicit maintainer waiver.
+This option never skips Linux Beta and never permits formal workflows before the
+selected candidate gates pass.
+
 The validation matrix and candidate manifest must exist before dispatch. Create
 the matrix before the candidate commit, then fill its evidence without moving the
 frozen release ref. GitHub API reads, dispatches and cancellation use bounded
