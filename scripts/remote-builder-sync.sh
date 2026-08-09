@@ -67,14 +67,14 @@ sync_source() {
   log "synchronizing source with dependency and build caches protected"
   rsync -a --delete-delay \
     --filter='protect /target/***' \
-    --filter='protect /.corepack/***' \
+    --filter='protect /.corepack*/***' \
     --filter='protect **/node_modules/***' \
     --exclude '/.git/' \
     --exclude '/target/' \
     --exclude '/.artifacts/' \
     --exclude '/.codex-artifacts/' \
     --exclude '/.claude/' \
-    --exclude '/.corepack/' \
+    --exclude '/.corepack*/' \
     --exclude '/.envrc.local' \
     --exclude 'node_modules/' \
     --exclude '/easytier-gui/src-tauri/gen/' \
@@ -109,6 +109,7 @@ $BUILDER_CONTAINER_WORKSPACE/tauri-plugin-vpnservice/node_modules'"
 install_frontend_dependencies() {
   local lock_id="$1"
   local installed_id
+  local corepack_home="$BUILDER_CONTAINER_WORKSPACE/.corepack-$lock_id"
   installed_id="$(installed_frontend_lock_id)"
 
   if [[ "$mode" != "repair-frontend" && "$installed_id" == "$lock_id" ]]; then
@@ -127,7 +128,7 @@ install_frontend_dependencies() {
   if ! ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
     "docker exec $BUILDER_CONTAINER bash -c 'cd $BUILDER_CONTAINER_WORKSPACE && \
 export PATH=/opt/node22/bin:\$PATH && \
-export COREPACK_HOME=$BUILDER_CONTAINER_WORKSPACE/.corepack && \
+export COREPACK_HOME=$corepack_home && \
 export HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 && \
 export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890 && \
 CI=1 timeout 1200 pnpm install --frozen-lockfile \

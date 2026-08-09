@@ -2,9 +2,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 BUILDER_HOST="${BUILDER_HOST:-root@192.168.2.160}"
 BUILDER_CONTAINER="${BUILDER_CONTAINER:-easytier-debug-builder}"
 REMOTE_WORKSPACE="${BUILDER_CONTAINER_WORKSPACE:-/workspace}"
+FRONTEND_LOCK_ID="$(git -C "$REPO_ROOT" hash-object pnpm-lock.yaml)"
+REMOTE_COREPACK_HOME="$REMOTE_WORKSPACE/.corepack-$FRONTEND_LOCK_ID"
 SSH_OPTIONS=(
   -o ServerAliveInterval=30
   -o ServerAliveCountMax=3
@@ -26,7 +29,7 @@ run_step() {
   if ! ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
     "docker exec $BUILDER_CONTAINER bash -c 'cd $REMOTE_WORKSPACE && \
 export PATH=/opt/node22/bin:\$PATH && \
-export COREPACK_HOME=$REMOTE_WORKSPACE/.corepack && \
+export COREPACK_HOME=$REMOTE_COREPACK_HOME && \
 export HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 && \
 export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890 && \
 CI=1 timeout $timeout_seconds $command > $log_file 2>&1'"; then
