@@ -43,6 +43,45 @@ static CUR_TID: once_cell::sync::Lazy<atomic_shim::AtomicI64> =
 type RpcPacketSender = mpsc::UnboundedSender<RpcPacket>;
 type RpcPacketReceiver = mpsc::UnboundedReceiver<RpcPacket>;
 
+fn try_deliver_rpc_response(
+    sender: &RpcPacketSender,
+    packet: RpcPacket,
+) -> std::result::Result<(), RpcPacket> {
+    sender.send(packet).map_err(|err| err.0)
+}
+
+#[cfg(test)]
+mod response_delivery_tests {
+    use super::*;
+
+    #[test]
+    fn response_delivery_succeeds_while_receiver_is_alive() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let packet = RpcPacket {
+            transaction_id: 17,
+            ..Default::default()
+        };
+
+        try_deliver_rpc_response(&sender, packet).unwrap();
+
+        assert_eq!(receiver.try_recv().unwrap().transaction_id, 17);
+    }
+
+    #[test]
+    fn response_delivery_treats_a_closed_receiver_as_stale() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        drop(receiver);
+        let packet = RpcPacket {
+            transaction_id: 19,
+            ..Default::default()
+        };
+
+        let stale = try_deliver_rpc_response(&sender, packet).unwrap_err();
+
+        assert_eq!(stale.transaction_id, 19);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct InflightRequestKey {
     from_peer_id: PeerId,
@@ -177,7 +216,20 @@ impl Client {
                 let ret = inflight_request.merger.feed(packet);
                 match ret {
                     Ok(Some(rpc_packet)) => {
-                        inflight_request.sender.send(rpc_packet).unwrap();
+                        // Normal request drop order keeps this receiver alive,
+                        // but a stale response must never abort the process if
+                        // that lifecycle invariant changes or is violated.
+                        if let Err(err) =
+                            try_deliver_rpc_response(&inflight_request.sender, rpc_packet)
+                        {
+                            tracing::warn!(
+                                ?err,
+                                ?key,
+                                "RPC response receiver is gone, removing inflight request"
+                            );
+                            drop(inflight_request);
+                            inflight_requests.remove(&key);
+                        }
                     }
                     Ok(None) => {}
                     Err(err) => {

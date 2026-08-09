@@ -176,6 +176,7 @@ impl Server {
 
     async fn handle_rpc_request(
         packet: RpcPacket,
+        descriptor: common::RpcDescriptor,
         reg: Arc<ServiceRegistry>,
         tunnel_info: Option<TunnelInfo>,
     ) -> Result<Bytes> {
@@ -197,7 +198,7 @@ impl Server {
         ctrl.set_source_peer_id(packet.from_peer);
         let ret = timeout(
             timeout_duration,
-            reg.call_method(packet.descriptor.unwrap(), ctrl.clone(), raw_req),
+            reg.call_method(descriptor, ctrl.clone(), raw_req),
         )
         .await??;
         if let Some(raw_output) = ctrl.get_raw_output() {
@@ -218,7 +219,13 @@ impl Server {
         let to_peer = packet.to_peer;
         let transaction_id = packet.transaction_id;
         let trace_id = packet.trace_id;
-        let desc = packet.descriptor.clone().unwrap();
+        // PacketMerger rejects missing descriptors, but retain this boundary
+        // check so future callers cannot turn malformed peer input into a
+        // process-wide panic in panic=abort builds.
+        let Some(desc) = packet.descriptor.clone() else {
+            tracing::warn!("received RPC request without a descriptor");
+            return;
+        };
         let method_name = reg.get_method_name(&desc).unwrap_or("<Nil>".to_owned());
         let labels = LabelSet::new()
             .with_label_type(LabelType::NetworkName(desc.domain_name.to_string()))
@@ -238,7 +245,7 @@ impl Server {
         let now = Instant::now();
 
         let compression_info = packet.compression_info;
-        let resp_bytes = Self::handle_rpc_request(packet, reg, tunnel_info).await;
+        let resp_bytes = Self::handle_rpc_request(packet, desc.clone(), reg, tunnel_info).await;
 
         match &resp_bytes {
             Ok(r) => {

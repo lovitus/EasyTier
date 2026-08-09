@@ -96,15 +96,18 @@ impl PacketMerger {
         let total_pieces = rpc_packet.total_pieces;
         let piece_idx = rpc_packet.piece_idx;
 
-        // for compatibility with old version
-        if total_pieces == 0 && piece_idx == 0 {
-            return Ok(Some(rpc_packet));
-        }
-
-        if rpc_packet.piece_idx == 0 && rpc_packet.descriptor.is_none() {
+        // The legacy single-packet representation still carries a request
+        // descriptor. Validate it before the compatibility return so malformed
+        // peer input cannot bypass the server's required-field contract.
+        if piece_idx == 0 && rpc_packet.descriptor.is_none() {
             return Err(Error::MalformatRpcPacket(
                 "descriptor is missing".to_owned(),
             ));
+        }
+
+        // for compatibility with old version
+        if total_pieces == 0 && piece_idx == 0 {
+            return Ok(Some(rpc_packet));
         }
 
         // about 32MB max size
@@ -364,6 +367,48 @@ mod tests {
         ZCPacketType::UDP.get_packet_offsets().payload_offset
             + packet.payload_len()
             + TAIL_RESERVED_SIZE
+    }
+
+    fn legacy_rpc_packet(descriptor: Option<RpcDescriptor>) -> RpcPacket {
+        RpcPacket {
+            descriptor,
+            total_pieces: 0,
+            piece_idx: 0,
+            transaction_id: 7,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn packet_merger_accepts_legacy_packet_with_descriptor() {
+        let descriptor = RpcDescriptor {
+            domain_name: "test".to_owned(),
+            proto_name: "test.proto".to_owned(),
+            service_name: "TestService".to_owned(),
+            method_index: 1,
+        };
+        let mut merger = PacketMerger::new();
+
+        let merged = merger
+            .feed(legacy_rpc_packet(Some(descriptor.clone())))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(merged.descriptor, Some(descriptor));
+        assert_eq!(merged.total_pieces, 0);
+        assert_eq!(merged.piece_idx, 0);
+    }
+
+    #[test]
+    fn packet_merger_rejects_legacy_packet_without_descriptor() {
+        let mut merger = PacketMerger::new();
+
+        let err = merger.feed(legacy_rpc_packet(None)).unwrap_err();
+
+        assert!(matches!(
+            err,
+            Error::MalformatRpcPacket(message) if message == "descriptor is missing"
+        ));
     }
 
     #[test]

@@ -413,12 +413,15 @@ impl PacketProtocol {
 }
 
 /// Infer the protocol based on the first nibble in the packet buffer.
-fn infer_proto(buf: &[u8]) -> PacketProtocol {
-    match buf[0] >> 4 {
+fn infer_proto(buf: &[u8]) -> Result<PacketProtocol, io::Error> {
+    let first = *buf
+        .first()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty IP packet"))?;
+    Ok(match first >> 4 {
         4 => PacketProtocol::IPv4,
         6 => PacketProtocol::IPv6,
         p => PacketProtocol::Other(p),
-    }
+    })
 }
 
 struct TunZCPacketToBytes {
@@ -452,7 +455,7 @@ impl ZCPacketToBytes for TunZCPacketToBytes {
 
         let ret = if self.has_packet_info {
             let mut inner = inner.split_off(payload_offset - 4);
-            let proto = infer_proto(&inner[4..]);
+            let proto = infer_proto(&inner[4..])?;
             self.fill_packet_info(&mut inner[0..4], proto)?;
             inner
         } else {
@@ -3868,9 +3871,9 @@ mod tests {
     };
     use crate::common::{error::Error, global_ctx::tests::get_mock_global_ctx};
 
-    use super::VirtualNic;
     #[cfg(all(feature = "leaf-policy-proxy", unix))]
     use super::{NicCtx, ensure_policy_mesh_credentials_confidential};
+    use super::{PacketProtocol, VirtualNic, infer_proto};
     #[cfg(all(
         feature = "leaf-policy-proxy",
         any(
@@ -3887,6 +3890,29 @@ mod tests {
         )
     ))]
     use std::{net::IpAddr, sync::Arc};
+
+    #[test]
+    fn infer_proto_rejects_an_empty_packet() {
+        let err = infer_proto(&[]).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn infer_proto_accepts_ipv4() {
+        assert!(matches!(
+            infer_proto(&[0x45]).unwrap(),
+            PacketProtocol::IPv4
+        ));
+    }
+
+    #[test]
+    fn infer_proto_accepts_ipv6() {
+        assert!(matches!(
+            infer_proto(&[0x60]).unwrap(),
+            PacketProtocol::IPv6
+        ));
+    }
 
     #[cfg(all(feature = "leaf-policy-proxy", unix))]
     #[test]
