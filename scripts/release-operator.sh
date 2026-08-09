@@ -15,6 +15,7 @@ Commands:
   builder-sync                Safely synchronize source to 192.168.2.160.
   builder-frontend            Incrementally prepare frozen frontend dependencies.
   builder-frontend-repair     Explicitly replace only known frontend dependencies.
+  builder-preflight           Run the standard Rust and ordered frontend gates.
   dispatch-core [SHA]         Dispatch Core once for the exact pushed SHA.
   dispatch-rest [SHA]         After Core/MIPS/MIPSel pass, dispatch the other four.
   dispatch-release VERSION [SHA]
@@ -136,6 +137,10 @@ main() {
       ;;
     builder-frontend-repair)
       "$SCRIPT_DIR/remote-builder-sync.sh" --repair-frontend-deps
+      ;;
+    builder-preflight)
+      "$SCRIPT_DIR/leaf-remote-preflight.sh"
+      "$SCRIPT_DIR/remote-frontend-preflight.sh"
       ;;
     dispatch-core)
       need gh; need jq

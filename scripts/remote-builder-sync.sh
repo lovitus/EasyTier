@@ -52,7 +52,7 @@ log() {
 check_builder_idle() {
   local output
   output="$(ssh "${BUILD_SSH_OPTIONS[@]}" "$BUILDER_HOST" \
-    "docker exec $BUILDER_CONTAINER bash -c 'if pgrep -x cargo >/dev/null || pgrep -x rustc >/dev/null; then pgrep -a -x cargo; pgrep -a -x rustc; echo BLOCKED; else echo CLEAR; fi'")"
+    "docker exec $BUILDER_CONTAINER bash -c 'if pgrep -x cargo >/dev/null || pgrep -x rustc >/dev/null || pgrep -x node >/dev/null || pgrep -x pnpm >/dev/null; then pgrep -a -x cargo || true; pgrep -a -x rustc || true; pgrep -a -x node || true; pgrep -a -x pnpm || true; echo BLOCKED; else echo CLEAR; fi'")"
   if [[ "$output" != *CLEAR* || "$output" == *BLOCKED* ]]; then
     printf '%s\n' "$output" >&2
     printf 'remote builder is busy; source synchronization was not started\n' >&2

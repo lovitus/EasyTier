@@ -2,6 +2,7 @@
 
 - The canonical Codex checkout is `/Volumes/micron512g/code/easytier`. Start every task with `scripts/ensure-codex-worktree-current.sh`; never continue development from a version-named historical worktree merely because it is the current shell directory.
 - Use `scripts/release-operator.sh` as the sole operator entry point for `.160` source/dependency preparation and formal Core/GUI/Mobile/OHOS/Test/Release dispatch. Do not reconstruct scattered `rsync` or `gh workflow run` commands from memory.
+- Use `scripts/release-operator.sh builder-preflight` for the standard release preflight. It runs the Rust gate and then frontend-lib Vitest, frontend-lib build, frontend build, VPN plugin build, and GUI build in the required dependency order with bounded per-step logs.
 - Source synchronization to `.160` must use `scripts/remote-builder-sync.sh`. It checks Cargo/rustc idleness before touching the workspace, preserves Cargo/Node/Corepack caches, and delays source deletion until transfer succeeds. Never add broad dependency deletion to rsync.
 - Frontend dependency replacement on `.160` is an explicit recovery action: use `scripts/release-operator.sh builder-frontend-repair`, which may remove only the fixed workspace `node_modules` list. Normal lockfile changes use incremental `builder-frontend` and must not erase dependencies first.
 

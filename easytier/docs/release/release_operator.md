@@ -20,6 +20,9 @@ scripts/release-operator.sh builder-frontend-repair
 
 # Standard Leaf/policy Rust preflight, including sync, no-run and focused tests.
 scripts/leaf-remote-preflight.sh
+
+# Complete standard gate: Rust preflight followed by the ordered frontend gate.
+scripts/release-operator.sh builder-preflight
 ```
 
 Source synchronization uses `rsync --delete-delay`: stale source is removed only
