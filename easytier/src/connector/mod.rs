@@ -317,18 +317,15 @@ async fn set_bind_addr_for_peer_connector(
     connector: &mut (impl TunnelConnector + ?Sized),
     is_ipv4: bool,
     global_ctx: &ArcGlobalCtx,
-    snapshot: &crate::common::network::UnderlayInterfaceSnapshot,
+    snapshot: Option<&crate::common::network::UnderlayInterfaceSnapshot>,
 ) -> Result<(), Error> {
-    if cfg!(any(
-        target_os = "android",
-        any(
-            target_os = "ios",
-            all(target_os = "macos", feature = "macos-ne")
-        ),
-        target_env = "ohos"
-    )) {
+    let Some(snapshot) = resolved_bind_snapshot_for_platform(
+        underlay_guard::native_interface_inspection_active(),
+        snapshot,
+    )?
+    else {
         return Ok(());
-    }
+    };
 
     let bind_addrs = build_resolved_bind_addrs(snapshot, is_ipv4, |ip| {
         underlay_guard::should_block_underlay_ip(global_ctx, ip)
@@ -336,6 +333,19 @@ async fn set_bind_addr_for_peer_connector(
     })?;
     connector.set_resolved_bind_addrs(bind_addrs);
     Ok(())
+}
+
+fn resolved_bind_snapshot_for_platform(
+    native_interface_inspection_active: bool,
+    snapshot: Option<&crate::common::network::UnderlayInterfaceSnapshot>,
+) -> Result<Option<&crate::common::network::UnderlayInterfaceSnapshot>, Error> {
+    if !native_interface_inspection_active {
+        return Ok(None);
+    }
+
+    snapshot.map(Some).ok_or_else(|| {
+        Error::InvalidUrl("bind-device connector has no underlay interface snapshot".to_owned())
+    })
 }
 
 struct ResolvedConnectorAddr {
@@ -692,11 +702,7 @@ pub(crate) async fn create_connector_by_url_with_scope(
                 let snapshot = preflight
                     .as_ref()
                     .and_then(UnderlayPreflightGuard::underlay_snapshot)
-                    .ok_or_else(|| {
-                        Error::InvalidUrl(
-                            "bind-device connector has no underlay interface snapshot".to_owned(),
-                        )
-                    })?;
+                    .map(|snapshot| snapshot.as_ref());
                 set_bind_addr_for_peer_connector(
                     &mut connector,
                     resolved_addr.addr.is_ipv4(),
@@ -739,6 +745,25 @@ pub(crate) async fn create_connector_by_url_with_scope(
         resolved_addr: resolved_socket_addr,
         snapshot_owner,
     })
+}
+
+#[cfg(test)]
+mod resolved_bind_snapshot_contract_tests {
+    #[test]
+    fn mobile_platforms_skip_snapshot_while_native_platforms_fail_closed() {
+        assert!(
+            super::resolved_bind_snapshot_for_platform(false, None)
+                .unwrap()
+                .is_none()
+        );
+
+        let error = super::resolved_bind_snapshot_for_platform(true, None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("bind-device connector has no underlay interface snapshot")
+        );
+    }
 }
 
 #[cfg(test)]

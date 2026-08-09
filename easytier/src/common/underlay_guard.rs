@@ -187,7 +187,7 @@ fn suspicious_interface_name(name: &str) -> bool {
         || name.contains("wintun")
 }
 
-fn native_interface_inspection_active() -> bool {
+pub(crate) fn native_interface_inspection_active() -> bool {
     !cfg!(any(
         target_os = "android",
         target_os = "ios",
