@@ -60,6 +60,7 @@ pub struct Event {
 
 struct EasyTierData {
     events: RwLock<VecDeque<Event>>,
+    bootstrap_peer_urls: RwLock<Vec<url::Url>>,
     tun_fd: (mpsc::Sender<TunFd>, Mutex<Option<mpsc::Receiver<TunFd>>>),
     #[cfg(mobile)]
     mobile_network: tokio::sync::watch::Sender<MobileNetworkState>,
@@ -81,6 +82,7 @@ impl Default for EasyTierData {
         Self {
             event_subscriber: RwLock::new(tx),
             events: RwLock::new(VecDeque::new()),
+            bootstrap_peer_urls: RwLock::new(Vec::new()),
             tun_fd: (sender, Mutex::new(Some(receiver))),
             #[cfg(mobile)]
             mobile_network: tokio::sync::watch::channel(MobileNetworkState::default()).0,
@@ -183,11 +185,13 @@ impl EasyTierLauncher {
 
     async fn easytier_routine(
         cfg: TomlConfigLoader,
+        runtime_initial_peers: Vec<url::Url>,
         stop_signal: Arc<tokio::sync::Notify>,
         api_service: ArcMutApiService,
         data: Arc<EasyTierData>,
     ) -> Result<(), anyhow::Error> {
         let mut instance = Instance::new(cfg);
+        instance.set_runtime_initial_peers(runtime_initial_peers);
         let mut tasks = JoinSet::new();
 
         // Subscribe to global context events
@@ -228,6 +232,11 @@ impl EasyTierLauncher {
 
         stop_signal.notified().await;
 
+        *data
+            .bootstrap_peer_urls
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = instance.bootstrap_peer_urls();
+
         tasks.abort_all();
         drop(tasks);
 
@@ -237,7 +246,7 @@ impl EasyTierLauncher {
         Ok(())
     }
 
-    pub fn start<F>(&mut self, cfg_generator: F)
+    pub fn start<F>(&mut self, cfg_generator: F, runtime_initial_peers: Vec<url::Url>)
     where
         F: FnOnce() -> Result<TomlConfigLoader, anyhow::Error> + Send + Sync,
     {
@@ -294,6 +303,7 @@ impl EasyTierLauncher {
             let notifier = data.instance_stop_notifier.clone();
             let ret = rt.block_on(Self::easytier_routine(
                 cfg,
+                runtime_initial_peers,
                 stop_notifier,
                 api_service,
                 data,
@@ -309,6 +319,24 @@ impl EasyTierLauncher {
 
     pub fn error_msg(&self) -> Option<String> {
         self.error_msg.read().unwrap().clone()
+    }
+
+    fn stop_and_join(&mut self) {
+        self.stop_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.thread_handle.take()
+            && let Err(error) = handle.join()
+        {
+            tracing::error!(?error, "failed to join EasyTier launcher thread");
+        }
+    }
+
+    fn bootstrap_peer_urls(&self) -> Vec<url::Url> {
+        self.data
+            .bootstrap_peer_urls
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn running(&self) -> bool {
@@ -377,13 +405,7 @@ impl Default for EasyTierLauncher {
 
 impl Drop for EasyTierLauncher {
     fn drop(&mut self) {
-        self.stop_flag
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(handle) = self.thread_handle.take()
-            && let Err(e) = handle.join()
-        {
-            println!("Error when joining thread: {:?}", e);
-        }
+        self.stop_and_join();
     }
 }
 
@@ -393,6 +415,7 @@ pub struct NetworkInstance {
     config: TomlConfigLoader,
     launcher: Option<EasyTierLauncher>,
     config_file_control: ConfigFileControl,
+    runtime_initial_peers: Vec<url::Url>,
 }
 
 impl NetworkInstance {
@@ -401,7 +424,12 @@ impl NetworkInstance {
             config,
             launcher: None,
             config_file_control,
+            runtime_initial_peers: Vec::new(),
         }
+    }
+
+    pub(crate) fn set_runtime_initial_peers(&mut self, peers: Vec<url::Url>) {
+        self.runtime_initial_peers = peers;
     }
 
     pub fn is_easytier_running(&self) -> bool {
@@ -550,10 +578,10 @@ impl NetworkInstance {
         self.launcher = Some(launcher);
         let ev = self.subscribe_event().unwrap();
 
-        self.launcher
-            .as_mut()
-            .unwrap()
-            .start(|| Ok(self.config.clone()));
+        self.launcher.as_mut().unwrap().start(
+            || Ok(self.config.clone()),
+            self.runtime_initial_peers.clone(),
+        );
 
         Ok(ev)
     }
@@ -576,6 +604,14 @@ impl NetworkInstance {
 
     pub fn get_config(&self) -> TomlConfigLoader {
         self.config.clone()
+    }
+
+    pub(crate) fn stop_and_take_bootstrap_peer_urls(&mut self) -> Vec<url::Url> {
+        let Some(launcher) = self.launcher.as_mut() else {
+            return Vec::new();
+        };
+        launcher.stop_and_join();
+        launcher.bootstrap_peer_urls()
     }
 
     pub fn get_network_config_source(&self) -> ConfigSource {

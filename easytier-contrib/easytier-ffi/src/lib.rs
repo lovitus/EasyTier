@@ -5,6 +5,7 @@
 //! implementation modules.
 //!
 //! Network management APIs:
+//! - `set_config_dir`: set the process-wide persistent application directory.
 //! - `parse_config`: validate a TOML network config string.
 //! - `run_network_instance`: start one local network instance from TOML.
 //! - `retain_network_instance`: keep named instances and stop all others.
@@ -60,6 +61,18 @@ use std::ffi::{c_char, c_int, c_void};
 use std::ffi::{c_uchar, c_ushort};
 
 // ===== Network Management API =====
+
+/// Set the process-wide persistent application directory.
+///
+/// Mobile and embedded hosts should call this once, before starting any network
+/// instance. Repeating the same path is allowed; changing it is rejected.
+///
+/// # Safety
+/// `config_dir` must be a non-null pointer to a null-terminated UTF-8 string.
+#[cfg_attr(feature = "c-abi", unsafe(no_mangle))]
+pub unsafe extern "C" fn set_config_dir(config_dir: *const c_char) -> c_int {
+    unsafe { instance_api::set_config_dir(config_dir) }
+}
 
 /// Validate a TOML network config string.
 ///

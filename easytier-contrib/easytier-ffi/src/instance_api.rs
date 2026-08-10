@@ -17,6 +17,36 @@ use crate::{
 };
 
 /// # Safety
+/// Configure the process-wide persistent application directory before starting instances.
+pub(crate) unsafe fn set_config_dir(config_dir: *const c_char) -> c_int {
+    if config_dir.is_null() {
+        set_error_msg("config_dir is null");
+        return -1;
+    }
+    let config_dir = unsafe { std::ffi::CStr::from_ptr(config_dir) }
+        .to_string_lossy()
+        .into_owned();
+
+    let _remote_mutation_guard = lock_remote_instance_mutation();
+    let _mutation_guard = match INSTANCE_MUTATION_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(error) => {
+            set_error_msg(&format!("failed to lock instance mutation: {error}"));
+            return -1;
+        }
+    };
+    match INSTANCE_MANAGER.set_config_path(config_dir.into()) {
+        Ok(()) => 0,
+        Err(error) => {
+            set_error_msg(&format!(
+                "failed to set persistent config directory: {error}"
+            ));
+            -1
+        }
+    }
+}
+
+/// # Safety
 /// Set the tun fd
 pub(crate) unsafe fn set_tun_fd(inst_name: *const c_char, fd: c_int) -> c_int {
     let inst_name = unsafe {

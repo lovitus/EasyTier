@@ -2,14 +2,15 @@
 use crate::launcher::{DataPlaneTcpListener, DataPlaneTcpStream, DataPlaneUdpSocket};
 use anyhow::Context as _;
 use dashmap::DashMap;
+use sha2::{Digest, Sha256};
 use std::fmt::{Display, Formatter};
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
-#[cfg(feature = "mesh-socks-egress")]
 use std::{
-    sync::{OnceLock, mpsc as std_mpsc},
-    thread,
-    time::Duration,
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
 };
+#[cfg(feature = "mesh-socks-egress")]
+use std::{sync::mpsc as std_mpsc, thread, time::Duration};
 #[cfg(feature = "mesh-socks-egress")]
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -21,8 +22,8 @@ mod gost;
 use crate::{
     common::{
         config::{
-            ConfigFileControl, ConfigLoader, ConfigSource, NicBackend, PolicyProxyConfig,
-            TomlConfigLoader,
+            ConfigFileControl, ConfigLoader, ConfigSource, NetworkIdentity, NicBackend,
+            PolicyProxyConfig, TomlConfigLoader,
         },
         global_ctx::{EventBusSubscriber, GlobalCtxEvent},
         log,
@@ -32,6 +33,91 @@ use crate::{
     proto::{self},
     rpc_service::InstanceRpcService,
 };
+
+const BOOTSTRAP_PEER_DIR: &str = "peer-bootstrap";
+
+fn bootstrap_peer_cache_key(identity: &NetworkIdentity) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"easytier-bootstrap-peer-v1\0");
+    hasher.update((identity.network_name.len() as u64).to_be_bytes());
+    hasher.update(identity.network_name.as_bytes());
+
+    let secret_digest = identity.network_secret_digest.or_else(|| {
+        identity.network_secret.as_ref().and_then(|secret| {
+            NetworkIdentity::new(identity.network_name.clone(), secret.clone())
+                .network_secret_digest
+        })
+    });
+    if let Some(secret_digest) = secret_digest {
+        hasher.update([1]);
+        hasher.update(secret_digest);
+    } else {
+        hasher.update([0]);
+    }
+
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn bootstrap_peer_cache_path(config_dir: &Path, identity: &NetworkIdentity) -> PathBuf {
+    config_dir
+        .join(BOOTSTRAP_PEER_DIR)
+        .join(format!("{}.txt", bootstrap_peer_cache_key(identity)))
+}
+
+fn load_bootstrap_peer_urls(
+    config_dir: Option<&Path>,
+    identity: &NetworkIdentity,
+) -> std::io::Result<Vec<url::Url>> {
+    let Some(config_dir) = config_dir else {
+        return Ok(Vec::new());
+    };
+    let contents = match std::fs::read_to_string(bootstrap_peer_cache_path(config_dir, identity)) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+
+    let mut urls = contents
+        .lines()
+        .filter_map(|line| line.trim().parse::<url::Url>().ok())
+        .filter(|url| url.scheme() != "ring")
+        .collect::<Vec<_>>();
+    urls.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    urls.dedup();
+    Ok(urls)
+}
+
+fn persist_bootstrap_peer_urls(
+    config_dir: Option<&Path>,
+    identity: &NetworkIdentity,
+    urls: &[url::Url],
+) -> std::io::Result<()> {
+    let Some(config_dir) = config_dir else {
+        return Ok(());
+    };
+    let mut urls = urls
+        .iter()
+        .filter(|url| url.scheme() != "ring")
+        .map(url::Url::as_str)
+        .collect::<Vec<_>>();
+    urls.sort_unstable();
+    urls.dedup();
+    if urls.is_empty() {
+        return Ok(());
+    }
+
+    let path = bootstrap_peer_cache_path(config_dir, identity);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut contents = urls.join("\n");
+    contents.push('\n');
+    std::fs::write(path, contents)
+}
 
 #[cfg(all(feature = "leaf-policy-proxy", target_os = "linux"))]
 fn ensure_policy_socket_mark(config: &TomlConfigLoader) -> anyhow::Result<Option<u32>> {
@@ -694,7 +780,7 @@ pub struct NetworkInstanceManager {
     instance_stop_tasks: Arc<DashMap<uuid::Uuid, InstanceStopTask>>,
     stop_check_notifier: Arc<tokio::sync::Notify>,
     instance_error_messages: Arc<DashMap<uuid::Uuid, String>>,
-    config_dir: Option<PathBuf>,
+    config_dir: OnceLock<PathBuf>,
     guard_counter: Arc<()>,
     remote_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     mihomo_owner: Arc<MihomoCoreOwner>,
@@ -735,7 +821,7 @@ impl NetworkInstanceManager {
             instance_stop_tasks: Arc::new(DashMap::new()),
             stop_check_notifier: Arc::new(tokio::sync::Notify::new()),
             instance_error_messages: Arc::new(DashMap::new()),
-            config_dir: None,
+            config_dir: OnceLock::new(),
             guard_counter: Arc::new(()),
             remote_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             mihomo_owner: MihomoCoreOwner::global(),
@@ -745,9 +831,33 @@ impl NetworkInstanceManager {
         }
     }
 
-    pub fn with_config_path(mut self, config_dir: Option<PathBuf>) -> Self {
-        self.config_dir = config_dir;
+    pub fn with_config_path(self, config_dir: Option<PathBuf>) -> Self {
+        if let Some(config_dir) = config_dir {
+            let _ = self.config_dir.set(config_dir);
+        }
         self
+    }
+
+    pub fn set_config_path(&self, config_dir: PathBuf) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !config_dir.as_os_str().is_empty(),
+            "persistent config directory cannot be empty"
+        );
+        if let Some(existing) = self.config_dir.get() {
+            anyhow::ensure!(
+                existing == &config_dir,
+                "persistent config directory is already initialized as {}",
+                existing.display()
+            );
+            return Ok(());
+        }
+        anyhow::ensure!(
+            self.instance_map.is_empty(),
+            "persistent config directory must be initialized before starting an instance"
+        );
+        self.config_dir.set(config_dir).map_err(|_| {
+            anyhow::anyhow!("persistent config directory was initialized concurrently")
+        })
     }
 
     pub fn with_nic_backend(mut self, nic_backend: NicBackend) -> Self {
@@ -847,13 +957,23 @@ impl NetworkInstanceManager {
         if let Some(mark) = ensure_policy_socket_mark(&cfg)? {
             crate::common::dns::set_control_plane_socket_mark(Some(mark));
         }
+        let runtime_initial_peers = match load_bootstrap_peer_urls(
+            self.get_config_dir().map(PathBuf::as_path),
+            &cfg.get_network_identity(),
+        ) {
+            Ok(peers) => peers,
+            Err(error) => {
+                log::warn!(%error, "failed to load auxiliary bootstrap peer snapshot");
+                Vec::new()
+            }
+        };
         let mihomo_request = if let Some(policy) = cfg.get_policy_proxy_config() {
             policy.validate_runtime_support()?;
             if policy.is_mihomo_enabled() {
                 Some(build_mihomo_start_request(
                     &cfg,
                     policy,
-                    self.config_dir.as_deref(),
+                    self.get_config_dir().map(PathBuf::as_path),
                 )?)
             } else {
                 None
@@ -878,6 +998,7 @@ impl NetworkInstanceManager {
         }
 
         let mut instance = NetworkInstance::new(cfg, config_file_control);
+        instance.set_runtime_initial_peers(runtime_initial_peers);
         instance.start()?;
         if let Some(request) = mihomo_request {
             self.mihomo_owner.start(request)?;
@@ -906,7 +1027,8 @@ impl NetworkInstanceManager {
             policy.is_mihomo_enabled(),
             "selected policy backend is not Mihomo"
         );
-        let mut request = build_mihomo_start_request(cfg, policy, self.config_dir.as_deref())?;
+        let mut request =
+            build_mihomo_start_request(cfg, policy, self.get_config_dir().map(PathBuf::as_path))?;
         request.source = MihomoConfigSource::Inline {
             label: format!("edited Mihomo config for network {}", cfg.get_id()),
             contents: contents.into(),
@@ -927,7 +1049,8 @@ impl NetworkInstanceManager {
             policy.is_mihomo_enabled(),
             "selected policy backend is not Mihomo"
         );
-        let mut request = build_mihomo_start_request(cfg, policy, self.config_dir.as_deref())?;
+        let mut request =
+            build_mihomo_start_request(cfg, policy, self.get_config_dir().map(PathBuf::as_path))?;
         request.source = MihomoConfigSource::Inline {
             label: format!("edited Mihomo config for network {}", cfg.get_id()),
             contents: contents.clone().into(),
@@ -974,7 +1097,11 @@ impl NetworkInstanceManager {
             policy.is_mihomo_enabled(),
             "network instance does not use the Mihomo policy backend"
         );
-        let request = build_mihomo_start_request(&config, policy, self.config_dir.as_deref())?;
+        let request = build_mihomo_start_request(
+            &config,
+            policy,
+            self.get_config_dir().map(PathBuf::as_path),
+        )?;
         let new_token = request.ownership_token;
         *ownership_token
             .write()
@@ -1003,12 +1130,17 @@ impl NetworkInstanceManager {
         &self,
         instance_ids: Vec<uuid::Uuid>,
     ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
-        for instance_id in self.list_network_instance_ids() {
-            if !instance_ids.contains(&instance_id) {
-                self.mihomo_owner.stop(instance_id)?;
-            }
+        let removed_ids = self
+            .list_network_instance_ids()
+            .into_iter()
+            .filter(|instance_id| !instance_ids.contains(instance_id))
+            .collect::<Vec<_>>();
+        for instance_id in &removed_ids {
+            self.mihomo_owner.stop(*instance_id)?;
         }
-        self.instance_map.retain(|k, _| instance_ids.contains(k));
+        for instance_id in removed_ids {
+            self.remove_instance_and_persist_bootstrap(instance_id);
+        }
         self.instance_map.shrink_to_fit();
         self.instance_error_messages
             .retain(|k, _| instance_ids.contains(k));
@@ -1023,7 +1155,9 @@ impl NetworkInstanceManager {
         for instance_id in &instance_ids {
             self.mihomo_owner.stop(*instance_id)?;
         }
-        self.instance_map.retain(|k, _| !instance_ids.contains(k));
+        for instance_id in &instance_ids {
+            self.remove_instance_and_persist_bootstrap(*instance_id);
+        }
         self.instance_map.shrink_to_fit();
         self.instance_error_messages
             .retain(|k, _| !instance_ids.contains(k));
@@ -1312,7 +1446,22 @@ impl NetworkInstanceManager {
     }
 
     pub fn get_config_dir(&self) -> Option<&PathBuf> {
-        self.config_dir.as_ref()
+        self.config_dir.get()
+    }
+
+    fn remove_instance_and_persist_bootstrap(&self, instance_id: uuid::Uuid) {
+        let Some((_, mut instance)) = self.instance_map.remove(&instance_id) else {
+            return;
+        };
+        let identity = instance.get_config().get_network_identity();
+        let urls = instance.stop_and_take_bootstrap_peer_urls();
+        if let Err(error) = persist_bootstrap_peer_urls(
+            self.get_config_dir().map(PathBuf::as_path),
+            &identity,
+            &urls,
+        ) {
+            log::warn!(%error, %instance_id, "failed to persist auxiliary bootstrap peer snapshot");
+        }
     }
 
     pub(crate) fn register_daemon(&self) -> DaemonGuard {
@@ -1347,6 +1496,7 @@ impl Drop for NetworkInstanceManager {
     fn drop(&mut self) {
         for instance_id in self.list_network_instance_ids() {
             let _ = self.mihomo_owner.stop(instance_id);
+            self.remove_instance_and_persist_bootstrap(instance_id);
         }
     }
 }
@@ -1672,6 +1822,76 @@ outbound_interface = "eth0"
                 .unwrap_err()
                 .to_string()
                 .contains("non-zero")
+        );
+    }
+
+    #[test]
+    fn bootstrap_cache_is_stable_isolated_and_tolerates_malformed_lines() {
+        let shared = NetworkIdentity::new("mesh-a".to_owned(), "secret-a".to_owned());
+        let shared_again = NetworkIdentity::new("mesh-a".to_owned(), "secret-a".to_owned());
+        let other_secret = NetworkIdentity::new("mesh-a".to_owned(), "secret-b".to_owned());
+        let credential = NetworkIdentity::new_credential("mesh-a".to_owned());
+        assert_eq!(
+            bootstrap_peer_cache_key(&shared),
+            bootstrap_peer_cache_key(&shared_again)
+        );
+        assert_ne!(
+            bootstrap_peer_cache_key(&shared),
+            bootstrap_peer_cache_key(&other_secret)
+        );
+        assert_ne!(
+            bootstrap_peer_cache_key(&shared),
+            bootstrap_peer_cache_key(&credential)
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = bootstrap_peer_cache_path(temp.path(), &shared);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "not-a-url\nring://local-only\ntcp://192.0.2.2:11010\ntcp://192.0.2.2:11010\n",
+        )
+        .unwrap();
+        let loaded = load_bootstrap_peer_urls(Some(temp.path()), &shared).unwrap();
+        assert_eq!(loaded, vec!["tcp://192.0.2.2:11010".parse().unwrap()]);
+        assert!(
+            load_bootstrap_peer_urls(Some(temp.path()), &other_secret)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn nonempty_bootstrap_snapshot_replaces_file_and_empty_preserves_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let identity = NetworkIdentity::new("mesh".to_owned(), "secret".to_owned());
+        let first = vec![
+            "udp://192.0.2.3:11010".parse().unwrap(),
+            "tcp://192.0.2.2:11010".parse().unwrap(),
+            "udp://192.0.2.3:11010".parse().unwrap(),
+            "ring://ignored".parse().unwrap(),
+        ];
+        persist_bootstrap_peer_urls(Some(temp.path()), &identity, &first).unwrap();
+        let path = bootstrap_peer_cache_path(temp.path(), &identity);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "tcp://192.0.2.2:11010\nudp://192.0.2.3:11010\n");
+
+        persist_bootstrap_peer_urls(Some(temp.path()), &identity, &[]).unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
+    }
+
+    #[test]
+    fn manager_persistent_path_is_optional_and_initialized_once() {
+        let manager = NetworkInstanceManager::new();
+        assert!(manager.get_config_dir().is_none());
+        let first = std::env::temp_dir().join("easytier-bootstrap-first");
+        manager.set_config_path(first.clone()).unwrap();
+        manager.set_config_path(first.clone()).unwrap();
+        assert_eq!(manager.get_config_dir(), Some(&first));
+        assert!(
+            manager
+                .set_config_path(std::env::temp_dir().join("easytier-bootstrap-second"))
+                .is_err()
         );
     }
 

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import java.io.File
 import com.squareup.moshi.Moshi
 import com.squareup.wire.WireJsonAdapterFactory
 import common.Ipv4Inet
@@ -67,6 +68,12 @@ class EasyTierManager(
         }
 
         try {
+            val configDir =
+                    File(activity.applicationContext.filesDir, "easytier").absolutePath
+            if (EasyTierJNI.setConfigDir(configDir) != 0) {
+                Log.e(TAG, "无法初始化 EasyTier 持久目录: ${EasyTierJNI.getLastError()}")
+                return
+            }
             // 启动 EasyTier 实例
             val result = EasyTierJNI.runNetworkInstance(networkConfig)
             if (result == 0) {

@@ -3,7 +3,7 @@ use std::{ffi::CStr, ptr};
 use easytier::proto::api::manage::{NetworkInstanceRunningInfo, NetworkInstanceRunningInfoMap};
 use easytier_ffi::{
     KeyValuePair, collect_network_infos, free_string, list_instance, parse_config,
-    retain_network_instance, run_network_instance, set_tun_fd,
+    retain_network_instance, run_network_instance, set_config_dir, set_tun_fd,
 };
 use jni::JNIEnv;
 use jni::objects::{JClass, JObjectArray, JString};
@@ -13,6 +13,25 @@ use crate::{
     error::{get_last_error, throw_exception},
     strings::jstring_to_cstring,
 };
+
+pub(crate) fn set_config_dir_jni(mut env: JNIEnv, _class: JClass, config_dir: JString) -> jint {
+    let config_dir = match jstring_to_cstring(&mut env, &config_dir) {
+        Ok(config_dir) => config_dir,
+        Err(error) => {
+            throw_exception(&mut env, &format!("Invalid config directory: {error}"));
+            return -1;
+        }
+    };
+    unsafe {
+        let result = set_config_dir(config_dir.as_ptr());
+        if result != 0
+            && let Some(error) = get_last_error()
+        {
+            throw_exception(&mut env, &error);
+        }
+        result
+    }
+}
 
 pub(crate) fn set_tun_fd_jni(
     mut env: JNIEnv,

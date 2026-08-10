@@ -45,6 +45,12 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   instance::virtual_nic::tests::leaf_owned_tun_selection_is_default_off_and_backend_bounded
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
   instance::instance::tests::socks_egress_uses_the_configured_linux_policy_mark
+  instance::instance::bootstrap_peer_tests::runtime_bootstrap_peers_follow_configured_peers_without_duplicates
+  peers::peer_map::bootstrap_peer_tests::bootstrap_url_uses_live_client_remote_then_resolved_fallback
+  peers::peer_map::bootstrap_peer_tests::bootstrap_url_excludes_inbound_closed_missing_and_ring_connections
+  instance_manager::tests::bootstrap_cache_is_stable_isolated_and_tolerates_malformed_lines
+  instance_manager::tests::nonempty_bootstrap_snapshot_replaces_file_and_empty_preserves_it
+  instance_manager::tests::manager_persistent_path_is_optional_and_initialized_once
   instance_manager::tests::neutral_mesh_entry
   instance_manager::gost::tests::socks5_udp_readiness_packet_round_trips_large_ipv4_payload
   instance_manager::gost::tests::socks5_udp_payload_rejects_fragmented_and_truncated_packets

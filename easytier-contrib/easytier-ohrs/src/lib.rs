@@ -70,6 +70,7 @@ use napi_derive_ohos::napi;
 use runtime::state::runtime_state::RuntimeAggregateState;
 use std::collections::{HashMap, HashSet};
 use std::format;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::{Builder, Runtime};
 use uuid::Uuid;
@@ -335,7 +336,19 @@ fn parse_instance_uuid(config_id: &str) -> Option<Uuid> {
 
 #[napi]
 pub fn init_config_store(root_dir: String) -> bool {
-    exports::config_api::init_config_store(root_dir)
+    if !exports::config_api::init_config_store(root_dir.clone()) {
+        return false;
+    }
+    INSTANCE_MANAGER
+        .set_config_path(PathBuf::from(root_dir))
+        .map(|_| true)
+        .unwrap_or_else(|error| {
+            ohrs_log_error!(
+                "[Rust] failed to initialize persistent runtime directory: {}",
+                error
+            );
+            false
+        })
 }
 
 #[napi]

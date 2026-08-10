@@ -11,6 +11,9 @@ object EasyTierJNI {
         System.loadLibrary("easytier_android_jni")
     }
 
+    /** 设置应用私有持久目录。必须在启动第一个网络实例前调用。 */
+    @JvmStatic external fun setConfigDir(configDir: String): Int
+
     /**
      * 设置 TUN 文件描述符
      * @param instanceName 实例名称

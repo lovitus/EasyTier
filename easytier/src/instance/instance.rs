@@ -837,6 +837,7 @@ pub struct Instance {
     peer_manager: Arc<PeerManager>,
     listener_manager: Arc<Mutex<ListenerManager<PeerManager>>>,
     conn_manager: Arc<ManualConnectorManager>,
+    runtime_initial_peers: Vec<url::Url>,
     direct_conn_manager: Arc<DirectConnectorManager>,
     udp_hole_puncher: Arc<Mutex<UdpHolePunchConnector>>,
     tcp_hole_puncher: Arc<Mutex<TcpHolePunchConnector>>,
@@ -934,6 +935,7 @@ impl Instance {
             peer_manager,
             listener_manager,
             conn_manager,
+            runtime_initial_peers: Vec::new(),
             direct_conn_manager,
             udp_hole_puncher,
             tcp_hole_puncher,
@@ -972,11 +974,19 @@ impl Instance {
         self.conn_manager.clone()
     }
 
+    pub(crate) fn set_runtime_initial_peers(&mut self, peers: Vec<url::Url>) {
+        self.runtime_initial_peers = peers;
+    }
+
     async fn add_initial_peers(&self) -> Result<(), Error> {
-        for peer in self.global_ctx.config.get_peers().iter() {
-            self.get_conn_manager()
-                .add_connector_by_url(peer.uri.clone())
-                .await?;
+        let configured = self
+            .global_ctx
+            .config
+            .get_peers()
+            .into_iter()
+            .map(|peer| peer.uri);
+        for peer in merge_initial_peer_urls(configured, &self.runtime_initial_peers) {
+            self.get_conn_manager().add_connector_by_url(peer).await?;
         }
         Ok(())
     }
@@ -1462,6 +1472,10 @@ impl Instance {
 
     pub fn get_peer_manager(&self) -> Arc<PeerManager> {
         self.peer_manager.clone()
+    }
+
+    pub(crate) fn bootstrap_peer_urls(&self) -> Vec<url::Url> {
+        self.peer_manager.get_peer_map().bootstrap_peer_urls()
     }
 
     #[cfg(all(test, any(feature = "kcp", feature = "quic")))]
@@ -1988,6 +2002,41 @@ impl Instance {
             policy_socks_egress.shutdown().await;
         }
         self.peer_manager.clear_resources().await;
+    }
+}
+
+fn merge_initial_peer_urls(
+    configured: impl IntoIterator<Item = url::Url>,
+    runtime: &[url::Url],
+) -> Vec<url::Url> {
+    let mut seen = HashSet::new();
+    configured
+        .into_iter()
+        .chain(runtime.iter().cloned())
+        .filter(|url| seen.insert(url.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod bootstrap_peer_tests {
+    use super::merge_initial_peer_urls;
+
+    #[test]
+    fn runtime_bootstrap_peers_follow_configured_peers_without_duplicates() {
+        let configured = vec![
+            "tcp://192.0.2.1:11010".parse().unwrap(),
+            "udp://192.0.2.2:11010".parse().unwrap(),
+        ];
+        let runtime = vec![
+            "udp://192.0.2.2:11010".parse().unwrap(),
+            "tcp://192.0.2.3:11010".parse().unwrap(),
+        ];
+
+        let merged = merge_initial_peer_urls(configured.clone(), &runtime);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0], configured[0]);
+        assert_eq!(merged[1], configured[1]);
+        assert_eq!(merged[2], runtime[1]);
     }
 }
 

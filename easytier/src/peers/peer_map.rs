@@ -75,14 +75,10 @@ impl PeerMap {
 
     fn maintain_alive_client_urls(&self, peer_conn: &PeerConn) -> Option<()> {
         let conn_info = peer_conn.get_conn_info();
-        if !conn_info.is_client {
-            return None;
-        }
-
         let close_notifier = peer_conn.get_close_notifier();
         let alive_conns_weak = Arc::downgrade(&self.alive_client_urls);
         let conn_id = close_notifier.get_conn_id();
-        let alive_client_url: url::Url = conn_info.tunnel?.remote_addr?.into();
+        let alive_client_url = bootstrap_url_from_conn_info(&conn_info)?;
         self.alive_client_urls
             .lock()
             .insert(alive_client_url.clone(), conn_id);
@@ -115,6 +111,22 @@ impl PeerMap {
 
     pub fn is_client_url_alive(&self, url: &url::Url) -> bool {
         self.alive_client_urls.lock().contains_key(url)
+    }
+
+    /// Returns the currently live outbound URLs without awaiting peer cleanup or
+    /// mutating connection state. This is intentionally only used by the normal
+    /// process-stop bootstrap snapshot.
+    pub fn bootstrap_peer_urls(&self) -> Vec<url::Url> {
+        let mut urls = self
+            .alive_client_urls
+            .lock()
+            .keys()
+            .filter(|url| url.scheme() != "ring")
+            .cloned()
+            .collect::<Vec<_>>();
+        urls.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        urls.dedup();
+        urls
     }
 
     pub fn get_peer_by_id(&self, peer_id: PeerId) -> Option<Arc<Peer>> {
@@ -432,12 +444,103 @@ impl PeerMap {
     }
 }
 
+fn bootstrap_url_from_conn_info(conn_info: &PeerConnInfo) -> Option<url::Url> {
+    if !conn_info.is_client || conn_info.is_closed {
+        return None;
+    }
+
+    let tunnel = conn_info.tunnel.as_ref()?;
+    let remote = tunnel
+        .remote_addr
+        .as_ref()
+        .or(tunnel.resolved_remote_addr.as_ref())?;
+    let url: url::Url = remote.clone().into();
+    (url.scheme() != "ring").then_some(url)
+}
+
 impl Drop for PeerMap {
     fn drop(&mut self) {
         tracing::debug!(
             self.my_peer_id,
             network = ?self.global_ctx.get_network_identity(),
             "PeerMap is dropped"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_peer_tests {
+    use super::*;
+    use crate::proto::common::TunnelInfo;
+
+    fn conn_info(
+        is_client: bool,
+        is_closed: bool,
+        remote: Option<&str>,
+        resolved: Option<&str>,
+    ) -> PeerConnInfo {
+        PeerConnInfo {
+            is_client,
+            is_closed,
+            tunnel: Some(TunnelInfo {
+                remote_addr: remote.map(|value| value.parse::<url::Url>().unwrap().into()),
+                resolved_remote_addr: resolved
+                    .map(|value| value.parse::<url::Url>().unwrap().into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn bootstrap_url_uses_live_client_remote_then_resolved_fallback() {
+        let original = conn_info(
+            true,
+            false,
+            Some("txt://peer.example/path?transport=tcp"),
+            Some("tcp://192.0.2.10:11010"),
+        );
+        assert_eq!(
+            bootstrap_url_from_conn_info(&original).unwrap().as_str(),
+            "txt://peer.example/path?transport=tcp"
+        );
+
+        let resolved = conn_info(true, false, None, Some("tcp://192.0.2.10:11010"));
+        assert_eq!(
+            bootstrap_url_from_conn_info(&resolved).unwrap().as_str(),
+            "tcp://192.0.2.10:11010"
+        );
+    }
+
+    #[test]
+    fn bootstrap_url_excludes_inbound_closed_missing_and_ring_connections() {
+        assert!(
+            bootstrap_url_from_conn_info(&conn_info(
+                false,
+                false,
+                Some("tcp://192.0.2.10:11010"),
+                None,
+            ))
+            .is_none()
+        );
+        assert!(
+            bootstrap_url_from_conn_info(&conn_info(
+                true,
+                true,
+                Some("tcp://192.0.2.10:11010"),
+                None,
+            ))
+            .is_none()
+        );
+        assert!(bootstrap_url_from_conn_info(&conn_info(true, false, None, None)).is_none());
+        assert!(
+            bootstrap_url_from_conn_info(&conn_info(
+                true,
+                false,
+                Some("ring://bootstrap-test"),
+                None,
+            ))
+            .is_none()
         );
     }
 }

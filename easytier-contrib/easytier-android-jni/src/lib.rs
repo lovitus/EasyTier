@@ -5,6 +5,7 @@
 //! modules so this facade stays readable as an API map.
 //!
 //! Network management APIs:
+//! - `setConfigDir(configDir)`: set the app-private persistent directory.
 //! - `setTunFd(instanceName, fd)`: attach an Android TUN fd to an instance.
 //! - `parseConfig(config)`: validate TOML config text.
 //! - `runNetworkInstance(config)`: start a local network instance.
@@ -38,6 +39,17 @@ mod strings;
 use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString};
 use jni::sys::{jboolean, jint, jlong, jobject, jstring};
+
+/// Set the app-private persistent directory before starting network instances.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_easytier_jni_EasyTierJNI_setConfigDir(
+    env: JNIEnv,
+    class: JClass,
+    config_dir: JString,
+) -> jint {
+    logger::init();
+    network_api::set_config_dir_jni(env, class, config_dir)
+}
 
 /// Attach a TUN file descriptor to an EasyTier network instance.
 ///
