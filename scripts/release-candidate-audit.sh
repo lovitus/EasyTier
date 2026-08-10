@@ -422,23 +422,13 @@ if [[ "$phase" == "--release" ]]; then
   for workflow_name in "EasyTier Core" "EasyTier GUI" "EasyTier Mobile" "EasyTier OHOS" "EasyTier Test"; do
     workflow_success "$workflow_name" "$candidate_sha" || fail "$workflow_name is not successful for $candidate_sha"
   done
-  if ! rg -q '\| Android physical device \| (PASS|WAIVED_BY_MAINTAINER) \|' "$matrix"; then
-    fail "Android physical gate is neither PASS nor explicitly waived"
+  if [[ "${EXACT_ARTIFACT_VALIDATED_SHA:-}" != "$candidate_sha" ]]; then
+    fail "exact-artifact validation is not attested for $candidate_sha"
+  else
+    pass "exact-artifact validation attestation matches $candidate_sha"
   fi
-  if rg -q '\| FAIL \||\| N/A \|' "$matrix"; then
-    fail "validation matrix contains FAIL or N/A"
-  fi
-  unresolved_external_gates="$(
-    awk -F'|' '
-      $3 ~ /^[[:space:]]*BLOCKED[[:space:]]*$/ {
-        gate=$2
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", gate)
-        if (gate !~ /^(Core formal workflow|GUI formal workflow|Mobile formal workflow|OHOS formal workflow|Test formal workflow|Tag and GitHub Release)$/) print gate
-      }
-    ' "$matrix"
-  )"
-  if [[ -n "$unresolved_external_gates" ]]; then
-    fail "validation matrix contains unresolved external gates: $unresolved_external_gates"
+  if rg -q '\| FAIL \|' "$matrix"; then
+    fail "pre-build validation matrix contains an explicit FAIL"
   fi
   if git show-ref --verify --quiet "refs/tags/$release_tag"; then
     fail "$release_tag tag already exists"

@@ -1440,14 +1440,37 @@ async fn wait_for_port_mapping_event(
 ) -> GlobalCtxEvent {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            match receiver.recv().await.unwrap() {
-                event @ GlobalCtxEvent::ListenerPortMappingEstablished { .. } => return event,
-                _ => continue,
+            match receiver.recv().await {
+                Ok(event @ GlobalCtxEvent::ListenerPortMappingEstablished { .. }) => return event,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("global event channel closed before port mapping was established")
+                }
             }
         }
     })
     .await
     .expect("timed out waiting for port mapping event")
+}
+
+#[tokio::test]
+async fn port_mapping_event_waiter_skips_broadcast_lag() {
+    let (sender, mut receiver) = tokio::sync::broadcast::channel(1);
+    let mapping_event = |mapped_port| GlobalCtxEvent::ListenerPortMappingEstablished {
+        local_listener: "udp://0.0.0.0:11010".parse().unwrap(),
+        mapped_listener: format!("udp://198.51.100.1:{mapped_port}").parse().unwrap(),
+        backend: "igd".to_owned(),
+    };
+
+    sender.send(mapping_event(21010)).unwrap();
+    sender.send(mapping_event(21011)).unwrap();
+
+    match wait_for_port_mapping_event(&mut receiver).await {
+        GlobalCtxEvent::ListenerPortMappingEstablished {
+            mapped_listener, ..
+        } => assert_eq!(mapped_listener.port(), Some(21011)),
+        other => panic!("unexpected event after broadcast lag: {other:?}"),
+    }
 }
 
 async fn timeout_stage<F, T>(stage: &str, duration: Duration, fut: F) -> T

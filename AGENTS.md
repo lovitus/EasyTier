@@ -1,172 +1,237 @@
 # Repository Agent Instructions
 
-- The canonical Codex checkout is `/Volumes/micron512g/code/easytier`. Start every task with `scripts/ensure-codex-worktree-current.sh`; never continue development from a version-named historical worktree merely because it is the current shell directory.
-- Use `scripts/release-operator.sh` as the sole operator entry point for `.160` source/dependency preparation and formal Core/GUI/Mobile/OHOS/Test/Release dispatch. Do not reconstruct scattered `rsync` or `gh workflow run` commands from memory.
-- Use `scripts/release-operator.sh builder-preflight` for the standard release preflight. It runs the Rust gate and then frontend-lib Vitest, frontend-lib build, frontend build, VPN plugin build, and GUI build in the required dependency order with bounded per-step logs.
-- Source synchronization to `.160` must use `scripts/remote-builder-sync.sh`. It checks Cargo/rustc idleness before touching the workspace, preserves Cargo/Node/Corepack caches, and delays source deletion until transfer succeeds. Never add broad dependency deletion to rsync.
-- Frontend dependency replacement on `.160` is an explicit recovery action: use `scripts/release-operator.sh builder-frontend-repair`, which may remove only the fixed workspace `node_modules` list. Normal lockfile changes use incremental `builder-frontend` and must not erase dependencies first.
+These rules are mandatory. Prefer the maintained scripts and recorded evidence over
+reconstructing commands from memory.
 
-- The repository root is the canonical Codex desktop worktree and MUST remain on `codex/current`. Before inspecting or editing files for a new task, run `scripts/ensure-codex-worktree-current.sh --update`. If it reports a dirty, stale, or divergent worktree, stop and resolve that state before making changes; never continue from a version-named release worktree merely because it was used by the preceding task.
-- `codex/current` is the permanent clean integration pointer, not a feature-development branch. Create every parallel feature/release worktree from the current `codex/current` HEAD after the guard passes. Version-named release worktrees are immutable validation evidence after publication and MUST NOT become the next task's development base.
-- The worktree guard may fast-forward only a clean `codex/current`. It MUST NOT reset, rebase, clean, or switch a dirty/feature worktree automatically. A parallel branch that does not contain the latest accepted integration target must fail closed and be rebased or recreated deliberately, so concurrent work is never discarded while correcting a stale base.
-- After a release and its documentation-only evidence commit, rerun the guard in the canonical root and fast-forward `codex/current` to the accepted release branch head before starting another feature. Remove obsolete version-named worktrees after their evidence is preserved, and run `git worktree prune` for dead temporary registrations.
-- Do not compile this repository on the maintainer's local machine.
-- Local formatting is allowed and expected before a validation push. Because this workspace uses Rust 2024 syntax, format changed Rust files with the project toolchain and an explicit edition (for example `rustup run 1.95 rustfmt --edition 2024 FILE...`) when `cargo fmt` resolves modules with an older edition. Formatting is not a build and must not be deferred to CI.
-- Before every commit, run `scripts/pre-commit-check.sh`. It is a hard gate for whitespace errors, Rust formatting, shell syntax, JSON syntax, and GitHub Actions syntax. Never commit first and use `.160` or GitHub Actions as the initial syntax or formatting check.
-- Treat every unexpected non-zero command exit as a diagnostic event. Preserve the first failing command, its exit code, and its unfiltered stderr; identify whether the cause is the command, environment, transport, dependency, or product before retrying. Never hide a required command behind `|| true`, append an unconditional success message, or change locale/proxy/toolchain and call the retry proof without explaining why the first attempt failed. Use `set -o pipefail` or separate producer and reader commands whenever a pipeline's producer result matters.
-- Run `scripts/check-command-environment.sh` before local release or artifact-verification commands and through `scripts/pre-commit-check.sh`. The bundled Codex unified-exec runtime may inject Linux-only `C.UTF-8` into `LANG`, `LC_CTYPE`, and `LC_ALL` after its normal shell environment policy; macOS Perl-backed tools then fail even though BSD `locale` appears to fall back to `C`. Do not work around this per command. The maintained machine configuration must explicitly override all three variables to an installed UTF-8 locale, and the check must pass before continuing. See `easytier/docs/release/command_execution_failure_gate.md`.
-- The maintainer's interactive shell is zsh, where lowercase `path` is a special array tied to `PATH`. Never use `path` as a shell loop/local variable in zsh commands; doing so can erase command lookup for the remainder of that shell. Use names such as `candidate_path` or `file_path` instead.
-- Every Leaf or policy-proxy implementation MUST first inspect the corresponding behavior and tests in the local Mihomo source tree at `/Users/fanli/Documents/mihomo-rev`. Inspect sing-box as an additional reference when Mihomo does not cover the feature, when the two projects intentionally differ, or when platform integration differs. This requirement applies to rule ordering and fallthrough, DNS/FakeDNS, GeoIP/GeoSite resources, caches, hot paths, proxy groups and failover, network-change recovery, loop prevention, resource updates, lifecycle, and error handling.
-- Before editing Leaf/policy behavior, record the exact Mihomo and/or sing-box source files, functions, and externally observable semantics being followed in the working notes, TODO, test name, or code comment. Add parity or compatibility tests for the relevant behavior. If the reference behavior cannot be established, do not invent a new semantic or performance-sensitive mechanism; continue investigation first.
-- EasyTier may intentionally differ only where its mesh architecture, pinned Leaf API, or platform constraints require it. Every intentional difference MUST document its reason, compatibility boundary, failure behavior, and validation evidence before merge. Do not claim Mihomo/sing-box compatibility for an unimplemented subset, and do not silently accept unsupported fields or change first-match rule semantics.
-- Before auditing or patching a Cargo git dependency, read its exact locked source URL and commit from `Cargo.lock`, then inspect a worktree explicitly checked out at that SHA. Never treat a Cargo cache directory name, a previously populated checkout, or the dependency repository's default branch as proof of the source EasyTier actually builds. Record the locked SHA with any source-level conclusion; if the inspected HEAD differs, the conclusion is invalid until repeated against the lockfile revision.
-- The primary build-and-validation path is the rolling profiling beta workflow:
-  1. Commit the exact build-affecting snapshot plus every safe non-code change already present in the workspace to `codex/profiling-beta`, even when a note, TODO, report, or plan is unrelated to the implementation candidate. Post-build run IDs, measurements, PASS/FAIL rows, release URLs, asset counts, and other result evidence that do not exist yet are not part of the build snapshot.
-  2. Push the branch and let `.github/workflows/profiling-beta.yml` build the optimized, symbolized x86_64-musl bundle.
-  3. Download the `profiling-beta` release assets, verify `SHA256SUMS.txt`, `BUILD_INFO.txt`, commit SHA, build ID, symbols, and target.
-  4. Deploy that exact artifact to isolated validation hosts and run functional, performance, resource, and interoperability checks.
-  5. If validation fails, use `git revert` for the offending validation commit(s), push the revert, and let the rolling beta rebuild. Never use destructive reset to hide a failed snapshot.
-- Documentation-only changes must remain local and must not be pushed immediately. Accumulate them without triggering GitHub workflows. Push pre-build documentation only when it accompanies a code snapshot that actually needs build/real-device validation, when a release is being prepared, or when the maintainer explicitly requests a documentation push. Record post-build and post-release evidence only after the immutable build/release SHA has completed; publish that evidence separately without moving `codex/profiling-beta`, `releases/**`, or the release tag.
-- Whenever the maintainer authorizes committing or submitting the workspace, include all current tracked and untracked non-code changes in that commit instead of maintaining unrelated-document exclusions or special audit exceptions. Exclude only credentials/private maintainer metadata, generated build output, caches, machine-local temporary files, or files the maintainer explicitly excludes; sanitize or preserve those safely rather than committing them. Never sweep unrelated source-code changes into the commit under this rule. List bundled non-code files in the candidate manifest, but do not expand the implementation validation scope merely because they were included.
-- Documentation that naturally belongs to a code release, including user-facing release notes, configuration examples, compatibility boundaries, and migration guidance, SHOULD be committed with the build-affecting snapshot so the release is complete and self-contained. This mixed code-and-documentation commit receives one normal validation cycle. The prohibition applies only when every changed file is documentation or evidence; adding or correcting such logs afterward must never restart the cycle.
-- NEVER trigger or repeat profiling-beta, Android candidate, Core, GUI, Mobile, OHOS, Test, or Release merely because Markdown, plans, reports, TODO files, validation matrices, run IDs, release URLs, asset counts, comments, or other non-build-affecting evidence changed. A documentation commit is not a new artifact candidate and must reuse the already recorded validated SHA. If a documentation-only push accidentally starts a build, cancel it immediately and do not treat that run as required evidence.
-- Before modifying a production hot path for an experimental performance idea, create a small reproducible Rust test or benchmark tool under `tools/` (or a focused benchmark beside the exact primitive) and run it on `192.168.2.160`. The tool must compare the unchanged baseline and candidate mechanism under realistic packet sizes, queue capacity, concurrency and work cost, and report throughput plus the relevant CPU, wakeup, syscall, allocation or batching evidence. Reject low-value mechanisms at this stage; do not send speculative hot-path changes to a full EasyTier workflow for routine compiler or performance feedback. A successful microbenchmark only authorizes a small production experiment and does not replace exact-artifact functional, interoperability, resource or real-network validation.
-- For every implementation candidate that changes Rust, native integration, platform `cfg`, dependencies, generated protocol code, or build configuration, the configured remote builder at `root@192.168.2.160` is a MANDATORY pre-push gate, not an optional fallback. Run the smallest-feature `--locked` no-run build and the exact focused tests there before starting GitHub workflows. The only exceptions are when the builder is confirmed unavailable or the required target/toolchain exists only in GitHub Actions; record that exception and the reason in the validation journal. Do not duplicate a full optimized candidate build on `.160`: GitHub remains authoritative for deployable release/profile artifacts.
-- Batch candidate development before any validation build. Finish all currently known related implementation, tests, platform `cfg`, lockfile, workflow pin, configuration examples, and required pre-build documentation in one working snapshot. Do not include results that can exist only after the build in this snapshot, and do not rebuild after filling them in. Do not build or push after each small fix unless that fix is required to discover the next unknown.
-- The mandatory candidate sequence is: local formatting only -> sync the complete snapshot to `192.168.2.160` -> remote smallest-feature `--locked` no-run build -> exact focused tests -> inspect `Cargo.lock`, platform `cfg`, workflow pins, generated files, and the complete candidate diff -> one candidate commit/push -> one required workflow set -> parallel real-device validation from the exact artifacts.
-- For the standard Leaf/HEV Rust batch, use `scripts/leaf-remote-preflight.sh` instead of manually reconstructing the `.160` SSH sequence. It synchronizes the complete snapshot, refuses a busy builder, forwards local port `7890`, builds the correct `easytier --lib` test target once, resolves that exact binary, and runs the focused suite serially. Extend its filter list when a batch adds behavior; do not bypass it with a narrower `--bin` build that can silently contain zero relevant tests.
-- Operate candidate work as four coordinated lanes instead of a serial build-wait-test loop: (1) batch all known related code, parity tests, configuration, and platform boundaries; (2) use `.160` for fast compiler and exact-test feedback; (3) use one GitHub workflow set for immutable optimized artifacts; (4) validate independent Linux and Android evidence in parallel from those exact artifacts. Prepare all four lanes before the candidate push so one narrow check such as `stopVpn` never consumes a workflow by itself while other known HEV, lifecycle, policy, or recovery work remains unbatched.
-- Use remote-build and workflow wait time productively. During `.160` compilation, continue independent Mihomo/sing-box source analysis, candidate-diff review, lockfile/`cfg`/workflow-pin inspection, and validation-script preparation without starting a competing Cargo job on `.160`. During GitHub builds, pre-clean and preflight validation hosts, prepare bounded commands and failure-injection matrices, verify Android ADB/CDP/probe readiness, and investigate independent issues that do not mutate or invalidate the in-flight snapshot. Never idle merely because a build is running; never edit the immutable snapshot being built, start a second build for a partial follow-up, or confuse evidence from a newer working tree with the in-flight SHA.
-- When artifacts are ready, run independent Linux and Android validation concurrently whenever they do not share a host-global resource. Within each platform, combine functional, failure/recovery, lifecycle, resource-baseline, configuration-retention, and cleanup checks into one staged session. A second workflow or rebuild is justified only by a source change, generated-output/lockfile change, build configuration change, or a failure that cannot be diagnosed with the existing exact artifact. Documentation and evidence changes never justify a second workflow; record which build-affecting condition required every rebuild.
-- Before each implementation candidate push, write a compact pre-build candidate manifest containing: exact intended build snapshot, included functions, `.160` no-run command and focused tests, required GitHub workflows, planned Linux evidence, planned Android evidence, and tasks to perform during each wait. Store actual run IDs, measurements and outcomes in a separate post-build evidence section or document keyed to the immutable validated SHA. Updating that evidence must not redefine the candidate SHA.
-- Before starting a candidate workflow, explicitly list the independent functionality covered by that candidate and the evidence each platform run will collect. A Linux/Android workflow pair must validate the whole batch, not a single function such as `stopVpn` when other known HEV, lifecycle, configuration, or platform-boundary work can be included safely.
-- Treat the candidate manifest and `.160` evidence as a hard dispatch lock. If the manifest does not contain a successful `.160` `--locked` no-run result plus the exact focused-test results for the complete batch, STOP before committing, pushing, or dispatching GitHub workflows. If known same-area implementation or validation work can still be included without invalidating completed evidence, finish and preflight that work first; a workflow started for one narrow function while related HEV, policy, lifecycle, recovery, or platform work remains unbatched is a scheduling failure, not acceptable incremental validation.
-- Use `.160` continuously as the fast compiler/test-feedback lane instead of sending mechanical failures to GitHub. Dependency/lockfile errors, Rust type errors, target `cfg` leakage, generated-code drift, focused lifecycle tests, and cancellation/concurrency tests belong on `.160`; GitHub Actions is reserved for the already-preflighted immutable candidate and its authoritative optimized Linux/Android artifacts. Long `.160` or GitHub waits must overlap with independent reference analysis, diff/config review, test-matrix preparation, host cleanup, artifact-check preparation, or unrelated issue diagnosis, never passive waiting or a second conflicting build.
-- Builder container: `easytier-debug-builder` (image: `rust:1.95-bookworm`). Mounts: `/data/easytier-builder/workspace` → `/workspace`, `/data/easytier-builder/cargo-registry` → `/usr/local/cargo/registry`. The repository root is `/workspace`; sync source to `/data/easytier-builder/workspace/` on the host and run Cargo from `/workspace` (the crate itself is `/workspace/easytier`). Build artifacts remain at `/workspace/target` on the 205G disk. The container must have `mold` installed because `.cargo/config.toml` selects it for GNU Linux targets. Cargo network access uses the maintainer's local proxy on `127.0.0.1:7890`: include `-o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890` on the same keepalive SSH invocation that runs `docker exec`. Do not infer that the proxy is absent from agent-side listener inspection; the required operation is forwarding it to the remote host.
-- Frontend preflight also runs on `.160`, not on the maintainer's Mac. The CentOS 7 host cannot execute current Node binaries, so use the verified Node 22 runtime at `/opt/node22` inside `easytier-debug-builder` (the container uses host networking). Export `PATH=/opt/node22/bin:$PATH`, `COREPACK_HOME=/workspace/.corepack`, and the four upper/lower-case HTTP(S) proxy variables pointing at `http://127.0.0.1:7890`. If platform-stale dependencies cause a missing Rollup optional package, remove only the remote `/workspace/node_modules` and `/workspace/easytier-web/**/node_modules`, then run `CI=1 pnpm install --frozen-lockfile`; never modify or regenerate the lockfile to repair the builder. Run focused Vitest files and the frontend production build before a candidate containing Vue/TypeScript changes is pushed.
-- Run the remote frontend/GUI gate in dependency order: focused `easytier-web/frontend-lib` Vitest, `easytier-web/frontend-lib` build, `easytier-web/frontend` build, `tauri-plugin-vpnservice` build, then `easytier-gui` build. The VPN plugin build regenerates `tauri-plugin-vpnservice/dist-js` declarations consumed by the GUI; skipping it can make GUI typecheck use stale declarations and report false missing fields such as `VpnStatusResponse.revokedBySystem`. Preserve this order for release validation even when only version metadata changed.
-- When compiling on the remote builder, explicitly use all available CPU cores by exporting `CARGO_BUILD_JOBS=$(nproc)` before `cargo build`, `cargo check`, `cargo test`, or `cargo nextest`.
-- For rapid, targeted logic preflight on the remote builder, prefer the GNU debug target with the smallest feature set that still contains the code under test. Set `CARGO_PROFILE_TEST_OPT_LEVEL=0`, `CARGO_PROFILE_TEST_DEBUG=0`, and `CARGO_INCREMENTAL=1`; then use `cargo test --no-run` followed by the exact test binary. This path is diagnostic only: deployable validation artifacts must still come from the profiling beta workflow, and old CentOS validation hosts must still receive musl binaries.
-- Do not increase test threads for tests that share ports, namespaces, UPnP state, routes, or other host-global network state. Parallelize independent test binaries or nextest hash partitions across runners instead, while keeping each network-sensitive partition at `--test-threads 1`.
-- ALWAYS wrap long-running cargo commands with `timeout` to prevent indefinite hangs from deadlocked tests or stalled builds. Use: `timeout 600 cargo check ...`, `timeout 1800 cargo build ...`, `timeout 600 cargo test ...` (per test binary), `timeout 1800 cargo test ...` (full suite). Adjust upward if needed but NEVER run cargo without a timeout on the remote builder.
-- Before starting any cargo command in the remote builder container, check that no other cargo/rustc process is already running using the keepalive SSH options plus `-o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890`. If BLOCKED, investigate before killing only confirmed stale process IDs; broad `pkill -f` patterns can match the inspection shell itself.
-- For GitHub release or workflow-artifact downloads, use the existing local proxy explicitly (`--proxy http://127.0.0.1:7890`) when direct Azure blob throughput is poor. Use `set -euo pipefail`, a total `timeout`, and a fresh destination for each retry. GitHub artifact API redirects do not reliably preserve byte ranges, so NEVER append/resume a partial workflow ZIP; download it from byte zero and run `unzip -tq` before extraction. Do not place a success-printing command after `gh run download` unless its exit status is checked first.
-- Manual validation builds on the remote builder must not use `--release` or release/profile optimized builds. Use dev/debug builds for all manual testing; release/profile optimized artifacts may only be produced by GitHub workflows.
-- The remote validation hosts `192.168.2.160`, `192.168.1.37`, and `192.168.1.38` run old CentOS 7 / Linux 3.10 userspace. GNU debug binaries from the builder require newer glibc and must not be used there; use non-release `--target x86_64-unknown-linux-musl` binaries for manual validation on these hosts.
-- On Linux, an explicit IPv6 unreachable route with metric `4294967295` (`u32::MAX`) collides with the kernel's implicit IPv6 unreachable sentinel and returns `EEXIST`, including on the CentOS 7 / Linux 3.10 validation hosts. EasyTier-owned IPv6 terminal policy routes must use metric `4294967294`; preserve a regression assertion and validate with `ip -6 route add unreachable default table TABLE metric 4294967294` when changing this code.
-- Use `10.20.0.65` for the KR validation host. Do not write the host's public domain name in repository docs, scripts, logs, or reports.
-- `lv1g2` and `lv1g3` mount the same NAS-backed `/slab2`; an artifact written by either host is already shared and MUST NOT be copied a second time. Keep every host-mutated config, script, PID file, log, and result under an explicit `lv1g2/` or `lv1g3/` subdirectory (or use an equivalent host suffix) so the two hosts never overwrite each other.
-- For a pre-release fix on `releases/**`, include `[skip ci]` in the commit message, push the commit, and manually trigger only `.github/workflows/gui-macos-aarch64-test.yml` (`EasyTier GUI macOS ARM64 Test`).
-- Do not trigger Core, the full GUI matrix, Mobile, OHOS, the full Test workflow, tags, or Release until the maintainer explicitly confirms real-device validation.
-- After that confirmation, run the formal release workflows against the exact validated commit before starting `EasyTier Release`.
-- Starting with v3.0.9, 64-bit atomic portability is a permanent, non-waivable release gate for every release, whether or not the candidate intentionally changes atomic code. Before the first formal workflow, run `rg -n 'AtomicU64|fetch_max' easytier/src --glob '*.rs'` and record every hit in the candidate manifest as either `atomic-shim`, test-only, or excluded from both `mips-unknown-linux-musl` and `mipsel-unknown-linux-musl` by an explicit `cfg`. MIPS/MIPSel-reachable code must never import `std::sync::atomic::AtomicU64`.
-- An `atomic_shim::AtomicU64` import alone is not proof of portability. Any operation added to or used through the shim must exist in the exact locked crate's non-native-64-bit implementation. In particular, do not use `AtomicU64::fetch_max` through `atomic-shim`; implement max updates with the supported load/compare-exchange loop and preserve the required memory ordering. See `easytier/docs/release/atomic_u64_portability_gate.md`.
-- Use `scripts/release-operator.sh dispatch-pipeline` as the only normal workflow entry point after the complete code batch and `.160` preflight. Linux Profiling Beta is always required because it produces the optimized/debug artifact and runs its automatic validation. Android Policy Candidate runs in parallel by default and is required whenever Android code, packaging, policy behavior, or Android evidence is in scope; only an explicit `ANDROID_CANDIDATE_MODE=skip` may omit it for an unrelated candidate, with `N/A` or maintainer waiver recorded in the validation matrix. The operator starts Core, GUI, Mobile, OHOS, and Test together only after the selected candidate gates pass. Each group is exact-SHA, resumable, and fail-fast: reuse successful/active runs, cancel active peers after the first failure, and never silently duplicate a failed run. Before any dispatch, the numeric cross-platform version, candidate manifest, and validation matrix must already exist. Before `EasyTier Release`, record the Core run ID, both MIPS/MIPSel job IDs and conclusions, exact SHA, and artifact architecture/endian audit in the validation matrix. An x86 build, `.160` preflight, grep result, shim import, one MIPS endianness, or a previous-SHA Core run cannot substitute for these two exact-SHA jobs.
-- Cross-platform validation releases must use a single numeric SemVer prerelease identifier, for example `3.0.15-1`. Do not use `beta.1`, `rc.1`, or another textual/dotted identifier: Tauri's Windows MSI bundler rejects it. Keep the same version string in Cargo, Tauri, Android `versionName`, release notes, tag, and GitHub Release.
-- A successful formal workflow is not proof that a validated feature is present in its release artifact. Before `EasyTier Release`, inspect the exact formal Core and GUI artifacts for every required feature flag, sidecar/native executable, target architecture, executable permission and macOS signature, then run an installed-artifact smoke for each supported delivery path. The formal artifact manifest and behavior must match the profiling candidate; a missing feature or sidecar invalidates the release candidate even when every workflow is green.
-- When starting test/validation services on remote hosts, ALWAYS specify explicit ports for ALL protocols in the `-l` listener list, not just UDP. Default ports (11010 TCP, 11011 WG/WS, 11012 QUIC/WSS, 11013 FakeTCP) will conflict with production instances. Use a port base (e.g. 21030) and allocate: UDP=base, TCP=base+1, QUIC=base+2, WG=base+3, WS=base+4. Example: `-l "udp://0.0.0.0:21030,tcp://0.0.0.0:21031,quic://0.0.0.0:21032,wg://0.0.0.0:21033,ws://0.0.0.0:21034/"`. Increment the base by 10 for each new test round.
-- When starting test/validation services on remote hosts, ALWAYS clean up old processes and TUN devices BEFORE starting new ones: `killall -9 easytier-core 2>/dev/null; ip link delete tun0 2>/dev/null; ip link delete tun1 2>/dev/null; sleep 1`. Verify no residual processes with `ps aux | grep easytier-core | grep -v grep` before starting.
-- When starting background processes via SSH, use `setsid` with `< /dev/null` to detach: `ssh root@HOST 'setsid /path/to/binary ARGS > /tmp/log 2>&1 < /dev/null &'`. NEVER use `nohup ... & sleep N` in a single SSH command — it hangs. Split start and verify into separate SSH calls.
-- ALL SSH commands to remote hosts must include keepalive options to prevent firewall/NAT idle disconnection: `ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 root@HOST '...'`. This is especially critical for commands expected to run >2 minutes (cargo build, cargo test, large file transfers).
-- NEVER pipe `docker exec` output through `tail`/`head`/`grep` in the same SSH command. Docker's stdout buffering with non-TTY pipes can block the remote process when the pipe reader closes early. Instead, redirect to a temp file first, then read it in a separate SSH call: Step 1: `ssh ... 'docker exec ... bash -c "cargo test ... > /tmp/result.txt 2>&1"'`, Step 2: `ssh ... 'docker exec ... tail -30 /tmp/result.txt'`.
-- Prefer `cargo test --no-run` followed by directly executing the test binary with `timeout`, over running `cargo test` directly. This separates compilation from execution: `ssh ... 'docker exec ... bash -c "cd /workspace && CARGO_BUILD_JOBS=\$(nproc) timeout 600 cargo test --no-run --package easytier --lib -- TEST_NAME 2>&1 | tee /tmp/build.log"'` then `ssh ... 'docker exec ... bash -c "timeout 120 /workspace/target/debug/deps/easytier-HASH TEST_NAME --nocapture 2>&1 | tee /tmp/test.log"'`.
-- Validation hosts: `192.168.1.37`, `192.168.1.38`, `192.168.2.160`, `10.20.0.65` (KR), plus two additional hosts whose names are stored locally in `.envrc.local` (excluded from git via `.git/info/exclude`). Do NOT use short names or 198.18.x.x addresses for those hosts.
-- Current non-Android validation host roles are fixed: `192.168.2.160` is the dedicated fast compiler and focused-test builder only; `192.168.1.37` and `192.168.1.38` are China-mainland/internal-network CentOS 7 compatibility and functional-validation hosts; `lv1g2.lovis.us` and `lv1g3.lovis.us` are the 10 Gbps public dual-stack cross-host, IPv4/IPv6, interoperability, and performance-validation pair. Do not substitute one role for another or draw WAN/performance conclusions from the builder or internal hosts.
-- While the Android validation device is unavailable, run all remaining validation only on `192.168.2.160`, `192.168.1.37`, `192.168.1.38`, `lv1g2.lovis.us`, and `lv1g3.lovis.us`; do not wait for, reconnect to, or mutate an Android device unless the maintainer explicitly makes it available again.
-- On `lv1g2` and `lv1g3`, store downloaded artifacts, extracted bundles, validation binaries, logs, and temporary test data under `/slab2`. Their `/tmp` and root filesystems are small and MUST NOT be used for artifact extraction or sustained validation storage.
-- The internal validation hosts have slow GitHub access. Download release/workflow artifacts once on the maintainer side or another fast GitHub-capable host, verify them there, then distribute the exact verified files to `192.168.1.37` and `192.168.1.38` with SCP. Do not wait on direct GitHub downloads from those internal hosts.
-- Local development and the Android validation device are on the downstream LAN `192.168.234.0/24`; Android ADB is `192.168.234.227:5555`. The downstream hosts can initiate connections to the upstream validation hosts `192.168.1.37`, `192.168.1.38`, and `192.168.2.160`, but those upstream hosts have no route back to `192.168.234.0/24` by default and must not be expected to initiate connections to the local/Android hosts.
-- Wireless-ADB network-outage tests MUST use one already-started device-side detached script for the complete Wi-Fi cycle: delay, disable Wi-Fi, wait for the outage interval, and re-enable Wi-Fi. Before the delay expires, verify the script PID and that its log file was created. The script MUST log markers and return codes for both `cmd wifi set-wifi-enabled disabled` and `cmd wifi set-wifi-enabled enabled`. NEVER disable Wi-Fi in a separate host-side ADB command; otherwise wireless ADB can be lost without a guaranteed recovery path. Use `setsid ... < /dev/null` so the recovery task survives the ADB transport loss.
-- Android policy traffic MUST be generated by an application UID included in the active VPN UID ranges. The candidate app excludes its own UID and both ADB shell and `run-as` execute outside the captured application domain, so none is valid evidence. Use the workflow-built target/runner pair `easytier-android-policy-probe-debug.apk` (`com.kkrainbow.easytier.policyprobe`) and `easytier-android-policy-probe-runner-debug.apk` (`com.kkrainbow.easytier.policyprobe.test`): uninstall stale copies, install both exact artifacts, confirm the target UID is present in `dumpsys connectivity` VPN ranges, then run `adb shell am instrument -w -e host HOST -e port PORT -e tls_server_name SNI_NAME -e timeout_ms 3000 com.kkrainbow.easytier.policyprobe.test/com.kkrainbow.easytier.policyprobe.PolicyProbeInstrumentation`. Require `probe_valid=true`, record `probe_uid`, `probe_selinux_context`, `probe_protocol`, `probe_tcp_connected`, `probe_tls_handshake`, `probe_connected`, elapsed time, error, target, SNI, expected first-match rule, and a VPN-down controlled baseline. TCP connect alone is not policy evidence because the TUN stack may complete a local handshake before outbound rule resolution; use a successful TLS handshake or controlled remote observation. The target is code-capable only so Android instrumentation can attach and has no runtime components or business classes; the runner contains only on-demand instrumentation. Uninstall both packages after validation.
-- The current routine validation scope is Linux and Android only. Do not start macOS workflows or validation unless the maintainer explicitly changes that scope.
-- For Android automation, prefer ADB shell/package/network commands, WebView CDP, and direct Tauri/plugin calls. Use screenshots and simulated clicks only for final visual or interaction verification when semantic automation cannot provide the required evidence.
+## 1. Canonical checkout and worktrees
 
-## Remote Cargo Diagnostic / Fallback — Golden Pattern
+- The canonical checkout is `/Volumes/micron512g/code/easytier` and must remain on
+  `codex/current`. Start every task there with
+  `scripts/ensure-codex-worktree-current.sh --update` before reading or editing project files.
+- `codex/current` is a clean integration pointer, not a development branch. Create each
+  feature or release branch in its own clearly named worktree from the guarded current HEAD.
+  Never continue from a historical version-named worktree merely because it is open.
+- The guard may only fast-forward a clean `codex/current`. It must never reset, clean,
+  rebase, switch, or discard a dirty/feature worktree. If a worktree is stale, divergent,
+  unexpectedly dirty, or contains changes not made in the current task, stop and resolve
+  ownership before proceeding.
+- Never use destructive Git operations, force-push, `stash pop/drop`, or remove a worktree
+  that contains unpreserved work. Preserve concurrent work by branch/ref before integration.
+- After release evidence is recorded, fast-forward `codex/current` to the accepted release
+  branch, remove obsolete version worktrees, and run `git worktree prune`.
 
-Whenever the remote builder is used for targeted diagnostics or as a GitHub fallback, ALL remote `cargo build` / `cargo check` / `cargo test` / `cargo nextest` commands MUST follow this pattern. Every line is mandatory — no shortcuts.
+## 2. Editing and commit gates
 
-```bash
-# ===== STEP 0: Pre-flight — check for stale cargo locks =====
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 \
-  -o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890 root@192.168.2.160 \
-  'docker exec easytier-debug-builder bash -c "if pgrep -x cargo >/dev/null || pgrep -x rustc >/dev/null; then pgrep -a -x cargo; pgrep -a -x rustc; echo BLOCKED; else echo CLEAR; fi"'
-# If BLOCKED → investigate and clean up FIRST. Do NOT proceed.
+- Batch all known related implementation, tests, platform `cfg`, generated files, dependency
+  pins, examples, and pre-build user documentation into one candidate. GitHub Actions is not
+  an edit-by-edit compiler.
+- For a non-trivial policy/Leaf or multi-module batch, maintain the existing parallel workboard
+  with each lane's objective, build-affecting state, evidence target, status, and shared SHA.
+  Workboard-only updates stay local and never trigger workflows.
+- Do not compile EasyTier on the maintainer's Mac. Local formatting is required and allowed;
+  for Rust 2024 files use the project toolchain explicitly when needed, for example
+  `rustup run 1.95 rustfmt --edition 2024 FILE...`.
+- Run `scripts/pre-commit-check.sh` before every commit. It is the hard syntax/format gate for
+  whitespace, Rust, shell, JSON, and GitHub Actions. Never commit first and let `.160` or CI
+  discover mechanical errors.
+- Run `scripts/check-command-environment.sh` before local release or artifact commands. Fix
+  invalid `LANG`, `LC_CTYPE`, or `LC_ALL` at the maintained environment source; do not hide
+  locale faults with one-off command prefixes. In zsh, never use lowercase `path` as a local
+  or loop variable because it mutates `PATH`.
+- Treat every unexpected non-zero exit as evidence: preserve the first command, exit code,
+  and unfiltered stderr; classify product, environment, dependency, transport, or timeout
+  before retrying. Never mask required failures with `|| true` or an unconditional success
+  message. Use `set -o pipefail` when producer status matters.
+- When the maintainer authorizes a workspace commit, include all safe tracked and untracked
+  non-code changes already present. Exclude only credentials/private host metadata, generated
+  output, caches, machine-local files, or items explicitly excluded by the maintainer. Never
+  sweep unrelated source changes into a candidate.
+- Documentation-only and post-build evidence changes must not trigger candidates or formal
+  workflows. Accumulate them locally, then publish with `[skip ci]` after the immutable build
+  or release SHA exists. If a docs-only push starts a workflow, cancel it immediately.
 
-# ===== STEP 1: Build (separate from execution) =====
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 \
-  -o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890 root@192.168.2.160 \
-  'docker exec easytier-debug-builder bash -c "cd /workspace && CARGO_BUILD_JOBS=\$(nproc) timeout 1800 cargo CMD ARGS > /tmp/easytier_build.log 2>&1; echo EXIT_CODE=\$?"'
-# CMD = build | check | test --no-run | nextest archive
-# timeout: 600 for check, 1800 for build/full-test-suite
+## 3. Immutable candidate and release sequence
 
-# ===== STEP 2: Read build result =====
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 \
-  -o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890 root@192.168.2.160 \
-  'docker exec easytier-debug-builder tail -50 /tmp/easytier_build.log'
-# Check EXIT_CODE. If non-zero → fix errors and retry from Step 0.
+The normal sequence is exactly:
 
-# ===== STEP 3: Run test binary directly (only if Step 1 was test --no-run) =====
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 \
-  -o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890 root@192.168.2.160 \
-  'docker exec easytier-debug-builder bash -c "timeout 300 /workspace/target/debug/deps/easytier-* TEST_FILTER --nocapture > /tmp/easytier_test.log 2>&1; echo EXIT_CODE=\$?"'
-# Adjust timeout: 120 for unit tests, 300 for integration/network tests, 600 for benchmarks
+1. Freeze scope and release version.
+2. Complete the whole code batch and its tests/docs.
+3. Run local formatting and `scripts/pre-commit-check.sh`.
+4. Run the complete `.160` preflight.
+5. Commit and push one immutable candidate.
+6. Run Linux Profiling Beta and Android Policy Candidate in parallel.
+7. Verify those exact artifacts and run Linux/Android real-device validation in parallel.
+8. Run Core, GUI, Mobile, OHOS, and Test together against the same SHA.
+9. Audit formal artifacts and run installed-artifact smoke tests.
+10. Dispatch EasyTier Release for that SHA.
+11. Append evidence with `[skip ci]`, update the Release body, and advance `codex/current`.
 
-# ===== STEP 4: Read test result =====
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=10 \
-  -o ExitOnForwardFailure=yes -R 7890:127.0.0.1:7890 root@192.168.2.160 \
-  'docker exec easytier-debug-builder tail -50 /tmp/easytier_test.log'
-```
+Hard constraints for this sequence:
 
-Key invariants:
-- The maintainer's local `127.0.0.1:7890` proxy is always available. Do not test for or report it as missing; forward it to the remote builder on every SSH step that may run Cargo.
-- NEVER combine steps into one SSH call — each step is a separate ssh invocation
-- NEVER pipe docker exec to tail/head/grep — redirect to file, then read the file
-- NEVER omit timeout — every cargo/docker exec command has a timeout
-- NEVER use `--release` for manual validation — always dev/debug builds
-- NEVER skip the pre-flight check — stale cargo processes cause silent hangs
+- Before the first candidate build, choose a version whose `vVERSION` tag does not exist.
+  Use only `X.Y.Z` or the cross-platform numeric prerelease form `X.Y.Z-N` (`N <= 65535`).
+  Update every Cargo/Tauri/Android version, user-facing release notes, candidate manifest, and
+  validation matrix in the same pre-build snapshot. Never validate under an already-published
+  version and bump the version afterward.
+- The pre-build manifest records scope, intended evidence, `.160` commands/tests, dependency
+  pins, and workflow set. It must not claim future run IDs, measurements, PASS results, assets,
+  or publication facts.
+- Any tracked build-affecting change after candidate dispatch creates a new SHA and invalidates
+  all earlier candidate, artifact, real-device, and formal evidence. Documentation-only
+  evidence never creates a new candidate and must not move the release ref before publication.
+- Reuse every successful or active exact-SHA workflow. Before dispatch, query existing runs;
+  never duplicate a run, and remember that a duplicate Android dispatch can cancel the
+  authoritative run through concurrency rules. A failed run is fail-closed. Repeat the same
+  SHA only for a demonstrated infrastructure/flaky failure, with the diagnosis recorded;
+  source fixes require a new complete candidate.
+- A push to an auto-trigger branch such as `codex/profiling-beta` may already have started both
+  candidate workflows. Query by exact SHA before any manual dispatch; the operator must reuse
+  those runs rather than creating a second pair.
+- Candidate workflow success does not replace real-device validation. Formal workflows begin
+  only after exact Linux and applicable Android artifacts have passed their planned functional,
+  lifecycle, recovery, resource, and cleanup matrix.
+- Start all five formal workflows together. Do not serialize Core first in the normal release
+  path. On the first formal failure, stop remaining peers, diagnose once, and avoid partial
+  repeated matrices.
+- Freeze the release branch from formal dispatch through Release. Do not push run IDs, evidence,
+  wording fixes, or any other tracked change to that ref in between.
+- Use build wait time for independent diff/pin review, fixture preparation, host cleanup,
+  baseline capture, and validation scripting. Do not mutate the in-flight snapshot or start a
+  competing build.
 
-## Musl Cross-Compilation (for CentOS 7 validation hosts)
+## 4. Release operator
 
-When building `x86_64-unknown-linux-musl` binaries on the remote builder, provide the musl headers and C compiler for build scripts, but leave Rust's final linker on the toolchain's self-contained default:
+- `scripts/release-operator.sh` is the sole entry point for `.160` preparation and release
+  workflow dispatch. Do not reconstruct `rsync` or `gh workflow run` commands from memory.
+- Use `builder-preflight` once for the complete candidate. Use `dispatch-candidates SHA`, then
+  validate the exact artifacts, then set `EXACT_ARTIFACT_VALIDATED_SHA=SHA` and use
+  `dispatch-formal SHA`. Use `dispatch-release vVERSION SHA` only after formal and artifact
+  audits pass. `dispatch-pipeline` is resumable but must stop between candidate and formal
+  stages unless that exact validation attestation is present.
+- Mutation commands must reject dirty, detached, unpushed, SHA-mismatched, incomplete, or
+  already-published version inputs. Existing active/successful exact-SHA runs are reused.
+- Linux Profiling Beta is always required. Android Policy Candidate is required by default;
+  use `ANDROID_CANDIDATE_MODE=skip` only when Android is unrelated and record explicit `N/A`
+  or maintainer waiver. Mobile compilation never substitutes for Android physical evidence.
+- The formal Release workflow resolves artifacts by its own exact `GITHUB_SHA`. Do not move the
+  dispatch ref between formal runs and Release.
+- Download GitHub artifacts through the configured local proxy when direct transfer is slow.
+  Use a fresh destination, total timeout, checksum/build-info verification, and `unzip -tq`.
+  Never append or resume a partial Actions ZIP because redirect handling does not preserve a
+  trustworthy byte range.
 
-```bash
-docker exec easytier-debug-builder bash -c "
-export BINDGEN_EXTRA_CLANG_ARGS=\"-I/usr/include/x86_64-linux-musl\"
-export CC_x86_64_unknown_linux_musl=musl-gcc
-cd /workspace
-CARGO_BUILD_JOBS=\$(nproc) timeout 1800 cargo build --target x86_64-unknown-linux-musl --package easytier --bin easytier-core
-"
-```
+## 5. `.160` builder and dependency handling
 
-The `musl-dev` package installs headers at `/usr/include/x86_64-linux-musl` and does not provide `/usr/x86_64-linux-musl`; do not pass that nonexistent path as a sysroot. Do not set `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc` in this Debian container: with Rust 1.95 it produced an interpreter-based musl PIE that crashed before `main`, while the default Rust linker produced the required runnable `static-pie` from the same source and libraries. Set an explicit Rust linker only for a target/toolchain that actually requires one, and always require both a `file` static/static-pie assertion and a bounded execution smoke after linking.
-# Android Semantic Candidate Validation
+- `192.168.2.160` is the dedicated fast compiler/focused-test builder, not a performance or
+  old-system validation host. Source sync must use `scripts/remote-builder-sync.sh`; it checks
+  Cargo/rustc idleness, preserves Cargo/Node/Corepack caches, and deletes old source only after
+  transfer succeeds.
+- Standard preflight is `scripts/release-operator.sh builder-preflight`. For Leaf/HEV Rust use
+  `scripts/leaf-remote-preflight.sh`; it builds the relevant library test binary once and runs
+  focused tests serially. Extend its filter list instead of using a narrow target that may run
+  zero relevant tests.
+- Container: `easytier-debug-builder`; workspace `/workspace`; host source
+  `/data/easytier-builder/workspace`; Cargo registry
+  `/data/easytier-builder/cargo-registry`. `mold` is required. Use
+  `CARGO_BUILD_JOBS=$(nproc)`, debug/smallest-feature builds, and bounded `timeout` for every
+  Cargo command. Never produce manual release/profile artifacts.
+- Forward the maintainer proxy on every builder SSH operation with
+  `-R 7890:127.0.0.1:7890` plus keepalive and `ExitOnForwardFailure=yes`. The local proxy is
+  known available; do not probe for or report it as missing.
+- Before Cargo, confirm no competing Cargo/rustc process. Redirect long `docker exec` output to
+  a file, read it in a separate SSH call, and never pipe it directly through `head`, `tail`, or
+  `grep`. Prefer `cargo test --no-run`, then execute the exact test binary with a timeout.
+- Frontend preflight uses Node 22 at `/opt/node22` and must run in this order: frontend-lib
+  Vitest, frontend-lib build, frontend build, VPN plugin build, GUI build. Normal dependency
+  preparation is incremental. Only `builder-frontend-repair` may remove the fixed approved
+  `node_modules` set; never broadly erase caches/dependencies during sync.
+- `/tmp` on `.160` is small. Put large archives, extracted bundles, and profiling results under
+  `/data/easytier-builder/` and remove only the exact staging directory after recording evidence.
+- GNU builder binaries do not run on CentOS 7. Manual binaries for `.37`/`.38` must be non-release
+  `x86_64-unknown-linux-musl`; deployable optimized artifacts come only from GitHub workflows.
 
-- Preserve candidate application data across validation upgrades. Record `firstInstallTime`, back up `shared_prefs`, `app_webview/Default/Local Storage`, and `app_webview/Default/IndexedDB` with `adb shell run-as`, then use `adb install -r`. Never use uninstall or clear-data as an upgrade shortcut. Compare the persisted stores before the first post-upgrade start.
-- Prefer semantic Android control over screenshots or coordinate clicks. Forward `tcp:9222` to `localabstract:webview_devtools_remote_$PID`, use Chrome DevTools Protocol `Runtime.evaluate`, and call the existing `window.__TAURI_INTERNALS__.invoke` commands. Every CDP request needs a bounded timeout, and its pending response entry must be registered before sending the request. Use screenshots only for final visual evidence.
-- Use the packaged captured-UID instrumentation probe for network policy checks: `com.kkrainbow.easytier.policyprobe.test/com.kkrainbow.easytier.policyprobe.PolicyProbeInstrumentation`. Run each `adb shell am instrument` command explicitly; local zsh does not split a scalar into positional fields by default. A TCP-only connect is insufficient evidence for `REJECT`; send application data or use the probe's TLS mode.
-- For Wi-Fi outage validation over network ADB, schedule recovery before disabling Wi-Fi: `setsid sh -c "sleep 12; svc wifi enable" > /data/local/tmp/easytier-wifi-recover.log 2>&1 < /dev/null &`. After reconnecting, verify the native `outage!EPOCH` event, a recovered network key with the new epoch, TUN routes, mesh traffic, and policy traffic. Do not disable Wi-Fi without an independent recovery path.
-- On old CentOS, `pgrep -x easytier-leaf-worker` cannot match because the kernel `comm` value is truncated to 15 bytes. Identify the unique worker from the known core PPID using `ps --ppid CORE_PID`, then signal only the exact PID.
-- Do not prefix individual macOS checksum or archive commands with `LC_ALL=C LANG=C` to conceal an invalid inherited locale. Repair the command environment at its source, run `scripts/check-command-environment.sh`, and then rerun the exact original command.
-- Before allocating an isolated namespace underlay CIDR, inspect the validation host's existing routes and bridges. Do not reuse a connected prefix: Linux may select the older bridge for gateway ARP or return traffic even when the new namespace route appears correct. Confirm namespace-to-gateway reachability before starting product validation.
-- Scope Leaf temporary-file cleanup assertions to the exact core PID or validation instance. Do not treat every `/tmp/easytier-leaf-*` file as owned by the current candidate; historical files from unrelated PIDs can create a false cleanup failure.
-- A push to `codex/profiling-beta` automatically starts both candidate workflows. Check `gh run list -R lovitus/EasyTier --branch codex/profiling-beta` before any manual dispatch. The Android workflow uses concurrency cancellation, so a duplicate dispatch can cancel the already-running authoritative build.
-- When counting Android process FDs or tasks through `adb shell`, use `ls -1 ... | wc -l` or another entry-wise counter. Plain Android `ls` uses columns, so `ls ... | wc -l` undercounts and is invalid resource evidence.
-- The formal `EasyTier Release` workflow resolves successful `core.yml`, `gui.yml`, `mobile.yml`, and `ohos.yml` runs by its own exact `GITHUB_SHA`; it does not select artifacts merely by branch. Run `test.yml` as an additional quality gate, verify every formal run reports the validated commit as `headSha`, and do not move the dispatch ref between those runs and `EasyTier Release`. Query existing runs by `head_sha` before dispatching to avoid duplicate full-matrix builds.
-- Freeze the `releases/**` ref at the validated build SHA before starting Core, GUI, Mobile, OHOS, and Test. Do not commit or push validation results, run IDs, release notes corrections, generated evidence, or any other documentation to that ref between formal workflows and `EasyTier Release`. After publication, update project documentation on a non-release branch and update the GitHub Release body with `gh release edit`; neither action changes the tag or requires rebuilding artifacts.
+## 6. Validation hosts and remote safety
 
-## Parallel Candidate and Validation Scheduling
+- Fixed roles: `.160` builds/tests; `192.168.1.37` and `.38` provide CentOS 7/internal-network
+  compatibility and functional validation; the two private public hosts stored in local
+  metadata provide shared-NAS 10 Gbps dual-stack, interoperability, and performance evidence;
+  `10.20.0.65` is the KR host. Never substitute roles or put private hostnames in the repository.
+- The two public hosts share `/slab2`; do not copy artifacts between them. Use separate
+  host-named subdirectories for configs, scripts, PIDs, logs, and results. Never stage sustained
+  validation data under their `/tmp` or root filesystems.
+- Internal hosts have slow GitHub access. Download once through a fast host, verify hashes/build
+  info there, then SCP the exact files to `.37` and `.38`.
+- Every SSH command uses `ServerAliveInterval=30`, `ServerAliveCountMax=3`, and
+  `ConnectTimeout=10`. Start background services with `setsid ... < /dev/null` and verify in a
+  separate SSH call; never use a combined `nohup ... & sleep` command.
+- Before each remote network test, clean only the intended EasyTier processes/TUNs and verify
+  no residue. Use explicit, unique ports for every protocol: UDP=`base`, TCP=`base+1`,
+  QUIC=`base+2`, WG=`base+3`, WS=`base+4`; never rely on production default ports.
+- Inspect host routes/bridges before allocating namespace CIDRs. Scope temporary-file, PID, FD,
+  route, and cleanup assertions to the exact validation instance. Stop immediately on storms,
+  unbounded growth, lost host connectivity, or watchdog violations and preserve failure evidence.
+- On Linux, EasyTier-owned IPv6 terminal routes use metric `4294967294`; `4294967295` collides
+  with the kernel sentinel on old validation kernels.
 
-- For every non-trivial Leaf/policy candidate, maintain `easytier/docs/todo/leaf_parallel_workboard.md` as the live execution board. Each independent workstream must record its description, objective, build-affecting status, exact evidence target, current status, and shared candidate SHA. Update this board locally while work proceeds; board-only changes must not trigger workflows.
-- Before pushing a candidate, identify all independent ready code workstreams, run their smallest targeted checks on `192.168.2.160`, and batch compatible fixes into one candidate. Do not push one mechanical fix at a time when unrelated ready fixes can share the same Linux/Android artifact and real-device matrix.
-- A candidate push is allowed only after local formatting, `.160` preflight, exact tests, lockfile/cfg/workflow-pin inspection, and one complete candidate-scope review. The push should normally start the automatic Linux and Android workflows once.
-- While GitHub builds, continue independent work in parallel: source/compatibility audits, documentation, fixture preparation, device persistence backups, host cleanup, baseline capture, and validation-script preparation. Do not idle or start another build merely to get faster compiler feedback.
-- After artifacts arrive, validate independent modules in parallel where they do not share host-global state. Reuse one exact artifact SHA for disabled-mode performance, actor routing, fallback/recovery, UDP lifecycle, Android network changes, persistence, and cleanup evidence. Serialize only tests that share routes, TUN devices, ports, firewall rules, or the same Android VPN owner.
-- A same-SHA no-Leaf comparator is an independent required artifact, not permission to duplicate the normal profiling run. Dispatch `profiling-beta.yml` with `audit_comparator=true` only when the workboard has an active disabled-mode gate; this runs the comparator-only job under its own concurrency group, does not rebuild HEV/Leaf/the feature-on bundle, and does not mutate the rolling prerelease. Run it in parallel with the automatic candidate workflows when possible and record its run ID.
-- The Linux profiling bundle contains the profiling-only `leaf-perf-selftest.sh` and `easytier-perf-probe`. Run `./leaf-perf-selftest.sh --check-only` after artifact verification, then run the full self-test as root only on an isolated validation host. The harness creates three PID-unique network namespaces, never changes host routes/firewall/forwarding, samples CPU/RSS/FD/threads, and writes `summary.json`. These files MUST remain absent from production release archives, APKs, Cargo features, and production binary dependency graphs.
-- Before any manual dispatch, query existing runs for the exact SHA and workflow. If an equivalent authoritative run exists or is queued, do not dispatch another. Cancel an accidental duplicate immediately and record the cause on the workboard.
-- Before treating a validated snapshot as formally releasable, verify that the `easytier` Cargo version maps to a tag that does not already exist. `release.yml` requires the input to equal `v${cargo_version}` and refuses to overwrite an existing tag. Batch the version bump and user-facing release notes with the final build-affecting snapshot before validation. Do not put workflow outcomes or publication facts into that snapshot: add them after publication, keyed to the unchanged validated/tagged SHA, without rebuilding.
-- The agent is authorized to commit and push a batched validation candidate to `codex/profiling-beta` without requesting per-push confirmation after the candidate scope is frozen and the required `.160` preflight has passed. This authorization does not permit using GitHub Actions as an edit-by-edit compiler: combine related implementation, tests, workflow checks, and validation tooling into one candidate, then push once and exercise multiple scenarios from that exact SHA.
+## 7. Android validation
 
-- The profiling bundle performance entry point is `profiling-perf-selftest.sh`. Its Linux-only isolated matrix covers Leaf DIRECT plus mesh native, KCP, QUIC, and forced relay. Never bypass its watchdogs for benchmark convenience: any RSS, FD, thread, log-growth, idle-CPU, no-progress, amplification, process-liveness, or wall-time violation must terminate the exact test process groups, clean the test namespaces, and preserve `abort.json` before more validation is attempted. These harnesses and `easytier-perf-probe` remain profiling-only and must never enter Cargo manifests or formal production artifacts.
-- On `192.168.2.160`, `/tmp` is on the small root filesystem and may be nearly full even when the builder data disk has space. Put profiling archive staging, clean extraction, and result directories under `/data/easytier-builder/`, check `df` before creating duplicate bundles, and remove only the exact candidate staging directory after evidence is recorded. Keep `/tmp` for small logs and control files, not 100+ MiB profiling archives.
-- Treat `profiling-perf-selftest.sh` only as a fast pre-validation smoke gate. A passing local isolated self-test MUST NOT replace, shrink, waive, or lower the acceptance criteria for exact-artifact validation. Continue to run the required real Linux and Android matrix, cross-host and real-underlay performance comparisons, native/KCP/QUIC/relay and policy-path evidence, failure/recovery and network-change tests, interoperability checks, repeated lifecycle/resource-return tests, and cleanup verification from the exact workflow artifact. Self-test results may reject a bad candidate early, but can never by themselves qualify a candidate for release or justify omitting noisy, long-running, platform-specific, or real-network scenarios.
+- Routine product validation is Linux and Android unless the maintainer changes scope. When an
+  Android device is declared unavailable, do not reconnect or mutate it until it is explicitly
+  made available again.
+- Prefer ADB shell/package/network commands, WebView CDP, and direct Tauri/plugin invocations.
+  Use screenshots or coordinate clicks only for final visual evidence when semantic control is
+  unavailable. Preserve candidate app data across upgrades with `adb install -r`; do not use
+  uninstall/clear-data as a shortcut unless the test explicitly requires a clean install.
+- Wireless-ADB outage tests must schedule and verify one detached device-side script that logs
+  disable and re-enable return codes before Wi-Fi is disabled. Never issue a standalone host-side
+  disable that can strand ADB.
+- Policy traffic evidence must come from an application UID captured by the VPN. The candidate
+  app, ADB shell, and `run-as` are not valid traffic sources. Use the packaged policy probe target
+  and instrumentation runner, confirm its UID is in VPN ranges, require application/TLS evidence
+  rather than TCP handshake alone, record the controlled VPN-down baseline, and uninstall probe
+  packages after validation.
+- When counting Android FDs/tasks, use entry-wise output such as `ls -1`; column-formatted `ls`
+  piped to `wc -l` is invalid evidence.
+
+## 8. Policy, Leaf, and dependency semantics
+
+- Before changing Leaf or policy behavior, inspect the corresponding Mihomo implementation and
+  tests under `/Users/fanli/Documents/mihomo-rev`. Use sing-box when Mihomo lacks the behavior or
+  platform integration. Record exact files/functions and observable semantics before editing,
+  then add parity/compatibility tests.
+- Do not invent policy, DNS/FakeDNS, Geo, group/fallback, lifecycle, loop-prevention, update, or
+  hot-path semantics when reference behavior is unknown. Document every intentional EasyTier
+  difference, compatibility boundary, failure behavior, and validation evidence.
+- Before auditing a Cargo Git dependency, read its exact URL/SHA from `Cargo.lock` and inspect a
+  worktree checked out at that SHA. A cache directory or dependency default branch is not proof.
+- Keep Leaf/policy integration decoupled from the mesh data plane. Do not modify established mesh
+  routing/transport ownership merely to work around a policy-component defect.
+
+## 9. Performance experiments and evidence
+
+- Before changing a production hot path for an experimental optimization, build a focused Rust
+  tool/benchmark under `tools/` and run it on `.160` against the unchanged baseline. Measure
+  realistic throughput plus CPU, wakeups, syscalls, allocations, queueing, or batching. Reject
+  low-value mechanisms before touching production code.
+- A microbenchmark authorizes only a small production experiment; it never replaces exact-artifact
+  functional, cross-host, resource, recovery, interoperability, and cleanup validation.
+- Profiling-only tools and self-tests must remain absent from formal production archives and
+  dependency graphs. Their watchdogs are mandatory; any liveness, resource, amplification,
+  no-progress, or timeout violation terminates the exact process group and preserves abort data.
+- Performance conclusions must use appropriate hosts and identify both endpoints, IP family,
+  transport, relay/direct path, build SHA, sample count, CPU, and resource baseline. Do not infer
+  10 Gbps WAN behavior from `.160`, `.37`, `.38`, or a noisy mobile link.
+
+## 10. Portability and final artifact gates
+
+- Every release includes the non-waivable 64-bit atomic audit. Record every `AtomicU64`/`fetch_max`
+  hit as shim, test-only, or explicitly unreachable on MIPS/MIPSel. MIPS-reachable code may not use
+  `std::sync::atomic::AtomicU64`; shim operations must exist in the locked fallback implementation.
+  Implement max via load/compare-exchange when `fetch_max` is unavailable.
+- Formal Core must contain successful exact-SHA `mips-unknown-linux-musl` and
+  `mipsel-unknown-linux-musl` jobs. Neither x86, one endianness, grep, shim imports, nor an older
+  SHA substitutes for them.
+- Workflow success alone is insufficient. Before Release, inspect exact Core/GUI artifacts for
+  feature flags, sidecars/native executables, architecture, endianness, executable permissions,
+  checksums/build info, and macOS signatures, then run installed-artifact smoke tests for supported
+  delivery paths. A missing feature or sidecar invalidates the candidate even when CI is green.
