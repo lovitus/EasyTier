@@ -217,6 +217,96 @@ key，可立即尝试。TCP simultaneous-open 与 both-easy-symmetric 的 mapped
 该 RPC；这两类 NAT 映射变化最晚在当前冷却到期后发现，最高 10 分钟。这个边界只影响
 未通告的临时 NAT mapped endpoint，不影响 peer 新增 listener/IP 的 Direct 尝试。
 
+## 已知但不解决问题
+
+### 冷却期间的 NAT port rebinding 发现延迟
+
+#### 问题与结论
+
+`v3.0.8` 和 `v3.0.9` 的 TCP simultaneous-open、UDP both-easy-symmetric 在已有
+`last_remote_addr` 时，会先查询 `P2pEndpointRetryTable`。旧 endpoint 仍在冷却就跳过
+地址交换 RPC。这个行为会推迟发现对端未通告的 NAT port rebinding，但不是遗漏的
+普遍性 P1：它是发布前为阻止同一 RPC 反复启动 responder fanout 而明确接受的恢复延迟
+边界，本批不修改。
+
+这里的“未通告映射”不是 peer 常规同步的 listener/IP，而是 peer 自己也不能直接知道、
+必须借助 STUN 或第三方观察，在一次打洞中临时获得的公网 `IP:port`：
+
+- TCP simultaneous-open 双方分别调用 `get_tcp_port_mapping()` 获取实时 STUN 映射，
+  再由 `exchange_mapped_addr` 交换；
+- UDP both-easy-symmetric 双方调用 `get_udp_port_mapping()` 获取基准映射，交换后再按
+  easy-symmetric 的端口变化方向应用既有 `DST_PORT_OFFSET` 预测。
+
+这不削减一次打洞事件内部的 socket 数、广播、端口猜测、重复发包、等待窗口或 fanout。
+冷却只决定是否启动下一次完整 RPC + burst。
+
+#### 当前发现和失效语义
+
+- 后台 UDP/TCP NAT 类型探测成功后每 600 秒重新检测，失败时每 10 秒重试；它更新公网
+  IP、NAT 类型和观测端口范围，但不向 peer 通报某次打洞使用的精确临时公网端口。
+- `get_udp_port_mapping()` 和 `get_tcp_port_mapping()` 每次调用都会执行现场 STUN
+  binding，不读取一个最长 10 分钟的精确端口缓存。只要 RPC 获准执行，新映射通常在
+  一次 STUN + RPC 周期内被发现。
+- 当前生产网络事件没有调用 `StunInfoCollector::update_stun_info()`；DHCP IPv4、
+  DHCP 冲突、Public IPv6 和配置变化只失效 underlay/interface cache，不清空
+  `P2pEndpointRetryTable`。
+- retry 表在 endpoint 成功时删除对应项；完整实例重启会重建表；开启
+  `disable_p2p_storm_throttle` 会清空全部 shard。容量淘汰也可能移除旧项，但不能作为
+  网络变化恢复机制。
+- TCP 成功任务结束后，后续任务从空的 `last_remote_addr` 开始；UDP 的 NAT 类型或
+  stealth 收集项变化也会重建任务。因此稳定 P2P 成功后刚发生网络切换，通常不会直接
+  继承一个旧任务的 10 分钟 pre-RPC 阻断。
+
+实际延迟是“当前冷却剩余时间 + 数秒调度/STUN/RPC”，不是冷却结束后再额外等待后台
+STUN 的 10 分钟。冷却阶段为 1、2、4、8、10、10... 分钟；一次 Wi-Fi 抖动不会直接
+进入 10 分钟阶段，必须是同一 endpoint 已经发生多轮可结算的完整失败。
+
+#### 影响范围
+
+只有同时满足以下条件才会命中：
+
+1. 使用 TCP simultaneous-open 或 UDP both-easy-symmetric；
+2. 同一个打洞任务已经完整失败并进入冷却；
+3. 任务仍保存旧 `last_remote_addr`；
+4. 对端在冷却期间发生未通告的 NAT port rebinding；
+5. listener/IP、NAT 类型等收集项没有触发新 Direct key 或任务重建；
+6. Direct、UDP cone 或其他协议没有先成功。
+
+普通 relay 模式下，业务仍可走 relay，主要表现为 P2P upgrade 延迟。新通告的
+listener/IP、其他 peer、其他协议和其他 `IP:port` 都是新 key，不继承旧冷却；UDP
+both-easy 还会在该 pre-RPC gate 前先尝试 cone 路径。稳定 P2P 成功会清除对应失败记录。
+
+困难 symmetric NAT、移动网络/CGNAT、频繁 Wi-Fi 漫游且已经连续失败的环境，可能等待
+当前阶段剩余时间，最坏接近 10 分钟。`p2p_only` 且没有任何替代直连时，命中后可能在
+这段时间不可用；单次后果较高，但触发条件窄。综合按已知 P2 恢复延迟边界处理，不作为
+`v3.0.8`/`v3.0.9` 紧急修复。
+
+#### 为什么本批不修复
+
+当前 TCP 和 both-easy RPC 在返回对端映射前已经启动 responder fanout。“低频调用 RPC
+只发现地址，再决定是否 fanout”在现有协议中不存在；直接放开 pre-RPC gate 会恢复本
+功能要消除的远端连接风暴。实现 discovery-only RPC 需要协议能力协商、混合版本语义、
+独立限频和新的实机成功率验证，不是安全的最小修复。
+
+把 key 加入本地 network/NAT generation 只能处理发起端本地变化，不能发现远端
+rebinding；在任意 DHCP/interface 事件中全量清表也会唤醒所有失败 endpoint，且远端
+rebinding 不一定产生本地事件。因此不通过无条件清表或简单移动 gate 改变当前行为。
+
+#### 用户临时规避
+
+用户遇到 P2P 建立或网络切换后恢复异常时，可以临时启用“禁用 P2P 风暴控制”：
+
+```text
+TOML: [flags] disable_p2p_storm_throttle = true
+CLI:  --disable-p2p-storm-throttle
+ENV:  ET_DISABLE_P2P_STORM_THROTTLE=true
+GUI:  Disable P2P Storm Throttle / 禁用 P2P 风暴控制
+```
+
+开启后统一放行 endpoint 尝试并立即清空旧冷却，行为等同未实现本功能，可用于判断异常
+是否由 cooldown 引起。该开关可能恢复高频 P2P 连接尝试、增加连接数和 CPU，只建议
+临时诊断或规避；确认连接恢复后可重新关闭。重新关闭从空表开始，不会复活旧冷却。
+
 ## 自动化契约
 
 1. 首次 endpoint 立即允许。
