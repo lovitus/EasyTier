@@ -1,252 +1,419 @@
-# 跨平台 Underlay 路由净化
+# Cross-platform underlay route purification assessment
 
-## 状态与优先级
+> Status: FEASIBILITY_PROVEN / EXISTING_MECHANISM_FOUND / RECOMMEND_NO_NEW_FEATURE / USER_DECISION_PENDING
+>
+> [!CAUTION]
+> **DEPRECATED PERMANENTLY - DO NOT IMPLEMENT THIS TODO.**
+>
+> The proposed broad `enable_underlay_socket_purify` feature is abandoned. EasyTier
+> already applies resolved interface binding on the ordinary TCP, UDP, WebSocket, and
+> WireGuard connector paths, so a second cross-platform purification subsystem would
+> duplicate working ownership and expand lifecycle, fallback, and platform state.
+>
+> Exact-artifact capture did confirm a separate, path-specific problem: a shared
+> wildcard QUIC socket can be captured by a policy TUN and handled by Mihomo before it
+> reaches the physical interface. That evidence does not justify this design. Fixing a
+> shared socket generically would require per-interface socket replication or per-packet
+> interface control and could change EasyTier's intentional multi-interface probing,
+> NAT mappings, hole punching, QUIC endpoint reuse, and path migration behavior.
+>
+> Any future work must use a new, narrowly scoped investigation for UDP/QUIC duplicate
+> handling. It must not revive this flag, add global routes/firewall ownership, or alter
+> healthy connector paths. The historical analysis below is retained only as rejected
+> design evidence.
+>
+> Proposed flag `enable_underlay_socket_purify`: `DEPRECATED_AND_REJECTED`.
+> Do not add this flag, CLI option, environment variable or GUI control unless later
+> evidence identifies behavior that cannot be represented by existing `bind_device`.
 
-- 状态：**待实现**。
-- 优先级：后于
-  [`p2p_connection_storm_normalization.md`](p2p_connection_storm_normalization.md)。
-- 主要已确认缺口：macOS 和 Windows 桌面在另一个 TUN/policy VPN 共存时，EasyTier 部分
-  underlay socket 未显式绑定物理出口。
-- 实现必须全局考虑 Linux、Android、iOS、OHOS、FreeBSD 和 `bind_device=false`，但不能
-  无证据改变这些平台的现有生产语义。
-- 当前阶段只记录问题和候选边界；不授权提交、push、构建或工作流。
+## 1. Final recommendation
 
-## “路由净化”的准确含义
+Do not implement a second underlay-purification subsystem.
 
-本 TODO 中的路由净化不是动态改写 Mihomo 配置，也不只是向系统路由表添加 endpoint
-host route。目标是：
+Standalone Linux, macOS and Windows probes proved that constraining an outbound socket
+to an interface already selected by EasyTier can bypass a policy TUN without reducing
+multi-interface fan-out. A subsequent current-source audit found that EasyTier already
+implements this exact mechanism for the socket paths that can accept it safely:
 
-> EasyTier 自己创建的 underlay socket 在首次网络 I/O 前携带明确、可验证、与当前网络
-> generation 一致的物理出口身份，不被 EasyTier、Mihomo、Wintun 或其他 policy TUN
-> 再次捕获。
+- `bind_device` defaults to `true`;
+- peer connectors receive an `UnderlayInterfaceSnapshot`;
+- existing source addresses are converted to `ResolvedBindAddr` values;
+- TCP, UDP, WebSocket and WireGuard connectors consume those resolved addresses;
+- `bind_resolved()` applies the platform interface constraint;
+- policy mode refuses to start with `bind_device=false` on supported desktop paths.
 
-Mihomo中的 `PROCESS-NAME,easytier-gui,DIRECT` 发生在包进入 Mihomo TUN 之后，只能选择
-Mihomo的 direct outbound。它不能阻止 TUN 捕获，也不能消除 Mihomo为每个UDP五元组创建
-的替代 socket 和会话状态。
+The remaining sockets are primarily wildcard/shared/raw paths that do not already
+carry a stable per-interface identity. Safely binding them would require changing the
+socket or endpoint topology, which violates the proposed feature's minimality and
+multi-interface invariants.
 
-动态维护 `route-exclude-address` 同样不适合作为主方案：
+Therefore a new default-off flag would duplicate current behavior on safe paths while
+leaving the difficult paths unchanged. It would add configuration, tests, support and
+status semantics without delivering the measured probe benefit to additional traffic.
 
-- peer endpoint 动态变化且包含 IPv4/IPv6、STUN映射和多协议端口；
-- endpoint 生命周期和系统路由生命周期难以原子同步；
-- 多实例和多个 VPN owner 容易互相覆盖；
-- 路由排除无法替代 socket source/interface 的明确所有权。
+## 2. Original objective
 
-## 当前实机证据
+The investigation asked whether EasyTier underlay traffic could bypass an active
+Mihomo/Leaf/system policy TUN to avoid:
 
-macOS测试机只读观测：
+- a second user-space packet traversal;
+- avoidable CPU, latency and throughput cost;
+- underlay recursion or route instability;
+- dependence on proxy process-rule matching.
 
-- Mihomo controller 记录约 202 条来自 `easytier-gui` 的 UDP `DIRECT` 会话；
-- 约 85 条指向同一远端 endpoint，与 hard-symmetric 84-socket pool 吻合；
-- Mihomo看到的 source address 为其 TUN gateway，证明包先进入了 Mihomo TUN；
-- `nettop` 显示 wildcard UDP socket 走 Mihomo utun，而明确绑定物理 IPv4 的 socket 走物理
-  Wi-Fi接口；
-- EasyTier root core 进程本身约有 508 个 UDP socket，Mihomo又为捕获的五元组维护第二份
-  socket/session状态。
+The optimization must preserve EasyTier's deliberate multi-address and multi-interface
+fan-out, which is part of aggressive NAT traversal and hole punching.
 
-该证据证明 macOS 缺口真实存在，但不证明每个平台、每种 socket 都有相同故障。
+## 3. Non-negotiable invariants
 
-## 已实现基础
+Any future targeted fix must preserve:
 
-v3.0.6 的 interface enumeration remediation 已提供本候选所需的主要基础：
+- local IPv4/IPv6 candidate sets;
+- candidate ordering and attempt count;
+- one-interface-per-attempt fan-out;
+- hole-punch timing, concurrency and retry behavior;
+- peer endpoint and relay selection;
+- TCP/UDP/QUIC/WebSocket/WireGuard/FakeTCP preference;
+- KCP/QUIC/native fallback semantics;
+- listener reachability;
+- mesh routing behavior.
 
-- `UnderlayInterfaceSnapshot`：地址、接口 name/index、generation 和 unmapped fallback；
-- 5 秒按需 TTL、singleflight 和 invalidation epoch；
-- `UnderlayPreflightGuard::underlay_snapshot()`：一次 attempt 使用同一个快照；
-- `ResolvedBindAddr` 和 crate-private `bind_resolved()`；
-- macOS/iOS resolved index 可直接用于 `IP_BOUND_IF` / `IPV6_BOUND_IF`；
-- stale local bind error 可失效generation，由下一次完整connector attempt重验；
-- Windows普通transport继续使用原生name-to-index，不声称通用snapshot index已经验证；
-- Linux现有 `SO_MARK` / `SO_BINDTODEVICE` 行为。
+It must not introduce:
 
-本 TODO 必须复用这些能力，禁止新建第二套快照缓存、Darwin index刷新周期或公共
-`BindDev::Resolved`。
+- a global/default physical-interface selector;
+- a second interface cache or snapshot;
+- automatic TUN polling or route monitoring;
+- an EasyTier-owned general firewall/route manager;
+- per-peer host routes;
+- proxy-backend YAML rewriting;
+- a helper process or background retry task;
+- work in the packet hot path.
 
-## Mihomo参考语义
+## 4. Standalone feasibility evidence
 
-实现前已核对本地 Mihomo source：
+The probes used temporary C, Python and PowerShell tools. They did not modify EasyTier
+source or configuration.
 
-- `/Users/fanli/Documents/mihomo-rev/component/dialer/bind_darwin.go`
-  - `bindControl`
-  - `bindIfaceToDialer`
-  - `bindIfaceToListenConfig`
-  - 对 global-unicast socket 在首次I/O前设置 `IP_BOUND_IF` 或 `IPV6_BOUND_IF`。
-- `/Users/fanli/Documents/mihomo-rev/component/dialer/bind_windows.go`
-  - `bind4`
-  - `bind6`
-  - `bindControl`
-  - `bindIfaceToDialer`
-  - `bindIfaceToListenConfig`
-  - 使用 `IP_UNICAST_IF` / `IPV6_UNICAST_IF`，并处理 wildcard `udp6` 到 IPv4 destination
-    及接口IPv6不可用的兼容情况。
-- `/Users/fanli/Documents/mihomo-rev/component/dialer/dialer.go`
-  - `DialContext`
-  - `ListenPacket`
-  - 在实际dial/listen前通过显式interface或`DefaultInterfaceFinder`确定出口。
-- `/Users/fanli/Documents/mihomo-rev/listener/sing_tun/server.go`
-  - `cDialerInterfaceFinder::DefaultInterfaceName`
-  - `cDialerInterfaceFinder::FindInterfaceName`
-  - `DefaultInterfaceMonitor`随平台网络变化更新物理默认接口，并避免把policy TUN选为
-    underlay。
+### 4.1 Linux IPv4 and IPv6
 
-EasyTier不要求复制Mihomo的Go dialer结构，但应保持可观察语义：出口绑定发生在首次I/O
-之前，使用当前物理接口，并在网络变化后失效旧身份。
+An isolated namespace topology contained two physical-like paths and a third
+higher-priority simulated policy-TUN path.
 
-## 平台边界
+Final `SO_BINDTODEVICE` result:
 
-| 平台 | 当前/候选机制 | 本 TODO 边界 |
-|---|---|---|
-| Linux | `SO_MARK`，必要时 `SO_BINDTODEVICE` | 保持现有mark和权限失败语义，防止跨平台重构造成回归 |
-| Android | VPN owner保护/平台网络，部分原生接口枚举被禁用 | 不恢复pnet热路径，不新增SELinux packet-socket探测 |
-| macOS桌面 | `IP_BOUND_IF` / `IPV6_BOUND_IF` | 主要实现和实机验收平台 |
-| iOS/macOS NE | 平台VPN owner和现有移动端门禁 | 不把桌面枚举机制错误搬入extension |
-| Windows | `IP_UNICAST_IF` / `IPV6_UNICAST_IF` | 主要实现平台；name-to-index必须原生解析或先由原生测试证明snapshot index等价 |
-| FreeBSD/其他BSD | 当前逻辑 | 先保持编译和行为，不在无实机证据时声明完成 |
-| OHOS/Fuchsia | 现有平台路径 | 不改变现有cfg边界 |
+- four unbound IPv4/IPv6 A/B packets entered the simulated TUN;
+- explicit-source A/B sockets constrained to their selected interfaces used A/B;
+- wildcard-source sockets carrying an explicit A/B interface identity also used A/B;
+- all eight constrained packets appeared on the physical receiver;
+- zero constrained packets appeared on the simulated TUN;
+- namespace, veth, capture and process state returned to baseline.
 
-`bind_device=false` 在所有平台必须保留系统默认路由行为，不能暗中强制接口绑定。
+An earlier `SO_MARK` prototype also worked when paired with a policy rule, but that
+design is rejected because it unnecessarily adds host-global ownership. Linux does not
+need a new mark/rule manager for per-interface sockets.
 
-## 第一批实现范围
+### 4.2 macOS IPv4
 
-连接风暴整改完成并取得独立证据后，本候选先覆盖 UDP hole-punch 中绕过普通transport
-resolved-bind的生产socket。当前至少包括：
+The host had a real active policy TUN plus Ethernet and Wi-Fi with independent
+gateways. The public destination used the policy TUN by default.
 
-1. `UdpSocketArray::start()` 的 84/25 批量socket；
-2. Cone客户端本地socket；
-3. Sym-to-cone direct尝试socket；
-4. `send_symmetric_hole_punch_packet()` 的发送socket；
-5. 会发送打洞应答的hole-punch listener/socket。
+- wildcard selected the policy-TUN address and all five packets entered the TUN;
+- `IP_BOUND_IF` Ethernet selected Ethernet and all five packets used only Ethernet;
+- `IP_BOUND_IF` Wi-Fi selected Wi-Fi and all five packets used only Wi-Fi;
+- zero constrained packets entered the TUN;
+- zero Ethernet/Wi-Fi cross-interface packets appeared.
 
-测试中的loopback或固定端口裸bind不机械替换。
+### 4.3 macOS IPv6
 
-后续必须再审计所有绕过普通connector的 underlay socket，包括但不限于：
+The public IPv6 destination used the policy TUN. Wi-Fi had a global IPv6 address and a
+physical scoped default route; Ethernet had no IPv6 default and was not treated as a
+usable IPv6 candidate.
 
-- manual/bootstrap connector；
-- STUN和UPnP辅助socket；
-- FakeTCP/raw socket；
-- WebSocket特殊默认bind；
-- QUIC/WireGuard endpoint；
-- TCP hole punch；
-- listener reply path。
+- wildcard selected the policy-TUN IPv6 address and all five packets entered the TUN;
+- `IPV6_BOUND_IF` Wi-Fi selected its global physical source;
+- all five constrained packets used Wi-Fi;
+- zero constrained packets entered the TUN.
 
-只有经过审计和验证的路径才能标为净化完成，不能由UDP hole-punch修复外推“全局所有
-socket均已绕行”。
+### 4.4 Windows IPv4 and IPv6 fan-out
 
-## 最小实现方向
+On a host with three active Wi-Fi adapters:
 
-### 1. 从同一次preflight消费resolved target
+- two usable IPv4 interfaces each emitted about 209 KB when constrained;
+- source-only and source-plus-interface TCP both connected on those interfaces;
+- a third interface failed both controls, proving its failure was existing
+  reachability rather than the socket option;
+- two independent IPv6 interfaces emitted about 214 KB and 212 KB respectively.
 
-对于已知remote endpoint的attempt：
+### 4.5 Windows real Mihomo TUN bypass
 
-1. 先完成现有 `prepare_hole_punch_attempt()`；
-2. 从其 `UnderlayPreflightGuard::underlay_snapshot()` 选择对应地址族的
-   `ResolvedBindAddr`；
-3. 保留现有地址顺序和first-match语义；
-4. unmapped fallback只阻断对应地址族；
-5. 在RPC/preflight失败时不提前创建84个socket。
+On a separate Windows host with an active Mihomo TUN, the same 200-packet,
+1000-byte UDP workload produced:
 
-### 2. 一个pool解析一次
+| Mode | Mihomo adapter | Physical adapter |
+|---|---:|---:|
+| wildcard | 209,474 bytes | 206,577 bytes |
+| physical `IP_UNICAST_IF` | 7,287 bytes | 221,329 bytes |
 
-增加一个很薄的 crate-private hole-punch bind helper，内部复用 `bind_resolved()`：
+The Mihomo-adapter delta fell by approximately 96.5%. The counters include small
+background traffic, so this proves path ownership rather than end-to-end performance.
 
-```text
-resolved target once
-  -> create N sockets with the same address/interface identity
-  -> apply platform option before first I/O
+## 5. Current-source audit
+
+### 5.1 Existing configuration already enables the mechanism
+
+`easytier/src/common/config.rs` sets:
+
+```rust,ignore
+bind_device: true
 ```
 
-不得让84个socket分别调用 `NetworkInterface::show()`、`if_nametoindex()` 或Windows adapter
-枚举。
+This is the default, not an experimental opt-in.
 
-macOS直接消费快照中已验证的name/index。Windows第一批继续保留原生name-to-index语义：
-在pool准备阶段原生解析一次，然后让本pool复用；除非Windows原生自动测试先证明通用
-snapshot index与 `IP_UNICAST_IF/IPV6_UNICAST_IF` 所需index完全等价，否则不直接消费。
+Supported desktop policy startup also rejects `bind_device=false` in
+`easytier/src/instance/virtual_nic.rs`, explicitly treating interface binding as part
+of underlay recursion prevention.
 
-### 3. 保持错误和generation语义
+### 5.2 Existing connector preparation resolves every safe attempt
 
-- 只有明确的本地socket bind/interface option失败才标记私有`LocalBindError`；
-- DNS、握手、超时和普通connect错误不能伪装成stale interface；
-- stale generation由下一次正常connector/hole-punch attempt完整重验；
-- 一个真实transport attempt内不因stale bind自动重复握手；
-- 网络事件发生在收集或发布期间时，旧快照不得覆盖新epoch；
-- partial bind成功时保留成功socket，不因其他地址族或其他source失败而销毁。
+`easytier/src/connector/mod.rs` already:
 
-## 与连接风暴整改的关系
+- consumes the current `UnderlayInterfaceSnapshot`;
+- builds one `ResolvedBindAddr` for each usable source address;
+- preserves the interface name and index;
+- passes the complete vector to the connector when `bind_device=true`.
 
-两个候选必须分开验证：
+This is the exact post-selection model proven by the standalone tools. Adding
+`enable_underlay_socket_purify` would not produce a new candidate or new socket policy
+for these connectors.
 
-1. **连接风暴规范化候选**
-   - 仍允许Mihomo捕获必要underlay；
-   - 用Mihomo session数辅助证明空闲campaign和shared pool是否减少；
-   - 不把Mihomo仍能看到一次合法campaign误判为调度整改失败。
-2. **路由净化候选**
-   - 人为触发一次合法UDP hole-punch campaign；
-   - EasyTier自身campaign和datagram计数应存在；
-   - Mihomo中不应再出现对应84/25路EasyTier UDP五元组；
-   - 物理接口必须观察到实际发送，hole-punch成功率和恢复时间不得下降。
+### 5.3 Existing platform helper already applies the options
 
-这样可以区分“没有发包”和“发包但正确绕过TUN”，避免两个修复互相掩盖。
+`easytier/src/tunnel/common.rs::bind_resolved()` reuses the resolved identity and
+applies the existing platform behavior:
 
-## 自动化测试范围
+| Platform | Existing behavior |
+|---|---|
+| Linux | `SO_BINDTODEVICE` using the resolved interface name |
+| macOS/iOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` using the resolved index |
+| Windows | existing Windows socket setup receives the resolved device identity |
 
-- [ ] 同一个preflight snapshot生成hole-punch resolved target，不发生第二次接口扫描。
-- [ ] 84/25 socket pool复用同一个target和generation。
-- [ ] macOS IPv4使用 `IP_BOUND_IF`，IPv6使用 `IPV6_BOUND_IF`。
-- [ ] Windows IPv4使用 `IP_UNICAST_IF`，IPv6使用 `IPV6_UNICAST_IF`。
-- [ ] Windows pool只执行一次原生name-to-index解析。
-- [ ] Windows wildcard UDP6到IPv4 destination保持Mihomo参考兼容行为。
-- [ ] Linux `socket_mark`和现有device binding无回归。
-- [ ] `bind_device=false`不请求snapshot target且保持wildcard bind。
-- [ ] IPv4/IPv6 unmapped fallback只阻断对应地址族。
-- [ ] 重复地址保持first-match。
-- [ ] preflight/RPC失败不创建批量socket。
-- [ ] network invalidation后不复用旧generation pool。
-- [ ] local bind stale error与DNS/connect/handshake error严格隔离。
-- [ ] partial success保留成功socket。
-- [ ] cancellation、owner drop和刷新期间invalidation不泄漏socket/task。
-- [ ] FreeBSD和其他未启用平台保持现有编译门禁。
+TCP, WebSocket and WireGuard visibly consume `ResolvedBindAddr`; the common connector
+contract also carries resolved bind addresses for supported tunnel connectors.
 
-平台socket option应优先使用真实native测试；纯fixture测试只能证明选择和调用次数，不能
-证明内核实际路由。
+### 5.4 Linux already owns mark-based coverage where needed
 
-## 实机验收
+Linux Leaf policy mode already requires a non-zero underlay `socket_mark` and installs
+an owned policy-routing table/rule set through `PolicyRoutingGuard`.
 
-### macOS
+Existing mark propagation covers paths that do not necessarily use resolved connector
+addresses, including:
 
-- 同一Mihomo TUN配置下，触发可重复的hard-symmetric campaign；
-- EasyTier聚合计数证明84-socket和datagram实际执行；
-- Mihomo controller中对应EasyTier UDP会话接近零；
-- `nettop`/系统socket信息证明出口是预期物理接口而非Mihomo utun；
-- IPv4、IPv6、Wi-Fi切换、接口generation失效和恢复通过；
-- UDP P2P成功率、首连时间和失败回退无显著回归。
+- listeners;
+- QUIC endpoints;
+- FakeTCP;
+- STUN/NAT discovery;
+- UDP hole-punch sockets;
+- control-plane DNS.
 
-### Windows
+`PolicyRoutingGuard` has an ownership lock, stale cleanup, refresh and reverse-order
+route/rule removal. A second mark/rule owner is unsafe and unnecessary.
 
-- 在Mihomo/Wintun TUN启用时运行同等campaign；
-- 对应EasyTier UDP不进入Wintun/Mihomo会话；
-- 原生接口index解析次数为每pool一次；
-- IPv4、IPv6、禁用接口IPv6、网络切换和恢复通过；
-- 普通TCP/UDP/WS/WG transport既有bind路径无回归。
+Mihomo and non-Leaf combinations must be assessed from exact runtime evidence rather
+than assuming Leaf's owned mark table applies to them.
 
-### Linux与BSD边界
+### 5.5 The uncovered paths are not compatible with the proposed minimal helper
 
-- Linux现有 `SO_MARK` focused tests和真实policy-route路径继续通过；
-- FreeBSD先要求编译及现有功能无回归，不声称已实现等价接口净化；
-- 不用Linux成功外推macOS或Windows native socket option正确。
+Examples in `easytier/src/connector/udp_hole_punch/common.rs` create wildcard UDP
+sockets such as:
 
-## 非目标
+```rust,ignore
+UdpSocket::bind("0.0.0.0:0")
+```
 
-- 不动态修改Mihomo配置或维护per-endpoint系统排除路由。
-- 不改变`transport_priority`、`lazy_p2p`或P2P task eligibility；这些属于前序TODO。
-- 不以减少84/25、三连发或200ms掩盖路由问题。
-- 不新增公共 `BindDev` variant、大型mock trait或第二套interface cache。
-- 不声称一个UDP路径修复即代表所有underlay socket均已完成净化。
-- 文档变更本身不触发profiling-beta或发布工作流。
+These sockets intentionally have no stable per-interface identity. The same design
+constraint applies to shared QUIC endpoints and some raw/FakeTCP paths.
 
-## 相关记录
+To constrain them on macOS or Windows would require one socket/endpoint per interface,
+selection and lifecycle changes, or a platform-specific global bypass. Those are
+transport-architecture changes, not a small socket-policy addition.
 
-- [`macos_interface_enumeration_cpu_remediation.md`](macos_interface_enumeration_cpu_remediation.md)
-  定义snapshot、generation、resolved bind和平台兼容边界。
-- [`../known_bugs/kcp_bugs_and_mihomo_loopback.md`](../known_bugs/kcp_bugs_and_mihomo_loopback.md)
-  记录generic connector进入policy TUN的既有防护。
-- [`p2p_connection_storm_normalization.md`](p2p_connection_storm_normalization.md)
-  是本候选的前置整改。
+The safe proposal explicitly excluded these paths. Consequently its entire remaining
+scope is already implemented by `bind_device`.
+
+## 6. Why the proposed new flag should not be implemented
+
+The proposed contract was:
+
+```text
+enable_underlay_socket_purify = false by default
+```
+
+That contract conflicts with current reality:
+
+- `bind_device` is already true by default;
+- policy mode already depends on it;
+- safe per-interface connector paths are already constrained;
+- Linux additionally propagates socket marks;
+- unsafe wildcard/shared paths would remain unchanged under the narrow proposal.
+
+Possible outcomes of adding the flag are all undesirable:
+
+- it aliases `bind_device`, creating two controls for one behavior;
+- it appears enabled but changes nothing on already covered paths;
+- it disables existing protection when false, causing a regression;
+- it expands into shared endpoint redesign, violating the minimality requirement.
+
+## 7. Recommended next action
+
+Do not add production code yet.
+
+Run a focused exact-artifact audit with current `bind_device=true` and an active policy
+TUN. Classify real EasyTier traffic by socket path:
+
+- ordinary TCP/UDP peer connectors;
+- WebSocket and WireGuard;
+- QUIC;
+- FakeTCP;
+- STUN;
+- UDP hole punch;
+- listeners/control-plane traffic.
+
+For each path record whether packets:
+
+- bypass the policy TUN;
+- enter it and are immediately DIRECT;
+- loop or retry;
+- show measurable CPU/latency/throughput cost.
+
+Only a path with a reproducible defect or meaningful cost should receive a new,
+path-specific TODO and implementation. Do not create a generic feature in anticipation
+of an unmeasured gap.
+
+## 8. Targeted implementation gate, if a real gap is found
+
+A later fix is acceptable only when:
+
+- it names one concrete socket path;
+- flag-off/current behavior remains available if compatibility risk exists;
+- it reuses existing snapshot and socket helpers;
+- candidate count/order remain identical;
+- no global interface selector is introduced;
+- no second route/mark owner is introduced;
+- no per-packet work is added;
+- exact-artifact capture proves the path changed as intended;
+- functional and performance evidence justify the maintenance cost.
+
+Stop if fixing the path requires a general endpoint graph rewrite unless that rewrite
+has an independently justified transport-level goal.
+
+## 9. Decision options
+
+### Option A: no new feature, exact-artifact gap audit
+
+Recommended. Preserve existing code and use current artifacts to identify whether any
+important path is still captured unnecessarily.
+
+### Option B: add an alias for `bind_device`
+
+Rejected. It creates duplicate configuration without new behavior.
+
+### Option C: redesign wildcard/shared endpoints per interface
+
+Not recommended without strong measured evidence. This has materially higher
+correctness, lifecycle and cross-platform risk than the observed optimization value.
+## 2026-08-10 exact-artifact gap audit
+
+Status: `AUDIT_COMPLETE / BROAD_FEATURE_REJECTED / NARROW_QUIC_FOLLOWUP_UNDECIDED`
+
+This audit used an installed macOS ARM64 EasyTier 3.0.13 artifact with EasyTier Core,
+the managed GOST entry, Mihomo, two active physical interfaces, the EasyTier mesh TUN,
+and the Mihomo policy TUN all running. No service, route, or configuration was changed.
+
+### What the installed artifact already gets right
+
+- The default resolved-bind path is effective in the real product. Established IPv4 and
+  IPv6 underlay flows used their selected physical-interface addresses even while the
+  ordinary route lookup for the same destination selected the policy TUN.
+- A 30-packet, 1,200-byte remote-mesh stimulus produced about 133 KiB on the selected
+  physical IPv6 interface, while the policy TUN carried only about 3.2 KiB of unrelated
+  low-rate maintenance traffic. The data path did not scale through Mihomo.
+- The idle residual observed on the policy TUN was about 202 packets and 15,012 payload
+  bytes over 92.4 seconds, or 2.19 packets/s and 162 B/s. Most of it belonged to one
+  wildcard UDP/QUIC flow; short UDP discovery attempts made up the remainder.
+
+### Confirmed remaining gap
+
+- A second 30-packet, 1,200-byte direct-peer stimulus selected the wildcard IPv4 QUIC
+  path. The same flow appeared first on the policy TUN with a Mihomo FakeIP source and
+  then on the physical interface with a native source.
+- The capture contained about 88 KiB on each side of that transition. This is real
+  double handling by EasyTier -> policy TUN -> Mihomo -> physical interface, not merely
+  an idle keepalive or a route-table theory.
+- The result is path-dependent: explicit/resolved TCP and IPv6 paths bypassed the policy
+  TUN, while this shared wildcard QUIC path did not. Therefore neither "all underlay is
+  already purified" nor "all underlay is recaptured" is accurate.
+
+### Decision after audit
+
+Do not implement the broad `enable_underlay_socket_purify` feature described by the
+earlier proposal. It would duplicate the existing resolved-bind mechanism on healthy
+paths, while the actual gap is concentrated in shared wildcard UDP/QUIC and hole-punch
+sockets. Binding those sockets generically risks changing EasyTier's intentional
+multi-interface probing, NAT mapping, socket sharing, and path migration semantics.
+
+If this work is revisited, it must start as a narrow QUIC outbound-endpoint prototype,
+not as a global routing or socket-purification subsystem. The prototype must preserve
+the wildcard listener and hole-punch behavior, prove that a selected outbound QUIC path
+can use an existing resolved interface identity, and stop before production integration
+if it requires cross-platform socket replication or a second route-ownership layer.
+
+Required evidence for reconsideration:
+
+- the same direct-peer stimulus produces no EasyTier-owned payload on the policy TUN;
+- exactly one physical copy remains and throughput/CPU improve measurably;
+- IPv4, IPv6, dual-stack, interface failover, QUIC fallback, and concurrent hole punching
+  retain their current behavior;
+- unsupported platforms keep the current path without degradation;
+- the implementation reuses existing snapshot, invalidation, and bind primitives and
+  introduces no new global route, firewall, mark, daemon, or policy-backend coupling.
+
+Until that narrow prototype meets all conditions, the residual recapture is an accepted,
+documented performance cost and not a correctness defect that justifies new production
+complexity.
+
+## 2026-08-10 maintainer decision
+
+Final decision: make no production change.
+
+- Keep the existing TCP, UDP, WebSocket, WireGuard, QUIC, FakeTCP, hole-punch, routing,
+  and policy-backend behavior unchanged.
+- Do not add `enable_underlay_socket_purify`, a replacement switch, dynamic endpoint
+  route exclusions, firewall ownership, or another cross-platform socket abstraction.
+- Treat the confirmed wildcard UDP/QUIC recapture as a known, path-dependent local
+  processing cost. It is not duplicate physical transmission and is not currently a
+  release blocker.
+- Preserve the existing multi-interface probing and NAT/hole-punch behavior instead of
+  trading those core EasyTier properties for an unproven optimization.
+
+Evidence supporting this decision:
+
+- Idle policy-TUN capture: 202 EasyTier-port packets and 15,012 payload bytes over
+  92.4 seconds, approximately 2.19 packets/s and 162 B/s. Most belonged to one wildcard
+  QUIC flow; the remainder were short discovery probes.
+- Remote-mesh data-path capture: about 132,855 payload bytes used the selected physical
+  IPv6 interface while the policy TUN carried only about 3,157 bytes of background
+  traffic. The main data path was already correctly isolated.
+- Direct-peer QUIC capture: the same approximately 88 KiB appeared first on the policy
+  TUN and then once on the physical interface. This proves local TUN/Mihomo reprocessing,
+  but not duplicate physical transmission. The bounded 30-packet test completed without
+  loss and averaged approximately 10.3 ms RTT.
+- Source audit: ordinary resolved-bind connector paths already reuse interface identity;
+  the remaining affected paths are shared wildcard QUIC endpoints and wildcard
+  hole-punch/discovery sockets whose semantics depend on multi-interface reachability.
+
+This TODO remains permanently deprecated. A future investigation may be opened only
+after independent profiling demonstrates a material real-workload throughput or CPU
+regression and a standalone prototype proves that it can preserve endpoint reuse,
+multi-interface probing, NAT mappings, hole punching, fallback, and unsupported-platform
+behavior. Such work must use a new narrowly scoped document rather than reopening this
+proposal.
