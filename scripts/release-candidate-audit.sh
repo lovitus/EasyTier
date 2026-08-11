@@ -412,7 +412,23 @@ if [[ "$phase" != "--source" ]]; then
       pass "candidate SHA is the published profiling-beta SHA"
     fi
   fi
-  for workflow_name in "EasyTier Linux Profiling Beta" "EasyTier Android Policy Candidate"; do
+  candidate_workflow_names=("EasyTier Linux Profiling Beta")
+  case "${ANDROID_CANDIDATE_MODE:-required}" in
+    required)
+      candidate_workflow_names+=("EasyTier Android Policy Candidate")
+      ;;
+    skip)
+      if rg -qi 'Android.*(N/A|WAIVED_BY_MAINTAINER)' "$matrix"; then
+        pass "Android candidate is explicitly skipped and recorded in the validation matrix"
+      else
+        fail "ANDROID_CANDIDATE_MODE=skip requires Android N/A or WAIVED_BY_MAINTAINER in the validation matrix"
+      fi
+      ;;
+    *)
+      fail "ANDROID_CANDIDATE_MODE must be required or skip"
+      ;;
+  esac
+  for workflow_name in "${candidate_workflow_names[@]}"; do
     workflow_success "$workflow_name" "$candidate_sha" || fail "$workflow_name is not successful for $candidate_sha"
   done
 fi
