@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -d "${HOME}/.cargo/bin" ]]; then
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+fi
+
 phase="${1:---source}"
 case "$phase" in
   --source|--candidate|--release) ;;
