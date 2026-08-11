@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -d "${HOME}/.cargo/bin" ]]; then
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+fi
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 GH_REPO="${GH_REPO:-lovitus/EasyTier}"
@@ -12,37 +16,37 @@ usage() {
   cat <<'EOF'
 Usage: scripts/release-operator.sh COMMAND [ARGUMENTS]
 
-Commands:
-  status [SHA]                 Show candidate and formal workflow state.
-  builder-sync                Safely synchronize source to 192.168.2.160.
-  builder-frontend            Incrementally prepare frozen frontend dependencies.
-  builder-frontend-repair     Explicitly replace only known frontend dependencies.
-  builder-preflight           Run the standard Rust and ordered frontend gates.
-  init-validation-matrix      Create the release validation matrix before commit.
-  dispatch-candidates [SHA]   Reuse or dispatch both candidate workflows in parallel.
-  dispatch-formal [SHA]       After candidate success, reuse or dispatch all five
-                              formal workflows in parallel.
-  dispatch-pipeline [SHA]     Resume the candidate-first release pipeline. It stops
-                              before formal workflows unless exact-artifact validation
-                              is attested with EXACT_ARTIFACT_VALIDATED_SHA=SHA.
-  dispatch-all [SHA]          Compatibility alias for dispatch-pipeline.
-  monitor [SHA]               Resume monitoring the complete pipeline.
-  dispatch-core [SHA]         Optional diagnostic: dispatch only Core.
-  dispatch-rest [SHA]         Optional diagnostic: dispatch the other four after Core.
+Normal commands:
+  version                      Print the current release version.
+  init-release                Create compact manifest, matrix, and release-note stubs.
+  prepare                     Run local gates and the required remote preflight scopes.
+  validate [SHA]              Run candidates, then all five formal workflows.
+  retry [SHA]                 Retry failed/canceled exact-SHA validation runs.
+  status [SHA]                Show candidate and formal workflow state.
+  publish VERSION [SHA]       Audit and dispatch EasyTier Release.
+  help-advanced               Show recovery and low-level commands.
+
+The normal successful path is init-release -> prepare -> commit/push -> validate ->
+artifact/device approval -> publish. Candidates finish before formal workflows start;
+artifact/device validation then overlaps the formal matrix.
+
+Commands reject dirty, detached, unpushed, SHA-mismatched, incomplete, or already
+published inputs. Existing successful/active exact-SHA runs are reused. A failed run
+requires retry for a diagnosed unchanged-SHA infrastructure/flaky failure, or a new SHA.
+
+Linux Profiling Beta is always required. Android is required by default; set
+ANDROID_CANDIDATE_MODE=skip only when the matrix records N/A or maintainer waiver.
+EOF
+}
+
+advanced_usage() {
+  cat <<'EOF'
+Advanced commands:
+  builder-sync | builder-frontend | builder-frontend-repair | builder-preflight
+  init-validation-matrix
+  dispatch-candidates [SHA] | dispatch-formal [SHA] | monitor [SHA]
+  dispatch-pipeline [SHA] | dispatch-all [SHA]
   dispatch-release VERSION [SHA]
-                               Audit and dispatch EasyTier Release.
-
-Mutation commands refuse dirty, detached, unpushed, SHA-mismatched, or incomplete
-release inputs. Existing successful or active exact-SHA runs are reused. Existing
-failed runs fail closed instead of silently starting duplicates.
-
-Linux Profiling Beta is always required. Android Policy Candidate is required by
-default; set ANDROID_CANDIDATE_MODE=skip only when Android validation is outside
-the candidate scope, and record the explicit N/A or waiver in the matrix.
-
-The release version, candidate manifest, validation matrix, and user-facing release
-notes must be frozen before the first candidate dispatch. A version whose tag already
-exists is rejected so a late version bump cannot invalidate completed validation.
 EOF
 }
 
@@ -149,6 +153,72 @@ require_unpublished_version() {
     die "v${version} already exists on origin; freeze a new version before candidate validation"
 }
 
+locked_leaf_sha() {
+  sed -n 's#.*lovitus/leaf.git?rev=\([0-9a-f]\{40\}\).*#\1#p' "$REPO_ROOT/Cargo.lock" | head -1
+}
+
+pinned_hev_sha() {
+  sed -n 's/^[[:space:]]*HEV_SERVER_COMMIT:[[:space:]]*\([0-9a-f]\{40\}\).*/\1/p' \
+    "$REPO_ROOT/.github/workflows/profiling-beta.yml" | head -1
+}
+
+init_release_inputs() {
+  local version manifest matrix release_notes leaf_sha hev_sha
+  version="$(cargo_version)"
+  validate_cross_platform_version "$version" ||
+    die "Cargo version $version is not cross-platform safe"
+  require_unpublished_version
+  manifest="$(release_input_path candidate_manifest "$version")"
+  matrix="$(release_input_path validation_matrix "$version")"
+  release_notes="$REPO_ROOT/easytier/docs/release_notes/v${version}.md"
+  leaf_sha="$(locked_leaf_sha)"
+  hev_sha="$(pinned_hev_sha)"
+  [[ -n "$leaf_sha" && -n "$hev_sha" ]] || die "cannot resolve locked Leaf/HEV pins"
+
+  if [[ ! -e "$manifest" ]]; then
+    cat >"$manifest" <<EOF
+# v${version} Candidate Manifest
+
+- Status: DRAFT
+- Candidate SHA: pending immutable commit
+- Scope: TODO
+- Leaf SHA: \`$leaf_sha\`
+- HEV SHA: \`$hev_sha\`
+- Android candidate: required
+- Preflight: \`scripts/release-operator.sh prepare\`
+- Validation: \`scripts/release-operator.sh validate\`
+
+Post-build run IDs and measurements belong in the validation matrix after publication.
+EOF
+    printf 'created %s\n' "$manifest"
+  else
+    printf 'kept existing %s\n' "$manifest"
+  fi
+
+  if [[ ! -e "$matrix" ]]; then
+    init_validation_matrix
+  else
+    printf 'kept existing %s\n' "$matrix"
+  fi
+
+  if [[ ! -e "$release_notes" ]]; then
+    cat >"$release_notes" <<EOF
+# v${version}
+
+## Changes
+
+- TODO: describe user-visible changes.
+
+## Compatibility
+
+- TODO: describe compatibility boundaries and known limitations.
+EOF
+    printf 'created %s\n' "$release_notes"
+  else
+    printf 'kept existing %s\n' "$release_notes"
+  fi
+}
+
 require_exact_artifact_attestation() {
   local sha="$1"
   [[ "${EXACT_ARTIFACT_VALIDATED_SHA:-}" == "$sha" ]] ||
@@ -169,6 +239,79 @@ assert_clean_pushed_sha() {
   [[ "$remote_sha" == "$expected_sha" ]] || die "origin/$branch does not equal $expected_sha"
   require_release_inputs
   require_unpublished_version
+}
+
+changed_candidate_files() {
+  local base_ref="${PREFLIGHT_BASE:-origin/codex/current}"
+  git -C "$REPO_ROOT" rev-parse "$base_ref^{commit}" >/dev/null 2>&1 ||
+    die "cannot resolve preflight base $base_ref"
+  {
+    git -C "$REPO_ROOT" diff --name-only "$base_ref"...HEAD
+    git -C "$REPO_ROOT" diff --name-only
+    git -C "$REPO_ROOT" diff --cached --name-only
+  } | sort -u
+}
+
+automatic_preflight_scope() {
+  local changed file_name
+  local rust=false frontend=false unknown=false
+  changed="$(changed_candidate_files)"
+  [[ -n "$changed" ]] || { printf 'full\n'; return; }
+
+  while IFS= read -r file_name; do
+    case "$file_name" in
+      AGENTS.md|*.md|*/docs/*|.github/*|scripts/*)
+        ;;
+      Cargo.toml|Cargo.lock|.cargo/*|rust-toolchain*|third_party/*)
+        rust=true
+        frontend=true
+        ;;
+      easytier-web/*|easytier-gui/*|tauri-plugin-vpnservice/*|package.json|pnpm-lock.yaml|pnpm-workspace.yaml)
+        frontend=true
+        case "$file_name" in
+          *.rs|*/Cargo.toml|*/build.rs) rust=true ;;
+        esac
+        ;;
+      *.rs|*/Cargo.toml|*/build.rs|easytier/*|easytier-contrib/*)
+        rust=true
+        ;;
+      *)
+        unknown=true
+        ;;
+    esac
+  done <<<"$changed"
+
+  if [[ "$unknown" == true || ( "$rust" == true && "$frontend" == true ) ]]; then
+    printf 'full\n'
+  elif [[ "$rust" == true ]]; then
+    printf 'rust\n'
+  elif [[ "$frontend" == true ]]; then
+    printf 'frontend\n'
+  else
+    printf 'none\n'
+  fi
+}
+
+prepare_release() {
+  local scope="${PREFLIGHT_SCOPE:-auto}"
+  [[ "$scope" != none ]] || die "PREFLIGHT_SCOPE=none is not an allowed manual override"
+  require_release_inputs
+  require_unpublished_version
+  "$SCRIPT_DIR/pre-commit-check.sh"
+  if [[ "$scope" == auto ]]; then
+    scope="$(automatic_preflight_scope)"
+  fi
+  printf 'release preflight scope: %s\n' "$scope"
+  case "$scope" in
+    none) printf 'remote preflight skipped: candidate changes are documentation/release tooling only\n' ;;
+    rust) "$SCRIPT_DIR/leaf-remote-preflight.sh" ;;
+    frontend) "$SCRIPT_DIR/remote-frontend-preflight.sh" ;;
+    full)
+      "$SCRIPT_DIR/leaf-remote-preflight.sh"
+      "$SCRIPT_DIR/remote-frontend-preflight.sh"
+      ;;
+    *) die "PREFLIGHT_SCOPE must be auto, full, rust, or frontend" ;;
+  esac
 }
 
 latest_run_json() {
@@ -335,6 +478,47 @@ monitor_formal() {
   require_core_cross_targets "$(successful_run_id core.yml "$sha")"
 }
 
+retry_group() {
+  local sha="$1" group_name="$2"
+  shift 2
+  local workflows=("$@")
+  local workflow run run_id conclusion branch
+  branch="$(current_branch)"
+  for workflow in "${workflows[@]}"; do
+    run="$(latest_run_json "$workflow" "$sha")"
+    if [[ -z "$run" ]]; then
+      gh_retry workflow run "$workflow" --repo "$GH_REPO" --ref "$branch" >/dev/null
+      printf 'dispatched missing %s at %s\n' "$workflow" "$sha"
+    elif run_is_successful "$run" || run_is_active "$run"; then
+      printf 'reusing %s run %s\n' "$workflow" "$(jq -r '.databaseId' <<<"$run")"
+    else
+      run_id="$(jq -r '.databaseId' <<<"$run")"
+      conclusion="$(jq -r '.conclusion // "unknown"' <<<"$run")"
+      case "$conclusion" in
+        failure|timed_out)
+          gh_retry run rerun "$run_id" --failed --repo "$GH_REPO" >/dev/null
+          printf 'rerunning failed jobs for %s run %s\n' "$workflow" "$run_id"
+          ;;
+        cancelled|stale|action_required)
+          gh_retry run rerun "$run_id" --repo "$GH_REPO" >/dev/null
+          printf 'rerunning %s run %s after %s\n' "$workflow" "$run_id" "$conclusion"
+          ;;
+        *)
+          die "$group_name workflow $workflow cannot be retried from conclusion $conclusion"
+          ;;
+      esac
+    fi
+  done
+}
+
+retry_validation() {
+  local sha="$1"
+  retry_group "$sha" candidate "${ACTIVE_CANDIDATE_WORKFLOWS[@]}"
+  monitor_candidates "$sha"
+  retry_group "$sha" formal "${FORMAL_WORKFLOWS[@]}"
+  monitor_formal "$sha"
+}
+
 dispatch_candidates() {
   local sha="$1"
   dispatch_group "$sha" candidate "${ACTIVE_CANDIDATE_WORKFLOWS[@]}"
@@ -344,7 +528,6 @@ dispatch_candidates() {
 dispatch_formal() {
   local sha="$1"
   require_group_success "$sha" candidate "${ACTIVE_CANDIDATE_WORKFLOWS[@]}"
-  require_exact_artifact_attestation "$sha"
   dispatch_group "$sha" formal "${FORMAL_WORKFLOWS[@]}"
   monitor_formal "$sha"
 }
@@ -352,11 +535,7 @@ dispatch_formal() {
 dispatch_pipeline() {
   local sha="$1"
   dispatch_candidates "$sha"
-  if [[ "${EXACT_ARTIFACT_VALIDATED_SHA:-}" != "$sha" ]]; then
-    printf 'candidate workflows succeeded for %s; validate their exact artifacts before formal dispatch\n' "$sha"
-    printf 'resume with EXACT_ARTIFACT_VALIDATED_SHA=%s scripts/release-operator.sh dispatch-pipeline %s\n' "$sha" "$sha"
-    return 0
-  fi
+  printf 'candidate workflows passed; start exact-artifact/device validation while formal workflows run\n'
   dispatch_formal "$sha"
 }
 
@@ -395,6 +574,10 @@ main() {
   configure_candidate_mode
   case "$command" in
     -h|--help|help|'') usage ;;
+    help-advanced) advanced_usage ;;
+    version) cargo_version ;;
+    init-release) init_release_inputs ;;
+    prepare) prepare_release ;;
     status)
       need gh; need jq
       sha="${2:-$(head_sha)}"
@@ -408,15 +591,21 @@ main() {
       "$SCRIPT_DIR/remote-frontend-preflight.sh"
       ;;
     init-validation-matrix) init_validation_matrix ;;
-    dispatch-candidates|dispatch-formal|dispatch-pipeline|dispatch-all)
+    validate|dispatch-candidates|dispatch-formal|dispatch-pipeline|dispatch-all)
       need gh; need jq
       sha="${2:-$(head_sha)}"
       assert_clean_pushed_sha "$sha"
       case "$command" in
         dispatch-candidates) dispatch_candidates "$sha" ;;
         dispatch-formal) dispatch_formal "$sha" ;;
-        dispatch-pipeline|dispatch-all) dispatch_pipeline "$sha" ;;
+        validate|dispatch-pipeline|dispatch-all) dispatch_pipeline "$sha" ;;
       esac
+      ;;
+    retry)
+      need gh; need jq
+      sha="${2:-$(head_sha)}"
+      assert_clean_pushed_sha "$sha"
+      retry_validation "$sha"
       ;;
     monitor)
       need gh; need jq
@@ -441,7 +630,7 @@ main() {
       require_core_cross_targets "$core_run"
       dispatch_group "$sha" diagnostic gui.yml mobile.yml ohos.yml test.yml
       ;;
-    dispatch-release)
+    publish|dispatch-release)
       need gh; need jq
       version="${2:-}"
       [[ "$version" == v* ]] || die "VERSION must start with v"

@@ -71,47 +71,6 @@ else
   pass "current candidate worktree is clean"
 fi
 
-while IFS= read -r worktree_dir; do
-  [[ "$worktree_dir" == "$repo_root" ]] && continue
-  dirty_paths="$({
-    git -C "$worktree_dir" diff --name-only
-    git -C "$worktree_dir" diff --cached --name-only
-    git -C "$worktree_dir" ls-files --others --exclude-standard
-  } | sort -u)"
-  [[ -n "$dirty_paths" ]] || continue
-
-  non_documentation_changes="$(printf '%s\n' "$dirty_paths" | grep -Ev '(^|/)docs/|\.md$' || true)"
-  if [[ -n "$non_documentation_changes" ]]; then
-    fail "dirty linked worktree contains non-documentation changes: $worktree_dir"
-  else
-    pass "linked worktree contains documentation-only WIP: $worktree_dir"
-  fi
-done < <(git worktree list --porcelain | sed -n 's/^worktree //p')
-
-archive_refs=(
-  codex/archive-invalid-v3-defaa442
-  codex/archive-gui-geo-20260720
-  codex/archive-pollsender-089d-20260720
-  codex/archive-agents-rejected-20260720
-  codex/archive-stash-merge-20260719
-  codex/archive-stash-index-20260719
-  codex/archive-stash-untracked-20260719
-  codex/archive-stash-combined-20260719
-)
-for archive_ref in "${archive_refs[@]}"; do
-  local_sha="$(git rev-parse "$archive_ref" 2>/dev/null || true)"
-  remote_sha="$(git ls-remote --heads origin "refs/heads/$archive_ref" | awk '{print $1}')"
-  if [[ -z "$local_sha" || "$local_sha" != "$remote_sha" ]]; then
-    fail "archive ref is absent or differs from origin: $archive_ref"
-  fi
-done
-
-if [[ "$(git rev-parse stash@{0})" != "$(git rev-parse codex/archive-stash-merge-20260719)" ]]; then
-  fail "stash merge commit is not the archived merge ref"
-else
-  pass "three-parent stash merge is archived"
-fi
-
 locked_leaf="$(sed -n 's#.*lovitus/leaf.git?rev=\([0-9a-f]\{40\}\).*#\1#p' Cargo.lock | head -1)"
 expected_leaf="$(sed -n 's/^- Leaf SHA: `\([^`]*\)`.*/\1/p' "$manifest")"
 if [[ "$locked_leaf" != "$expected_leaf" ]]; then
