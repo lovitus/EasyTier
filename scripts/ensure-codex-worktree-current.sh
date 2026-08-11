@@ -44,33 +44,16 @@ if [[ -n "$dirty" ]]; then
     exit 1
 fi
 
-# Tags provide the immutable release boundary. The matching release branch may
-# contain documentation-only evidence after the tag, so prefer its head only
-# when the tag is an ancestor of that branch.
-git fetch --quiet origin '+refs/tags/v*:refs/tags/v*'
-latest_tag=$(
-    git for-each-ref --sort=-version:refname --format='%(refname:short)' 'refs/tags/v*' |
-        awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }'
-)
-if [[ -z "$latest_tag" ]]; then
-    echo "worktree guard: no stable vX.Y.Z release tag is available from origin" >&2
+# codex/current is the sole accepted integration pointer. Release and evidence
+# branches advance it only after validation, so tags and version-named worktrees
+# are immutable evidence rather than competing definitions of "current".
+remote_current_ref="refs/heads/codex/current"
+if [[ -z "$(git ls-remote --heads origin "$remote_current_ref")" ]]; then
+    echo "worktree guard: origin/codex/current is unavailable" >&2
     exit 1
 fi
-
-target_ref="$latest_tag"
-release_branch="codex/${latest_tag}-release"
-remote_release_ref="refs/heads/$release_branch"
-remote_release=$(git ls-remote --heads origin "$remote_release_ref")
-if [[ -n "$remote_release" ]]; then
-    git fetch --quiet origin "+${remote_release_ref}:refs/remotes/origin/${release_branch}"
-    candidate_ref="refs/remotes/origin/$release_branch"
-    if git merge-base --is-ancestor "$latest_tag" "$candidate_ref"; then
-        target_ref="$candidate_ref"
-    else
-        echo "worktree guard: $release_branch does not contain $latest_tag" >&2
-        exit 1
-    fi
-fi
+git fetch --quiet origin "+${remote_current_ref}:refs/remotes/origin/codex/current"
+target_ref="refs/remotes/origin/codex/current"
 
 head_sha=$(git rev-parse HEAD)
 target_sha=$(git rev-parse "$target_ref^{commit}")
