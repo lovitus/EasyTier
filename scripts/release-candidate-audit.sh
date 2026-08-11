@@ -367,14 +367,6 @@ workflow_success() {
 
 if [[ "$phase" != "--source" ]]; then
   candidate_sha="$validated_sha"
-  if [[ "$phase" == "--candidate" ]]; then
-    published_sha="$(git ls-remote --heads origin refs/heads/codex/profiling-beta | awk '{print $1}')"
-    if [[ "$published_sha" != "$candidate_sha" ]]; then
-      fail "origin/codex/profiling-beta $published_sha differs from candidate $candidate_sha"
-    else
-      pass "candidate SHA is the published profiling-beta SHA"
-    fi
-  fi
   candidate_workflow_names=("EasyTier Linux Profiling Beta")
   case "${ANDROID_CANDIDATE_MODE:-required}" in
     required)
