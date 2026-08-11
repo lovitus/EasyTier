@@ -1757,7 +1757,16 @@ pub fn run_gui() -> std::process::ExitCode {
         .build(tauri::generate_context!())
         .unwrap();
 
-    app.run(|_app, _event| {});
+    app.run(|_app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let mut manager = INSTANCE_MANAGER
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(manager) = manager.take() {
+                manager.shutdown_and_persist_instances();
+            }
+        }
+    });
 
     std::process::ExitCode::SUCCESS
 }

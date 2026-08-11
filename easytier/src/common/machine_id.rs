@@ -65,6 +65,10 @@ fn resolve_machine_id_state_file(state_dir: Option<&Path>) -> anyhow::Result<Pat
     Ok(state_dir.join("machine_id"))
 }
 
+pub fn default_state_dir() -> anyhow::Result<PathBuf> {
+    default_machine_id_state_dir()
+}
+
 fn non_empty_os_string(value: Option<OsString>) -> Option<OsString> {
     value.filter(|value| !value.is_empty())
 }

@@ -23,6 +23,7 @@ pub mod netns;
 pub mod network;
 pub mod os_info;
 pub(crate) mod p2p_endpoint_retry;
+pub mod retry_backoff;
 pub mod stats_manager;
 pub mod stealth_registry;
 pub mod stun;
@@ -33,7 +34,7 @@ pub mod transport_priority;
 pub mod underlay_guard;
 pub mod upnp;
 
-pub use machine_id::{MachineIdOptions, resolve_machine_id};
+pub use machine_id::{MachineIdOptions, default_state_dir, resolve_machine_id};
 
 pub fn get_logger_timer<F: time::formatting::Formattable>(
     format: F,

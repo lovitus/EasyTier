@@ -36,6 +36,10 @@ use crate::{
 
 const BOOTSTRAP_PEER_DIR: &str = "peer-bootstrap";
 
+fn bootstrap_peer_url_supported(url: &url::Url) -> bool {
+    url.scheme() != "ring" && crate::tunnel::TunnelScheme::try_from(url).is_ok()
+}
+
 fn bootstrap_peer_cache_key(identity: &NetworkIdentity) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"easytier-bootstrap-peer-v1\0");
@@ -68,6 +72,22 @@ fn bootstrap_peer_cache_path(config_dir: &Path, identity: &NetworkIdentity) -> P
         .join(format!("{}.txt", bootstrap_peer_cache_key(identity)))
 }
 
+fn bootstrap_peer_backup_path(config_dir: &Path, identity: &NetworkIdentity) -> PathBuf {
+    bootstrap_peer_cache_path(config_dir, identity).with_extension("txt.bak")
+}
+
+fn read_bootstrap_peer_urls(path: &Path) -> std::io::Result<Vec<url::Url>> {
+    let contents = std::fs::read_to_string(path)?;
+    let mut urls = contents
+        .lines()
+        .filter_map(|line| line.trim().parse::<url::Url>().ok())
+        .filter(bootstrap_peer_url_supported)
+        .collect::<Vec<_>>();
+    urls.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    urls.dedup();
+    Ok(urls)
+}
+
 fn load_bootstrap_peer_urls(
     config_dir: Option<&Path>,
     identity: &NetworkIdentity,
@@ -75,20 +95,23 @@ fn load_bootstrap_peer_urls(
     let Some(config_dir) = config_dir else {
         return Ok(Vec::new());
     };
-    let contents = match std::fs::read_to_string(bootstrap_peer_cache_path(config_dir, identity)) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
+    let primary_path = bootstrap_peer_cache_path(config_dir, identity);
+    let primary = read_bootstrap_peer_urls(&primary_path);
+    if let Ok(urls) = &primary
+        && !urls.is_empty()
+    {
+        return Ok(urls.clone());
+    }
 
-    let mut urls = contents
-        .lines()
-        .filter_map(|line| line.trim().parse::<url::Url>().ok())
-        .filter(|url| url.scheme() != "ring")
-        .collect::<Vec<_>>();
-    urls.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-    urls.dedup();
-    Ok(urls)
+    let backup = read_bootstrap_peer_urls(&bootstrap_peer_backup_path(config_dir, identity));
+    match backup {
+        Ok(urls) if !urls.is_empty() => Ok(urls),
+        _ => match primary {
+            Ok(urls) => Ok(urls),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error),
+        },
+    }
 }
 
 fn persist_bootstrap_peer_urls(
@@ -101,7 +124,7 @@ fn persist_bootstrap_peer_urls(
     };
     let mut urls = urls
         .iter()
-        .filter(|url| url.scheme() != "ring")
+        .filter(|url| bootstrap_peer_url_supported(url))
         .map(url::Url::as_str)
         .collect::<Vec<_>>();
     urls.sort_unstable();
@@ -111,8 +134,28 @@ fn persist_bootstrap_peer_urls(
     }
 
     let path = bootstrap_peer_cache_path(config_dir, identity);
+    let previous_urls = match read_bootstrap_peer_urls(&path) {
+        Ok(urls) => urls,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    let previous = previous_urls
+        .iter()
+        .map(url::Url::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let next = urls
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    if next == previous || (next.len() < previous.len() && next.is_subset(&previous)) {
+        return Ok(());
+    }
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+    if !previous.is_empty() {
+        std::fs::copy(&path, bootstrap_peer_backup_path(config_dir, identity))?;
     }
     let mut contents = urls.join("\n");
     contents.push('\n');
@@ -781,6 +824,7 @@ pub struct NetworkInstanceManager {
     stop_check_notifier: Arc<tokio::sync::Notify>,
     instance_error_messages: Arc<DashMap<uuid::Uuid, String>>,
     config_dir: OnceLock<PathBuf>,
+    bootstrap_state_dir: OnceLock<PathBuf>,
     guard_counter: Arc<()>,
     remote_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     mihomo_owner: Arc<MihomoCoreOwner>,
@@ -822,6 +866,7 @@ impl NetworkInstanceManager {
             stop_check_notifier: Arc::new(tokio::sync::Notify::new()),
             instance_error_messages: Arc::new(DashMap::new()),
             config_dir: OnceLock::new(),
+            bootstrap_state_dir: OnceLock::new(),
             guard_counter: Arc::new(()),
             remote_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             mihomo_owner: MihomoCoreOwner::global(),
@@ -836,6 +881,31 @@ impl NetworkInstanceManager {
             let _ = self.config_dir.set(config_dir);
         }
         self
+    }
+
+    pub fn with_bootstrap_state_path(self, state_dir: Option<PathBuf>) -> Self {
+        if let Some(state_dir) = state_dir {
+            let _ = self.bootstrap_state_dir.set(state_dir);
+        }
+        self
+    }
+
+    pub fn set_bootstrap_state_path(&self, state_dir: PathBuf) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !state_dir.as_os_str().is_empty(),
+            "bootstrap state path is empty"
+        );
+        if let Some(existing) = self.bootstrap_state_dir.get() {
+            anyhow::ensure!(
+                existing == &state_dir,
+                "bootstrap state path is already initialized as {}",
+                existing.display()
+            );
+            return Ok(());
+        }
+        self.bootstrap_state_dir
+            .set(state_dir)
+            .map_err(|_| anyhow::anyhow!("bootstrap state path was initialized concurrently"))
     }
 
     pub fn set_config_path(&self, config_dir: PathBuf) -> anyhow::Result<()> {
@@ -958,7 +1028,7 @@ impl NetworkInstanceManager {
             crate::common::dns::set_control_plane_socket_mark(Some(mark));
         }
         let runtime_initial_peers = match load_bootstrap_peer_urls(
-            self.get_config_dir().map(PathBuf::as_path),
+            self.get_bootstrap_state_dir().map(PathBuf::as_path),
             &cfg.get_network_identity(),
         ) {
             Ok(peers) => peers,
@@ -1449,6 +1519,12 @@ impl NetworkInstanceManager {
         self.config_dir.get()
     }
 
+    pub fn get_bootstrap_state_dir(&self) -> Option<&PathBuf> {
+        self.bootstrap_state_dir
+            .get()
+            .or_else(|| self.config_dir.get())
+    }
+
     fn remove_instance_and_persist_bootstrap(&self, instance_id: uuid::Uuid) {
         let Some((_, mut instance)) = self.instance_map.remove(&instance_id) else {
             return;
@@ -1456,12 +1532,22 @@ impl NetworkInstanceManager {
         let identity = instance.get_config().get_network_identity();
         let urls = instance.stop_and_take_bootstrap_peer_urls();
         if let Err(error) = persist_bootstrap_peer_urls(
-            self.get_config_dir().map(PathBuf::as_path),
+            self.get_bootstrap_state_dir().map(PathBuf::as_path),
             &identity,
             &urls,
         ) {
             log::warn!(%error, %instance_id, "failed to persist auxiliary bootstrap peer snapshot");
         }
+    }
+
+    pub fn shutdown_and_persist_instances(&self) {
+        for instance_id in self.list_network_instance_ids() {
+            if let Err(error) = self.mihomo_owner.stop(instance_id) {
+                log::warn!(%error, %instance_id, "failed to stop Mihomo during manager shutdown");
+            }
+            self.remove_instance_and_persist_bootstrap(instance_id);
+        }
+        self.instance_map.shrink_to_fit();
     }
 
     pub(crate) fn register_daemon(&self) -> DaemonGuard {
@@ -1494,10 +1580,7 @@ impl NetworkInstanceManager {
 
 impl Drop for NetworkInstanceManager {
     fn drop(&mut self) {
-        for instance_id in self.list_network_instance_ids() {
-            let _ = self.mihomo_owner.stop(instance_id);
-            self.remove_instance_and_persist_bootstrap(instance_id);
-        }
+        self.shutdown_and_persist_instances();
     }
 }
 
@@ -1849,7 +1932,7 @@ outbound_interface = "eth0"
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "not-a-url\nring://local-only\ntcp://192.0.2.2:11010\ntcp://192.0.2.2:11010\n",
+            "not-a-url\nring://local-only\nunsupported://192.0.2.9:1\ntcp://192.0.2.2:11010\ntcp://192.0.2.2:11010\n",
         )
         .unwrap();
         let loaded = load_bootstrap_peer_urls(Some(temp.path()), &shared).unwrap();
@@ -1877,7 +1960,50 @@ outbound_interface = "eth0"
         assert_eq!(contents, "tcp://192.0.2.2:11010\nudp://192.0.2.3:11010\n");
 
         persist_bootstrap_peer_urls(Some(temp.path()), &identity, &[]).unwrap();
-        assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+
+        persist_bootstrap_peer_urls(Some(temp.path()), &identity, &first).unwrap();
+        assert!(!bootstrap_peer_backup_path(temp.path(), &identity).exists());
+
+        let subset = vec!["tcp://192.0.2.2:11010".parse().unwrap()];
+        persist_bootstrap_peer_urls(Some(temp.path()), &identity, &subset).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        assert!(!bootstrap_peer_backup_path(temp.path(), &identity).exists());
+
+        let changed = vec![
+            "tcp://192.0.2.2:11010".parse().unwrap(),
+            "udp://192.0.2.4:11010".parse().unwrap(),
+        ];
+        persist_bootstrap_peer_urls(Some(temp.path()), &identity, &changed).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(bootstrap_peer_backup_path(temp.path(), &identity)).unwrap(),
+            contents
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "tcp://192.0.2.2:11010\nudp://192.0.2.4:11010\n"
+        );
+    }
+
+    #[test]
+    fn bootstrap_primary_is_preferred_and_invalid_primary_falls_back_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let identity = NetworkIdentity::new("mesh".to_owned(), "secret".to_owned());
+        let primary = bootstrap_peer_cache_path(temp.path(), &identity);
+        let backup = bootstrap_peer_backup_path(temp.path(), &identity);
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        std::fs::write(&primary, "tcp://192.0.2.1:11010\n").unwrap();
+        std::fs::write(&backup, "tcp://192.0.2.2:11010\n").unwrap();
+        assert_eq!(
+            load_bootstrap_peer_urls(Some(temp.path()), &identity).unwrap(),
+            vec!["tcp://192.0.2.1:11010".parse().unwrap()]
+        );
+
+        std::fs::write(&primary, "ring://local\nunsupported://host\n").unwrap();
+        assert_eq!(
+            load_bootstrap_peer_urls(Some(temp.path()), &identity).unwrap(),
+            vec!["tcp://192.0.2.2:11010".parse().unwrap()]
+        );
     }
 
     #[test]

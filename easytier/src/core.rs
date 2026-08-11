@@ -1457,10 +1457,10 @@ fn win_service_event_loop(
     use tokio::runtime::Runtime;
     use windows_service::service::*;
 
-    let normal_status = ServiceStatus {
+    let stopped_status = ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
+        current_state: ServiceState::Stopped,
+        controls_accepted: ServiceControlAccept::empty(),
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
         wait_hint: Duration::default(),
@@ -1478,26 +1478,17 @@ fn win_service_event_loop(
 
     std::thread::spawn(move || {
         let rt = Runtime::new().unwrap();
-        rt.block_on(async move {
-            tokio::select! {
-                res = run_main(cli) => {
-                    match res {
-                        Ok(_) => {
-                            status_handle.set_service_status(normal_status).unwrap();
-                            std::process::exit(0);
-                        }
-                        Err(error) => {
-                            status_handle.set_service_status(error_status).unwrap();
-                            log::error!(?error);
-                        }
-                    }
-                },
-                _ = stop_notify.notified() => {
-                    _ = status_handle.set_service_status(normal_status);
-                    std::process::exit(0);
-                }
+        let result = rt.block_on(run_main_with_service_stop(cli, Some(stop_notify)));
+        match result {
+            Ok(_) => {
+                status_handle.set_service_status(stopped_status).unwrap();
+                std::process::exit(0);
             }
-        });
+            Err(error) => {
+                status_handle.set_service_status(error_status).unwrap();
+                log::error!(?error);
+            }
+        }
     });
 }
 
@@ -1553,6 +1544,13 @@ fn win_service_main(arg: Vec<std::ffi::OsString>) {
 }
 
 async fn run_main(cli: Cli) -> anyhow::Result<()> {
+    run_main_with_service_stop(cli, None).await
+}
+
+async fn run_main_with_service_stop(
+    cli: Cli,
+    service_stop: Option<std::sync::Arc<tokio::sync::Notify>>,
+) -> anyhow::Result<()> {
     defer!(dump_profile(0););
     log::init(&cli.logging_options, true)?;
     // Register Unix termination handlers before starting any network instance
@@ -1602,9 +1600,20 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
         )?;
     }
 
+    let bootstrap_state_dir =
+        cli.config_dir
+            .clone()
+            .or_else(|| match crate::common::default_state_dir() {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    log::warn!(%error, "bootstrap peer persistence is unavailable");
+                    None
+                }
+            });
     let manager = Arc::new(
         NetworkInstanceManager::new()
             .with_config_path(cli.config_dir.clone())
+            .with_bootstrap_state_path(bootstrap_state_dir)
             .with_nic_backend(cli.nic_backend()),
     );
     struct MihomoOwnerShutdownGuard(Arc<NetworkInstanceManager>);
@@ -1763,6 +1772,13 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     let sigint = sigint.recv();
     #[cfg(not(unix))]
     let sigint = tokio::signal::ctrl_c();
+    let service_stop = async move {
+        if let Some(stop) = service_stop {
+            stop.notified().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
 
     tokio::select! {
         _ = manager.wait() => {
@@ -1780,7 +1796,11 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
         _ = sigterm, if cfg!(unix) => {
             log::warn!("terminate signal received, exiting...");
         }
+        _ = service_stop => {
+            log::info!("service stop received, exiting...");
+        }
     }
+    manager.shutdown_and_persist_instances();
     Ok(())
 }
 
