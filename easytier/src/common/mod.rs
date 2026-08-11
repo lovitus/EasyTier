@@ -23,7 +23,6 @@ pub mod netns;
 pub mod network;
 pub mod os_info;
 pub(crate) mod p2p_endpoint_retry;
-pub mod retry_backoff;
 pub mod stats_manager;
 pub mod stealth_registry;
 pub mod stun;

@@ -1,19 +1,16 @@
 use std::{
     collections::BTreeSet,
     future::Future,
-    sync::{
-        Arc, Weak,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Weak},
     time::Duration,
 };
 
 use dashmap::DashSet;
 use hotpath::instant::Instant;
-use tokio::{sync::Notify, task::JoinSet, time::timeout};
+use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 
 use crate::{
-    common::{PeerId, dns::socket_addrs, retry_backoff::BackOff},
+    common::{PeerId, dns::socket_addrs, join_joinset_background},
     peers::peer_conn::PeerConnId,
     proto::{
         api::instance::{
@@ -40,9 +37,6 @@ use super::create_connector_by_url;
 
 type ConnectorMap = Arc<DashSet<url::Url>>;
 
-const MANUAL_CONNECTOR_RETRY_BACKOFF_MS: [u64; 7] =
-    [1_000, 10_000, 30_000, 60_000, 120_000, 360_000, 720_000];
-
 #[derive(Debug, Clone)]
 struct ReconnResult {
     dead_url: String,
@@ -57,8 +51,6 @@ struct ConnectorManagerData {
     alive_conn_urls: Arc<DashSet<url::Url>>,
     // user removed connector urls
     removed_conn_urls: Arc<DashSet<url::Url>>,
-    retry_generation: AtomicUsize,
-    retry_wakeup: Notify,
     net_ns: NetNS,
     global_ctx: ArcGlobalCtx,
 }
@@ -82,8 +74,6 @@ impl ManualConnectorManager {
                 peer_manager: Arc::downgrade(&peer_manager),
                 alive_conn_urls: Arc::new(DashSet::new()),
                 removed_conn_urls: Arc::new(DashSet::new()),
-                retry_generation: AtomicUsize::new(0),
-                retry_wakeup: Notify::new(),
                 net_ns: global_ctx.net_ns.clone(),
                 global_ctx,
             }),
@@ -137,54 +127,6 @@ impl ManualConnectorManager {
         Error::AnyhowError(anyhow::anyhow!("{} timeout after {:?}", stage, duration))
     }
 
-    fn notify_retry_change(data: &ConnectorManagerData) {
-        data.retry_generation.fetch_add(1, Ordering::Relaxed);
-        data.retry_wakeup.notify_one();
-    }
-
-    fn resets_retry_backoff(event: &GlobalCtxEvent) -> bool {
-        matches!(
-            event,
-            GlobalCtxEvent::DhcpIpv4Changed(_, _)
-                | GlobalCtxEvent::DhcpIpv4Conflicted(_)
-                | GlobalCtxEvent::PublicIpv6Changed(_, _)
-                | GlobalCtxEvent::ConfigPatched(_)
-        )
-    }
-
-    async fn wait_for_retry_deadline(
-        data: &ConnectorManagerData,
-        events: &mut crate::common::global_ctx::EventBusSubscriber,
-        delay: Duration,
-        observed_generation: usize,
-    ) -> bool {
-        let deadline = tokio::time::Instant::now() + delay;
-        loop {
-            if data.retry_generation.load(Ordering::Relaxed) != observed_generation {
-                return true;
-            }
-            tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => return false,
-                _ = data.retry_wakeup.notified() => {
-                    if data.retry_generation.load(Ordering::Relaxed) != observed_generation {
-                        return true;
-                    }
-                }
-                event = events.recv() => match event {
-                    Ok(event) if Self::resets_retry_backoff(&event) => return true,
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        *events = events.resubscribe();
-                        return true;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        return false;
-                    }
-                }
-            }
-        }
-    }
-
     async fn with_reconnect_timeout<T, F>(
         stage: &'static str,
         started_at: Instant,
@@ -208,15 +150,11 @@ impl ManualConnectorManager {
         T: TunnelConnector + 'static,
     {
         tracing::info!("add_connector: {}", connector.remote_url());
-        if self.data.connectors.insert(connector.remote_url()) {
-            Self::notify_retry_change(&self.data);
-        }
+        self.data.connectors.insert(connector.remote_url());
     }
 
     pub async fn add_connector_by_url(&self, url: url::Url) -> Result<(), Error> {
-        if self.data.connectors.insert(url) {
-            Self::notify_retry_change(&self.data);
-        }
+        self.data.connectors.insert(url);
         Ok(())
     }
 
@@ -232,7 +170,6 @@ impl ManualConnectorManager {
             return Err(Error::NotFound);
         }
         self.data.removed_conn_urls.insert(url.into());
-        Self::notify_retry_change(&self.data);
         Ok(())
     }
 
@@ -242,7 +179,6 @@ impl ManualConnectorManager {
                 self.data.removed_conn_urls.insert(url.clone().into());
             }
         });
-        Self::notify_retry_change(&self.data);
     }
 
     pub async fn list_connectors(&self) -> Vec<Connector> {
@@ -286,71 +222,42 @@ impl ManualConnectorManager {
 
     async fn conn_mgr_reconn_routine(data: Arc<ConnectorManagerData>) {
         tracing::warn!("conn_mgr_routine started");
-        let mut events = data.global_ctx.subscribe();
-        let mut backoff = BackOff::new(MANUAL_CONNECTOR_RETRY_BACKOFF_MS.to_vec());
-        let mut next_delay = None;
-        let mut observed_generation = data.retry_generation.load(Ordering::Relaxed);
+        let mut reconn_interval = tokio::time::interval(std::time::Duration::from_millis(
+            use_global_var!(MANUAL_CONNECTOR_RECONNECT_INTERVAL_MS),
+        ));
+        let (reconn_result_send, mut reconn_result_recv) = mpsc::channel(100);
+        let tasks = Arc::new(std::sync::Mutex::new(JoinSet::new()));
+        join_joinset_background(tasks.clone(), "connector_reconnect_tasks".to_string());
+
         loop {
-            if let Some(delay) = next_delay.take()
-                && Self::wait_for_retry_deadline(&data, &mut events, delay, observed_generation)
-                    .await
-            {
-                backoff.reset();
-            }
+            tokio::select! {
+                _ = reconn_interval.tick() => {
+                    let dead_urls = Self::collect_dead_conns(data.clone()).await;
+                    if dead_urls.is_empty() {
+                        continue;
+                    }
+                    for dead_url in dead_urls {
+                        let data_clone = data.clone();
+                        let sender = reconn_result_send.clone();
+                        data.connectors.remove(&dead_url).unwrap();
+                        let insert_succ = data.reconnecting.insert(dead_url.clone());
+                        assert!(insert_succ);
 
-            // Keep the generation observed at batch start. A connector added or
-            // removed while this batch is in flight must wake the next iteration
-            // instead of being treated as already processed.
-            let batch_generation = data.retry_generation.load(Ordering::Relaxed);
-            let dead_urls = Self::collect_dead_conns(data.clone()).await;
-            if dead_urls.is_empty() {
-                backoff.reset();
-                observed_generation = batch_generation;
-                next_delay = Some(Duration::from_millis(use_global_var!(
-                    MANUAL_CONNECTOR_RECONNECT_INTERVAL_MS
-                )));
-                continue;
-            }
+                        tasks.lock().unwrap().spawn(async move {
+                            let reconn_ret = Self::conn_reconnect(data_clone.clone(), dead_url.clone() ).await;
+                            let _ = sender.send(reconn_ret).await;
 
-            let mut tasks = JoinSet::new();
-            for dead_url in dead_urls {
-                if data.connectors.remove(&dead_url).is_none()
-                    || !data.reconnecting.insert(dead_url.clone())
-                {
-                    continue;
+                            data_clone.reconnecting.remove(&dead_url).unwrap();
+                            data_clone.connectors.insert(dead_url.clone());
+                        });
+                    }
+                    tracing::info!("reconn_interval tick, done");
                 }
-                let data_clone = data.clone();
-                tasks.spawn(async move {
-                    let result = Self::conn_reconnect(data_clone, dead_url.clone()).await;
-                    (dead_url, result)
-                });
-            }
 
-            while let Some(joined) = tasks.join_next().await {
-                match joined {
-                    Ok((url, result)) => {
-                        data.reconnecting.remove(&url);
-                        if !data.removed_conn_urls.contains(&url) {
-                            data.connectors.insert(url.clone());
-                        }
-                        tracing::warn!(?url, ?result, "connector retry batch item completed");
-                    }
-                    Err(error) => {
-                        tracing::error!(?error, "connector retry batch task failed");
-                    }
+                ret = reconn_result_recv.recv() => {
+                    tracing::warn!("reconn_tasks done, reconn result: {:?}", ret);
                 }
             }
-
-            let failures_remain = !Self::collect_dead_conns(data.clone()).await.is_empty();
-            if failures_remain {
-                next_delay = Some(Duration::from_millis(backoff.next_backoff_with_jitter()));
-            } else {
-                backoff.reset();
-                next_delay = Some(Duration::from_millis(use_global_var!(
-                    MANUAL_CONNECTOR_RECONNECT_INTERVAL_MS
-                )));
-            }
-            observed_generation = batch_generation;
         }
     }
 

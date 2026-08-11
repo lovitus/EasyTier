@@ -174,7 +174,46 @@ impl UdpHolePunchRpc for UdpHolePunchServer {
     }
 }
 
-pub use crate::common::retry_backoff::BackOff;
+#[derive(Debug)]
+pub struct BackOff {
+    backoffs_ms: Vec<u64>,
+    current_idx: usize,
+}
+
+impl BackOff {
+    pub fn new(backoffs_ms: Vec<u64>) -> Self {
+        Self {
+            backoffs_ms,
+            current_idx: 0,
+        }
+    }
+
+    pub fn next_backoff(&mut self) -> u64 {
+        let backoff = self.backoffs_ms[self.current_idx];
+        self.current_idx = (self.current_idx + 1).min(self.backoffs_ms.len() - 1);
+        backoff
+    }
+
+    pub fn rollback(&mut self) {
+        self.current_idx = self.current_idx.saturating_sub(1);
+    }
+
+    /// True only after the existing retry ramp has reached its final delay.
+    ///
+    /// Endpoint cooldown uses this boundary so it suppresses indefinite
+    /// steady-state retries without removing any of the protocol's original
+    /// warm-up rounds.
+    pub fn is_saturated(&self) -> bool {
+        self.current_idx == self.backoffs_ms.len() - 1
+    }
+
+    pub async fn sleep_for_next_backoff(&mut self) {
+        let backoff = self.next_backoff();
+        if backoff > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(backoff)).await;
+        }
+    }
+}
 
 pub fn handle_rpc_result<T>(
     ret: Result<T, rpc_types::error::Error>,

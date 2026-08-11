@@ -78,7 +78,7 @@ impl PeerMap {
         let close_notifier = peer_conn.get_close_notifier();
         let alive_conns_weak = Arc::downgrade(&self.alive_client_urls);
         let conn_id = close_notifier.get_conn_id();
-        let alive_client_url = bootstrap_url_from_conn_info(&conn_info)?;
+        let alive_client_url = live_client_url_from_conn_info(&conn_info)?;
         self.alive_client_urls
             .lock()
             .insert(alive_client_url.clone(), conn_id);
@@ -121,7 +121,7 @@ impl PeerMap {
             .alive_client_urls
             .lock()
             .keys()
-            .filter(|url| url.scheme() != "ring")
+            .filter(|url| is_persistable_bootstrap_url(url))
             .cloned()
             .collect::<Vec<_>>();
         urls.sort_by(|left, right| left.as_str().cmp(right.as_str()));
@@ -444,7 +444,7 @@ impl PeerMap {
     }
 }
 
-fn bootstrap_url_from_conn_info(conn_info: &PeerConnInfo) -> Option<url::Url> {
+fn live_client_url_from_conn_info(conn_info: &PeerConnInfo) -> Option<url::Url> {
     if !conn_info.is_client || conn_info.is_closed {
         return None;
     }
@@ -454,8 +454,11 @@ fn bootstrap_url_from_conn_info(conn_info: &PeerConnInfo) -> Option<url::Url> {
         .remote_addr
         .as_ref()
         .or(tunnel.resolved_remote_addr.as_ref())?;
-    let url: url::Url = remote.clone().into();
-    (url.scheme() != "ring").then_some(url)
+    Some(remote.clone().into())
+}
+
+fn is_persistable_bootstrap_url(url: &url::Url) -> bool {
+    url.scheme() != "ring"
 }
 
 impl Drop for PeerMap {
@@ -493,7 +496,7 @@ mod bootstrap_peer_tests {
     }
 
     #[test]
-    fn bootstrap_url_uses_live_client_remote_then_resolved_fallback() {
+    fn live_client_url_uses_remote_then_resolved_fallback() {
         let original = conn_info(
             true,
             false,
@@ -501,21 +504,21 @@ mod bootstrap_peer_tests {
             Some("tcp://192.0.2.10:11010"),
         );
         assert_eq!(
-            bootstrap_url_from_conn_info(&original).unwrap().as_str(),
+            live_client_url_from_conn_info(&original).unwrap().as_str(),
             "txt://peer.example/path?transport=tcp"
         );
 
         let resolved = conn_info(true, false, None, Some("tcp://192.0.2.10:11010"));
         assert_eq!(
-            bootstrap_url_from_conn_info(&resolved).unwrap().as_str(),
+            live_client_url_from_conn_info(&resolved).unwrap().as_str(),
             "tcp://192.0.2.10:11010"
         );
     }
 
     #[test]
-    fn bootstrap_url_excludes_inbound_closed_missing_and_ring_connections() {
+    fn live_client_url_excludes_inbound_closed_and_missing_connections() {
         assert!(
-            bootstrap_url_from_conn_info(&conn_info(
+            live_client_url_from_conn_info(&conn_info(
                 false,
                 false,
                 Some("tcp://192.0.2.10:11010"),
@@ -524,7 +527,7 @@ mod bootstrap_peer_tests {
             .is_none()
         );
         assert!(
-            bootstrap_url_from_conn_info(&conn_info(
+            live_client_url_from_conn_info(&conn_info(
                 true,
                 true,
                 Some("tcp://192.0.2.10:11010"),
@@ -532,15 +535,27 @@ mod bootstrap_peer_tests {
             ))
             .is_none()
         );
-        assert!(bootstrap_url_from_conn_info(&conn_info(true, false, None, None)).is_none());
-        assert!(
-            bootstrap_url_from_conn_info(&conn_info(
+        assert!(live_client_url_from_conn_info(&conn_info(true, false, None, None)).is_none());
+        assert_eq!(
+            live_client_url_from_conn_info(&conn_info(
                 true,
                 false,
                 Some("ring://bootstrap-test"),
                 None,
             ))
-            .is_none()
+            .unwrap()
+            .as_str(),
+            "ring://bootstrap-test"
         );
+    }
+
+    #[test]
+    fn bootstrap_persistence_excludes_ring_but_keeps_network_urls() {
+        assert!(!is_persistable_bootstrap_url(
+            &"ring://bootstrap-test".parse().unwrap()
+        ));
+        assert!(is_persistable_bootstrap_url(
+            &"tcp://192.0.2.10:11010".parse().unwrap()
+        ));
     }
 }

@@ -1925,13 +1925,6 @@ pub async fn proxy_three_node_disconnect_test(#[values("tcp", "wg")] proto: &str
             .await;
 
             set_link_status("net_d", true);
-            // set_link_status() only mutates the test namespace and does not emit
-            // the platform network-change event that resets connector backoff in
-            // production. Model that event so recovery is tested without waiting
-            // for the next scheduled cooldown attempt.
-            inst4.get_global_ctx().issue_event(
-                crate::common::global_ctx::GlobalCtxEvent::DhcpIpv4Changed(None, None),
-            );
         }
 
         drop_insts(insts).await;

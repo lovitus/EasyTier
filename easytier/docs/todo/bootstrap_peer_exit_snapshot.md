@@ -1,6 +1,6 @@
 # Bootstrap Peer Exit Snapshot
 
-Status: IMPLEMENTED; EXACT-ARTIFACT AND NATIVE PLATFORM VALIDATION PENDING
+Status: PERSISTENCE IMPLEMENTED; MANAGER-WIDE COOLDOWN REJECTED; PREBUILD GATE PASSED
 
 Date: 2026-08-10
 
@@ -231,7 +231,14 @@ A missing, unreadable, empty or malformed cache must never block startup. A stal
 handled by the existing `ManualConnectorManager` reconnect behavior exactly like a stale configured
 initial peer.
 
-## 7.1 Initial connector batch retry and cooldown
+## 7.1 Rejected attempt: manager-wide initial connector cooldown
+
+Status: REJECTED for v3.0.16-3.
+
+The design below was implemented experimentally, but formal Test evidence showed that one shared
+cooldown changed recovery semantics for every manual connector rather than only reducing noise
+from cold bootstrap URLs. It was removed from the release candidate. This section is retained as
+failed-attempt evidence, not as an implementation requirement.
 
 The baseline `ManualConnectorManager` scans once per second and maintains every configured URL as
 an independent persistent connector. Connecting through one initial URL does not stop retries for
@@ -308,17 +315,15 @@ reachable P2P endpoints; it cannot remove the fundamental need for rendezvous in
 
 ## 10. Minimal implementation surface
 
-Implemented production surface:
+Implemented production surface for the accepted persistence scope:
 
-- `common/retry_backoff.rs`: provide the shared bounded backoff and jitter primitive already used
-  by hole punching and now reused by manual initial-peer retries.
 - `peers/peer_map.rs`: reuse the existing live outbound URL index as a synchronous snapshot.
 - `instance/instance.rs` and `launcher.rs`: carry cached URLs separately from configuration and
   capture the live snapshot at the existing normal-stop boundary.
 - `instance_manager.rs`: derive the stable key, read/write the line file, append runtime-only URLs,
   maintain one fixed backup, and save before normal removal or manager exit.
-- `connector/manual.rs`: replace independent fixed-period retries with one bounded, jittered batch
-  cooldown while preserving the existing connector pipeline and network-change events.
+- `connector/manual.rs`: retain the v3.0.16-2 fixed-period retry behavior; persistence only appends
+  runtime connector inputs and does not own retry scheduling.
 - `core.rs` and GUI/Tauri shutdown handling: invoke the shared manager shutdown path explicitly;
   Windows Service Stop joins the same Core shutdown path before reporting the service stopped.
 - Android JNI/FFI and OHOS entry points: initialize the same manager with their existing
@@ -367,7 +372,8 @@ Add focused tests for the new contract:
 No performance benchmark is required. Snapshot work is proportional to the small number of live
 peer connections and occurs only during normal stop or exit, outside the packet hot path.
 
-Add deterministic paused-time tests for the connector retry scheduler:
+The following tests belonged to the rejected manager-wide cooldown and are deferred with its
+replacement design:
 
 - Startup attempts one immediate batch.
 - Complete failures advance through `1, 10, 30, 60, 120, 360, 720, 720` seconds.
@@ -417,8 +423,7 @@ logic must not be introduced.
 - Empty, identical and strict-subset snapshots never replace a useful primary file.
 - Exactly one fixed backup protects the previous primary contents during an eligible update.
 - A valid primary never causes its backup generation to be registered as additional connectors.
-- Failed initial connectors use one bounded, jittered batch cooldown and wake immediately on the
-  existing network-change signals.
+- Manual connectors retain the established v3.0.16-2 retry and eventless recovery behavior.
 - Stop does not perform network RPC, DNS, interface enumeration or hole punching.
 - Packet forwarding and established-connection hot paths are untouched.
 - Cached endpoints still pass the ordinary EasyTier authentication and connector pipeline.
@@ -426,17 +431,21 @@ logic must not be introduced.
 
 ## 14. Implementation and preflight evidence
 
-Evidence collected on 2026-08-11 for the current uncommitted implementation snapshot:
+Rejected-candidate evidence collected on 2026-08-11:
 
 - Local command-environment, Rust formatting, shell/JSON/workflow syntax and pre-commit checks:
   PASS.
 - `192.168.2.160` `cargo test --locked --no-run --package easytier --lib`: PASS without warnings.
-- Nine focused invocations covering shared backoff/jitter, snapshot filtering and isolation,
-  empty/equal/subset preservation, fixed-backup preference/fallback, runtime deduplication, the
-  existing hole-punch cooldown and manual reconnect regression: PASS.
-- Standard `.160` `scripts/release-operator.sh builder-preflight`: PASS on the final source tree,
-  including the Rust gate, remote focused suite, three-node port-forward test, 122 frontend-lib
-  tests, frontend-lib/frontend production builds, VPN plugin build and GUI/Tauri build.
+- The early cooldown tree passed focused unit/preflight checks, but those checks did not preserve
+  all existing integration semantics.
+- Formal Test run `31482539039` failed all four positive P2P-only variants plus TCP/WG eventless
+  disconnect recovery. Commit `078ed0a9` then injected a synthetic DHCP event into the existing
+  disconnect test, changing its validation semantics; formal Test run `31495812249` still failed
+  all four positive P2P-only variants.
+- Root-cause review also found that runtime ring-client liveness had incorrectly reused the
+  persistence-only `ring://` filter. The replacement tree separates those responsibilities.
+- The manager-wide cooldown and synthetic event are therefore removed. All earlier PASS evidence
+  is diagnostic only and does not apply to the replacement candidate.
 - A Linux-hosted `i686-pc-windows-msvc` check was attempted but is `BLOCKED` as platform evidence:
   the builder has the Rust target but no MSVC C toolchain, so `ring` was handed to Linux `cc` and
   failed before checking EasyTier's Windows code. This is neither a product PASS nor a product
@@ -447,6 +456,19 @@ Still required before release acceptance:
 - build immutable Linux and Android candidate artifacts from one committed SHA;
 - run the three-node cached-bootstrap and disconnected-stop lifecycle against the exact Linux
   artifact;
-- compile the Windows service path in its native workflow and run native macOS/Windows lifecycle
-  smoke;
+- install and validate the exact Android candidate on the physical device;
+- pass the five exact-SHA formal workflows before Release. Windows and macOS remain formal
+  compile/package gates rather than manual runtime scope for this release.
+
+Accepted replacement-tree pre-build evidence on 2026-08-11:
+
+- `connector/manual.rs`, `connector/udp_hole_punch/mod.rs`, and `tests/three_node.rs` match released
+  `v3.0.16-2` byte-for-byte. No synthetic network-change event, enlarged deadline, or weakened
+  P2P assertion remains.
+- The first complete preflight exposed only stale focused-test names after the helper split; it did
+  not expose a product failure. The filter-only correction also added the existing backup and
+  persistence-filter tests to the maintained suite.
+- The corrected final tree passed `scripts/release-operator.sh prepare`, including locked Rust
+  no-run, all maintained Leaf/HEV focused tests, quinn-udp 8/8, frontend Vitest 122/122, and all
+  required frontend, VPN-plugin, and GUI production builds.
 - repeat the normal-stop, empty-snapshot preservation and cached restart smoke on Android.
