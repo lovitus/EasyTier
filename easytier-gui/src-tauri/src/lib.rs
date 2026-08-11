@@ -1759,9 +1759,9 @@ pub fn run_gui() -> std::process::ExitCode {
 
     app.run(|_app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
-            let mut manager = INSTANCE_MANAGER
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Tauri's final RunEvent callback is synchronous, so use Tokio's
+            // blocking lock only at this teardown boundary.
+            let mut manager = INSTANCE_MANAGER.blocking_write();
             if let Some(manager) = manager.take() {
                 manager.shutdown_and_persist_instances();
             }
