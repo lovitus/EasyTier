@@ -985,8 +985,15 @@ impl Instance {
             .get_peers()
             .into_iter()
             .map(|peer| peer.uri);
-        for peer in merge_initial_peer_urls(configured, &self.runtime_initial_peers) {
+        let (configured, runtime) =
+            split_initial_peer_urls(configured, &self.runtime_initial_peers);
+        for peer in configured {
             self.get_conn_manager().add_connector_by_url(peer).await?;
+        }
+        for peer in runtime {
+            self.get_conn_manager()
+                .add_runtime_bootstrap_helper_by_url(peer)
+                .await?;
         }
         Ok(())
     }
@@ -2005,24 +2012,29 @@ impl Instance {
     }
 }
 
-fn merge_initial_peer_urls(
+fn split_initial_peer_urls(
     configured: impl IntoIterator<Item = url::Url>,
     runtime: &[url::Url],
-) -> Vec<url::Url> {
+) -> (Vec<url::Url>, Vec<url::Url>) {
     let mut seen = HashSet::new();
-    configured
+    let configured = configured
         .into_iter()
-        .chain(runtime.iter().cloned())
         .filter(|url| seen.insert(url.clone()))
-        .collect()
+        .collect();
+    let runtime = runtime
+        .iter()
+        .filter(|url| seen.insert((*url).clone()))
+        .cloned()
+        .collect();
+    (configured, runtime)
 }
 
 #[cfg(test)]
 mod bootstrap_peer_tests {
-    use super::merge_initial_peer_urls;
+    use super::split_initial_peer_urls;
 
     #[test]
-    fn runtime_bootstrap_peers_follow_configured_peers_without_duplicates() {
+    fn configured_precedes_runtime_helpers() {
         let configured = vec![
             "tcp://192.0.2.1:11010".parse().unwrap(),
             "udp://192.0.2.2:11010".parse().unwrap(),
@@ -2030,13 +2042,13 @@ mod bootstrap_peer_tests {
         let runtime = vec![
             "udp://192.0.2.2:11010".parse().unwrap(),
             "tcp://192.0.2.3:11010".parse().unwrap(),
+            "tcp://192.0.2.1:11010/path?mode=helper".parse().unwrap(),
         ];
 
-        let merged = merge_initial_peer_urls(configured.clone(), &runtime);
-        assert_eq!(merged.len(), 3);
-        assert_eq!(merged[0], configured[0]);
-        assert_eq!(merged[1], configured[1]);
-        assert_eq!(merged[2], runtime[1]);
+        let (actual_configured, actual_runtime) =
+            split_initial_peer_urls(configured.clone(), &runtime);
+        assert_eq!(actual_configured, configured);
+        assert_eq!(actual_runtime, runtime[1..]);
     }
 }
 

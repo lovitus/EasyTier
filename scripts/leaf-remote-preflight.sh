@@ -45,7 +45,9 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   instance::virtual_nic::tests::leaf_owned_tun_selection_is_default_off_and_backend_bounded
   instance::instance::tests::socks_egress_guard_shutdown_waits_for_owned_task
   instance::instance::tests::socks_egress_uses_the_configured_linux_policy_mark
-  instance::instance::bootstrap_peer_tests::runtime_bootstrap_peers_follow_configured_peers_without_duplicates
+  connector::manual::tests::runtime_helper_lifecycle_is_instance_local
+  connector::manual::tests::live_primary_peer_pauses_only_runtime_helpers_without_events
+  instance::instance::bootstrap_peer_tests::configured_precedes_runtime_helpers
   peers::peer_map::bootstrap_peer_tests::live_client_url_uses_remote_then_resolved_fallback
   peers::peer_map::bootstrap_peer_tests::live_client_url_excludes_inbound_closed_and_missing_connections
   peers::peer_map::bootstrap_peer_tests::bootstrap_persistence_excludes_ring_but_keeps_network_urls
@@ -63,6 +65,7 @@ readonly -a DEFAULT_EASYTIER_TEST_FILTERS=(
   rpc_service::instance_manage::tests::absolute_mihomo_config_path_does_not_require_managed_directory
   rpc_service::instance_manage::tests::mihomo_policy_yaml_is_not_validated_by_the_leaf_parser
   tests::three_node::port_forward_with_inbound_default_drop_acl_test::case_2
+  tests::three_node::proxy_three_node_disconnect_test
 )
 readonly -a DEFAULT_SOCKS_EGRESS_TEST_FILTERS=(
   tests::renders_bounded_direct_egress_config

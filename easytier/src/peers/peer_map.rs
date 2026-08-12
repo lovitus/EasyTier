@@ -335,6 +335,12 @@ impl PeerMap {
         ret
     }
 
+    pub(crate) fn has_live_peer_conn(&self) -> bool {
+        self.peer_map
+            .iter()
+            .any(|peer| peer.value().has_live_conns())
+    }
+
     pub async fn list_peer_conns(&self, peer_id: PeerId) -> Option<Vec<PeerConnInfo>> {
         if let Some(p) = self.get_peer_by_id(peer_id) {
             Some(p.list_peer_conns().await)

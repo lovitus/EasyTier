@@ -47,6 +47,8 @@ struct ReconnResult {
 struct ConnectorManagerData {
     connectors: ConnectorMap,
     reconnecting: DashSet<url::Url>,
+    runtime_bootstrap_helpers: DashSet<url::Url>,
+    connector_state_lock: std::sync::Mutex<()>,
     peer_manager: Weak<PeerManager>,
     alive_conn_urls: Arc<DashSet<url::Url>>,
     // user removed connector urls
@@ -71,6 +73,8 @@ impl ManualConnectorManager {
             data: Arc::new(ConnectorManagerData {
                 connectors,
                 reconnecting: DashSet::new(),
+                runtime_bootstrap_helpers: DashSet::new(),
+                connector_state_lock: std::sync::Mutex::new(()),
                 peer_manager: Arc::downgrade(&peer_manager),
                 alive_conn_urls: Arc::new(DashSet::new()),
                 removed_conn_urls: Arc::new(DashSet::new()),
@@ -145,40 +149,74 @@ impl ManualConnectorManager {
 }
 
 impl ManualConnectorManager {
+    fn add_normal_connector_url(&self, url: url::Url) {
+        let _state = self.data.connector_state_lock.lock().unwrap();
+        self.data.removed_conn_urls.remove(&url);
+        self.data.runtime_bootstrap_helpers.remove(&url);
+        if self.data.reconnecting.contains(&url) {
+            return;
+        }
+        self.data.connectors.insert(url);
+    }
+
     pub fn add_connector<T>(&self, connector: T)
     where
         T: TunnelConnector + 'static,
     {
         tracing::info!("add_connector: {}", connector.remote_url());
-        self.data.connectors.insert(connector.remote_url());
+        self.add_normal_connector_url(connector.remote_url());
     }
 
     pub async fn add_connector_by_url(&self, url: url::Url) -> Result<(), Error> {
+        self.add_normal_connector_url(url);
+        Ok(())
+    }
+
+    pub(crate) async fn add_runtime_bootstrap_helper_by_url(
+        &self,
+        url: url::Url,
+    ) -> Result<(), Error> {
+        let _state = self.data.connector_state_lock.lock().unwrap();
+        let revives_removed = self.data.removed_conn_urls.remove(&url).is_some();
+        if self.data.connectors.contains(&url) || self.data.reconnecting.contains(&url) {
+            if revives_removed {
+                self.data.runtime_bootstrap_helpers.insert(url);
+            }
+            return Ok(());
+        }
+        self.data.runtime_bootstrap_helpers.insert(url.clone());
         self.data.connectors.insert(url);
         Ok(())
     }
 
     pub async fn remove_connector(&self, url: url::Url) -> Result<(), Error> {
         tracing::info!("remove_connector: {}", url);
-        let url = url.into();
+        let proto_url = url.clone().into();
         if !self
             .list_connectors()
             .await
             .iter()
-            .any(|x| x.url.as_ref() == Some(&url))
+            .any(|x| x.url.as_ref() == Some(&proto_url))
         {
             return Err(Error::NotFound);
         }
+        let _state = self.data.connector_state_lock.lock().unwrap();
+        self.data.runtime_bootstrap_helpers.remove(&url);
         self.data.removed_conn_urls.insert(url.into());
         Ok(())
     }
 
     pub async fn clear_connectors(&self) {
-        self.list_connectors().await.iter().for_each(|x| {
-            if let Some(url) = &x.url {
-                self.data.removed_conn_urls.insert(url.clone().into());
-            }
-        });
+        let _state = self.data.connector_state_lock.lock().unwrap();
+        self.data.runtime_bootstrap_helpers.clear();
+        for url in self
+            .data
+            .connectors
+            .iter()
+            .chain(self.data.reconnecting.iter())
+        {
+            self.data.removed_conn_urls.insert(url.key().clone());
+        }
     }
 
     pub async fn list_connectors(&self) -> Vec<Connector> {
@@ -186,11 +224,25 @@ impl ManualConnectorManager {
             .await
             .into_iter()
             .collect();
+        let (connector_urls, reconnecting_urls) = {
+            let _state = self.data.connector_state_lock.lock().unwrap();
+            (
+                self.data
+                    .connectors
+                    .iter()
+                    .map(|url| url.key().clone())
+                    .collect::<Vec<_>>(),
+                self.data
+                    .reconnecting
+                    .iter()
+                    .map(|url| url.key().clone())
+                    .collect::<BTreeSet<_>>(),
+            )
+        };
 
         let mut ret = Vec::new();
 
-        for item in self.data.connectors.iter() {
-            let conn_url = item.key().clone();
+        for conn_url in connector_urls {
             let mut status = ConnectorStatus::Connected;
             if dead_urls.contains(&conn_url) {
                 status = ConnectorStatus::Disconnected;
@@ -204,14 +256,12 @@ impl ManualConnectorManager {
             );
         }
 
-        let reconnecting_urls: BTreeSet<url::Url> =
-            self.data.reconnecting.iter().map(|x| x.clone()).collect();
-
         for conn_url in reconnecting_urls {
+            let conn_url = conn_url.into();
             ret.insert(
                 0,
                 Connector {
-                    url: Some(conn_url.into()),
+                    url: Some(conn_url),
                     status: ConnectorStatus::Connecting.into(),
                 },
             );
@@ -236,19 +286,31 @@ impl ManualConnectorManager {
                     if dead_urls.is_empty() {
                         continue;
                     }
+                    let pause_runtime_helpers = Self::pause_runtime_bootstrap_helpers(
+                        &data,
+                        &dead_urls,
+                    );
                     for dead_url in dead_urls {
+                        if pause_runtime_helpers
+                            && data.runtime_bootstrap_helpers.contains(&dead_url)
+                        {
+                            continue;
+                        }
+                        if !Self::claim_dead_connector(&data, &dead_url) {
+                            continue;
+                        }
                         let data_clone = data.clone();
                         let sender = reconn_result_send.clone();
-                        data.connectors.remove(&dead_url).unwrap();
-                        let insert_succ = data.reconnecting.insert(dead_url.clone());
-                        assert!(insert_succ);
 
                         tasks.lock().unwrap().spawn(async move {
                             let reconn_ret = Self::conn_reconnect(data_clone.clone(), dead_url.clone() ).await;
                             let _ = sender.send(reconn_ret).await;
 
+                            let _state = data_clone.connector_state_lock.lock().unwrap();
+                            if data_clone.removed_conn_urls.remove(&dead_url).is_none() {
+                                data_clone.connectors.insert(dead_url.clone());
+                            }
                             data_clone.reconnecting.remove(&dead_url).unwrap();
-                            data_clone.connectors.insert(dead_url.clone());
                         });
                     }
                     tracing::info!("reconn_interval tick, done");
@@ -261,7 +323,33 @@ impl ManualConnectorManager {
         }
     }
 
+    fn pause_runtime_bootstrap_helpers(
+        data: &ConnectorManagerData,
+        dead_urls: &BTreeSet<url::Url>,
+    ) -> bool {
+        dead_urls
+            .iter()
+            .any(|url| data.runtime_bootstrap_helpers.contains(url))
+            && data
+                .peer_manager
+                .upgrade()
+                .is_some_and(|peer_manager| peer_manager.get_peer_map().has_live_peer_conn())
+    }
+
+    fn claim_dead_connector(data: &ConnectorManagerData, url: &url::Url) -> bool {
+        let _state = data.connector_state_lock.lock().unwrap();
+        if !data.reconnecting.insert(url.clone()) {
+            return false;
+        }
+        if data.connectors.remove(url).is_some() {
+            return true;
+        }
+        data.reconnecting.remove(url);
+        false
+    }
+
     fn handle_remove_connector(data: Arc<ConnectorManagerData>) {
+        let _state = data.connector_state_lock.lock().unwrap();
         let remove_later = DashSet::new();
         for it in data.removed_conn_urls.iter() {
             let url = it.key();
@@ -458,12 +546,219 @@ impl ConnectorManageRpc for ConnectorManagerRpcService {
 #[cfg(test)]
 mod tests {
     use crate::{
-        peers::tests::create_mock_peer_manager,
-        set_global_var,
+        peers::tests::{connect_peer_manager, create_mock_peer_manager},
         tunnel::{Tunnel, TunnelError},
     };
 
     use super::*;
+
+    async fn wait_for_connecting_event(
+        events: &mut crate::common::global_ctx::EventBusSubscriber,
+        expected: &url::Url,
+    ) {
+        loop {
+            match events.recv().await {
+                Ok(GlobalCtxEvent::Connecting(url)) if &url == expected => return,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("event bus closed before connector attempt")
+                }
+            }
+        }
+    }
+
+    async fn collect_connecting_events(
+        events: &mut crate::common::global_ctx::EventBusSubscriber,
+        duration: Duration,
+    ) -> BTreeSet<url::Url> {
+        let deadline = tokio::time::Instant::now() + duration;
+        let mut urls = BTreeSet::new();
+        loop {
+            match tokio::time::timeout_at(deadline, events.recv()).await {
+                Ok(Ok(GlobalCtxEvent::Connecting(url))) => {
+                    urls.insert(url);
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(count))) => {
+                    panic!("lost {count} events while checking connector suppression")
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => return urls,
+            }
+        }
+    }
+
+    async fn start_blackhole_listener() -> (url::Url, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = url::Url::parse(&format!("tcp://{}", listener.local_addr().unwrap())).unwrap();
+        let task = tokio::spawn(async move {
+            let mut streams = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                streams.push(stream);
+            }
+        });
+        (url, task)
+    }
+
+    async fn wait_for_live_peer(peer_manager: &PeerManager) {
+        timeout(Duration::from_secs(5), async {
+            while !peer_manager.get_peer_map().has_live_peer_conn() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_helper_lifecycle_is_instance_local() {
+        let peer_manager_a = create_mock_peer_manager().await;
+        let peer_manager_b = create_mock_peer_manager().await;
+        let remote_peer_manager = create_mock_peer_manager().await;
+        connect_peer_manager(peer_manager_a.clone(), remote_peer_manager.clone()).await;
+        wait_for_live_peer(&peer_manager_a).await;
+        let manager_a =
+            ManualConnectorManager::new(peer_manager_a.get_global_ctx(), peer_manager_a);
+        let manager_b =
+            ManualConnectorManager::new(peer_manager_b.get_global_ctx(), peer_manager_b);
+        let url = url::Url::parse("tcp://127.0.0.1:1").unwrap();
+
+        manager_a
+            .add_runtime_bootstrap_helper_by_url(url.clone())
+            .await
+            .unwrap();
+        assert!(manager_a.data.runtime_bootstrap_helpers.contains(&url));
+        assert!(!manager_b.data.runtime_bootstrap_helpers.contains(&url));
+
+        manager_a.add_connector_by_url(url.clone()).await.unwrap();
+        assert!(!manager_a.data.runtime_bootstrap_helpers.contains(&url));
+        manager_a.remove_connector(url.clone()).await.unwrap();
+        manager_a.add_connector_by_url(url.clone()).await.unwrap();
+        assert!(!manager_a.data.removed_conn_urls.contains(&url));
+
+        let helper_to_remove = url::Url::parse("tcp://127.0.0.1:2").unwrap();
+        manager_a
+            .add_runtime_bootstrap_helper_by_url(helper_to_remove.clone())
+            .await
+            .unwrap();
+        manager_a
+            .remove_connector(helper_to_remove.clone())
+            .await
+            .unwrap();
+        assert!(
+            !manager_a
+                .data
+                .runtime_bootstrap_helpers
+                .contains(&helper_to_remove)
+        );
+
+        let helper_to_clear = url::Url::parse("tcp://127.0.0.1:3").unwrap();
+        manager_a
+            .add_runtime_bootstrap_helper_by_url(helper_to_clear)
+            .await
+            .unwrap();
+        manager_a.clear_connectors().await;
+        assert!(manager_a.data.runtime_bootstrap_helpers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_primary_peer_pauses_only_runtime_helpers_without_events() {
+        let peer_manager = create_mock_peer_manager().await;
+        let remote_peer_manager = create_mock_peer_manager().await;
+        connect_peer_manager(peer_manager.clone(), remote_peer_manager.clone()).await;
+        wait_for_live_peer(&peer_manager).await;
+
+        let manager =
+            ManualConnectorManager::new(peer_manager.get_global_ctx(), peer_manager.clone());
+        let mut events = peer_manager.get_global_ctx().subscribe();
+        let (helper, helper_blackhole) = start_blackhole_listener().await;
+        let (configured, configured_blackhole) = start_blackhole_listener().await;
+        manager
+            .add_runtime_bootstrap_helper_by_url(helper.clone())
+            .await
+            .unwrap();
+        manager
+            .add_connector_by_url(configured.clone())
+            .await
+            .unwrap();
+        let dead_urls = BTreeSet::from([helper.clone(), configured.clone()]);
+
+        let connecting = collect_connecting_events(&mut events, Duration::from_millis(2200)).await;
+        assert!(connecting.contains(&configured));
+        assert!(!connecting.contains(&helper));
+        assert!(ManualConnectorManager::pause_runtime_bootstrap_helpers(
+            &manager.data,
+            &dead_urls
+        ));
+        assert!(manager.data.runtime_bootstrap_helpers.contains(&helper));
+        assert!(!manager.data.runtime_bootstrap_helpers.contains(&configured));
+        let helper_proto = helper.clone().into();
+        assert_eq!(
+            manager
+                .list_connectors()
+                .await
+                .into_iter()
+                .find(|connector| connector.url.as_ref() == Some(&helper_proto))
+                .unwrap()
+                .status,
+            ConnectorStatus::Disconnected as i32
+        );
+
+        for peer_id in peer_manager.get_peer_map().list_peers() {
+            peer_manager
+                .get_peer_map()
+                .close_peer(peer_id)
+                .await
+                .unwrap();
+        }
+        assert!(!ManualConnectorManager::pause_runtime_bootstrap_helpers(
+            &manager.data,
+            &dead_urls
+        ));
+
+        timeout(
+            Duration::from_secs(3),
+            wait_for_connecting_event(&mut events, &helper),
+        )
+        .await
+        .unwrap();
+        assert!(manager.data.reconnecting.contains(&helper));
+        manager.add_connector_by_url(helper.clone()).await.unwrap();
+        assert!(!manager.data.runtime_bootstrap_helpers.contains(&helper));
+        assert!(!manager.data.connectors.contains(&helper));
+
+        timeout(
+            Duration::from_secs(5),
+            wait_for_connecting_event(&mut events, &helper),
+        )
+        .await
+        .unwrap();
+        assert!(!manager.data.runtime_bootstrap_helpers.contains(&helper));
+
+        manager.remove_connector(helper.clone()).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let helper_proto = helper.into();
+        assert!(
+            manager
+                .list_connectors()
+                .await
+                .iter()
+                .all(|connector| connector.url.as_ref() != Some(&helper_proto))
+        );
+
+        let _ = collect_connecting_events(&mut events, Duration::from_millis(100)).await;
+        timeout(
+            Duration::from_secs(5),
+            wait_for_connecting_event(&mut events, &configured),
+        )
+        .await
+        .unwrap();
+        assert!(manager.data.reconnecting.contains(&configured));
+        manager.clear_connectors().await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(manager.list_connectors().await.is_empty());
+        helper_blackhole.abort();
+        configured_blackhole.abort();
+    }
 
     #[test]
     fn reconnect_timeout_reserves_udp_stealth_fallback_budget() {
@@ -534,8 +829,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconnect_with_connecting_addr() {
-        set_global_var!(MANUAL_CONNECTOR_RECONNECT_INTERVAL_MS, 1);
-
         let peer_mgr = create_mock_peer_manager().await;
         let mgr = ManualConnectorManager::new(peer_mgr.get_global_ctx(), peer_mgr);
 
