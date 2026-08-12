@@ -1,6 +1,6 @@
 # Bootstrap Peer Exit Snapshot
 
-Status: PERSISTENCE IMPLEMENTED; MANAGER-WIDE COOLDOWN REJECTED; PREBUILD GATE PASSED
+Status: PERSISTENCE AND RUNTIME HELPER PAUSE IMPLEMENTED; MANAGER-WIDE COOLDOWN REJECTED; CANDIDATE VALIDATION PENDING
 
 Date: 2026-08-10
 
@@ -217,19 +217,23 @@ Before `NetworkInstance::new()` consumes the configuration:
 6. Never merge the primary and backup snapshots. Every loaded URL becomes an independently
    maintained `ManualConnectorManager` connector; combining two generations would preserve stale
    endpoints and multiply permanent reconnect work.
-7. Build a runtime-only connector list and append the selected cached URLs after user-configured
-   peers.
-8. Deduplicate exact URLs so a configured initial peer is not added twice.
-9. Pass the merged in-memory peer list through the existing `add_initial_peers()` path.
+7. Keep configured URLs and cached URLs as separate runtime sources. Register configured URLs with
+   the established manual-connector semantics and register persisted-only URLs as runtime bootstrap
+   helpers.
+8. Deduplicate exact URLs with configured precedence so a configured initial peer is never demoted
+   to helper behavior.
+9. Once the primary peer map has any registered, non-closed connection, stop scheduling new helper
+   reconnect tasks. Resume helpers on the existing manager tick when the primary map becomes empty.
 
 This merge is strictly runtime-only and in-memory. Never call a configuration persistence,
 serialization or source-file write-back path for cached URLs. Never rewrite the user's TOML, GUI
 configuration, imported file or initial-peer list. The cached URLs exist only in the temporary
 connector input for that process run.
 
-A missing, unreadable, empty or malformed cache must never block startup. A stale but valid URL is
-handled by the existing `ManualConnectorManager` reconnect behavior exactly like a stale configured
-initial peer.
+A missing, unreadable, empty or malformed cache must never block startup. Cached helpers reuse the
+existing connector implementation and scheduler; their only distinct behavior is the scheduling
+pause after primary-mesh recovery. No timer, network event subscription or persistent retry state is
+added. An attempt already in flight may complete once.
 
 ## 7.1 Rejected attempt: manager-wide initial connector cooldown
 
@@ -322,15 +326,16 @@ Implemented production surface for the accepted persistence scope:
   capture the live snapshot at the existing normal-stop boundary.
 - `instance_manager.rs`: derive the stable key, read/write the line file, append runtime-only URLs,
   maintain one fixed backup, and save before normal removal or manager exit.
-- `connector/manual.rs`: retain the v3.0.16-2 fixed-period retry behavior; persistence only appends
-  runtime connector inputs and does not own retry scheduling.
+- `connector/manual.rs`: retain the established configured/RPC connector behavior, mark only
+  persisted-only URLs as runtime helpers, and suppress new helper claims while the primary peer map
+  is live. Add/Remove/Clear and reconnect completion are linearized per instance.
 - `core.rs` and GUI/Tauri shutdown handling: invoke the shared manager shutdown path explicitly;
   Windows Service Stop joins the same Core shutdown path before reporting the service stopped.
 - Android JNI/FFI and OHOS entry points: initialize the same manager with their existing
   app-private persistent directory.
 
-The manual connector change is limited to retry scheduling. It does not alter connector creation,
-DNS, transport selection, handshake, authentication or P2P behavior. Do not make
+The manual connector change is limited to helper classification and retry scheduling. It does not
+alter connector creation, DNS, transport selection, handshake, authentication or P2P behavior. Do not make
 `retain_network_instance()` async merely to collect the snapshot.
 
 ## 11. Automated tests
@@ -361,6 +366,13 @@ Add focused tests for the new contract:
 - A missing, unreadable, empty or wholly malformed primary falls back to the backup.
 - Each stable network key creates at most one primary and one fixed backup file.
 - Cached URLs are appended after configured initial peers and deduplicated.
+- Configured URLs take precedence over identical cached helpers and keep their original retry
+  semantics.
+- A live primary peer suppresses only new cached-helper reconnect attempts; configured and RPC
+  connectors continue unchanged.
+- Removing the last primary peer resumes cached helpers without a synthetic network event.
+- Add, Remove and Clear cannot race an in-flight reconnect into resurrecting a removed connector or
+  changing a newer source classification.
 - A normal manager removal writes the snapshot before dropping the instance.
 - GUI Exit, Windows Service Stop and normal Core signal shutdown explicitly invoke the shared
   manager shutdown helper exactly once.
@@ -423,7 +435,8 @@ logic must not be introduced.
 - Empty, identical and strict-subset snapshots never replace a useful primary file.
 - Exactly one fixed backup protects the previous primary contents during an eligible update.
 - A valid primary never causes its backup generation to be registered as additional connectors.
-- Manual connectors retain the established v3.0.16-2 retry and eventless recovery behavior.
+- Configured manual connectors retain the established retry and eventless recovery behavior;
+  persisted-only helpers pause after primary recovery and resume if the primary map becomes empty.
 - Stop does not perform network RPC, DNS, interface enumeration or hole punching.
 - Packet forwarding and established-connection hot paths are untouched.
 - Cached endpoints still pass the ordinary EasyTier authentication and connector pipeline.
