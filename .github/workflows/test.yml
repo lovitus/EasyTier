@@ -93,58 +93,11 @@ jobs:
       - name: Prepare GUI sidecars for static checks
         env:
           MIHOMO_RELEASE_MANIFEST: ${{ github.workspace }}/target/mihomo-release/mihomo-release-manifest.json
-        run: |
-          set -euo pipefail
-          host_target="$(rustc -vV | sed -n 's/^host: //p')"
-          test -n "$host_target"
-          mkdir -p easytier-gui/src-tauri/binaries
-          for sidecar in easytier-leaf-worker easytier-hev-socks-egress; do
-            sidecar_path="easytier-gui/src-tauri/binaries/${sidecar}-${host_target}"
-            install -m 0755 /bin/true "$sidecar_path"
-            test -x "$sidecar_path"
-          done
-          MIHOMO_DISTRIBUTED_BINARY_NAME=easytier-mihomo \
-            bash scripts/fetch-mihomo-release.sh fetch \
-            x86_64-unknown-linux-musl \
-            "easytier-gui/src-tauri/binaries/easytier-mihomo-${host_target}" \
-            easytier-gui/src-tauri/binaries/easytier-mihomo-manifest.json
-          cp easytier/resources/policy-rule-data/METACUBEX-GPL-3.0.txt \
-            easytier-gui/src-tauri/binaries/MIHOMO_LICENSE.txt
-          cp easytier/resources/mihomo/SOURCE.md \
-            easytier-gui/src-tauri/binaries/MIHOMO_SOURCE.md
-          bash scripts/fetch-gost-release.sh fetch \
-            x86_64-unknown-linux-musl \
-            "easytier-gui/src-tauri/binaries/easytier-gost-${host_target}" \
-            easytier-gui/src-tauri/binaries/easytier-gost.manifest.json
-          cp easytier/resources/gost/LICENSE \
-            easytier-gui/src-tauri/binaries/GOST_LICENSE.txt
-          cp easytier/resources/gost/SOURCE.md \
-            easytier-gui/src-tauri/binaries/GOST_SOURCE.md
-          printf 'fixture=true\nbackend=hev-native\n' \
-            > easytier-gui/src-tauri/binaries/SOCKS_EGRESS_BUILD_INFO.txt
-          # Leaf/HEV only need declared externalBin paths for Clippy. Mihomo is
-          # the exact workflow-resolved binary so Test covers its release
-          # manifest, target mapping, executable format, and metadata.
+        run: bash scripts/prepare-gui-static-sidecars.sh
 
-      - name: Check formatting
+      - name: Run formal Rust static checks
         if: ${{ !cancelled() }}
-        run: cargo fmt --all -- --check
-
-      - name: Check Clippy
-        if: ${{ !cancelled() }}
-        run: cargo clippy --locked --all-targets --features full --all -- -D warnings
-
-      - name: Check features
-        if: ${{ !cancelled() }}
-        run: cargo hack check --locked --package easytier --each-feature --exclude-features macos-ne --verbose
-
-      - name: Check Cargo.lock is up to date
-        if: ${{ !cancelled() }}
-        run: |
-          if ! cargo metadata --format-version 1 --locked > /dev/null; then
-            echo "::error::Cargo.lock is out of date. Run cargo generate-lockfile or cargo build locally, then commit Cargo.lock."
-            exit 1
-          fi
+        run: bash scripts/formal-rust-static-checks.sh
 
   pre-test:
     name: Build test

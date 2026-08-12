@@ -22,6 +22,9 @@ runbooks, not in this file.
   scripts/pre-commit-check.sh before every commit.
 - Use .160 for compiler and focused-test feedback. GitHub Actions is not an
   edit-by-edit compiler.
+- The Rust release preflight must run the workflow-shared GUI sidecar setup and
+  formal formatting, Clippy, each-feature and lockfile checks before focused tests.
+  Never recreate those gates with ad-hoc SSH or `docker exec` commands.
 - Treat the first non-zero exit as evidence. Preserve its command, exit code, and stderr,
   diagnose it, then retry. Never hide required failures.
 - Documentation/evidence-only commits use [skip ci] and never invalidate an already
@@ -59,6 +62,8 @@ four commands:
   explicit repair operation, never a normal sync step.
 - Builder Cargo commands use all cores, a bounded timeout, the maintained proxy forward,
   and no competing Cargo/rustc process. Deployable optimized artifacts come only from CI.
+- The formal feature matrix uses `CARGO_INCREMENTAL=0`. Low-space recovery may prune only
+  `target/debug/incremental` under the builder lock; never delete dependency or registry caches.
 - Existing successful or active exact-SHA runs are always reused. Failed runs fail closed
   until retry or a new source SHA is chosen.
 - Core, GUI, Mobile, OHOS, and Test are dispatched together after candidate success; do
@@ -94,3 +99,7 @@ four commands:
 - Workflow success alone is not artifact proof. Verify checksums/build info, required
   sidecars, architecture, permissions/signatures, and one installed-artifact smoke before
   Release.
+- `release.yml` owns the full formal-artifact download, extraction, compliance audit and
+  release assembly on GitHub runners. Never download the complete Core/GUI/Mobile/OHOS
+  matrix locally. Locally download only exact Linux/Android candidate artifacts required
+  for device tests and one representative formal asset for the installed-artifact smoke.

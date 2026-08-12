@@ -7,6 +7,9 @@ fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+RELEASE_OPERATOR_TMPDIR="${RELEASE_OPERATOR_TMPDIR:-$REPO_ROOT/target/release-operator-tmp}"
+mkdir -p "$RELEASE_OPERATOR_TMPDIR"
+export TMPDIR="$RELEASE_OPERATOR_TMPDIR"
 GH_REPO="${GH_REPO:-lovitus/EasyTier}"
 CANDIDATE_WORKFLOWS=(profiling-beta.yml android-policy-candidate.yml)
 ACTIVE_CANDIDATE_WORKFLOWS=("${CANDIDATE_WORKFLOWS[@]}")
@@ -292,26 +295,47 @@ automatic_preflight_scope() {
   fi
 }
 
+run_formal_static_preflight() {
+  "$SCRIPT_DIR/remote-formal-static-preflight.sh"
+}
+
+run_leaf_preflight() {
+  "$SCRIPT_DIR/leaf-remote-preflight.sh"
+}
+
+run_frontend_preflight() {
+  "$SCRIPT_DIR/remote-frontend-preflight.sh"
+}
+
+run_preflight_scope() {
+  case "$1" in
+    none) printf 'remote preflight skipped: candidate changes are documentation/release tooling only\n' ;;
+    rust)
+      run_formal_static_preflight
+      run_leaf_preflight
+      ;;
+    frontend) run_frontend_preflight ;;
+    full)
+      run_formal_static_preflight
+      run_leaf_preflight
+      run_frontend_preflight
+      ;;
+    *) die "PREFLIGHT_SCOPE must be auto, full, rust, or frontend" ;;
+  esac
+}
+
 prepare_release() {
   local scope="${PREFLIGHT_SCOPE:-auto}"
   [[ "$scope" != none ]] || die "PREFLIGHT_SCOPE=none is not an allowed manual override"
   require_release_inputs
   require_unpublished_version
   "$SCRIPT_DIR/pre-commit-check.sh"
+  "$SCRIPT_DIR/tests/release-operator-test.sh"
   if [[ "$scope" == auto ]]; then
     scope="$(automatic_preflight_scope)"
   fi
   printf 'release preflight scope: %s\n' "$scope"
-  case "$scope" in
-    none) printf 'remote preflight skipped: candidate changes are documentation/release tooling only\n' ;;
-    rust) "$SCRIPT_DIR/leaf-remote-preflight.sh" ;;
-    frontend) "$SCRIPT_DIR/remote-frontend-preflight.sh" ;;
-    full)
-      "$SCRIPT_DIR/leaf-remote-preflight.sh"
-      "$SCRIPT_DIR/remote-frontend-preflight.sh"
-      ;;
-    *) die "PREFLIGHT_SCOPE must be auto, full, rust, or frontend" ;;
-  esac
+  run_preflight_scope "$scope"
 }
 
 latest_run_json() {
@@ -536,7 +560,11 @@ dispatch_pipeline() {
   local sha="$1"
   dispatch_candidates "$sha"
   printf 'candidate workflows passed; start exact-artifact/device validation while formal workflows run\n'
+  printf 'do not download the formal artifact matrix locally; release.yml audits and assembles it on GitHub\n'
   dispatch_formal "$sha"
+  printf 'formal workflows passed; if device validation is complete, publish immediately with:\n'
+  printf '  EXACT_ARTIFACT_VALIDATED_SHA=%q %q publish %q\n' \
+    "$sha" "$SCRIPT_DIR/release-operator.sh" "v$(cargo_version)"
 }
 
 init_validation_matrix() {

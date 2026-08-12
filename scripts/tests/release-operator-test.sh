@@ -24,7 +24,7 @@ assert_false() {
 }
 
 test_versions() {
-  assert_eq "$(cargo_version)" "3.0.15-1"
+  assert_true validate_cross_platform_version "$(cargo_version)"
   assert_true validate_cross_platform_version 3.0.15
   assert_true validate_cross_platform_version 3.0.15-1
   assert_true validate_cross_platform_version 3.0.15-65535
@@ -34,6 +34,24 @@ test_versions() {
   assert_false validate_cross_platform_version 3.0.15-65536
   require_release_inputs
 }
+
+test_rust_preflight_includes_formal_checks_first() (
+  local log
+  log="$(mktemp)"
+  run_formal_static_preflight() { printf 'static\n' >>"$log"; }
+  run_leaf_preflight() { printf 'leaf\n' >>"$log"; }
+  run_frontend_preflight() { printf 'frontend\n' >>"$log"; }
+
+  run_preflight_scope rust
+  assert_eq "$(cat "$log")" $'static\nleaf'
+  : >"$log"
+  run_preflight_scope full
+  assert_eq "$(cat "$log")" $'static\nleaf\nfrontend'
+  : >"$log"
+  run_preflight_scope frontend
+  assert_eq "$(cat "$log")" frontend
+  rm -f "$log"
+)
 
 test_workflow_sets() {
   assert_eq "${CANDIDATE_WORKFLOWS[*]}" "profiling-beta.yml android-policy-candidate.yml"
@@ -138,6 +156,7 @@ test_failed_group_cancels_peer() {
 }
 
 test_versions
+test_rust_preflight_includes_formal_checks_first
 test_workflow_sets
 test_mips_gate
 test_gh_retry

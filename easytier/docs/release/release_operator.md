@@ -19,6 +19,25 @@ PREFLIGHT_SCOPE=full, rust, or frontend is an explicit override. Auto mode skips
 compilation only for documentation, workflow, and release-tool-only changes; unknown
 build paths fail safe to the full gate.
 
+Rust and full scopes first run the same sidecar preparation, formatting, full Clippy,
+each-feature and lockfile checks as the formal Test workflow on `.160`, then run the focused
+functional suite. Do not reproduce these commands with ad-hoc `ssh` or `docker exec`. The
+operator uses `target/release-operator-tmp` instead of the system temporary volume and remote
+tasks use the maintained proxy forward, absolute tool paths, a builder lock and bounded timeout.
+The remote gate refuses to run without the local `127.0.0.1:7890` proxy or while another
+Cargo/rustc process owns the builder, and caches verified static-check sidecars under `target`.
+It disables Cargo incremental data for the 28-way feature matrix. If free space falls below
+8 GiB, it may remove only `target/debug/incremental` while holding the builder lock; registry,
+Git, dependency and normal target caches are never deleted by this recovery path.
+
+Do not download and unpack the full formal artifact matrix on the operator machine. The
+Release workflow already downloads those artifacts inside GitHub Actions, verifies manifests,
+sidecars and release payloads, and assembles the release. Operator-side downloads are limited
+to the exact Linux/Android candidate artifacts needed for real-device validation and one
+representative formal asset for the post-build install smoke.
+When the candidate/device evidence is already complete, dispatch `publish` immediately after
+the five formal workflows pass; do not insert another artifact-inspection phase.
+
 3. Commit and push the immutable SHA, then run validation:
 
     scripts/release-operator.sh validate
