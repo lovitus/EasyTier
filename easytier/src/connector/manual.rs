@@ -202,7 +202,7 @@ impl ManualConnectorManager {
         }
         let _state = self.data.connector_state_lock.lock().unwrap();
         self.data.runtime_bootstrap_helpers.remove(&url);
-        self.data.removed_conn_urls.insert(url.into());
+        self.data.removed_conn_urls.insert(url);
         Ok(())
     }
 
