@@ -1,0 +1,11 @@
+[package]
+name = "issue4-ring-contract"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[workspace]
+[dependencies]
+async-ringbuf = "=0.3.1"
+futures = "=0.3.31"
+[profile.release]
+opt-level = 3

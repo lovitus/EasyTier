@@ -1,0 +1,122 @@
+name: Issue 4 isolated mesh diagnosis
+'on':
+  push:
+    branches: ['ci/issue-4-diagnosis-20260916']
+    paths: ['.github/workflows/mesh-ci-diagnosis.yml', 'tools/mesh-ci/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: issue4-diagnosis-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  isolated:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Prepare bounded diagnostic tools
+        run: |
+          set -euo pipefail
+          mkdir -p ci-evidence
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iputils-ping iperf3 ethtool strace tcpdump autoconf automake libtool
+          python3 -m py_compile tools/mesh-ci/diagnose.py
+          git diff --check
+          uname -a | tee ci-evidence/kernel.txt
+          lscpu > ci-evidence/cpu.txt
+          cat /proc/self/cgroup > ci-evidence/cgroup.txt
+          for f in cpu.max cpu.stat cpu.pressure memory.max; do
+            if [ -f "/sys/fs/cgroup/$f" ]; then cat "/sys/fs/cgroup/$f" > "ci-evidence/$f"; fi
+          done
+      - name: Verify and extract immutable measured Core artifact
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --max-time 180 \
+            https://github.com/lovitus/EasyTier/releases/download/profiling-beta/easytier-profiling-beta-linux-x86_64-musl.tar.gz -o bundle.tar.gz
+          echo '9c7d8a5dc1987491c79e4e1a2576911f18807f7f2ac80570a9675c0291ea2445  bundle.tar.gz' | sha256sum --check
+          mkdir -p ci-bundle
+          tar -xzf bundle.tar.gz -C ci-bundle --strip-components=1
+          echo '95c5724367ce4ab5a33688f871cc1531c50d84e78389e0c77d4d17ea99b5dc71  ci-bundle/easytier-core' | sha256sum --check
+          sha256sum ci-bundle/easytier-core ci-bundle/easytier-cli > ci-evidence/binary-sha256.txt
+          readelf -n ci-bundle/easytier-core > ci-evidence/build-id.txt
+          ci-bundle/easytier-core --version > ci-evidence/core-version.txt
+          ci-bundle/easytier-core --help > ci-evidence/core-help.txt
+      - name: Build exact iperf 3.9 comparator, not Core
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --max-time 90 \
+            https://codeload.github.com/esnet/iperf/tar.gz/1f8fb13297f3e3e40169ebcd12e171167e394473 -o iperf39.tar.gz
+          mkdir -p ci-iperf39
+          tar -xzf iperf39.tar.gz -C ci-iperf39 --strip-components=1
+          cd ci-iperf39
+          if [ ! -x configure ]; then autoreconf -fi; fi
+          ./configure --without-openssl --disable-shared CFLAGS='-O2 -g'
+          timeout 180 make -j2
+          src/iperf3 --version
+      - name: Test exact async-ringbuf contract
+        id: ring
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          timeout 180 cargo +stable run --release --manifest-path tools/mesh-ci/ring/Cargo.toml | tee ci-evidence/ring-results.txt
+          cp tools/mesh-ci/ring/Cargo.lock ci-evidence/ring-Cargo.lock
+          find "$HOME/.cargo/registry/src" -path '*/async-ringbuf-0.3.1/src/*' -name '*.rs' -print0 | \
+            xargs -0 grep -n -A18 -B3 'fn poll_flush' > ci-evidence/ring-flush-source.txt
+      - name: Execute namespace matrix on the original binary
+        id: simulation
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=GITHUB_ACTIONS,GITHUB_SHA,RUNNER_OS,ImageVersion \
+            timeout --signal=TERM --kill-after=10s 1080s python3 tools/mesh-ci/diagnose.py \
+              --bundle ci-bundle --output ci-evidence/lab --iperf39 ci-iperf39/src/iperf3 | tee ci-evidence/simulation.log
+      - name: Publish measured summary, including failures
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p=Path('ci-evidence/lab/results.jsonl')
+          rows=[json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
+              f.write('# Issue #4 diagnostic observations\n\nCore source: `391c191c`; no production patch.\n\n')
+              f.write('| Mode | Kind | Label | Result | Mbps | gross CPU s/GiB |\n|---|---|---|---|---:|---:|\n')
+              for r in rows:
+                  if r['kind'] not in ('iperf','halfclose','idle','harness_failure','cleanup'): continue
+                  f.write('|{}|{}|{}|{}|{}|{}|\n'.format(r['mode'],r['kind'],r.get('label',''),r.get('ok',r.get('error','recorded')),r.get('goodput_mbps',''),r.get('cpu_s_per_GiB','')))
+              f.write('\nA completed workflow is not an all-tests-pass or production capacity claim. Detailed failures and cleanup are retained.\n')
+          print('ETCI_FINAL_COUNTS',json.dumps({'rows':len(rows),'failures':sum(r.get('ok') is False for r in rows),'harness_errors':sum(r['kind']=='harness_failure' for r in rows)}))
+          PY
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: issue4-evidence-${{ matrix.os }}-${{ github.sha }}
+          path: ci-evidence/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Enforce diagnostic completion and preserve failing outcome
+        if: always()
+        env:
+          RING_OUTCOME: ${{ steps.ring.outcome }}
+        run: |
+          python3 - <<'PYEND'
+          import json, os, sys
+          from pathlib import Path
+          p=Path('ci-evidence/lab/results.jsonl')
+          rows=[json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+          complete=any(r['kind']=='suite_finished' for r in rows)
+          clean=any(r['kind']=='cleanup' and r.get('root_routes_unchanged') and all(x['delete_exit']==0 and not x['residual_pids'] for x in r['namespaces']) for r in rows)
+          failed=[r.get('label',r['kind']) for r in rows if r.get('ok') is False or r['kind']=='harness_failure']
+          print(json.dumps({'suite_completed':complete,'cleanup_passed':clean,'failed_cases':failed,'ring_outcome':os.getenv('RING_OUTCOME')}))
+          sys.exit(0 if complete and clean and not failed and os.getenv('RING_OUTCOME')=='success' else 1)
+          PYEND
