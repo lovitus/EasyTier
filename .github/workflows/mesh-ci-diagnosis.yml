@@ -29,8 +29,13 @@ jobs:
           set -euo pipefail
           mkdir -p ci-evidence
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iputils-ping iperf3 ethtool strace tcpdump autoconf automake libtool
-          python3 -m py_compile tools/mesh-ci/diagnose.py
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iputils-ping iperf3 ethtool strace tcpdump autoconf automake libtool linux-tools-common linux-tools-generic
+          python3 -m py_compile tools/mesh-ci/diagnose.py tools/mesh-ci/followup.py
+          dpkg-query -W iperf3 libiperf0 > ci-evidence/iperf-packages.txt
+          ldd "$(command -v iperf3)" > ci-evidence/iperf-linkage.txt
+          perf_bin="$(find /usr/lib/linux-tools -type f -name perf | sort -V | tail -n1)"
+          if [ -n "$perf_bin" ]; then sudo ln -sf "$perf_bin" /usr/local/bin/perf; fi
+          perf --version > ci-evidence/perf-version.txt 2>&1 || true
           git diff --check
           uname -a | tee ci-evidence/kernel.txt
           lscpu > ci-evidence/cpu.txt
@@ -68,17 +73,23 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          rustup toolchain install stable --profile minimal
-          timeout 180 cargo +stable run --release --manifest-path tools/mesh-ci/ring/Cargo.toml | tee ci-evidence/ring-results.txt
-          cp tools/mesh-ci/ring/Cargo.lock ci-evidence/ring-Cargo.lock
+          rustup toolchain install 1.95.0 --profile minimal
+          evidence="$PWD/ci-evidence"
+          standalone="$RUNNER_TEMP/issue4-ring"
+          mkdir -p "$standalone"
+          cp -r tools/mesh-ci/ring/src tools/mesh-ci/ring/Cargo.toml "$standalone/"
+          cp Cargo.lock "$standalone/Cargo.lock"
+          cd "$standalone"
+          timeout 180 cargo +1.95.0 run --release | tee "$evidence/ring-results.txt"
+          cp Cargo.lock "$evidence/ring-Cargo.lock"
           find "$HOME/.cargo/registry/src" -path '*/async-ringbuf-0.3.1/src/*' -name '*.rs' -print0 | \
-            xargs -0 grep -n -A18 -B3 'fn poll_flush' > ci-evidence/ring-flush-source.txt
-      - name: Execute namespace matrix on the original binary
+            xargs -0 grep -n -A18 -B3 'fn poll_flush' > "$evidence/ring-flush-source.txt"
+      - name: Execute targeted observers and completion replication
         id: simulation
         run: |
           set -euo pipefail
           sudo --preserve-env=GITHUB_ACTIONS,GITHUB_SHA,RUNNER_OS,ImageVersion \
-            timeout --signal=TERM --kill-after=10s 1080s python3 tools/mesh-ci/diagnose.py \
+            timeout --signal=TERM --kill-after=10s 900s python3 tools/mesh-ci/followup.py \
               --bundle ci-bundle --output ci-evidence/lab --iperf39 ci-iperf39/src/iperf3 | tee ci-evidence/simulation.log
       - name: Publish measured summary, including failures
         if: always()
