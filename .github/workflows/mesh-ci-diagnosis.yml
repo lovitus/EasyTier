@@ -30,7 +30,8 @@ jobs:
           mkdir -p ci-evidence
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iputils-ping iperf3 ethtool strace tcpdump autoconf automake libtool linux-tools-common linux-tools-generic
-          python3 -m py_compile tools/mesh-ci/diagnose.py tools/mesh-ci/followup.py
+          python3 -m py_compile tools/mesh-ci/diagnose.py tools/mesh-ci/followup.py tools/mesh-ci/control_diagnostic.py
+          gcc -shared -fPIC -O2 -Wall -Wextra tools/mesh-ci/select_diagnostic.c -ldl -o ci-evidence/select-diagnostic.so
           dpkg-query -W iperf3 libiperf0 > ci-evidence/iperf-packages.txt
           ldd "$(command -v iperf3)" > ci-evidence/iperf-linkage.txt
           perf_bin="$(find /usr/lib/linux-tools -type f -name perf | sort -V | tail -n1)"
@@ -91,6 +92,22 @@ jobs:
           sudo --preserve-env=GITHUB_ACTIONS,GITHUB_SHA,RUNNER_OS,ImageVersion \
             timeout --signal=TERM --kill-after=10s 900s python3 tools/mesh-ci/followup.py \
               --bundle ci-bundle --output ci-evidence/lab --iperf39 ci-iperf39/src/iperf3 | tee ci-evidence/simulation.log
+      - name: Isolate packaged iperf nonblocking-read behavior
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=GITHUB_ACTIONS,GITHUB_SHA,RUNNER_OS,ImageVersion \
+            timeout --signal=TERM --kill-after=10s 360s python3 tools/mesh-ci/control_diagnostic.py \
+              --bundle ci-bundle --output ci-evidence/control --iperf39 ci-iperf39/src/iperf3 | tee ci-evidence/control.log
+      - name: Preserve readable observer evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          # Only this job's experiment outputs: do not change system paths.
+          sudo chown -R "$(id -u):$(id -g)" ci-evidence
+          for f in ci-evidence/lab/udp-syscalls-counts.txt ci-evidence/lab/tcp-syscalls-counts.txt ci-evidence/lab/udp-perf-self.txt ci-evidence/ring-flush-source.txt; do
+            if [ -f "$f" ]; then echo "ETCI_OBSERVER_FILE $f"; head -n 100 "$f"; fi
+          done
       - name: Publish measured summary, including failures
         if: always()
         run: |
