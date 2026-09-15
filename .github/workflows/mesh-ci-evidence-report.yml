@@ -1,0 +1,133 @@
+name: Issue 4 evidence report
+'on':
+  push:
+    branches: ['ci/issue-4-diagnosis-20260916']
+    paths: ['.github/workflows/mesh-ci-evidence-report.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: issue4-evidence-report-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          run-id: 34995727266
+          github-token: ${{ github.token }}
+          path: incoming/34995727266
+      - uses: actions/download-artifact@v5
+        with:
+          run-id: 34997288873
+          github-token: ${{ github.token }}
+          path: incoming/34997288873
+      - uses: actions/download-artifact@v5
+        with:
+          run-id: 34998192877
+          github-token: ${{ github.token }}
+          path: incoming/34998192877
+      - name: Aggregate original results and diagnostic failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p report
+          python3 - <<'PY'
+          import csv, hashlib, json, re, statistics
+          from collections import Counter, defaultdict
+          from pathlib import Path
+          expected='95c5724367ce4ab5a33688f871cc1531c50d84e78389e0c77d4d17ea99b5dc71'
+          summaries=[]
+          flat=[]
+          manifest=[]
+          for p in sorted(Path('incoming').rglob('results.jsonl')):
+              parts=p.parts
+              run=parts[1]
+              image='ubuntu-22.04' if 'ubuntu-22.04' in str(p) else 'ubuntu-24.04'
+              lane=p.parent.name
+              rows=[json.loads(x) for x in p.read_text().splitlines() if x.strip()]
+              env=next((r for r in rows if r['kind']=='environment'),{})
+              if env.get('binary_sha256') != expected:
+                  raise RuntimeError('unexpected or missing measured binary hash: '+str(p))
+              tests=[r for r in rows if r['kind'] in ('iperf','halfclose')]
+              counts=Counter((r['kind'],str(r.get('ok'))) for r in tests)
+              by_group=defaultdict(list)
+              for r in tests:
+                  flat.append({'run':run,'image':image,'lane':lane,**r})
+                  if r['kind']!='iperf' or not r.get('ok'): continue
+                  if r.get('diagnostic_trace') or r.get('observer_attached') or 'warmup' in r.get('phase','') or lane=='control': continue
+                  key=(r['mode'],r['version'],r['rate_mbps'],r['payload_direction'],r['client_host'],r['reverse'],r['parallel'],r['app_udp'],r.get('phase','matrix'))
+                  by_group[key].append(r)
+              groups=[]
+              for key, values in sorted(by_group.items(),key=lambda x:str(x[0])):
+                  def rng(field):
+                      nums=[float(r[field]) for r in values if field in r]
+                      return [round(min(nums),4),round(statistics.median(nums),4),round(max(nums),4)] if nums else None
+                  cpu=[]
+                  for r in values:
+                      if r.get('gross_elapsed_s',0): cpu.append(r['cpu_s']/r['gross_elapsed_s'])
+                  sys_fracs=[]
+                  for r in values:
+                      s=sum(b.get('system_s',0)-a.get('system_s',0) for a,b in zip(r.get('before',[]),r.get('after',[])))
+                      if r.get('cpu_s',0)>0: sys_fracs.append(s/r['cpu_s'])
+                  groups.append({'case':key,'n':len(values),'goodput_mbps_min_med_max':rng('goodput_mbps'),
+                      'gross_cpu_s_per_GiB_min_med_max':rng('cpu_s_per_GiB'),
+                      'median_combined_core_equivalents':round(statistics.median(cpu),4) if cpu else None,
+                      'median_core_system_time_fraction':round(statistics.median(sys_fracs),4) if sys_fracs else None})
+              resource=p.parent/'resources.jsonl'
+              states=[]
+              if resource.exists():
+                  for line in resource.read_text().splitlines():
+                      row=json.loads(line)
+                      states.extend(x for x in row.get('cores',[]) if not x.get('unavailable'))
+              peaks={k:max((x.get(k,0) for x in states),default=0) for k in ('rss_kib','threads','fds')}
+              failure=[{k:r.get(k) for k in ('kind','label','mode','version','rate_mbps','payload_direction','reverse','client_host','shim_mode','client_exit','server_exit','error')} for r in tests if not r.get('ok')]
+              item={'run':run,'image':image,'lane':lane,'workflow_sha':env.get('workflow_sha'),
+                  'kind_outcomes':{str(k):v for k,v in counts.items()},'test_rows':len(tests),
+                  'halfclose_sessions':sum(r.get('sessions',0) for r in tests if r['kind']=='halfclose' and r.get('ok')),
+                  'idle':[{'mode':r['mode'],'combined_core_equivalents':r.get('combined_core_equivalents')} for r in rows if r['kind']=='idle'],
+                  'per_process_sampled_peaks':peaks,'failures':failure,
+                  'completion_and_cleanup':[r for r in rows if r['kind'] in ('suite_finished','cleanup','harness_failure')],
+                  'performance_groups':groups}
+              summaries.append(item)
+              print('ETCI_AGG_SUMMARY '+json.dumps(item,separators=(',',':')))
+              if lane=='control':
+                  control=[{k:r.get(k) for k in ('mode','phase','shim_mode','ok','client_exit','server_exit','diagnostic_trace')} for r in tests if r['kind']=='iperf']
+                  print('ETCI_AGG_CONTROL '+json.dumps({'run':run,'image':image,'cases':control}))
+                  for f in sorted(p.parent.glob('*server.err')):
+                      lines=[s for s in f.read_text(errors='replace').splitlines() if s.startswith('ETCI_SELECT')]
+                      if lines: print('ETCI_AGG_SELECT '+json.dumps({'file':str(f),'lines':lines[-8:]}))
+              for snap in sorted(p.parent.glob('*churn*.snapshot.json')):
+                  d=json.loads(snap.read_text())
+                  print('ETCI_AGG_CHURN '+json.dumps({'file':str(snap),'cores':d.get('cores')}))
+          for p in sorted(Path('incoming').rglob('*')):
+              if not p.is_file(): continue
+              manifest.append({'path':str(p),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+              if p.name in ('udp-syscalls-counts.txt','tcp-syscalls-counts.txt','ring-results.txt','iperf-packages.txt'):
+                  print('ETCI_AGG_TEXT '+json.dumps({'file':str(p),'text':p.read_text(errors='replace')[:10000]}))
+              if p.name=='udp-perf-self.txt':
+                  text=p.read_text(errors='replace').splitlines()
+                  top=[s for s in text if re.match(r'^\s*\d+\.\d+%\s',s)][:30]
+                  headers=[s for s in text if 'Samples:' in s or 'Lost Samples:' in s or 'Event count' in s]
+                  print('ETCI_AGG_PERF '+json.dumps({'file':str(p),'headers':headers,'self':top}))
+          Path('report/summary.json').write_text(json.dumps(summaries,indent=2))
+          Path('report/original-results.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in flat))
+          Path('report/evidence-manifest.json').write_text(json.dumps(manifest,indent=2))
+          cols=['run','image','lane','kind','label','mode','version','rate_mbps','payload_direction','parallel','app_udp','diagnostic_trace','observer_attached','ok','client_exit','server_exit','cpu_s','gross_elapsed_s','goodput_mbps','cpu_s_per_GiB']
+          with Path('report/results.csv').open('w',newline='') as f:
+              writer=csv.DictWriter(f,fieldnames=cols,extrasaction='ignore');writer.writeheader();writer.writerows(flat)
+          required={(str(r),os) for r in (34995727266,34998192877) for os in ('ubuntu-22.04','ubuntu-24.04')}
+          found={(s['run'],s['image']) for s in summaries if s['lane']=='lab'}
+          assert required<=found,(required-found)
+          print('ETCI_AGG_TOTAL '+json.dumps({'result_sets':len(summaries),'test_rows':len(flat),'failed_test_rows':sum(r.get('ok') is False for r in flat),'source_files':len(manifest),'note':'Aggregation success is NOT a test-PASS assertion; control-intervention rows are diagnostic only.'}))
+          PY
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: issue4-reproducible-evidence-report
+          path: report/
+          if-no-files-found: error
+          retention-days: 30
