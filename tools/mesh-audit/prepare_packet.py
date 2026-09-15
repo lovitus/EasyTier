@@ -68,7 +68,7 @@ def version(name,prefix=''):
     values=[p['version'] for p in lock['package'] if p['name']==name and p['version'].startswith(prefix)]
     if len(values)!=1:raise RuntimeError(f'non-unique dependency {name}: {values}')
     return values[0]
-versions={k:version(k,p) for k,p in [('bytes',''),('zerocopy','0.7.'),('tracing','')]}
+versions={k:version(k,p) for k,p in [('bytes',''),('zerocopy','0.7.'),('tracing',''),('bitflags','2.')]}
 (root/'src').mkdir(exist_ok=True)
 (root/'src/original.rs').write_text(original)
 (root/'src/patched.rs').write_text(patched)
@@ -84,6 +84,7 @@ publish=false
 bytes="={versions['bytes']}"
 zerocopy={{version="={versions['zerocopy']}",features=["derive","simd"]}}
 tracing="={versions['tracing']}"
+bitflags="={versions['bitflags']}"
 [features]
 zstd=[]
 ''')
