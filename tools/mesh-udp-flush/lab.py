@@ -87,16 +87,20 @@ def run(args):
             (out/f'r{round_id}-{label}-peers-{i}.json').write_text(result.stdout)
             actual=types(json.loads(result.stdout));assert actual and set(actual)=={'udp'},actual
             record('peer',round=round_id,endpoint=i,phase=label,actual=actual)
-    def parse_stats(file):
+    def parse_stats(metrics_dir):
         sink=[];writer=[];errors=[]
-        for line in file.read_text(errors='replace').splitlines():
-            target = sink if line.startswith('ISSUE4_FLUSH_SINK ') else writer if line.startswith('ISSUE4_FLUSH_WRITER ') else None
+        files=sorted(metrics_dir.glob('*.json'))
+        if not files:
+            return sink,writer,[{'error':'no dedicated diagnostic metric files','directory':str(metrics_dir)}]
+        for file in files:
+            target = sink if file.name.startswith('SINK-') else writer if file.name.startswith('WRITER-') else None
             if target is None:
+                errors.append({'error':'unexpected diagnostic metric filename','file':str(file)})
                 continue
             try:
-                target.append(json.loads(line.split(' ',1)[1]))
+                target.append(json.loads(file.read_text()))
             except json.JSONDecodeError as error:
-                errors.append({'error':str(error),'raw_line':line})
+                errors.append({'error':str(error),'file':str(file)})
         return sink,writer,errors
     def interrupted(sig,_frame):raise RuntimeError(f'signal {sig}')
     signal.signal(signal.SIGTERM,interrupted);signal.signal(signal.SIGINT,interrupted)
@@ -133,9 +137,11 @@ def run(args):
             cores=[]
             for i,ns in enumerate(names):
                 cfg=out/f'r{round_id}-cfg-{i}';cfg.mkdir();home=cfg/'home';home.mkdir()
+                metrics_dir=cfg/'issue4-flush-metrics';metrics_dir.mkdir()
                 env={k:v for k,v in os.environ.items() if not k.startswith('ET_')}
                 env.update({'HOME':str(home),'XDG_CONFIG_HOME':str(home/'config'),'RUST_LOG':'warn'})
-                if arm!='stock':env.update({'ET_ISSUE4_FLUSH_MODE':arm,'ET_ISSUE4_EXPERIMENT':'ISOLATED_LAB_ONLY'})
+                if arm!='stock':env.update({'ET_ISSUE4_FLUSH_MODE':arm,'ET_ISSUE4_EXPERIMENT':'ISOLATED_LAB_ONLY',
+                                             'ET_ISSUE4_FLUSH_METRICS_DIR':str(metrics_dir)})
                 argv=[path/args.core_name,'--config-dir',cfg,'--network-name','flush-lab',
                       '--network-secret','isolated-test-only','--ipv4',f'10.88.0.{i+1}',
                       '--listeners',f'udp://192.0.2.{i+1}:35904','--hostname',f'flush-{i}',
@@ -192,8 +198,10 @@ def run(args):
             exits=[stop(p) for p in cores];record('core_stop',round=round_id,arm=arm,values=exits)
             assert all(x['exit']==0 and not x['killed'] for x in exits)
             for i in range(2):
-                log=out/f'r{round_id}-{arm}-core-{i}.log';sink,writer,errors=parse_stats(log)
-                record('activation',round=round_id,arm=arm,stealth=stealth,endpoint=i,sink=sink,writer=writer,parse_errors=errors)
+                log=out/f'r{round_id}-{arm}-core-{i}.log';metrics_dir=out/f'r{round_id}-cfg-{i}'/'issue4-flush-metrics'
+                sink,writer,errors=parse_stats(metrics_dir)
+                record('activation',round=round_id,arm=arm,stealth=stealth,endpoint=i,sink=sink,writer=writer,
+                       metrics_dir=str(metrics_dir),parse_errors=errors)
                 if arm=='stock':
                     assert not sink and not writer and not errors
                     continue

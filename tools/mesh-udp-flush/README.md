@@ -50,6 +50,14 @@ whole-host CPU, fresh configuration/HOME directories, and exact route cleanup.
 Additional explicit secure-mode/Stealth rounds must report actual outer-phase
 activation; setting an environment variable is not sufficient evidence.
 
+Each diagnostic Core receives an otherwise empty, per-round directory under its
+temporary `--config-dir` through `ET_ISSUE4_FLUSH_METRICS_DIR`. Sink and writer
+destructors write unique JSON records there, while stderr retains the same
+human-readable records. `lab.py` accepts only the dedicated files as activation
+evidence: a missing, unexpected, or malformed record is an observation failure.
+This removes shutdown stderr truncation from the evidence path without adding a
+runtime facility, persistent state, or production logging behavior.
+
 For a narrowly scoped external observation, `lab.py --order gso` runs only the
 requested comma-separated non-Stealth arms while retaining the same functional
 checks and cleanup. It writes each round's two Core PIDs before the startup

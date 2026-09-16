@@ -5,14 +5,16 @@ mod issue4_flush {
     use bytes::Bytes;
     use futures::{FutureExt, Sink, ready};
     use nix::libc;
-    use std::{collections::VecDeque, io, mem, os::fd::AsRawFd, pin::Pin, ptr,
-        sync::OnceLock, task::{Context, Poll}};
+    use std::{collections::VecDeque, fs::OpenOptions, io, io::Write, mem, os::fd::AsRawFd,
+        path::Path, pin::Pin, ptr, sync::{OnceLock, atomic::{AtomicU64, Ordering}},
+        task::{Context, Poll}};
     use tokio::io::Interest;
 
     const STAGE: usize = 32;
     const RING: usize = 64;
     const WIRE: usize = 32;
     const MAX_BYTES: usize = 60_000;
+    static METRIC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) enum Mode { Legacy, Stage, Gso }
@@ -44,6 +46,21 @@ mod issue4_flush {
         })
     }
 
+    // The experiment launcher gives each temporary Core config a private metrics
+    // directory. Unique files avoid depending on stderr drain order at shutdown;
+    // production never compiles this overlay.
+    fn emit_stats(kind: &str, payload: String) {
+        eprintln!("ISSUE4_FLUSH_{kind} {payload}");
+        let Ok(dir) = std::env::var("ET_ISSUE4_FLUSH_METRICS_DIR") else { return; };
+        let sequence = METRIC_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = Path::new(&dir).join(format!("{kind}-{}-{sequence}.json", std::process::id()));
+        let result = OpenOptions::new().write(true).create_new(true).open(&path)
+            .and_then(|mut file| file.write_all(payload.as_bytes()));
+        if let Err(error) = result {
+            eprintln!("ISSUE4_FLUSH_METRICS_ERROR {}: {error}", path.display());
+        }
+    }
+
     pub(super) struct StagedSink {
         inner: RingSink,
         mode: Mode,
@@ -68,8 +85,8 @@ mod issue4_flush {
     }
     impl Drop for StagedSink {
         fn drop(&mut self) {
-            eprintln!("ISSUE4_FLUSH_SINK {{\"mode\":\"{}\",\"flush_histogram\":{:?},\"max_feed_group\":{},\"pending_on_drop\":{}}}",
-                self.mode.name(), self.flush_histogram, self.maximum, self.pending.len());
+            emit_stats("SINK", format!("{{\"mode\":\"{}\",\"flush_histogram\":{:?},\"max_feed_group\":{},\"pending_on_drop\":{}}}",
+                self.mode.name(), self.flush_histogram, self.maximum, self.pending.len()));
         }
     }
     impl Sink<ZCPacket> for StagedSink {
@@ -174,9 +191,9 @@ mod issue4_flush {
     }
     impl Drop for WriterStats {
         fn drop(&mut self) {
-            eprintln!("ISSUE4_FLUSH_WRITER {{\"mode\":\"{}\",\"conn_id\":{},\"packets\":{},\"send_calls\":{},\"gso_calls\":{},\"eagain\":{},\"stealth_enabled\":{},\"outer_seen\":{},\"batch_histogram\":{:?}}}",
+            emit_stats("WRITER", format!("{{\"mode\":\"{}\",\"conn_id\":{},\"packets\":{},\"send_calls\":{},\"gso_calls\":{},\"eagain\":{},\"stealth_enabled\":{},\"outer_seen\":{},\"batch_histogram\":{:?}}}",
                 self.mode.name(), self.conn_id, self.packets, self.calls, self.gso_calls, self.eagain,
-                self.stealth_enabled, self.outer_seen, self.histogram);
+                self.stealth_enabled, self.outer_seen, self.histogram));
         }
     }
     async fn send_group(socket: &UdpSocket, address: SocketAddr, frames: &[Frame], stats: &mut WriterStats) -> io::Result<usize> {
