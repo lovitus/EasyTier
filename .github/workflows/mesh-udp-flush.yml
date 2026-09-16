@@ -1,0 +1,91 @@
+name: Actual Core UDP flush-boundary experiment
+'on':
+  push:
+    branches: ['codex/issue4-natural-cohort']
+    paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
+permissions:
+  contents: read
+concurrency:
+  group: issue4-udp-flush-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  core-flush:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      FORK_SHA: c6772dbfef2395ff96b39bd4801945d92212dffb
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '1'
+      CARGO_PROFILE_RELEASE_STRIP: 'false'
+      RUSTFLAGS: '-C force-frame-pointers=yes -C link-arg=-fuse-ld=mold'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Prepare exact source and required build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p flush-evidence flush-binaries/stock flush-binaries/candidate
+          python3 -m py_compile tools/mesh-udp-flush/*.py
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config clang cmake mold libssl-dev protobuf-compiler libprotobuf-dev libpcap-dev iproute2 iputils-ping ethtool
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          timeout 90 git fetch --no-tags --depth=1 origin "$FORK_SHA"
+          git worktree add --detach "$RUNNER_TEMP/flush-source" "$FORK_SHA"
+          lscpu > flush-evidence/cpu.txt
+          uname -a > flush-evidence/kernel.txt
+          rustc +1.95.0 --version --verbose > flush-evidence/toolchain.txt
+          cp "$RUNNER_TEMP/flush-source/Cargo.lock" flush-evidence/Cargo.lock
+          printf '%s\n' "$GITHUB_SHA" > flush-evidence/experiment-sha.txt
+          printf '%s\n' 'GNU Ubuntu 22.04; Rust 1.95; default+jemalloc; stock plus same-binary legacy/stage/gso; no production rollout' > flush-evidence/BOUNDARY.txt
+      - name: Build stock, then the bounded diagnostic batch and contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/flush-target"
+          cd "$RUNNER_TEMP/flush-source"
+          timeout 1800 cargo +1.95.0 build --locked --release -j "$(nproc)" -p easytier --bin easytier-core --bin easytier-cli --features jemalloc 2>&1 | tee "$root/flush-evidence/stock-build.log"
+          cp "$CARGO_TARGET_DIR/release/easytier-core" "$CARGO_TARGET_DIR/release/easytier-cli" "$root/flush-binaries/stock/"
+          python3 "$root/tools/mesh-udp-flush/prepare.py" "$PWD" > "$root/flush-evidence/diagnostic-source.json"
+          rustfmt +1.95.0 --edition 2024 easytier/src/tunnel/udp.rs
+          sha256sum easytier/src/tunnel/udp.rs > "$root/flush-evidence/formatted-source.sha256"
+          git diff --check
+          git diff --exit-code -- Cargo.lock
+          git diff -- easytier/src/tunnel/udp.rs > "$root/flush-evidence/diagnostic-only.patch"
+          timeout 900 cargo +1.95.0 build --locked --release -j "$(nproc)" -p easytier --bin easytier-core --bin easytier-cli --features jemalloc 2>&1 | tee "$root/flush-evidence/candidate-build.log"
+          cp "$CARGO_TARGET_DIR/release/easytier-core" "$CARGO_TARGET_DIR/release/easytier-cli" "$root/flush-binaries/candidate/"
+          timeout 900 cargo +1.95.0 test --locked --release -j "$(nproc)" -p easytier --lib --features jemalloc issue4_flush_ -- --test-threads=1 2>&1 | tee "$root/flush-evidence/contract-tests.log"
+          cd "$root"
+          sha256sum flush-binaries/{stock,candidate}/easytier-{core,cli} > flush-evidence/binaries.sha256
+          file flush-binaries/{stock,candidate}/easytier-core > flush-evidence/binary-format.txt
+      - name: Run actual Core comparisons and explicit Stealth/UDP checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo timeout --signal=TERM --kill-after=15s 480s python3 tools/mesh-udp-flush/lab.py \
+            --stock flush-binaries/stock --candidate flush-binaries/candidate --output flush-evidence/lab \
+            | tee flush-evidence/lab.log
+      - name: Preserve failures and artifact identities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" flush-evidence flush-binaries
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json
+          root=Path('flush-evidence')
+          rows=[{'file':str(p.relative_to(root)),'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(root.rglob('*')) if p.is_file()]
+          (root/'manifest.json').write_text(json.dumps(rows,indent=2))
+          PY
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: issue4-udp-flush-${{ github.sha }}
+          path: |
+            flush-evidence/
+            flush-binaries/
+          retention-days: 30
+          if-no-files-found: error
