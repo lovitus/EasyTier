@@ -1,5 +1,6 @@
 name: Actual Core UDP flush-boundary experiment
 'on':
+  workflow_dispatch:
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
