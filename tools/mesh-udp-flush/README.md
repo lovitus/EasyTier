@@ -50,6 +50,14 @@ whole-host CPU, fresh configuration/HOME directories, and exact route cleanup.
 Additional explicit secure-mode/Stealth rounds must report actual outer-phase
 activation; setting an environment variable is not sufficient evidence.
 
+For a narrowly scoped external observation, `lab.py --order gso` runs only the
+requested comma-separated non-Stealth arms while retaining the same functional
+checks and cleanup. It writes each round's two Core PIDs before the startup
+wait so an external tracer can attach only to those processes. A tracer may
+prove that the candidate reached the `sendmsg` GSO path, but its CPU and rate
+figures are not performance evidence because ptrace changes scheduling and
+syscall cost.
+
 Kernel EAGAIN forcing, saturation/relay/mixed-version acceptance and a shipping
 fallback policy remain outside this first experiment, not silently PASS. The
 fixed-load result must first justify further work. All unsupported-GSO errors,

@@ -88,16 +88,21 @@ def run(args):
             actual=types(json.loads(result.stdout));assert actual and set(actual)=={'udp'},actual
             record('peer',round=round_id,endpoint=i,phase=label,actual=actual)
     def parse_stats(file):
-        sink=[];writer=[]
+        sink=[];writer=[];errors=[]
         for line in file.read_text(errors='replace').splitlines():
-            if line.startswith('ISSUE4_FLUSH_SINK '):sink.append(json.loads(line.split(' ',1)[1]))
-            if line.startswith('ISSUE4_FLUSH_WRITER '):writer.append(json.loads(line.split(' ',1)[1]))
-        return sink,writer
+            target = sink if line.startswith('ISSUE4_FLUSH_SINK ') else writer if line.startswith('ISSUE4_FLUSH_WRITER ') else None
+            if target is None:
+                continue
+            try:
+                target.append(json.loads(line.split(' ',1)[1]))
+            except json.JSONDecodeError as error:
+                errors.append({'error':str(error),'raw_line':line})
+        return sink,writer,errors
     def interrupted(sig,_frame):raise RuntimeError(f'signal {sig}')
     signal.signal(signal.SIGTERM,interrupted);signal.signal(signal.SIGINT,interrupted)
     before_routes=routes('host-routes-before')
     try:
-        record('binaries',values={k:{'core':hashlib.sha256((v/'easytier-core').read_bytes()).hexdigest(),
+        record('binaries',values={k:{'core':hashlib.sha256((v/args.core_name).read_bytes()).hexdigest(),
                                      'cli':hashlib.sha256((v/'easytier-cli').read_bytes()).hexdigest()} for k,v in binaries.items()})
         for ns in names:
             command(['ip','netns','add',ns]);created.append(ns)
@@ -118,6 +123,11 @@ def run(args):
                ('gso',False),('stage',False),('legacy',False),('stage',False),
                ('legacy',False),('gso',False),('stock',False),
                ('legacy',True),('stage',True),('gso',True)]
+        if args.order:
+            requested = args.order.split(',')
+            invalid = set(requested) - {'stock', 'legacy', 'stage', 'gso'}
+            assert not invalid, f'unknown diagnostic arms: {sorted(invalid)}'
+            order = [(arm, False) for arm in requested]
         for round_id,(arm,stealth) in enumerate(order):
             path=binaries['stock' if arm=='stock' else 'candidate'];cli=path/'easytier-cli'
             cores=[]
@@ -126,7 +136,7 @@ def run(args):
                 env={k:v for k,v in os.environ.items() if not k.startswith('ET_')}
                 env.update({'HOME':str(home),'XDG_CONFIG_HOME':str(home/'config'),'RUST_LOG':'warn'})
                 if arm!='stock':env.update({'ET_ISSUE4_FLUSH_MODE':arm,'ET_ISSUE4_EXPERIMENT':'ISOLATED_LAB_ONLY'})
-                argv=[path/'easytier-core','--config-dir',cfg,'--network-name','flush-lab',
+                argv=[path/args.core_name,'--config-dir',cfg,'--network-name','flush-lab',
                       '--network-secret','isolated-test-only','--ipv4',f'10.88.0.{i+1}',
                       '--listeners',f'udp://192.0.2.{i+1}:35904','--hostname',f'flush-{i}',
                       '--rpc-portal','127.0.0.1:35903','--mtu','1380','--dev-name','tun0',
@@ -136,6 +146,9 @@ def run(args):
                       '--secure-mode',str(stealth).lower(),'--stealth-mode',str(stealth).lower()]
                 if i==0:argv+=['--peers','udp://192.0.2.2:35904']
                 cores.append(spawn(argv,f'r{round_id}-{arm}-core-{i}',ns,env))
+            (out/f'r{round_id}-{arm}-core-pids.json').write_text(
+                json.dumps([core.pid for core in cores])
+            )
             time.sleep(8)
             assert all(p.poll() is None for p in cores),'startup failure'
             peers(cli,round_id,'before')
@@ -179,19 +192,22 @@ def run(args):
             exits=[stop(p) for p in cores];record('core_stop',round=round_id,arm=arm,values=exits)
             assert all(x['exit']==0 and not x['killed'] for x in exits)
             for i in range(2):
-                log=out/f'r{round_id}-{arm}-core-{i}.log';sink,writer=parse_stats(log)
-                record('activation',round=round_id,arm=arm,stealth=stealth,endpoint=i,sink=sink,writer=writer)
+                log=out/f'r{round_id}-{arm}-core-{i}.log';sink,writer,errors=parse_stats(log)
+                record('activation',round=round_id,arm=arm,stealth=stealth,endpoint=i,sink=sink,writer=writer,parse_errors=errors)
                 if arm=='stock':
-                    assert not sink and not writer
+                    assert not sink and not writer and not errors
                     continue
                 assert f'ISSUE4_FLUSH_MODE {arm}' in log.read_text(errors='replace')
-                assert sink and writer,'missing final diagnostic counters'
                 assert all(x['mode']==arm for x in sink+writer)
-                assert any(x['packets']>0 for x in writer)
-                if stealth:assert any(x['stealth_enabled'] and x['outer_seen'] for x in writer),'Stealth outer phase not observed'
-                if arm=='gso':
+                if writer:
+                    assert any(x['packets']>0 for x in writer)
+                if stealth and writer:assert any(x['stealth_enabled'] and x['outer_seen'] for x in writer),'Stealth outer phase not observed'
+                if arm=='gso' and writer:
                     assert any(x['gso_calls']>0 and sum(x['batch_histogram'][2:])>0 for x in writer),'no actual Core GSO batch'
                 else:assert all(x['gso_calls']==0 for x in writer)
+                if errors or not sink or not writer:
+                    record('observation_failure',round=round_id,arm=arm,endpoint=i,
+                           missing_sink=not sink,missing_writer=not writer,parse_errors=errors)
         record('suite_complete',rounds=len(order))
     except Exception as error:
         record('failure',error=repr(error));raise
@@ -212,11 +228,18 @@ def run(args):
     for arm in ['stock','legacy','stage','gso']:
         for direction in ['upload','download']:
             selected=[r for r in rows if r['kind']=='transfer' and r['arm']==arm and not r['stealth'] and r['direction']==direction]
+            if not selected:
+                continue
             summary.append({'arm':arm,'direction':direction,'n':len(selected),
                             'Mbps':statistics.median(r['result']['bits_per_second']/1e6 for r in selected),
                             'core_cpu_s_GiB':statistics.median(r['core_cpu_s_GiB'] for r in selected),
                             'host_cpu_s_GiB':statistics.median(r['host_cpu_s_GiB'] for r in selected)})
-    (out/'summary.json').write_text(json.dumps(summary,indent=2));print(json.dumps({'summary':summary,'scope':'diagnostic Core, not release acceptance'}))
+    observations_ok=not any(r['kind']=='observation_failure' for r in rows)
+    (out/'summary.json').write_text(json.dumps(summary,indent=2))
+    print(json.dumps({'summary':summary,'observations_complete':observations_ok,
+                      'scope':'diagnostic measurements; not acceptance when observation is incomplete'}))
+    if not observations_ok:
+        raise RuntimeError('observation incomplete; raw measurements retained, run remains FAIL')
 
 
 if __name__=='__main__':
@@ -224,4 +247,6 @@ if __name__=='__main__':
     else:
         parser=argparse.ArgumentParser()
         for name in ['stock','candidate','output']:parser.add_argument('--'+name,required=True)
+        parser.add_argument('--core-name',default='easytier-core')
+        parser.add_argument('--order',help='comma-separated diagnostic arms; defaults to the full interleaved matrix')
         run(parser.parse_args())
