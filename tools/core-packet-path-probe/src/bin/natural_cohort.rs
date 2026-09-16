@@ -186,7 +186,7 @@ mod linux {
                     socket.as_raw_fd(),
                     messages[sent..].as_mut_ptr(),
                     (messages.len() - sent) as _,
-                    libc::MSG_DONTWAIT,
+                    libc::MSG_DONTWAIT as _,
                 )
             };
             if n < 0 {
@@ -241,7 +241,7 @@ mod linux {
             msg.msg_iovlen = 1;
             msg.msg_control = control.as_mut_ptr().cast();
             msg.msg_controllen = unsafe { libc::CMSG_SPACE(mem::size_of::<u16>() as _) } as _;
-            if msg.msg_controllen > mem::size_of_val(&control) {
+            if msg.msg_controllen as usize > mem::size_of_val(&control) {
                 return Err(error("ancillary storage too short"));
             }
             // SAFETY: CMSG_FIRSTHDR refers into aligned initialized control,
