@@ -1,0 +1,164 @@
+// Runner-local diagnostic only: removes the outbound queue traversal, not encryption.
+// Restricted to a two-peer fixture with one data writer per socket. poll_send_to
+// has a single send waker: this is NOT a multi-peer production implementation.
+mod issue4_inline_tx {
+    use super::*;
+    use bytes::Bytes;
+    use futures::Sink;
+    use std::{io, pin::Pin, task::{Context, Poll, ready}};
+
+    pub(super) fn enabled() -> bool {
+        static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| {
+            if std::env::var("ET_ISSUE4_TX_GUARD").as_deref() != Ok("ISOLATED_TWO_PEER_ONLY") {
+                return false;
+            }
+            let mode = std::env::var("ET_ISSUE4_TX_MODE").expect("explicit diagnostic mode");
+            assert!(mode == "queued" || mode == "inline");
+            eprintln!("ISSUE4_TX_OWNER mode={mode}; one data writer per socket; diagnostic only");
+            mode == "inline"
+        })
+    }
+
+    fn frame(mut packet: ZCPacket, conn_id: u32,
+             stealth: &crate::tunnel::stealth::OuterSessionState) -> Bytes {
+        packet = packet.convert_type(ZCPacketType::UDP);
+        let len = packet.udp_payload().len();
+        let hdr = packet.mut_udp_tunnel_header().unwrap();
+        hdr.conn_id.set(conn_id);
+        hdr.len.set(len as u16);
+        hdr.msg_type = UdpPacketType::Data as u8;
+        let buf = packet.into_bytes();
+        match stealth.seal_datagram(&buf) {
+            Some(sealed) => Bytes::from(sealed),
+            None => buf,
+        }
+    }
+
+    fn flush_with(pending: &mut Option<Bytes>,
+                  submit: impl FnOnce(&[u8]) -> Poll<io::Result<usize>>) -> Poll<io::Result<()>> {
+        let Some(bytes) = pending.as_ref() else { return Poll::Ready(Ok(())); };
+        let n = ready!(submit(bytes))?;
+        if n != bytes.len() {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::WriteZero,
+                                                "partial UDP datagram submission")));
+        }
+        pending.take();
+        Poll::Ready(Ok(()))
+    }
+
+    struct InlineSink {
+        socket: Arc<UdpSocket>, addr: SocketAddr, conn_id: u32,
+        stealth: Arc<crate::tunnel::stealth::OuterSessionState>,
+        close: Option<UdpCloseEventSender>, pending: Option<Bytes>,
+    }
+    impl InlineSink {
+        fn notify_close(&mut self) {
+            if let Some(sender) = self.close.take() { let _ = sender.send((self.addr, None)); }
+        }
+    }
+    impl Drop for InlineSink { fn drop(&mut self) { self.notify_close(); } }
+    impl Sink<ZCPacket> for InlineSink {
+        type Error = TunnelError;
+        fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(),TunnelError>> {
+            if self.close.is_none() { return Poll::Ready(Err(TunnelError::Shutdown)); }
+            self.as_mut().poll_flush(cx)
+        }
+        fn start_send(self: Pin<&mut Self>, packet: ZCPacket) -> Result<(),TunnelError> {
+            let this = self.get_mut();
+            if this.close.is_none() { return Err(TunnelError::Shutdown); }
+            if this.pending.is_some() { return Err(TunnelError::BufferFull); }
+            this.pending = Some(frame(packet, this.conn_id, &this.stealth));
+            Ok(())
+        }
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(),TunnelError>> {
+            let this = self.get_mut();
+            if this.close.is_none() {
+                return if this.pending.is_none() {Poll::Ready(Ok(()))}
+                    else {Poll::Ready(Err(TunnelError::Shutdown))};
+            }
+            let socket = &this.socket; let addr = this.addr;
+            match flush_with(&mut this.pending, |bytes| socket.poll_send_to(cx, bytes, addr)) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+                Poll::Ready(Err(e)) => {this.notify_close(); Poll::Ready(Err(e.into()))}
+            }
+        }
+        fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(),TunnelError>> {
+            ready!(self.as_mut().poll_flush(cx))?;
+            self.get_mut().notify_close();
+            Poll::Ready(Ok(()))
+        }
+    }
+    pub(super) fn make(tunnel: Arc<RingTunnel>, socket: Arc<UdpSocket>, addr: SocketAddr,
+        conn_id: u32, stealth: Arc<crate::tunnel::stealth::OuterSessionState>, close: UdpCloseEventSender)
+        -> Box<dyn crate::tunnel::ZCPacketSink + Unpin> {
+        if enabled() {
+            Box::new(InlineSink { socket, addr, conn_id, stealth,
+                close:Some(close), pending:None })
+        } else { Box::new(RingSink::new(tunnel)) }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use futures::{SinkExt, task::noop_waker_ref};
+        #[test]
+        fn issue4_inline_pending_preserves_exact_owned_datagram() {
+            let mut pending=Some(Bytes::from_static(b"framed authenticated datagram"));
+            let before=pending.as_ref().unwrap().as_ptr();
+            assert!(flush_with(&mut pending, |_| Poll::Pending).is_pending());
+            assert_eq!(before,pending.as_ref().unwrap().as_ptr());
+            assert!(matches!(flush_with(&mut pending, |b| Poll::Ready(Ok(b.len()))),Poll::Ready(Ok(()))));
+            assert!(pending.is_none());
+        }
+        #[test]
+        fn issue4_inline_rejects_short_submission_without_sending_a_suffix() {
+            let mut p=Some(Bytes::from_static(b"whole"));
+            assert!(matches!(flush_with(&mut p, |_| Poll::Ready(Ok(2))),Poll::Ready(Err(_))));
+            assert_eq!(p.as_ref().unwrap().as_ref(),b"whole");
+        }
+        #[test]
+        fn issue4_inline_error_keeps_bytes_until_owner_drops() {
+            let mut p=Some(Bytes::from_static(b"whole"));
+            assert!(matches!(flush_with(&mut p, |_| Poll::Ready(Err(io::ErrorKind::Other.into()))),Poll::Ready(Err(_))));
+            assert_eq!(p.as_ref().unwrap().as_ref(),b"whole");
+        }
+        #[tokio::test]
+        async fn issue4_inline_real_udp_bytes_and_close_are_correct() {
+            let tx=Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let rx=UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let target=rx.local_addr().unwrap();
+            let (s,mut events)=tokio::sync::mpsc::unbounded_channel();
+            let stealth=Arc::new(crate::tunnel::stealth::OuterSessionState::disabled());
+            let mut sink=InlineSink{socket:tx,addr:target,conn_id:19,stealth:stealth.clone(),close:Some(s),pending:None};
+            let mut pkt=ZCPacket::new_with_payload(b"test packet payload");
+            pkt.fill_peer_manager_hdr(3,5,crate::tunnel::packet_def::PacketType::Data as u8);
+            let mut expected_packet=ZCPacket::new_with_payload(b"test packet payload");
+            expected_packet.fill_peer_manager_hdr(3,5,crate::tunnel::packet_def::PacketType::Data as u8);
+            let expected=frame(expected_packet,19,&stealth);
+            sink.send(pkt).await.unwrap();
+            let mut buf=[0u8;4096];
+            let (n,_)=tokio::time::timeout(Duration::from_secs(2),rx.recv_from(&mut buf)).await.unwrap().unwrap();
+            assert_eq!(&buf[..n],expected.as_ref());
+            sink.close().await.unwrap();
+            let mut cx=Context::from_waker(noop_waker_ref());
+            assert!(matches!(Pin::new(&mut sink).poll_ready(&mut cx),Poll::Ready(Err(TunnelError::Shutdown))));
+            drop(sink);
+            assert_eq!(events.try_recv().unwrap().0,target);
+            assert!(events.try_recv().is_err());
+        }
+        #[tokio::test]
+        async fn issue4_inline_cancellation_notifies_once() {
+            let socket=Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let (s,mut events)=tokio::sync::mpsc::unbounded_channel();
+            let addr="127.0.0.1:19231".parse().unwrap();
+            let mut sink=InlineSink{socket,addr,conn_id:19,stealth:Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),close:Some(s),pending:None};
+            Pin::new(&mut sink).start_send(ZCPacket::new_with_payload(b"pending")).unwrap();
+            assert!(matches!(Pin::new(&mut sink).start_send(ZCPacket::new_with_payload(b"cannot overwrite")),Err(TunnelError::BufferFull)));
+            drop(sink);
+            assert_eq!(events.try_recv().unwrap().0,addr);
+            assert!(events.try_recv().is_err());
+        }
+    }
+}

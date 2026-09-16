@@ -1,0 +1,196 @@
+name: Issue 4 historical audit and bounded fix verification
+'on':
+  push:
+    branches: ['ci/issue-4-diagnosis-20260916']
+    paths: ['.github/workflows/mesh-perf-verification.yml', 'tools/mesh-audit/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: issue4-fix-verification-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  FORK_SHA: c6772dbfef2395ff96b39bd4801945d92212dffb
+  UPSTREAM_SHA: 286e0f4a0d801637178d1e58def19e508c9109c2
+jobs:
+  history:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch the exact original upstream snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/EasyTier/EasyTier.git "$UPSTREAM_SHA"
+          python3 -m py_compile tools/mesh-audit/*.py
+          git diff --check
+          python3 tools/mesh-audit/history.py history-evidence | tee history.log
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: issue4-history-${{ github.sha }}
+          path: |
+            history-evidence/
+            history.log
+          retention-days: 30
+          if-no-files-found: error
+  packet:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Generate guarded candidate without changing repository production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/mesh-audit/prepare_packet.py "$RUNNER_TEMP/packet-verification"
+          cp tools/mesh-audit/packet_main.rs "$RUNNER_TEMP/packet-verification/src/main.rs"
+          mkdir -p packet-evidence
+          cp "$RUNNER_TEMP/packet-verification/"{provenance.json,candidate.patch,packet_def.candidate.rs} packet-evidence/
+      - name: Exact-source equivalence, existing unit tests and counted extraction experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.95.0 --profile minimal
+          evidence="$PWD/packet-evidence"
+          cd "$RUNNER_TEMP/packet-verification"
+          timeout 240 cargo +1.95.0 test -- --test-threads=1 2>&1 | tee "$evidence/tests.log"
+          timeout 300 cargo +1.95.0 run --release 2>&1 | tee "$evidence/bench.log"
+          cp Cargo.lock "$evidence/Cargo.lock"
+          cp Cargo.toml "$evidence/Cargo.toml"
+          python3 - "$evidence" <<'PY'
+          import json, statistics, sys
+          from collections import defaultdict
+          from pathlib import Path
+          out=Path(sys.argv[1]); groups=defaultdict(list)
+          for line in (out/'bench.log').read_text().splitlines():
+              if line.startswith('ETVERIFY_BENCH '):
+                  r=json.loads(line.split(' ',1)[1]);groups[(r['payload'],r['shared'],r['op'],r['variant'])].append(r)
+          assert len(groups)==48,len(groups)
+          rows=[]
+          for key, values in sorted(groups.items()):
+              assert len(values)==7
+              r={'payload':key[0],'shared':key[1],'op':key[2],'variant':key[3],'repeats':len(values)}
+              for metric in ['ns_each','allocations_each','allocated_bytes_each']:
+                  r[metric]=statistics.median(x[metric] for x in values)
+              rows.append(r);print('ETVERIFY_PACKET_SUMMARY '+json.dumps(r))
+          assert all(r['allocations_each']==0 for r in rows if r['variant']=='candidate')
+          assert all(r['allocations_each']>=1 for r in rows if r['variant']=='baseline' and not r['shared'])
+          (out/'summary.json').write_text(json.dumps(rows,indent=2))
+          PY
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: issue4-packet-${{ github.sha }}
+          path: packet-evidence/
+          retention-days: 30
+          if-no-files-found: error
+  core-ab:
+    needs: packet
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '1'
+      CARGO_PROFILE_RELEASE_STRIP: 'false'
+      RUSTFLAGS: '-C force-frame-pointers=yes -C link-arg=-fuse-ld=mold'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: issue4-packet-${{ github.sha }}
+          path: packet-evidence
+      - name: Prepare same-toolchain experimental Core builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p core-evidence core-binaries/baseline core-binaries/candidate
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config clang cmake mold libssl-dev protobuf-compiler libprotobuf-dev libpcap-dev iproute2 iputils-ping ethtool iperf3
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          git worktree add --detach "$RUNNER_TEMP/core-source" "$FORK_SHA"
+          lscpu > core-evidence/cpu.txt
+          uname -a > core-evidence/kernel.txt
+          df -h > core-evidence/disk-before.txt
+          printf '%s\n' 'default features + jemalloc; no active Leaf/Mihomo; identical GNU build flags for A/B' > core-evidence/build-contract.txt
+          cp "$RUNNER_TEMP/core-source/Cargo.lock" core-evidence/Cargo.lock
+      - name: Build baseline, apply runner-local extraction patch, build candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/core-target"
+          cd "$RUNNER_TEMP/core-source"
+          timeout 1800 cargo +1.95.0 build --locked --release -j "$(nproc)" -p easytier --bin easytier-core --bin easytier-cli --features jemalloc 2>&1 | tee "$root/core-evidence/baseline-build.log"
+          cp "$CARGO_TARGET_DIR/release/easytier-core" "$CARGO_TARGET_DIR/release/easytier-cli" "$root/core-binaries/baseline/"
+          cp "$root/packet-evidence/packet_def.candidate.rs" easytier/src/tunnel/packet_def.rs
+          rustfmt +1.95.0 --edition 2024 easytier/src/tunnel/packet_def.rs
+          git diff --check
+          git diff -- easytier/src/tunnel/packet_def.rs > "$root/core-evidence/applied.patch"
+          git diff --exit-code -- Cargo.lock
+          timeout 1200 cargo +1.95.0 build --locked --release -j "$(nproc)" -p easytier --bin easytier-core --bin easytier-cli --features jemalloc 2>&1 | tee "$root/core-evidence/candidate-build.log"
+          cp "$CARGO_TARGET_DIR/release/easytier-core" "$CARGO_TARGET_DIR/release/easytier-cli" "$root/core-binaries/candidate/"
+          cd "$root"
+          python3 - <<'PY'
+          import hashlib,json,os,subprocess
+          from pathlib import Path
+          d={'source':os.environ['FORK_SHA'],'target':'x86_64-unknown-linux-gnu','features':'default + jemalloc','rustflags':os.environ['RUSTFLAGS'],'patch_sha256':hashlib.sha256(Path('core-evidence/applied.patch').read_bytes()).hexdigest()}
+          for v in ['baseline','candidate']:
+              p=Path('core-binaries')/v/'easytier-core'
+              d[v]={'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'bytes':p.stat().st_size,'version':subprocess.check_output([str(p),'--version'],text=True)}
+              Path(f'core-evidence/{v}-build-id.txt').write_text(subprocess.check_output(['readelf','-n',str(p)],text=True))
+          Path('core-evidence/manifest.json').write_text(json.dumps(d,indent=2));print('ETVERIFY_CORE_MANIFEST '+json.dumps(d))
+          PY
+      - name: Build checksum-pinned maintained iperf comparator
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --max-time 90 https://github.com/esnet/iperf/releases/download/3.21/iperf-3.21.tar.gz -o iperf321.tar.gz
+          echo '656e4405ebd620121de7ceca3eaf43a88f79ea1b857d041a6a0b1314801acdd8  iperf321.tar.gz' | sha256sum --check
+          mkdir -p verified-iperf
+          tar -xzf iperf321.tar.gz -C verified-iperf --strip-components=1
+          cd verified-iperf
+          ./configure --disable-shared CFLAGS='-O2 -g'
+          timeout 180 make -j "$(nproc)"
+          cd ..
+          verified-iperf/src/iperf3 --version > core-evidence/iperf-version.txt
+          sha256sum verified-iperf/src/iperf3 >> core-evidence/iperf-version.txt
+      - name: Interleaved full-Core functional and efficiency verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=GITHUB_ACTIONS,GITHUB_SHA,RUNNER_OS,ImageVersion \
+            timeout --signal=TERM --kill-after=10s 900s python3 tools/mesh-audit/core_ab.py \
+              --baseline core-binaries/baseline --candidate core-binaries/candidate \
+              --manifest core-evidence/manifest.json --iperf verified-iperf/src/iperf3 --output core-evidence/lab | tee core-evidence/ab.log
+      - name: Preserve exact experiment artifacts, including failures
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" core-evidence core-binaries
+          df -h > core-evidence/disk-after.txt
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: issue4-core-verification-${{ github.sha }}
+          path: core-evidence/
+          retention-days: 30
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v5
+        if: success()
+        with:
+          name: issue4-experimental-cores-${{ github.sha }}
+          path: core-binaries/
+          retention-days: 7
+          if-no-files-found: error
