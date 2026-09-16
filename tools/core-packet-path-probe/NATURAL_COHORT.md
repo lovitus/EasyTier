@@ -45,3 +45,29 @@ a repeatable material CPU/GiB gain without throughput or ICMP regression. A
 positive standalone result only opens the Core experiment; it cannot authorize
 production changes. The old synthetic GRO scratch and writer-drain failures
 remain valid and are not superseded by this probe.
+
+## First execution, 2026-09-16
+
+Run 35061859589 failed before tool compilation because the workflow omitted
+the repository-required mold linker. Run 35062151397 fixed that preparation
+error: all three unit tests passed, including real kernel datagram boundaries.
+The first single-send baseline then failed its download ICMP check: 20 sent,
+19 received, maximum RTT 23.783 ms. Both 512 MiB TCP transfers and their
+separate 1,048,595-byte digest/half-close checks completed, but this is NOT a
+performance PASS. No mmsg/GSO arm ran. Cleanup was successful.
+
+The two baseline endpoints observed 567,947 and 578,193 transmitted datagrams.
+Their natural cohort histograms include 8,125 and 8,092 reads yielding 49
+segments; natural multi-segment input is real, not a prefilled synthetic queue.
+The original evidence did not collect kernel drop counters, so it cannot
+attribute missing datagrams to socket overflow rather than another boundary.
+
+Artifact 10432588706 has ZIP SHA256
+`8e6103a26f4ee77b16890f8b115f8b8c5caeea90423f8279ec998d5a657b9168`;
+all 23 manifest entries and both binary hashes were checked independently.
+Its GNU binary requires GLIBC_2.39 and cannot run on the intended GLIBC_2.35
+lab host. The next artifact is therefore static musl, consistently for all
+arms. Raw transfer snapshots are now retained even when a later ICMP check
+fails; exit-time namespace SNMP/socket/link counters add diagnostic evidence.
+Neither this observation nor static packaging relaxes the original assertions.
+Do not compare absolute GNU/musl throughput as a batching effect.

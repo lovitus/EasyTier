@@ -14,6 +14,8 @@ jobs:
   kernel-mechanism:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
     steps:
       - uses: actions/checkout@v5
         with:
@@ -24,9 +26,11 @@ jobs:
           set -euo pipefail
           mkdir -p cohort-evidence cohort-binaries
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iputils-ping mold
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iputils-ping mold musl-tools
           mold --version > cohort-evidence/linker.txt
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          rustup target add --toolchain 1.95.0 x86_64-unknown-linux-musl
+          rustc +1.95.0 --version --verbose > cohort-evidence/toolchain.txt
           uname -a > cohort-evidence/kernel.txt
           lscpu > cohort-evidence/cpu.txt
           cp tools/core-packet-path-probe/Cargo.lock cohort-evidence/Cargo.lock
@@ -38,10 +42,11 @@ jobs:
           set -euo pipefail
           python3 -m py_compile tools/core-packet-path-probe/natural_cohort_lab.py
           rustfmt +1.95.0 --edition 2024 --check tools/core-packet-path-probe/src/bin/natural_cohort.rs
-          timeout 300 cargo +1.95.0 build --locked --release --manifest-path tools/core-packet-path-probe/Cargo.toml --bin natural_cohort 2>&1 | tee cohort-evidence/build.log
-          timeout 120 cargo +1.95.0 test --locked --release --manifest-path tools/core-packet-path-probe/Cargo.toml --bin natural_cohort -- --test-threads=1 2>&1 | tee cohort-evidence/tests.log
-          rustc +1.95.0 --edition 2024 -O tools/easytier-perf-probe.rs -o cohort-binaries/probe
-          cp tools/core-packet-path-probe/target/release/natural_cohort cohort-binaries/
+          timeout 300 cargo +1.95.0 build --locked --release --target x86_64-unknown-linux-musl --manifest-path tools/core-packet-path-probe/Cargo.toml --bin natural_cohort 2>&1 | tee cohort-evidence/build.log
+          timeout 120 cargo +1.95.0 test --locked --release --target x86_64-unknown-linux-musl --manifest-path tools/core-packet-path-probe/Cargo.toml --bin natural_cohort -- --test-threads=1 2>&1 | tee cohort-evidence/tests.log
+          rustc +1.95.0 --edition 2024 --target x86_64-unknown-linux-musl -O tools/easytier-perf-probe.rs -o cohort-binaries/probe
+          cp tools/core-packet-path-probe/target/x86_64-unknown-linux-musl/release/natural_cohort cohort-binaries/
+          file cohort-binaries/* > cohort-evidence/binary-format.txt
           sha256sum cohort-binaries/* > cohort-evidence/binaries.sha256
           git diff --exit-code -- tools/core-packet-path-probe/Cargo.lock
       - name: Real TUN cohorts and identical kernel receive path

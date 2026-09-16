@@ -153,6 +153,9 @@ def lab(args):
                 before = snapshot(processes)
                 result = command([probe, "client", "--target", "10.88.0.2:35803", "--direction", direction, "--bytes", str(536870912), "--timeout-seconds", "20"], a, check=False, timeout=25)
                 after = snapshot(processes)
+                record({"kind": "raw_transfer", "round": number, "mode": mode,
+                        "direction": direction, "before": before, "after": after,
+                        "stdout": result.stdout, "stderr": result.stderr, "exit": result.returncode})
                 (root / (label + "-client.json")).write_text(result.stdout)
                 (root / (label + "-client.stderr")).write_text(result.stderr)
                 server.wait(timeout=3)
@@ -183,6 +186,14 @@ def lab(args):
         record({"kind": "failure", "error": repr(e)})
         raise
     finally:
+        try:
+            for ns in created:
+                record({"kind": "kernel_before_cleanup", "namespace": ns,
+                        "snmp": command(["cat", "/proc/net/snmp"], ns, check=False).stdout,
+                        "udp": command(["cat", "/proc/net/udp"], ns, check=False).stdout,
+                        "links": command(["ip", "-j", "-s", "link"], ns, check=False).stdout})
+        except Exception as e:
+            record({"kind": "observation_failure", "error": repr(e)})
         cleanup = [stop(p) for p in reversed(children)]
         for ns in reversed(created):
             residual = command(["ip", "netns", "pids", ns], check=False).stdout.strip()
