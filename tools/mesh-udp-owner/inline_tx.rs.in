@@ -103,6 +103,21 @@ mod issue4_inline_tx {
     mod tests {
         use super::*;
         use futures::{SinkExt, task::noop_waker_ref};
+
+        fn fixture_packet(payload: &[u8]) -> ZCPacket {
+            // new_with_payload leaves header storage uninitialized. Define all
+            // bytes here so padding/reserved fields are part of the wire check.
+            let offset = ZCPacketType::NIC.get_packet_offsets().payload_offset;
+            let mut buffer = bytes::BytesMut::new();
+            buffer.resize(offset + payload.len(), 0);
+            buffer[offset..].copy_from_slice(payload);
+            let mut packet = ZCPacket::new_from_buf(buffer, ZCPacketType::NIC);
+            packet.fill_peer_manager_hdr(
+                3, 5, crate::tunnel::packet_def::PacketType::Data as u8,
+            );
+            packet
+        }
+
         #[test]
         fn issue4_inline_pending_preserves_exact_owned_datagram() {
             let mut pending=Some(Bytes::from_static(b"framed authenticated datagram"));
@@ -132,15 +147,18 @@ mod issue4_inline_tx {
             let (s,mut events)=tokio::sync::mpsc::unbounded_channel();
             let stealth=Arc::new(crate::tunnel::stealth::OuterSessionState::disabled());
             let mut sink=InlineSink{socket:tx,addr:target,conn_id:19,stealth:stealth.clone(),close:Some(s),pending:None};
-            let mut pkt=ZCPacket::new_with_payload(b"test packet payload");
-            pkt.fill_peer_manager_hdr(3,5,crate::tunnel::packet_def::PacketType::Data as u8);
-            let mut expected_packet=ZCPacket::new_with_payload(b"test packet payload");
-            expected_packet.fill_peer_manager_hdr(3,5,crate::tunnel::packet_def::PacketType::Data as u8);
-            let expected=frame(expected_packet,19,&stealth);
+            let pkt=fixture_packet(b"test packet payload");
+            // Independent fixed wire oracle, not another call to frame().
+            let mut expected=vec![
+                19, 0, 0, 0, 3, 0, 35, 0, // UDP: connection, DATA, padding, length
+                3, 0, 0, 0, 5, 0, 0, 0,   // source and destination peers
+                1, 0, 1, 0, 19, 0, 0, 0,  // DATA, flags, forward, reserved, length
+            ];
+            expected.extend_from_slice(b"test packet payload");
             sink.send(pkt).await.unwrap();
             let mut buf=[0u8;4096];
             let (n,_)=tokio::time::timeout(Duration::from_secs(2),rx.recv_from(&mut buf)).await.unwrap().unwrap();
-            assert_eq!(&buf[..n],expected.as_ref());
+            assert_eq!(&buf[..n],expected.as_slice());
             sink.close().await.unwrap();
             let mut cx=Context::from_waker(noop_waker_ref());
             assert!(matches!(Pin::new(&mut sink).poll_ready(&mut cx),Poll::Ready(Err(TunnelError::Shutdown))));
@@ -154,8 +172,8 @@ mod issue4_inline_tx {
             let (s,mut events)=tokio::sync::mpsc::unbounded_channel();
             let addr="127.0.0.1:19231".parse().unwrap();
             let mut sink=InlineSink{socket,addr,conn_id:19,stealth:Arc::new(crate::tunnel::stealth::OuterSessionState::disabled()),close:Some(s),pending:None};
-            Pin::new(&mut sink).start_send(ZCPacket::new_with_payload(b"pending")).unwrap();
-            assert!(matches!(Pin::new(&mut sink).start_send(ZCPacket::new_with_payload(b"cannot overwrite")),Err(TunnelError::BufferFull)));
+            Pin::new(&mut sink).start_send(fixture_packet(b"pending")).unwrap();
+            assert!(matches!(Pin::new(&mut sink).start_send(fixture_packet(b"cannot overwrite")),Err(TunnelError::BufferFull)));
             drop(sink);
             assert_eq!(events.try_recv().unwrap().0,addr);
             assert!(events.try_recv().is_err());

@@ -8,4 +8,24 @@ Only the static two-peer isolated fixture is supported. Tokio 1.52.1 poll_send_t
 
 Five focused tests cover pending ownership, short submission rejection, errors, real UDP bytes/close, and cancellation. Integration covers three interleaved queued/inline repetitions, stock before/after, both directions, fixed load, saturation with ICMP progress, sparse UDP, content/EOF and scoped cleanup. A failed ping, process stop or transfer remains a failed gate. The new tests are not claimed passed before workflow completion.
 
+## Deterministic packet fixture correction
+
+The first ownership artifact (10428100940, source a658039a) contains successful
+stock/probe builds followed by four passing tests and one failed wire test;
+it contains no integration A/B results. ZIP SHA256 is
+`1cf199cc2ae1dbfe270fa944537bb4a781ca85c0a3fb5864f3918555a4f0a648`.
+The differing byte is UDP header offset 5 (`padding`): actual 0 versus expected
+130. The test created two packets through `new_with_payload`, which leaves
+header bytes uninitialized, and neither framing path sets padding.
+
+Test packets now initialize the entire storage before constructing ZCPacket.
+The expected plaintext datagram is a fixed independent wire vector, including
+padding/reserved bytes; it no longer calls the candidate frame function.
+Cancellation-test packets use the same initialized input helper. Full byte
+comparison, deadline, closed-state and exactly-once notification assertions
+remain unchanged. The production framing, security, sink behavior, workload,
+features and CI pass/fail gates are unchanged. This corrects diagnostic inputs,
+not the inherited production constructor; compilation/runtime evidence for the
+corrected fixture must be recorded separately after execution.
+
 The first local preparation check used the wrong local temporary root and failed with FileNotFoundError before changing a repository file; the corrected path passed the exact-source guards. Local Python AST and workflow YAML checks passed. No local Rust compilation or full repository pre-commit was available. Existing release workflows and production branches/hosts are untouched; only this exact branch/path workflow runs. This is one coherent test batch under the maintainer's later explicit CI authorization, not the old builder policy or release pipeline.
