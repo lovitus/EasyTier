@@ -1,0 +1,106 @@
+name: Issue 4 UDP transmit ownership causality
+'on':
+  push:
+    branches: ['ci/issue-4-diagnosis-20260916']
+    paths: ['.github/workflows/mesh-udp-owner.yml', 'tools/mesh-udp-owner/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: issue4-udp-owner-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  ownership:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      FORK_SHA: c6772dbfef2395ff96b39bd4801945d92212dffb
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '1'
+      CARGO_PROFILE_RELEASE_STRIP: 'false'
+      RUSTFLAGS: '-C force-frame-pointers=yes -C link-arg=-fuse-ld=mold'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare isolated same-toolchain test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p owner-evidence owner-binaries/stock owner-binaries/probe
+          python3 -m py_compile tools/mesh-udp-owner/*.py
+          git diff --check
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config clang cmake mold libssl-dev protobuf-compiler libprotobuf-dev libpcap-dev iproute2 iputils-ping ethtool iperf3
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          git worktree add --detach "$RUNNER_TEMP/owner-source" "$FORK_SHA"
+          lscpu > owner-evidence/cpu.txt
+          uname -a > owner-evidence/kernel.txt
+          cp "$RUNNER_TEMP/owner-source/Cargo.lock" owner-evidence/Cargo.lock
+          printf '%s\n' 'default+jemalloc; one UDP peer each; no active policy; plain outer / encrypted mesh; same GNU flags' > owner-evidence/build-contract.txt
+      - name: Build stock and guarded ownership experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/owner-target"
+          cd "$RUNNER_TEMP/owner-source"
+          test "$(git rev-parse HEAD)" = "$FORK_SHA"
+          git diff --exit-code
+          timeout 1800 cargo +1.95.0 build --locked --release -j "$(nproc)" -p easytier --bin easytier-core --bin easytier-cli --features jemalloc 2>&1 | tee "$root/owner-evidence/stock-build.log"
+          cp "$CARGO_TARGET_DIR/release/easytier-core" "$CARGO_TARGET_DIR/release/easytier-cli" "$root/owner-binaries/stock/"
+          python3 "$root/tools/mesh-udp-owner/prepare.py" "$PWD" | tee "$root/owner-evidence/source.json.log"
+          rustfmt +1.95.0 --edition 2024 easytier/src/tunnel/udp.rs
+          git diff --check
+          git diff --exit-code -- Cargo.lock
+          git diff -- easytier/src/tunnel/udp.rs > "$root/owner-evidence/diagnostic-only.patch"
+          timeout 900 cargo +1.95.0 build --locked --release -j "$(nproc)" -p easytier --bin easytier-core --bin easytier-cli --features jemalloc 2>&1 | tee "$root/owner-evidence/probe-build.log"
+          cp "$CARGO_TARGET_DIR/release/easytier-core" "$CARGO_TARGET_DIR/release/easytier-cli" "$root/owner-binaries/probe/"
+          timeout 900 cargo +1.95.0 test --locked --release -j "$(nproc)" -p easytier --lib --features jemalloc issue4_inline_ -- --test-threads=1 2>&1 | tee "$root/owner-evidence/unit-tests.log"
+          grep -F '5 passed; 0 failed' "$root/owner-evidence/unit-tests.log"
+          cd "$root"
+          sha256sum owner-binaries/{stock,probe}/easytier-{core,cli} > owner-evidence/binaries.sha256
+      - name: Build pinned iperf comparator
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --max-time 90 https://github.com/esnet/iperf/releases/download/3.21/iperf-3.21.tar.gz -o iperf321.tar.gz
+          echo '656e4405ebd620121de7ceca3eaf43a88f79ea1b857d041a6a0b1314801acdd8  iperf321.tar.gz' | sha256sum --check
+          mkdir verified-iperf
+          tar -xzf iperf321.tar.gz -C verified-iperf --strip-components=1
+          cd verified-iperf
+          ./configure --disable-shared CFLAGS='-O2 -g'
+          timeout 180 make -j "$(nproc)"
+          cd ..
+          verified-iperf/src/iperf3 --version > owner-evidence/iperf.txt
+          sha256sum verified-iperf/src/iperf3 >> owner-evidence/iperf.txt
+      - name: Run same-binary queued versus inline control with stock bracketing
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=GITHUB_ACTIONS,GITHUB_SHA,RUNNER_OS,ImageVersion \
+            timeout --signal=TERM --kill-after=10s 900s python3 tools/mesh-udp-owner/experiment.py \
+              --stock owner-binaries/stock --probe owner-binaries/probe --iperf verified-iperf/src/iperf3 \
+              --output owner-evidence/lab | tee owner-evidence/experiment.log
+      - name: Preserve failed as well as successful evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" owner-evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json
+          r=Path('owner-evidence')
+          rows=[{'path':str(p.relative_to(r)),'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(r.rglob('*')) if p.is_file()]
+          (r/'manifest.json').write_text(json.dumps(rows,indent=2))
+          print('Evidence files:',len(rows))
+          PY
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: issue4-udp-owner-${{ github.sha }}
+          path: owner-evidence/
+          retention-days: 30
+          if-no-files-found: error

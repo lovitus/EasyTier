@@ -1,0 +1,11 @@
+# Issue 4 outbound UDP ownership experiment
+
+This is an authorized isolated CI diagnostic, not production source or a proposed shipping feature. Source is pinned to c6772dbf. The queued and inline arms use the same rebuilt diagnostic binary, with stock bracketing.
+
+Inline changes the outbound ring enqueue/dequeue and executing task: framing and UDP submission occur in the caller through a bounded one-pending-datagram sink. The original unused ring/task are retained as dormant controls. Thus the experiment does not claim to measure their allocation/resource footprint. The backpressure boundary changes too; interpret this as a combined ownership/scheduling intervention, not a pure syscall or CPU-function ablation. Input/receive rings remain unchanged. No metrics, encryption, ACL, route or wire switch is removed.
+
+Only the static two-peer isolated fixture is supported. Tokio 1.52.1 poll_send_to retains one send-side waker, so this direct implementation is not valid as a general multi-peer shared-socket replacement. Its registration.poll_write_io still consumes Tokio cooperative budget. Production adoption would require a per-socket writer owner or safe multi-waiter readiness plus full control/pressure/rotation coverage. No diagnostic binaries are published as release assets.
+
+Five focused tests cover pending ownership, short submission rejection, errors, real UDP bytes/close, and cancellation. Integration covers three interleaved queued/inline repetitions, stock before/after, both directions, fixed load, saturation with ICMP progress, sparse UDP, content/EOF and scoped cleanup. A failed ping, process stop or transfer remains a failed gate. The new tests are not claimed passed before workflow completion.
+
+The first local preparation check used the wrong local temporary root and failed with FileNotFoundError before changing a repository file; the corrected path passed the exact-source guards. Local Python AST and workflow YAML checks passed. No local Rust compilation or full repository pre-commit was available. Existing release workflows and production branches/hosts are untouched; only this exact branch/path workflow runs. This is one coherent test batch under the maintainer's later explicit CI authorization, not the old builder policy or release pipeline.
