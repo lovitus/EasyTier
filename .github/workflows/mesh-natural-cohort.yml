@@ -1,0 +1,74 @@
+name: Mesh natural-cohort kernel mechanism
+'on':
+  push:
+    branches: ['codex/issue4-natural-cohort']
+    paths:
+      - '.github/workflows/mesh-natural-cohort.yml'
+      - 'tools/core-packet-path-probe/**'
+permissions:
+  contents: read
+concurrency:
+  group: mesh-natural-cohort-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  kernel-mechanism:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Prepare small standalone tool only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p cohort-evidence cohort-binaries
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iputils-ping
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          uname -a > cohort-evidence/kernel.txt
+          lscpu > cohort-evidence/cpu.txt
+          cp tools/core-packet-path-probe/Cargo.lock cohort-evidence/Cargo.lock
+          printf '%s\n' "$GITHUB_SHA" > cohort-evidence/source-sha.txt
+          printf '%s\n' 'Kernel mechanism only: no Core, routing, encryption, policy, or WAN performance claim.' > cohort-evidence/BOUNDARY.txt
+      - name: Build and test locked tool, not EasyTier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tools/core-packet-path-probe/natural_cohort_lab.py
+          rustfmt +1.95.0 --edition 2024 --check tools/core-packet-path-probe/src/bin/natural_cohort.rs
+          timeout 300 cargo +1.95.0 build --locked --release --manifest-path tools/core-packet-path-probe/Cargo.toml --bin natural_cohort 2>&1 | tee cohort-evidence/build.log
+          timeout 120 cargo +1.95.0 test --locked --release --manifest-path tools/core-packet-path-probe/Cargo.toml --bin natural_cohort -- --test-threads=1 2>&1 | tee cohort-evidence/tests.log
+          rustc +1.95.0 --edition 2024 -O tools/easytier-perf-probe.rs -o cohort-binaries/probe
+          cp tools/core-packet-path-probe/target/release/natural_cohort cohort-binaries/
+          sha256sum cohort-binaries/* > cohort-evidence/binaries.sha256
+          git diff --exit-code -- tools/core-packet-path-probe/Cargo.lock
+      - name: Real TUN cohorts and identical kernel receive path
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo timeout --signal=TERM --kill-after=10s 480s python3 tools/core-packet-path-probe/natural_cohort_lab.py \
+            --binary cohort-binaries/natural_cohort --probe cohort-binaries/probe --output cohort-evidence/lab \
+            | tee cohort-evidence/run.log
+      - name: Keep failures and exact tool identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" cohort-evidence cohort-binaries
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          root = Path('cohort-evidence')
+          files = [{'file': str(p.relative_to(root)), 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(root.rglob('*')) if p.is_file()]
+          (root/'manifest.json').write_text(json.dumps(files, indent=2))
+          PY
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: mesh-natural-cohort-${{ github.sha }}
+          path: |
+            cohort-evidence/
+            cohort-binaries/
+          retention-days: 30
+          if-no-files-found: error
