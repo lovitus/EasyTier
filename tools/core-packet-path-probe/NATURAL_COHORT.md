@@ -122,3 +122,34 @@ route, automatic restore, or retroactive PASS is introduced. Private-host
 snapshots stay in private evidence, never in public issue text or Git files.
 The receive-only arm runs first; older arms retain their relative order and
 every existing failure assertion remains fatal. No production source changes.
+
+## Segmentation boundary and host accounting
+
+Run 35068255671 showed zero GRO receive groups from individual sends with the
+default veth GRO feature off. That does not reject receive-only GRO on other
+devices. Conversely, a paired virtual-link result can include an skb already
+carrying GSO metadata; it is not proof of physical-wire reaggregation.
+
+The `segmented` fixture profile disables UDP transmit segmentation and TCP
+TSO on only the disposable veth endpoints, and enables receive GRO there.
+The actual feature values must match. This asks Linux to segment before veth
+transmission and permits the veth NAPI/GRO path. It remains a software model,
+not a physical NIC or WAN benchmark. The `default` profile stays available.
+All modes in a run use the same device settings; physical interfaces are never
+tuned. Linux v6.8 references: `drivers/net/veth.c::veth_skb_is_eligible_for_gro`,
+`net/core/dev.c::validate_xmit_skb`, and `net/ipv4/udp.c::udp_lib_setsockopt`.
+
+Veth endpoints are created directly in their destination namespaces using
+the documented netns parameters, not created in the host and moved later.
+`--setup-only` checks this lifecycle and raw route equality without starting
+forwarders or load. This removes a source of host link-event interference;
+it does not prove the cause of the old missing-snapshot route mismatch.
+
+Each measured transfer now also retains aggregate `/proc/stat` samples.
+Host busy CPU includes user, nice, system, IRQ and softirq, without adding
+guest time twice or counting idle/iowait/steal as executed CPU. Steal and
+softirq remain separately visible. This prevents process-only results from
+hiding work moved into softirq/ksoftirqd. Host values include the load
+generator and unrelated host work; they are not isolated Core CPU. Two small
+unit tests protect the field selection and clock conversion. No prior FAIL
+is changed and no production source or socket-buffer limit is modified.

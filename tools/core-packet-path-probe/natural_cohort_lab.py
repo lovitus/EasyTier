@@ -59,6 +59,17 @@ def integrity(role, direction):
     print(json.dumps({"ok": True, "bytes": count, "sha256": expected}))
 
 
+def host_cpu_values(line, hz):
+    fields = line.split()
+    if fields[0] != "cpu" or len(fields) < 9 or hz <= 0:
+        raise ValueError("invalid aggregate /proc/stat CPU sample")
+    ticks = list(map(int, fields[1:]))
+    # Guest time is not added again; idle/iowait/steal are not executed CPU.
+    busy = sum(ticks[i] for i in [0, 1, 2, 5, 6]) / hz
+    return {"ticks": ticks, "hz": hz, "busy_seconds": busy,
+            "softirq_seconds": ticks[6] / hz, "steal_seconds": ticks[7] / hz}
+
+
 def lab(args):
     root = Path(args.output).resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -106,6 +117,10 @@ def lab(args):
                            "rss": int(stat[21]) * os.sysconf("SC_PAGESIZE")})
         return values
 
+    def host_snapshot():
+        with open("/proc/stat") as src:
+            return host_cpu_values(src.readline(), os.sysconf("SC_CLK_TCK"))
+
     def interrupted(sig, _frame):
         raise RuntimeError(f"interrupted by {sig}")
 
@@ -115,24 +130,40 @@ def lab(args):
     (root / "host-routes-before.json").write_text(json.dumps(before_routes, indent=2))
     try:
         record({"kind": "binary", "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                "underlay_profile": args.underlay_profile, "setup_only": args.setup_only,
                 "warning": "No Core, no crypto, no policy; kernel mechanism only"})
         for ns in names:
             command(["ip", "netns", "add", ns])
             created.append(ns)
             command(["ip", "-n", ns, "link", "set", "lo", "up"])
             command(["sysctl", "-qw", "net.ipv6.conf.all.disable_ipv6=1", "net.ipv6.conf.default.disable_ipv6=1"], ns)
-        va, vb = "nca" + str(os.getpid()), "ncb" + str(os.getpid())
-        command(["ip", "link", "add", va, "type", "veth", "peer", "name", vb])
-        for i, (ns, interface) in enumerate(zip(names, [va, vb])):
-            command(["ip", "link", "set", interface, "netns", ns])
-            command(["ip", "-n", ns, "link", "set", interface, "name", "under0"])
+        # Both endpoints are born in their final namespaces. Never expose a
+        # temporary link in the host namespace to its network managers.
+        command(["ip", "link", "add", "under0", "netns", a, "type", "veth",
+                 "peer", "name", "under0", "netns", b])
+        for i, ns in enumerate(names):
             command(["ip", "-n", ns, "addr", "add", f"192.0.2.{i+1}/30", "dev", "under0"])
             command(["ip", "-n", ns, "link", "set", "under0", "mtu", "1500", "up"])
-            (root / f"underlay-features-{i}.txt").write_text(command(["ethtool", "-k", "under0"], ns).stdout)
+            if args.underlay_profile == "segmented":
+                # Software-segment UDP before veth transmission; allow receive
+                # NAPI/GRO instead of merely transporting an existing GSO skb.
+                # These changes apply only to the disposable namespace device.
+                command(["ethtool", "-K", "under0", "tx-udp-segmentation", "off",
+                         "tso", "off", "gro", "on"], ns)
+            features = command(["ethtool", "-k", "under0"], ns).stdout
+            (root / f"underlay-features-{i}.txt").write_text(features)
+            if args.underlay_profile == "segmented":
+                expected = {"tx-udp-segmentation": "off", "tcp-segmentation-offload": "off",
+                            "generic-receive-offload": "on"}
+                actual = {k.strip(): v.strip().split()[0] for line in features.splitlines()
+                          if ":" in line for k, v in [line.split(":", 1)] if k.strip() in expected}
+                assert actual == expected, f"underlay feature contract differs: {actual}"
         # Keep the prior arms in their original relative order. Run the new
         # arm first so a known baseline failure cannot hide all new-path data.
         # Every assertion below remains fatal; this is not a waiver.
         order = ["gro", "gso-gro", "single", "mmsg", "gso", "gro", "gso-gro", "gso", "mmsg", "single", "gro", "gso-gro", "mmsg", "single", "gso"]
+        if args.setup_only:
+            order = []
         for number, mode in enumerate(order):
             processes = [spawn(["env", "ET_KERNEL_COHORT_LAB=1", binary, mode,
                                 f"192.0.2.{i+1}:35804", f"192.0.2.{2-i}:35804"],
@@ -156,10 +187,13 @@ def lab(args):
                 time.sleep(.2)
                 ping = spawn(["ping", "-c", "20", "-i", "0.1", "-W", "1", "10.88.0.2"], label + "-ping", a)
                 before = snapshot(processes)
+                host_before = host_snapshot()
                 result = command([probe, "client", "--target", "10.88.0.2:35803", "--direction", direction, "--bytes", str(536870912), "--timeout-seconds", "20"], a, check=False, timeout=25)
+                host_after = host_snapshot()
                 after = snapshot(processes)
                 record({"kind": "raw_transfer", "round": number, "mode": mode,
                         "direction": direction, "before": before, "after": after,
+                        "host_before": host_before, "host_after": host_after,
                         "stdout": result.stdout, "stderr": result.stderr, "exit": result.returncode})
                 (root / (label + "-client.json")).write_text(result.stdout)
                 (root / (label + "-client.stderr")).write_text(result.stderr)
@@ -175,6 +209,8 @@ def lab(args):
                 assert ping.returncode == 0 and loss and float(loss[1]) == 0, "ICMP progress failed"
                 record({"kind": "transfer", "round": number, "mode": mode, "direction": direction,
                         "before": before, "after": after, "result": data,
+                        "host_before": host_before, "host_after": host_after,
+                        "host_cpu_s_GiB": (host_after["busy_seconds"]-host_before["busy_seconds"])/.5,
                         "cpu_s_GiB": sum(last["cpu"]-first["cpu"] for first, last in zip(before, after))/.5})
             exits = [stop(p) for p in processes]
             record({"kind": "stop", "round": number, "values": exits})
@@ -214,12 +250,17 @@ def lab(args):
         record({"kind": "cleanup", "values": cleanup, "root_routes_unchanged": before_routes == after_routes})
     assert all(r["exit"] == 0 and not r.get("killed") and not r.get("residual") for r in cleanup)
     assert before_routes == after_routes
+    if args.setup_only:
+        print(json.dumps({"result": "SETUP_ONLY", "underlay_profile": args.underlay_profile,
+                          "root_routes_unchanged": True}))
+        return
     summary = []
     for mode in ["single", "mmsg", "gso", "gso-gro", "gro"]:
         for direction in ["upload", "download"]:
             selected = [r for r in rows if r["kind"] == "transfer" and r["mode"] == mode and r["direction"] == direction]
             summary.append({"mode": mode, "direction": direction, "samples": len(selected),
                             "Mbps": statistics.median(r["result"]["bits_per_second"]/1e6 for r in selected),
+                            "host_cpu_s_GiB": statistics.median(r["host_cpu_s_GiB"] for r in selected),
                             "cpu_s_GiB": statistics.median(r["cpu_s_GiB"] for r in selected)})
     (root / "summary.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps({"result": "MECHANISM_ONLY", "summary": summary}))
@@ -233,4 +274,6 @@ if __name__ == "__main__":
         parser.add_argument("--binary", required=True)
         parser.add_argument("--probe", required=True)
         parser.add_argument("--output", required=True)
+        parser.add_argument("--setup-only", action="store_true")
+        parser.add_argument("--underlay-profile", choices=["default", "segmented"], default="default")
         lab(parser.parse_args())
