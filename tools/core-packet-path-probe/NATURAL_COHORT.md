@@ -71,3 +71,28 @@ arms. Raw transfer snapshots are now retained even when a later ICMP check
 fails; exit-time namespace SNMP/socket/link counters add diagnostic evidence.
 Neither this observation nor static packaging relaxes the original assertions.
 Do not compare absolute GNU/musl throughput as a batching effect.
+
+## Paired UDP_GRO arm, pending validation
+
+The next experiment adds `gso-gro`; the original single/mmsg/gso modes retain
+single-datagram receive. Only the new arm enables UDP_GRO and uses recvmsg.
+Linux v6.8 `include/linux/udp.h::udp_cmsg_recv` emits the GRO segment size as
+a native-endian int, not the u16 used for UDP_SEGMENT sends. The parser rejects
+payload/control truncation, invalid cmsg bounds, duplicate GRO values and
+invalid segment sizes. Each recovered IPv4 datagram is validated separately.
+
+TUN output remains one ordinary write per datagram. The existing receive
+buffer is reused: once one datagram is written, its final header-sized bytes
+may become the next zero virtio prefix. No payload-sized copy, extra receive
+allocation, TCP GRO scratch, socket-buffer increase or coalescing timer is
+introduced. New tests cover metadata errors, prefix reuse and actual kernel
+GRO with a short tail plus a plain datagram. Runtime counters must demonstrate
+actual GRO activation rather than merely a successful setsockopt.
+
+An owned receive aggregate is finished before polling another descriptor;
+the receive loop's 64-packet soft budget may therefore be exceeded by one
+bounded aggregate. This scheduling difference belongs to the experiment and
+must be evaluated with control latency; it is not an unchanged Core contract.
+The new arm starts first, while previous arms retain their relative order.
+All existing failure assertions remain fatal and old failed runs remain FAIL.
+Sparse-load and whole-Core acceptance are still not established.

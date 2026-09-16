@@ -26,6 +26,7 @@ mod linux {
         Single,
         Mmsg,
         Gso,
+        GsoGro,
     }
 
     #[derive(Default)]
@@ -42,10 +43,143 @@ mod linux {
         gso_segments: u64,
         send_eagain: u64,
         tun_writes: u64,
+        rx_buffers: u64,
+        rx_gro_buffers: u64,
+        max_rx_segments: usize,
     }
 
     fn error(text: &str) -> io::Error {
         io::Error::new(io::ErrorKind::InvalidData, text)
+    }
+
+    fn enable_gro(socket: &UdpSocket) -> io::Result<()> {
+        let enabled: libc::c_int = 1;
+        // SAFETY: a live socket and a correctly sized int option value.
+        if unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::IPPROTO_UDP,
+                libc::UDP_GRO,
+                ptr::from_ref(&enabled).cast(),
+                mem::size_of_val(&enabled) as _,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    // Linux v6.8 udp_cmsg_recv emits an int, unlike UDP_SEGMENT's u16.
+    // Parse by value after checking bounds; no aligned pointer into kernel
+    // control data escapes this function, on either GNU or musl.
+    fn gro_size(control: &[u8], flags: libc::c_int) -> io::Result<Option<usize>> {
+        if flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0 {
+            return Err(error("truncated UDP payload or ancillary data"));
+        }
+        let header_len = unsafe { libc::CMSG_LEN(0) } as usize;
+        let alignment = mem::size_of::<usize>();
+        let mut at = 0usize;
+        let mut size = None;
+        while control.len().saturating_sub(at) >= header_len {
+            // SAFETY: an entire initialized cmsghdr is in bounds. Its integer
+            // fields have no invalid bit patterns, and alignment is not assumed.
+            let header =
+                unsafe { ptr::read_unaligned(control[at..].as_ptr().cast::<libc::cmsghdr>()) };
+            let len = header.cmsg_len as usize;
+            if len < header_len || len > control.len() - at {
+                return Err(error("invalid ancillary length"));
+            }
+            if header.cmsg_level == libc::IPPROTO_UDP && header.cmsg_type == libc::UDP_GRO {
+                if size.is_some() || len - header_len != mem::size_of::<libc::c_int>() {
+                    return Err(error("duplicate or malformed UDP_GRO value"));
+                }
+                let value =
+                    i32::from_ne_bytes(control[at + header_len..at + len].try_into().unwrap());
+                if value <= 0 || value as usize > MTU {
+                    return Err(error("invalid UDP_GRO segment size"));
+                }
+                size = Some(value as usize);
+            }
+            at += (len + alignment - 1) & !(alignment - 1);
+        }
+        Ok(size)
+    }
+
+    fn recv_gro(
+        socket: &UdpSocket,
+        buffer: &mut [u8],
+    ) -> io::Result<(usize, std::net::SocketAddr, Option<usize>)> {
+        let mut control = [0usize; 8];
+        let mut iov = libc::iovec {
+            iov_base: buffer.as_mut_ptr().cast(),
+            iov_len: buffer.len(),
+        };
+        // SAFETY: zeroed integer/pointer C records, completed before the call.
+        let mut addr: libc::sockaddr_in = unsafe { mem::zeroed() };
+        let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+        msg.msg_name = ptr::from_mut(&mut addr).cast();
+        msg.msg_namelen = mem::size_of_val(&addr) as _;
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen = mem::size_of_val(&control) as _;
+        // SAFETY: all writable buffers stay owned for this synchronous call.
+        let n = unsafe { libc::recvmsg(socket.as_raw_fd(), &mut msg, libc::MSG_DONTWAIT) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if n as usize > buffer.len()
+            || msg.msg_controllen as usize > mem::size_of_val(&control)
+            || msg.msg_namelen as usize != mem::size_of_val(&addr)
+            || addr.sin_family != libc::AF_INET as _
+        {
+            return Err(error("invalid received UDP metadata"));
+        }
+        // SAFETY: bounded view of the fully initialized control storage.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(control.as_ptr().cast::<u8>(), msg.msg_controllen as usize)
+        };
+        let segment = gro_size(bytes, msg.msg_flags)?;
+        let source = SocketAddrV4::new(
+            addr.sin_addr.s_addr.to_ne_bytes().into(),
+            u16::from_be(addr.sin_port),
+        );
+        Ok((n as usize, source.into(), segment))
+    }
+
+    fn segment_length(length: usize, gro: Option<usize>) -> io::Result<usize> {
+        if length == 0 {
+            return Err(error("empty UDP payload"));
+        }
+        let segment = gro.unwrap_or(length);
+        if segment == 0 || segment > MTU || segment > length {
+            return Err(error("invalid datagram boundary"));
+        }
+        Ok(segment)
+    }
+
+    fn tun_frame(
+        buffer: &mut [u8],
+        begin: usize,
+        length: usize,
+    ) -> io::Result<std::ops::Range<usize>> {
+        let head = begin
+            .checked_sub(VIRTIO_NET_HDR_LEN)
+            .ok_or_else(|| error("missing TUN headroom"))?;
+        let end = begin
+            .checked_add(length)
+            .ok_or_else(|| error("packet length overflow"))?;
+        let packet = buffer
+            .get(begin..end)
+            .ok_or_else(|| error("packet exceeds receive buffer"))?;
+        if length < 20 || length > MTU || packet[0] >> 4 != 4 {
+            return Err(error("invalid isolated IPv4 packet"));
+        }
+        // Previously written datagrams are no longer borrowed. Reuse their last
+        // header-sized bytes for the next virtio prefix, without copying payload.
+        buffer[head..begin].fill(0);
+        Ok(head..end)
     }
 
     // A GSO send may end with one short segment, but must not combine a
@@ -289,19 +423,23 @@ mod linux {
         let args: Vec<_> = std::env::args().collect();
         if args.len() != 4 {
             return Err(error(
-                "usage: natural_cohort single|mmsg|gso BIND_V4 PEER_V4",
+                "usage: natural_cohort single|mmsg|gso|gso-gro BIND_V4 PEER_V4",
             ));
         }
         let mode = match args[1].as_str() {
             "single" => Mode::Single,
             "mmsg" => Mode::Mmsg,
             "gso" => Mode::Gso,
+            "gso-gro" => Mode::GsoGro,
             _ => return Err(error("unknown mode")),
         };
         let local: SocketAddrV4 = args[2].parse().map_err(|_| error("invalid bind"))?;
         let peer: SocketAddrV4 = args[3].parse().map_err(|_| error("invalid peer"))?;
         let socket = UdpSocket::bind(local)?;
         socket.set_nonblocking(true)?;
+        if mode == Mode::GsoGro {
+            enable_gro(&socket)?;
+        }
         let device = DeviceBuilder::new()
             .name("cohort0")
             .mtu(MTU as u16)
@@ -362,48 +500,78 @@ mod linux {
                     return Err(error("poll descriptor failure"));
                 }
                 if fds[1].revents & libc::POLLIN != 0 {
-                    for _ in 0..64 {
-                        let (n, source) = match socket.recv_from(&mut receive[VIRTIO_NET_HDR_LEN..])
-                        {
+                    let mut received = 0;
+                    while received < 64 {
+                        let incoming = if mode == Mode::GsoGro {
+                            recv_gro(&socket, &mut receive[VIRTIO_NET_HDR_LEN..])
+                        } else {
+                            socket
+                                .recv_from(&mut receive[VIRTIO_NET_HDR_LEN..])
+                                .map(|(n, addr)| (n, addr, None))
+                        };
+                        let (n, source, gro) = match incoming {
                             Ok(v) => v,
                             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                             Err(e) => return Err(e),
                         };
-                        if source != peer.into()
-                            || n < 20
-                            || n > MTU
-                            || receive[VIRTIO_NET_HDR_LEN] >> 4 != 4
-                        {
-                            return Err(error("invalid isolated IPv4 packet"));
+                        if source != peer.into() {
+                            return Err(error("unexpected UDP source"));
                         }
-                        let end = n + VIRTIO_NET_HDR_LEN;
-                        let deadline = Instant::now() + Duration::from_secs(3);
-                        loop {
-                            // SAFETY: fd remains owned and the initialized
-                            // zero virtio header plus IP bytes live until return.
-                            let written = unsafe {
-                                libc::write(device.as_raw_fd(), receive.as_ptr().cast(), end)
-                            };
-                            if written == end as isize {
-                                break;
+                        let segment = segment_length(n, gro)?;
+                        let segments = n.div_ceil(segment);
+                        stats.rx_buffers += 1;
+                        stats.rx_gro_buffers += u64::from(gro.is_some());
+                        stats.max_rx_segments = stats.max_rx_segments.max(segments);
+                        // Finish an owned aggregate before polling another fd.
+                        // No waiting for packets; work is bounded by this buffer.
+                        for offset in (0..n).step_by(segment) {
+                            let length = segment.min(n - offset);
+                            if gro.is_some() {
+                                let start = VIRTIO_NET_HDR_LEN + offset;
+                                if length < 20
+                                    || u16::from_be_bytes([receive[start + 2], receive[start + 3]])
+                                        as usize
+                                        != length
+                                {
+                                    return Err(error("GRO boundary disagrees with IPv4 length"));
+                                }
                             }
-                            if written >= 0 {
-                                return Err(error("short TUN write"));
+                            let range =
+                                tun_frame(&mut receive, VIRTIO_NET_HDR_LEN + offset, length)?;
+                            let frame = &receive[range];
+                            let deadline = Instant::now() + Duration::from_secs(3);
+                            loop {
+                                // SAFETY: fd remains owned and the initialized
+                                // zero virtio header plus IP bytes live until return.
+                                let written = unsafe {
+                                    libc::write(
+                                        device.as_raw_fd(),
+                                        frame.as_ptr().cast(),
+                                        frame.len(),
+                                    )
+                                };
+                                if written == frame.len() as isize {
+                                    break;
+                                }
+                                if written >= 0 {
+                                    return Err(error("short TUN write"));
+                                }
+                                let e = io::Error::last_os_error();
+                                if e.kind() == io::ErrorKind::Interrupted {
+                                    continue;
+                                }
+                                if e.kind() == io::ErrorKind::WouldBlock {
+                                    wait_fd(device.as_raw_fd(), libc::POLLOUT, deadline)?;
+                                    continue;
+                                }
+                                return Err(e);
                             }
-                            let e = io::Error::last_os_error();
-                            if e.kind() == io::ErrorKind::Interrupted {
-                                continue;
-                            }
-                            if e.kind() == io::ErrorKind::WouldBlock {
-                                wait_fd(device.as_raw_fd(), libc::POLLOUT, deadline)?;
-                                continue;
-                            }
-                            return Err(e);
+                            stats.rx_packets += 1;
+                            stats.rx_bytes += length as u64;
+                            stats.tun_writes += 1;
+                            received += 1;
                         }
-                        stats.rx_packets += 1;
-                        stats.rx_bytes += n as u64;
-                        stats.tun_writes += 1;
                     }
                 }
                 if fds[0].revents & libc::POLLIN != 0 {
@@ -460,7 +628,7 @@ mod linux {
             Ok(())
         })();
         println!(
-            "{{\"mode\":\"{}\",\"cohorts\":{},\"histogram\":{:?},\"tx_packets\":{},\"rx_packets\":{},\"tx_bytes\":{},\"rx_bytes\":{},\"send_calls\":{},\"mmsg_calls\":{},\"gso_calls\":{},\"gso_segments\":{},\"send_eagain\":{},\"tun_writes\":{}}}",
+            "{{\"mode\":\"{}\",\"cohorts\":{},\"histogram\":{:?},\"tx_packets\":{},\"rx_packets\":{},\"tx_bytes\":{},\"rx_bytes\":{},\"send_calls\":{},\"mmsg_calls\":{},\"gso_calls\":{},\"gso_segments\":{},\"send_eagain\":{},\"tun_writes\":{},\"rx_buffers\":{},\"rx_gro_buffers\":{},\"max_rx_segments\":{}}}",
             args[1],
             stats.cohorts,
             stats.histogram,
@@ -473,7 +641,10 @@ mod linux {
             stats.gso_calls,
             stats.gso_segments,
             stats.send_eagain,
-            stats.tun_writes
+            stats.tun_writes,
+            stats.rx_buffers,
+            stats.rx_gro_buffers,
+            stats.max_rx_segments
         );
         match result {
             Err(e) if STOP.load(Ordering::Relaxed) && e.kind() == io::ErrorKind::Interrupted => {
@@ -486,6 +657,96 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+        fn control(value: i32) -> Vec<u8> {
+            let head = unsafe { libc::CMSG_LEN(0) } as usize;
+            let len = unsafe { libc::CMSG_LEN(4) } as usize;
+            let mut bytes = vec![0u8; unsafe { libc::CMSG_SPACE(4) } as usize];
+            let mut header: libc::cmsghdr = unsafe { mem::zeroed() };
+            header.cmsg_level = libc::IPPROTO_UDP;
+            header.cmsg_type = libc::UDP_GRO;
+            header.cmsg_len = len as _;
+            // SAFETY: enough initialized storage; unaligned write is explicit.
+            unsafe {
+                ptr::write_unaligned(bytes.as_mut_ptr().cast::<libc::cmsghdr>(), header);
+            }
+            bytes[head..len].copy_from_slice(&value.to_ne_bytes());
+            bytes
+        }
+        #[test]
+        fn gro_metadata_rejects_truncation_invalid_sizes_and_duplicates() {
+            assert_eq!(gro_size(&control(100), 0).unwrap(), Some(100));
+            assert_eq!(gro_size(&[], 0).unwrap(), None);
+            for flag in [libc::MSG_TRUNC, libc::MSG_CTRUNC] {
+                assert!(gro_size(&control(100), flag).is_err());
+            }
+            for value in [0, -1, MTU as i32 + 1] {
+                assert!(gro_size(&control(value), 0).is_err());
+            }
+            let mut duplicate = control(100);
+            duplicate.extend(control(100));
+            assert!(gro_size(&duplicate, 0).is_err());
+            let malformed = &control(100)[..mem::size_of::<libc::cmsghdr>()];
+            assert!(gro_size(malformed, 0).is_err());
+            assert_eq!(segment_length(240, Some(100)).unwrap(), 100);
+            assert!(segment_length(80, Some(100)).is_err());
+            assert!(segment_length(0, None).is_err());
+            assert!(segment_length(MTU + 1, None).is_err());
+        }
+        #[test]
+        fn sliding_virtio_prefix_preserves_every_datagram() {
+            let mut first = vec![1u8; 40];
+            first[0] = 0x45;
+            let mut second = vec![2u8; 24];
+            second[0] = 0x45;
+            let mut buffer = vec![0u8; VIRTIO_NET_HDR_LEN];
+            buffer.extend(&first);
+            buffer.extend(&second);
+            let a = tun_frame(&mut buffer, VIRTIO_NET_HDR_LEN, first.len()).unwrap();
+            assert_eq!(&buffer[a][VIRTIO_NET_HDR_LEN..], first);
+            let b = tun_frame(&mut buffer, VIRTIO_NET_HDR_LEN + first.len(), second.len()).unwrap();
+            assert_eq!(&buffer[b][VIRTIO_NET_HDR_LEN..], second);
+            assert!(tun_frame(&mut buffer, 0, 20).is_err());
+            let outside = buffer.len();
+            assert!(tun_frame(&mut buffer, outside, 20).is_err());
+        }
+        #[test]
+        fn kernel_gro_recovers_segments_short_tail_and_plain_datagram() {
+            let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+            rx.set_nonblocking(true).unwrap();
+            enable_gro(&rx).unwrap();
+            let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+            tx.set_nonblocking(true).unwrap();
+            let peer = match rx.local_addr().unwrap() {
+                std::net::SocketAddr::V4(v) => v,
+                _ => unreachable!(),
+            };
+            let packets = vec![vec![1; 100], vec![2; 100], vec![3; 40], vec![4; 100]];
+            send_gso(
+                &tx,
+                peer,
+                &packets,
+                &[100, 100, 40, 100],
+                &mut Vec::new(),
+                &mut Stats::default(),
+            )
+            .unwrap();
+            let mut received = Vec::new();
+            let mut aggregated = false;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while received.len() < packets.len() {
+                wait_fd(rx.as_raw_fd(), libc::POLLIN, deadline).unwrap();
+                let mut buf = [0u8; 1024];
+                let (n, source, gro) = recv_gro(&rx, &mut buf).unwrap();
+                assert_eq!(source, tx.local_addr().unwrap());
+                let size = segment_length(n, gro).unwrap();
+                aggregated |= n > size;
+                for packet in buf[..n].chunks(size) {
+                    received.push(packet.to_vec());
+                }
+            }
+            assert!(aggregated, "kernel did not deliver a GRO aggregate");
+            assert_eq!(received, packets);
+        }
         #[test]
         fn short_tail_ends_group_without_waiting_for_more_packets() {
             assert_eq!(group_end(&[100, 100, 40, 100], 0), 3);
