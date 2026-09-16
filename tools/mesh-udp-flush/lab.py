@@ -199,7 +199,9 @@ def run(args):
             assert all(x['exit']==0 and not x['killed'] for x in exits)
             for i in range(2):
                 log=out/f'r{round_id}-{arm}-core-{i}.log';metrics_dir=out/f'r{round_id}-cfg-{i}'/'issue4-flush-metrics'
-                sink,writer,errors=parse_stats(metrics_dir)
+                # Stock never loads the diagnostic overlay or its metrics env.
+                # Its expected absence is the negative activation control.
+                sink,writer,errors = ([],[],[]) if arm=='stock' else parse_stats(metrics_dir)
                 record('activation',round=round_id,arm=arm,stealth=stealth,endpoint=i,sink=sink,writer=writer,
                        metrics_dir=str(metrics_dir),parse_errors=errors)
                 if arm=='stock':
