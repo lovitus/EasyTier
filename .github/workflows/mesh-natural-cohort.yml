@@ -26,7 +26,7 @@ jobs:
           set -euo pipefail
           mkdir -p cohort-evidence cohort-binaries
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iputils-ping mold musl-tools
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iputils-ping ethtool mold musl-tools
           mold --version > cohort-evidence/linker.txt
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt
           rustup target add --toolchain 1.95.0 x86_64-unknown-linux-musl

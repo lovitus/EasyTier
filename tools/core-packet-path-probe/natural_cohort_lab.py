@@ -112,6 +112,7 @@ def lab(args):
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     before_routes = {family: command(["ip", "-j", family, "route", "show", "table", "all"]).stdout for family in ["-4", "-6"]}
+    (root / "host-routes-before.json").write_text(json.dumps(before_routes, indent=2))
     try:
         record({"kind": "binary", "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                 "warning": "No Core, no crypto, no policy; kernel mechanism only"})
@@ -127,10 +128,11 @@ def lab(args):
             command(["ip", "-n", ns, "link", "set", interface, "name", "under0"])
             command(["ip", "-n", ns, "addr", "add", f"192.0.2.{i+1}/30", "dev", "under0"])
             command(["ip", "-n", ns, "link", "set", "under0", "mtu", "1500", "up"])
+            (root / f"underlay-features-{i}.txt").write_text(command(["ethtool", "-k", "under0"], ns).stdout)
         # Keep the prior arms in their original relative order. Run the new
         # arm first so a known baseline failure cannot hide all new-path data.
         # Every assertion below remains fatal; this is not a waiver.
-        order = ["gso-gro", "single", "mmsg", "gso", "gso-gro", "gso", "mmsg", "single", "gso-gro", "mmsg", "single", "gso"]
+        order = ["gro", "gso-gro", "single", "mmsg", "gso", "gro", "gso-gro", "gso", "mmsg", "single", "gro", "gso-gro", "mmsg", "single", "gso"]
         for number, mode in enumerate(order):
             processes = [spawn(["env", "ET_KERNEL_COHORT_LAB=1", binary, mode,
                                 f"192.0.2.{i+1}:35804", f"192.0.2.{2-i}:35804"],
@@ -182,11 +184,14 @@ def lab(args):
                 stats = json.loads(lines[-1])
                 record({"kind": "cohorts", "round": number, "mode": mode, "endpoint": i, "stats": stats})
                 assert stats["tx_packets"] > 0 and stats["rx_packets"] > 0
-                if mode != "single":
+                if mode in ["mmsg", "gso", "gso-gro"]:
                     assert sum(stats["histogram"][2:]) > 0, "no natural multi-packet cohorts observed"
                     assert stats["mmsg_calls" if mode == "mmsg" else "gso_calls"] > 0
                 if mode == "gso-gro":
                     assert stats["rx_gro_buffers"] > 0 and stats["max_rx_segments"] > 1, "UDP_GRO never activated"
+                if mode == "gro":
+                    assert stats["mmsg_calls"] == 0 and stats["gso_calls"] == 0
+                    assert stats["send_calls"] >= stats["tx_packets"], "legacy send path bypassed"
     except Exception as e:
         record({"kind": "failure", "error": repr(e)})
         raise
@@ -205,11 +210,12 @@ def lab(args):
             p = command(["ip", "netns", "delete", ns], check=False)
             cleanup.append({"namespace": ns, "exit": p.returncode, "residual": residual})
         after_routes = {family: command(["ip", "-j", family, "route", "show", "table", "all"]).stdout for family in ["-4", "-6"]}
+        (root / "host-routes-after.json").write_text(json.dumps(after_routes, indent=2))
         record({"kind": "cleanup", "values": cleanup, "root_routes_unchanged": before_routes == after_routes})
     assert all(r["exit"] == 0 and not r.get("killed") and not r.get("residual") for r in cleanup)
     assert before_routes == after_routes
     summary = []
-    for mode in ["single", "mmsg", "gso", "gso-gro"]:
+    for mode in ["single", "mmsg", "gso", "gso-gro", "gro"]:
         for direction in ["upload", "download"]:
             selected = [r for r in rows if r["kind"] == "transfer" and r["mode"] == mode and r["direction"] == direction]
             summary.append({"mode": mode, "direction": direction, "samples": len(selected),

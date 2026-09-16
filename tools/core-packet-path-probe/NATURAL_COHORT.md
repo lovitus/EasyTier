@@ -96,3 +96,29 @@ must be evaluated with control latency; it is not an unchanged Core contract.
 The new arm starts first, while previous arms retain their relative order.
 All existing failure assertions remain fatal and old failed runs remain FAIL.
 Sparse-load and whole-Core acceptance are still not established.
+
+## Receive-only decision and route evidence
+
+The `gro` arm leaves every outgoing datagram on send_to and enables only UDP
+receive aggregation. It tests whether a bounded receive-only Core experiment
+could be useful without extending the mesh sending API. Single datagrams from
+legacy senders remain valid whether or not the kernel coalesces them. Lack of
+observed GRO is recorded as absence of mechanism activation, not disguised as
+a batching gain. The lab asserts that this arm makes no mmsg/GSO submissions.
+The unit test checks actual received bytes/source/order from a legacy sender.
+Underlay offload features are captured without modifying them.
+
+The paired-offload artifact b53fbe63 passed six unit tests, but unpaced CI and
+lab runs failed ICMP gates. A separate paced diagnostic completed 24 transfers,
+digest/half-close and ICMP checks, then failed root-route equality. The original
+before/after root-route dumps were not retained, so that failure is unresolved
+and must not be waived. A subsequent passive 60-second route observation had
+no events and identical IPv4/IPv6 snapshots; it cannot prove what changed in
+the earlier run. Production Core process/binary remained unchanged.
+
+The lab now preserves both complete original route responses while keeping
+the exact same equality assertion. No sorting, expiry normalization, ignored
+route, automatic restore, or retroactive PASS is introduced. Private-host
+snapshots stay in private evidence, never in public issue text or Git files.
+The receive-only arm runs first; older arms retain their relative order and
+every existing failure assertion remains fatal. No production source changes.

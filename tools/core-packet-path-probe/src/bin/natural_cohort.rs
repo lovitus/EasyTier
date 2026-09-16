@@ -27,6 +27,7 @@ mod linux {
         Mmsg,
         Gso,
         GsoGro,
+        Gro,
     }
 
     #[derive(Default)]
@@ -423,7 +424,7 @@ mod linux {
         let args: Vec<_> = std::env::args().collect();
         if args.len() != 4 {
             return Err(error(
-                "usage: natural_cohort single|mmsg|gso|gso-gro BIND_V4 PEER_V4",
+                "usage: natural_cohort single|mmsg|gso|gso-gro|gro BIND_V4 PEER_V4",
             ));
         }
         let mode = match args[1].as_str() {
@@ -431,13 +432,14 @@ mod linux {
             "mmsg" => Mode::Mmsg,
             "gso" => Mode::Gso,
             "gso-gro" => Mode::GsoGro,
+            "gro" => Mode::Gro,
             _ => return Err(error("unknown mode")),
         };
         let local: SocketAddrV4 = args[2].parse().map_err(|_| error("invalid bind"))?;
         let peer: SocketAddrV4 = args[3].parse().map_err(|_| error("invalid peer"))?;
         let socket = UdpSocket::bind(local)?;
         socket.set_nonblocking(true)?;
-        if mode == Mode::GsoGro {
+        if matches!(mode, Mode::GsoGro | Mode::Gro) {
             enable_gro(&socket)?;
         }
         let device = DeviceBuilder::new()
@@ -502,7 +504,7 @@ mod linux {
                 if fds[1].revents & libc::POLLIN != 0 {
                     let mut received = 0;
                     while received < 64 {
-                        let incoming = if mode == Mode::GsoGro {
+                        let incoming = if matches!(mode, Mode::GsoGro | Mode::Gro) {
                             recv_gro(&socket, &mut receive[VIRTIO_NET_HDR_LEN..])
                         } else {
                             socket
@@ -596,7 +598,7 @@ mod linux {
                     }
                     stats.cohorts += 1;
                     stats.histogram[count] += 1;
-                    if mode == Mode::Single || count == 1 {
+                    if matches!(mode, Mode::Single | Mode::Gro) || count == 1 {
                         for i in 0..count {
                             send_one(&socket, peer, &packets[i][..sizes[i]], &mut stats)?;
                         }
@@ -709,6 +711,35 @@ mod linux {
             let outside = buffer.len();
             assert!(tun_frame(&mut buffer, outside, 20).is_err());
         }
+        #[test]
+        fn kernel_gro_accepts_legacy_individual_datagrams() {
+            let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+            rx.set_nonblocking(true).unwrap();
+            enable_gro(&rx).unwrap();
+            let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let peer = match rx.local_addr().unwrap() {
+                std::net::SocketAddr::V4(v) => v,
+                _ => unreachable!(),
+            };
+            let packets = vec![vec![1; 100], vec![2; 120], vec![3; 60]];
+            for packet in &packets {
+                send_one(&tx, peer, packet, &mut Stats::default()).unwrap();
+            }
+            let mut received = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while received.len() < packets.len() {
+                wait_fd(rx.as_raw_fd(), libc::POLLIN, deadline).unwrap();
+                let mut buf = [0u8; 1024];
+                let (n, source, gro) = recv_gro(&rx, &mut buf).unwrap();
+                assert_eq!(source, tx.local_addr().unwrap());
+                let size = segment_length(n, gro).unwrap();
+                for packet in buf[..n].chunks(size) {
+                    received.push(packet.to_vec());
+                }
+            }
+            assert_eq!(received, packets);
+        }
+
         #[test]
         fn kernel_gro_recovers_segments_short_tail_and_plain_datagram() {
             let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
