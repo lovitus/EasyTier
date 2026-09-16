@@ -1,0 +1,105 @@
+name: Issue 4 causal ablation, not production fixes
+'on':
+  push:
+    branches: ['ci/issue-4-diagnosis-20260916']
+    paths: ['.github/workflows/mesh-causal-ablation.yml', 'tools/mesh-cause/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: issue4-causal-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  causality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '1'
+      CARGO_PROFILE_RELEASE_STRIP: 'false'
+      RUSTFLAGS: '-C force-frame-pointers=yes -C link-arg=-fuse-ld=mold'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare isolated same-toolchain builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tools/mesh-cause/*.py
+          git diff --check
+          mkdir -p cause-evidence cause-binaries/stock cause-binaries/probe
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config clang cmake mold libssl-dev protobuf-compiler libprotobuf-dev libpcap-dev iproute2 iputils-ping ethtool iperf3
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          git worktree add --detach "$RUNNER_TEMP/cause-source" c6772dbfef2395ff96b39bd4801945d92212dffb
+          lscpu > cause-evidence/cpu.txt
+          uname -a > cause-evidence/kernel.txt
+          cp "$RUNNER_TEMP/cause-source/Cargo.lock" cause-evidence/Cargo.lock
+          for name in cpu.max cpu.stat cpu.pressure memory.max; do
+            if [ -f "/sys/fs/cgroup/$name" ]; then cp "/sys/fs/cgroup/$name" "cause-evidence/$name"; fi
+          done
+      - name: Build stock and diagnostic-only binary with exact source guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/cause-target"
+          cd "$RUNNER_TEMP/cause-source"
+          timeout 1800 cargo +1.95.0 build --locked --release -j "$(nproc)" -p easytier --bin easytier-core --bin easytier-cli --features jemalloc 2>&1 | tee "$root/cause-evidence/stock-build.log"
+          cp "$CARGO_TARGET_DIR/release/easytier-core" "$CARGO_TARGET_DIR/release/easytier-cli" "$root/cause-binaries/stock/"
+          python3 "$root/tools/mesh-cause/prepare_ablation.py" "$PWD"
+          rustfmt +1.95.0 --edition 2024 easytier/src/gateway/socks5.rs easytier/src/peers/traffic_metrics.rs
+          git diff --check
+          git diff --exit-code -- Cargo.lock
+          git diff -- easytier/src/lib.rs easytier/src/gateway/socks5.rs easytier/src/peers/traffic_metrics.rs > "$root/cause-evidence/diagnostic-only.patch"
+          timeout 900 cargo +1.95.0 build --locked --release -j "$(nproc)" -p easytier --bin easytier-core --bin easytier-cli --features jemalloc 2>&1 | tee "$root/cause-evidence/probe-build.log"
+          cp "$CARGO_TARGET_DIR/release/easytier-core" "$CARGO_TARGET_DIR/release/easytier-cli" "$root/cause-binaries/probe/"
+          cd "$root"
+          sha256sum cause-binaries/{stock,probe}/easytier-{core,cli} > cause-evidence/binaries.sha256
+          printf '%s\n' 'c6772dbf; GNU; Rust 1.95.0; default features + jemalloc; unchanged crypto/wire/MTU; probe is NOT deployable' > cause-evidence/build-contract.txt
+      - name: Build pinned measurement tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --max-time 90 https://github.com/esnet/iperf/releases/download/3.21/iperf-3.21.tar.gz -o iperf321.tar.gz
+          echo '656e4405ebd620121de7ceca3eaf43a88f79ea1b857d041a6a0b1314801acdd8  iperf321.tar.gz' | sha256sum --check
+          mkdir -p cause-iperf
+          tar -xzf iperf321.tar.gz -C cause-iperf --strip-components=1
+          cd cause-iperf
+          ./configure --disable-shared CFLAGS='-O2 -g'
+          timeout 180 make -j "$(nproc)"
+          src/iperf3 --version > ../cause-evidence/iperf.txt
+          sha256sum src/iperf3 >> ../cause-evidence/iperf.txt
+      - name: Causal factorial comparison with activation, integrity and stop evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=GITHUB_ACTIONS,GITHUB_SHA,RUNNER_OS,ImageVersion \
+            timeout --signal=TERM --kill-after=10s 1080s python3 tools/mesh-cause/ablation.py \
+              --stock cause-binaries/stock --probe cause-binaries/probe --iperf cause-iperf/src/iperf3 --output cause-evidence/lab | tee cause-evidence/ablation.log
+      - name: Preserve results including failed transactions
+        if: always()
+        shell: bash
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" cause-evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, hashlib, os
+          p=Path('cause-evidence'); p.mkdir(exist_ok=True)
+          rows=[json.loads(x) for x in (p/'lab/results.jsonl').read_text().splitlines()] if (p/'lab/results.jsonl').exists() else []
+          result={'records':len(rows),'failed_transactions':[r for r in rows if r.get('ok') is False], 'harness_errors':[r for r in rows if r['kind']=='harness_failure'], 'warning':'Ablation changes observability/static idle semantics; not a product fix. No Go implementation tested.'}
+          print('ISSUE4_CAUSAL_OUTCOME '+json.dumps(result))
+          (p/'outcome.json').write_text(json.dumps(result,indent=2))
+          files=[{'path':str(f.relative_to(p)),'sha256':hashlib.sha256(f.read_bytes()).hexdigest()} for f in sorted(p.rglob('*')) if f.is_file()]
+          (p/'manifest.json').write_text(json.dumps(files,indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as out: out.write('# Diagnostic-only causal experiment\n\n'+json.dumps(result,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: issue4-causal-evidence-${{ github.sha }}
+          path: cause-evidence/
+          retention-days: 30
+          if-no-files-found: error
