@@ -25,7 +25,8 @@ jobs:
           set -euo pipefail
           mkdir -p backpressure-evidence
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 mold
+          mold --version > backpressure-evidence/linker.txt
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt
           rustfmt +1.95.0 --edition 2024 --check tools/udp-backpressure-probe/probe.rs
           python3 -m py_compile tools/udp-backpressure-probe/lab.py
