@@ -28,7 +28,7 @@ the single-waker poll_send_to pattern. Unsupported GSO or a short GSO return
 fails the diagnostic; there is no hidden fallback that could fake activation.
 
 The tests cover independent initialized wire bytes, ready-group publication,
-backpressure/order/close, consumer closure, control/tail boundaries, per-packet
+backpressure/order/close, cancelled-flush recovery, consumer closure, control/tail boundaries, per-packet
 Gate/Outer sealing, IPv4/IPv6 kernel output and two destinations on a shared
 socket. They do not by themselves prove forced kernel EAGAIN, key rotation,
 full handshake timing, all multi-peer/relay paths, or production acceptance.
@@ -42,7 +42,7 @@ failed ring-drain/inline/GRO results; this tests a different publication point.
 The dedicated workflow uses Ubuntu 22.04 GNU builds so the artifacts can also
 run on the authorized older-glibc lab machine. It builds stock, applies only
 the exact-source udp.rs diagnostic overlay, builds the same-binary arms, and
-runs all seven contract tests before runtime. No release workflow is involved.
+runs all eight contract tests before runtime. No release workflow is involved.
 The lab uses stock brackets, three interleaved repetitions per diagnostic arm,
 both directions, real CLI transport checks, independent TCP digest/half-close,
 UDP echo, ICMP progress, native-TUN/MTU/device-feature evidence, process and
@@ -70,3 +70,20 @@ Kernel EAGAIN forcing, saturation/relay/mixed-version acceptance and a shipping
 fallback policy remain outside this first experiment, not silently PASS. The
 fixed-load result must first justify further work. All unsupported-GSO errors,
 missing batch counters, failed control checks or cleanup errors fail the run.
+
+## Cancelled-flush contract
+
+`issue4_flush_cancelled_flush_retains_order_and_wakes` fills the existing ring
+and staging budget, polls a flush to Pending, then drops only that flush future.
+It verifies that the sink still owns every staged packet. A fresh flush and a
+concurrent reader must complete within a bounded deadline, preserve the exact
+sequence of all accepted packets, and finish at EOF without extra packets.
+This exercises queue cancellation/recovery, not kernel socket EAGAIN, GSO error
+fallback, dropping the sink owner, or delivery across a connection restart.
+
+The previous exact experiment at harness SHA
+`fb3905df094ce99801c573b4ce51a19d6683ea9e` passed with complete observations in
+[run 35114295729](https://github.com/lovitus/EasyTier/actions/runs/35114295729).
+That result predates this eighth test and cannot be cited as its execution.
+The production-source base remains `c6772dbfef2395ff96b39bd4801945d92212dffb`;
+the harness revision and Core source base are different provenance fields.

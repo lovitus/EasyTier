@@ -357,6 +357,55 @@ mod issue4_flush {
             assert!(writer.feed(packet(b"unaccepted")).await.is_err());
             assert!(writer.pending.is_empty());
         }
+        #[tokio::test]
+        async fn issue4_flush_cancelled_flush_retains_order_and_wakes() {
+            timeout(Duration::from_secs(3), async {
+                let ring = Arc::new(RingTunnel::new(RING));
+                let mut reader = RingStream::new(ring.clone());
+                let mut inner = RingSink::new(ring);
+                for value in 0..RING {
+                    inner.feed(packet(&[value as u8])).await.unwrap();
+                }
+                let mut writer = StagedSink::new(inner, Mode::Stage);
+                for value in RING..RING + STAGE {
+                    writer.feed(packet(&[value as u8])).await.unwrap();
+                }
+
+                // Cancel a genuinely pending flush without dropping its owner.
+                {
+                    let mut flush = Box::pin(writer.flush());
+                    futures::future::poll_fn(|cx| {
+                        assert!(std::future::Future::poll(flush.as_mut(), cx).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                }
+                assert_eq!(writer.pending.len(), STAGE);
+
+                // join! polls the blocked writer before the reader frees space.
+                // Completion therefore also exercises the ring's real wakeup.
+                let ((), received) = futures::join!(
+                    async {
+                        writer.flush().await.unwrap();
+                        writer.close().await.unwrap();
+                        assert!(writer.pending.is_empty());
+                    },
+                    async {
+                        let mut received = Vec::new();
+                        while let Some(value) = reader.next().await {
+                            received.push(value.unwrap().payload().to_vec());
+                        }
+                        received
+                    }
+                );
+                let expected = (0..RING + STAGE)
+                    .map(|value| vec![value as u8])
+                    .collect::<Vec<_>>();
+                assert_eq!(received, expected);
+            })
+            .await
+            .expect("cancelled flush must recover without a lost wakeup");
+        }
         #[test]
         fn issue4_flush_control_and_short_tail_boundaries() {
             let make = |n, batchable| Frame { bytes: Bytes::from(vec![1; n]), batchable };
