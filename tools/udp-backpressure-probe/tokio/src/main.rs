@@ -255,6 +255,10 @@ async fn characterize_rejection(
     let error = send_frames(&socket, destination, &rejected, &mut stats)
         .await
         .expect_err("kernel must reject this GSO request");
+    eprintln!(
+        "UDP rejection observation: phase=gso mode={mode} error={error:?} errno={:?}",
+        error.raw_os_error()
+    );
     require(
         error.raw_os_error() == Some(libc::EINVAL),
         "unexpected GSO rejection errno",
@@ -281,6 +285,10 @@ async fn characterize_rejection(
             .send_to(&rejected[0].bytes, destination)
             .await
             .expect_err("ordinary send must retain PMTU failure");
+        eprintln!(
+            "UDP rejection observation: phase=ordinary mode={mode} error={error:?} errno={:?}",
+            error.raw_os_error()
+        );
         require(
             error.raw_os_error() == Some(libc::EMSGSIZE),
             "ordinary send lost EMSGSIZE",
