@@ -60,7 +60,8 @@ def run(args):
     save("routes-before.json", before)
     save("identity.json", {"binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                            "kernel": os.uname().release,
-                           "scope": "kernel EAGAIN/readiness; no Core/Tokio/GSO acceptance"})
+                           "scope": "actual experiment send functions; not full Core acceptance" if args.adapter else
+                                    "kernel EAGAIN/readiness; no Core/Tokio/GSO acceptance"})
     try:
         for ns in names:
             command(["ip", "netns", "add", ns])
@@ -78,32 +79,46 @@ def run(args):
                      "lladdr", peer_mac, "nud", "permanent", "dev", "under0"])
         command(["tc", "qdisc", "add", "dev", "under0", "root", "tbf", "rate", "32kbit",
                  "burst", "1600", "limit", "65536"], names[0])
-        for label, source, destination in [("ipv4", "192.0.2.1", "192.0.2.2"),
+        for family, source, destination in [("ipv4", "192.0.2.1", "192.0.2.2"),
                                             ("ipv6", "fd00:8888::1", "fd00:8888::2")]:
-            proc = subprocess.Popen(["ip", "netns", "exec", names[1], sys.executable,
-                                     str(Path(__file__).resolve()), "receive", destination, "35906"],
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            children.append(proc)
-            ready, _, _ = select.select([proc.stdout], [], [], 3)
-            assert ready and proc.stdout.readline().strip() == "ready", "receiver startup failed"
-            bind = f"[{source}]:0" if label == "ipv6" else f"{source}:0"
-            remote = f"[{destination}]:35906" if label == "ipv6" else f"{destination}:35906"
-            sent = command(["env", "ET_UDP_BACKPRESSURE=ISOLATED_NETNS_ONLY", binary, bind, remote],
-                           names[0], check=False)
-            (output / f"{label}-sender.stdout").write_text(sent.stdout)
-            (output / f"{label}-sender.stderr").write_text(sent.stderr)
-            assert sent.returncode == 0, f"{label} sender: {sent.stderr}"
-            stdout, stderr = proc.communicate(timeout=15)
-            (output / f"{label}-receiver.stderr").write_text(stderr)
-            assert proc.returncode == 0, f"{label} receiver: {stderr}"
-            tx, rx = json.loads(sent.stdout), json.loads(stdout)
-            assert tx["kernel_eagain"] and tx["writable_notifications"] > 0
-            assert tx["sent_datagrams"] == rx["received"]
-            qdisc = json.loads(command(["tc", "-s", "-j", "qdisc", "show", "dev", "under0"], names[0]).stdout)
-            save(f"{label}-qdisc.json", qdisc)
-            assert qdisc and all(item.get("drops", 0) == 0 for item in qdisc), "qdisc dropped packets"
-            cases.append({"family": label, "sender": tx, "receiver": rx})
-            save("cases.json", cases)
+            for mode in (["recover", "cancel", "shared"] if args.adapter else ["kernel"]):
+                label = f"{family}-{mode}"
+                receivers = []
+                for port in ([35906, 35907] if mode == "shared" else [35906]):
+                    proc = subprocess.Popen(["ip", "netns", "exec", names[1], sys.executable,
+                                             str(Path(__file__).resolve()), "receive", destination, str(port)],
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    children.append(proc)
+                    receivers.append(proc)
+                    ready, _, _ = select.select([proc.stdout], [], [], 3)
+                    assert ready and proc.stdout.readline().strip() == "ready", "receiver startup failed"
+                bind = f"[{source}]:0" if family == "ipv6" else f"{source}:0"
+                remote = f"[{destination}]:35906" if family == "ipv6" else f"{destination}:35906"
+                second = f"[{destination}]:35907" if family == "ipv6" else f"{destination}:35907"
+                extra = [mode, second] if args.adapter else []
+                sent = command(["env", "ET_UDP_BACKPRESSURE=ISOLATED_NETNS_ONLY", binary, bind, remote, *extra],
+                               names[0], check=False)
+                (output / f"{label}-sender.stdout").write_text(sent.stdout)
+                (output / f"{label}-sender.stderr").write_text(sent.stderr)
+                assert sent.returncode == 0, f"{label} sender: {sent.stderr}"
+                tx, received = json.loads(sent.stdout), []
+                for index, proc in enumerate(receivers):
+                    stdout, stderr = proc.communicate(timeout=15)
+                    (output / f"{label}-receiver-{index}.stderr").write_text(stderr)
+                    assert proc.returncode == 0, f"{label} receiver: {stderr}"
+                    rx = json.loads(stdout)
+                    assert rx["received"] == (tx["sent_datagrams"] if index == 0 else 4)
+                    received.append(rx)
+                assert tx["kernel_eagain"]
+                if args.adapter:
+                    assert tx["adapter_eagain"] > 0 and tx["gso_calls"] > 0 and tx["heartbeat_ticks"] > 0
+                else:
+                    assert tx["writable_notifications"] > 0
+                qdisc = json.loads(command(["tc", "-s", "-j", "qdisc", "show", "dev", "under0"], names[0]).stdout)
+                save(f"{label}-qdisc.json", qdisc)
+                assert qdisc and all(item.get("drops", 0) == 0 for item in qdisc), "qdisc dropped packets"
+                cases.append({"family": family, "mode": mode, "sender": tx, "receivers": received})
+                save("cases.json", cases)
     except BaseException as error:
         save("failure.json", {"error": repr(error)})
         raise
@@ -128,7 +143,7 @@ def run(args):
         after = routes()
         save("routes-after.json", after)
         assert before == after, "host routes changed"
-    assert len(cases) == 2
+    assert len(cases) == (6 if args.adapter else 2)
     assert all(not row.get("forced") and not row.get("remaining") and
                row.get("process_exit", row.get("exit")) == 0 for row in cleanup)
     print(json.dumps({"cases": cases, "cleanup_ok": True, "host_routes_unchanged": True}))
@@ -141,4 +156,5 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser()
         parser.add_argument("--binary", required=True)
         parser.add_argument("--output", required=True)
+        parser.add_argument("--adapter", action="store_true")
         run(parser.parse_args())

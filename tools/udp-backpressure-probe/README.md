@@ -32,3 +32,25 @@ Run only through the dedicated lightweight CI or in an explicitly authorized
 disposable Linux environment. No runtime result is claimed before execution.
 Do not relax the EAGAIN requirement if a kernel/device combination does not
 reproduce the mechanism; retain that failure as an inconclusive fixture result.
+
+## Actual experiment adapter lane
+
+The separate `tokio` crate pins bytes 1.9.0, libc 0.2.186, socket2 0.5.10 and
+Tokio 1.52.1, matching the Core experiment base rather than the older standalone
+tool's independently updated lock. Its build script extracts `group_end`,
+`send_group` and `send_frames` verbatim from `mesh-udp-flush/adapter.rs.in`.
+Only the frame/stat containers and test orchestration are substituted; Core
+framing, encryption, MPSC, routing and lifecycle are not exercised in this lane.
+
+With `lab.py --adapter`, each IP family runs recovery, pending-future cancellation
+and two destinations sharing the same socket. Tokio readiness is primed before
+raw sends fill the kernel queue, so the extracted code must itself encounter
+real EAGAIN. Cancellation retains the immutable batch, requires no packet to
+have been submitted by that operation, then retries it and checks exact received
+sequence. A current-thread heartbeat must progress while the writers wait.
+Every case is bounded and requires real GSO calls and full payload verification.
+
+These checks do not prove fair scheduling bounds, owner-drop/restart semantics,
+key rotation, PMTU handling or runtime capability fallback. The original
+single-datagram mechanism lane remains an independent control. CI builds only
+the two small tools, never Core, and archives the exact extracted Rust source.
