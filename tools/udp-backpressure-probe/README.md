@@ -54,3 +54,17 @@ These checks do not prove fair scheduling bounds, owner-drop/restart semantics,
 key rotation, PMTU handling or runtime capability fallback. The original
 single-datagram mechanism lane remains an independent control. CI builds only
 the two small tools, never Core, and archives the exact extracted Rust source.
+
+Three additional real-kernel characterization cases constrain any later fallback
+design without implementing it. With the isolated link MTU at 1280 and explicit
+PMTU discovery, 1400-byte datagrams must produce GSO EINVAL and ordinary-send
+EMSGSIZE for both IPv4 and IPv6. A smaller GSO group must still work on the same
+socket. The IPv4 checksum control disables checksums on only the fixture socket:
+GSO must fail with EINVAL, ordinary datagrams must arrive, and restoring checksums
+must allow GSO again. Receivers verify all delivered bytes and sequence; oversized
+or unexpectedly delivered rejected datagrams fail validation.
+
+The nine-case adapter lane therefore distinguishes an offload-specific rejection
+from a path-size error. It does not claim that EINVAL universally means unsupported
+GSO, or that the fixture has covered EIO and every kernel/driver error origin.
+No production socket option or default is changed by these experiments.

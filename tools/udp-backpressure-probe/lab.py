@@ -81,7 +81,13 @@ def run(args):
                  "burst", "1600", "limit", "65536"], names[0])
         for family, source, destination in [("ipv4", "192.0.2.1", "192.0.2.2"),
                                             ("ipv6", "fd00:8888::1", "fd00:8888::2")]:
-            for mode in (["recover", "cancel", "shared"] if args.adapter else ["kernel"]):
+            modes = ["recover", "cancel", "shared", "reject-mtu"] if args.adapter else ["kernel"]
+            if args.adapter and family == "ipv4":
+                modes.append("reject-checksum")
+            for mode in modes:
+                mtu = 1280 if mode == "reject-mtu" else 1500
+                for ns in names:
+                    command(["ip", "-n", ns, "link", "set", "under0", "mtu", str(mtu)])
                 label = f"{family}-{mode}"
                 receivers = []
                 for port in ([35906, 35907] if mode == "shared" else [35906]):
@@ -109,10 +115,15 @@ def run(args):
                     rx = json.loads(stdout)
                     assert rx["received"] == (tx["sent_datagrams"] if index == 0 else 4)
                     received.append(rx)
-                assert tx["kernel_eagain"]
-                if args.adapter:
+                if mode.startswith("reject-"):
+                    assert not tx["kernel_eagain"] and tx["gso_rejection_errno"] == 22
+                    assert tx["ordinary_errno"] == (90 if mode == "reject-mtu" else 0)
+                    assert tx["gso_after_error"] and tx["gso_calls"] >= 2
+                elif args.adapter:
+                    assert tx["kernel_eagain"]
                     assert tx["adapter_eagain"] > 0 and tx["gso_calls"] > 0 and tx["heartbeat_ticks"] > 0
                 else:
+                    assert tx["kernel_eagain"]
                     assert tx["writable_notifications"] > 0
                 qdisc = json.loads(command(["tc", "-s", "-j", "qdisc", "show", "dev", "under0"], names[0]).stdout)
                 save(f"{label}-qdisc.json", qdisc)
@@ -143,7 +154,7 @@ def run(args):
         after = routes()
         save("routes-after.json", after)
         assert before == after, "host routes changed"
-    assert len(cases) == (6 if args.adapter else 2)
+    assert len(cases) == (9 if args.adapter else 2)
     assert all(not row.get("forced") and not row.get("remaining") and
                row.get("process_exit", row.get("exit")) == 0 for row in cleanup)
     print(json.dumps({"cases": cases, "cleanup_ok": True, "host_routes_unchanged": True}))
