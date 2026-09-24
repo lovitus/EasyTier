@@ -39,6 +39,10 @@ def run(args):
     out=Path(args.output).resolve();out.mkdir(parents=True,exist_ok=False)
     binaries={'stock':Path(args.stock).resolve(),'candidate':Path(args.candidate).resolve()}
     loadgen=Path(__file__).with_name('paced_probe.py').resolve()
+    if args.unpaced_probe:
+        loadgen=Path(args.unpaced_probe).resolve()
+    load_command=[str(loadgen)] if args.unpaced_probe else [sys.executable,str(loadgen)]
+    transfer_timeout=120 if args.unpaced_probe else 20
     integrity=Path(__file__).resolve().parents[1]/'core-packet-path-probe/natural_cohort_lab.py'
     names=['etfa'+str(os.getpid()),'etfb'+str(os.getpid())]
     children=[];created=[];rows=[]
@@ -70,8 +74,11 @@ def run(args):
         result=[]
         for p in processes:
             fields=Path(f'/proc/{p.pid}/stat').read_text().rsplit(')',1)[1].split()
+            status=Path(f'/proc/{p.pid}/status').read_text().splitlines()
+            high_water=next(int(line.split()[1])*1024 for line in status if line.startswith('VmHWM:'))
             result.append({'pid':p.pid,'start':int(fields[19]),'cpu':(int(fields[11])+int(fields[12]))/os.sysconf('SC_CLK_TCK'),
-                           'rss':int(fields[21])*os.sysconf('SC_PAGESIZE')})
+                           'rss':int(fields[21])*os.sysconf('SC_PAGESIZE'),
+                           'lifetime_rss_high_water_bytes':high_water})
         return result
     def host_cpu():
         with open('/proc/stat') as f:return host_cpu_values(f.readline(),os.sysconf('SC_CLK_TCK'))
@@ -123,6 +130,30 @@ def run(args):
             expected={'tcp-segmentation-offload':'off','tx-udp-segmentation':'off','generic-receive-offload':'on'}
             actual={k.strip():v.strip().split()[0] for line in features.splitlines() if ':' in line for k,v in [line.split(':',1)] if k.strip() in expected}
             assert actual==expected,actual
+        record('topology',endpoints=[{'role':role,'namespace':ns,'underlay':f'192.0.2.{i+1}',
+                                     'overlay':f'10.88.0.{i+1}'}
+                                    for i,(role,ns) in enumerate(zip(['client','server'],names))],
+               scope='same GitHub runner, two network namespaces, veth; not physical-host/WAN evidence',
+               profiled=args.profile,unpaced=bool(args.unpaced_probe))
+        if args.unpaced_probe and not args.profile:
+            for repeat in range(3):
+                for direction in ['upload','download']:
+                    label=f'direct-{repeat}-{direction}'
+                    server=spawn(load_command+['server','--listen','192.0.2.2:35902','--sessions','1',
+                                               '--timeout-seconds',str(transfer_timeout)],label,names[1])
+                    time.sleep(.2)
+                    host_before=host_cpu()
+                    result=command(load_command+['client','--target','192.0.2.2:35902','--direction',direction,
+                                                 '--bytes',str(args.transfer_bytes),'--timeout-seconds',
+                                                 str(transfer_timeout)],names[0],check=False,timeout=transfer_timeout+10)
+                    host_after=host_cpu()
+                    record('direct_raw',repeat=repeat,direction=direction,exit=result.returncode,
+                           stdout=result.stdout,stderr=result.stderr,host_before=host_before,host_after=host_after)
+                    server.wait(timeout=4)
+                    assert result.returncode==0 and server.returncode==0
+                    data=json.loads(result.stdout)
+                    assert data['ok'] and data['bytes']==args.transfer_bytes
+                    record('direct_transfer',repeat=repeat,direction=direction,result=data)
         order=[('stock',False),('legacy',False),('stage',False),('gso',False),
                ('gso',False),('stage',False),('legacy',False),('stage',False),
                ('legacy',False),('gso',False),('stock',False),
@@ -174,24 +205,39 @@ def run(args):
                 result=command([sys.executable,integrity,'integrity','client',direction],names[0]);server.wait(timeout=4)
                 assert server.returncode==0
                 record('integrity',round=round_id,arm=arm,stealth=stealth,direction=direction,result=json.loads(result.stdout))
-                amount=33554432 if stealth else 67108864
+                amount=args.transfer_bytes if args.unpaced_probe else (33554432 if stealth else 67108864)
                 env={**os.environ,'ET_PACED_MBPS':'200'}
-                server=spawn([sys.executable,loadgen,'server','--listen','10.88.0.2:35902','--sessions','1','--timeout-seconds','20'],label+'-server',names[1],env)
+                server=spawn(load_command+['server','--listen','10.88.0.2:35902','--sessions','1','--timeout-seconds',str(transfer_timeout)],label+'-server',names[1],env)
                 time.sleep(.2)
                 ping=spawn(['ping','-c','20','-i','0.1','-W','1','10.88.0.2'],label+'-ping',names[0])
+                profiler=None
+                if args.profile:
+                    profiler=spawn(['perf','record','-e','cpu-clock','-F','99','--call-graph','fp',
+                                    '-p',','.join(str(p.pid) for p in cores),'-o',out/(label+'.perf.data')],
+                                   label+'-perf',names[0])
+                    time.sleep(.2)
+                    assert profiler.poll() is None,'perf failed to attach'
                 before=snapshot(cores);host_before=host_cpu()
-                result=command(['env','ET_PACED_MBPS=200',sys.executable,loadgen,'client','--target','10.88.0.2:35902','--direction',direction,'--bytes',str(amount),'--timeout-seconds','20'],names[0],check=False)
+                result=command(['env','ET_PACED_MBPS=200']+load_command+['client','--target','10.88.0.2:35902','--direction',direction,'--bytes',str(amount),'--timeout-seconds',str(transfer_timeout)],names[0],check=False,timeout=transfer_timeout+10)
                 host_after=host_cpu();after=snapshot(cores)
+                if profiler:
+                    os.killpg(profiler.pid,signal.SIGINT)
+                    profiler.wait(timeout=10)
+                    assert profiler.returncode==0,'perf recording failed'
+                    report=command(['perf','report','--stdio','--no-children','--sort','comm,pid,dso,symbol',
+                                    '-i',out/(label+'.perf.data')],timeout=60)
+                    (out/(label+'-perf-report.txt')).write_text(report.stdout)
                 (out/(label+'-client.json')).write_text(result.stdout)
                 (out/(label+'-client.stderr')).write_text(result.stderr)
                 record('raw_transfer',round=round_id,arm=arm,stealth=stealth,direction=direction,before=before,after=after,host_before=host_before,host_after=host_after,exit=result.returncode,stdout=result.stdout)
                 server.wait(timeout=4);assert result.returncode==0 and server.returncode==0
-                data=json.loads(result.stdout);assert data['ok'] and data['bytes']==amount and data['rate_cap_mbps']==200
+                data=json.loads(result.stdout);assert data['ok'] and data['bytes']==amount
+                if not args.unpaced_probe:assert data['rate_cap_mbps']==200
                 for first,last in zip(before,after):assert(first['pid'],first['start'])==(last['pid'],last['start'])
                 ping.wait(timeout=5);text=(out/(label+'-ping.log')).read_text()
                 loss=re.search(r'([0-9.]+)% packet loss',text)
                 assert ping.returncode==0 and loss and float(loss[1])==0,'ICMP progress failed'
-                record('transfer',round=round_id,arm=arm,stealth=stealth,direction=direction,result=data,
+                record('transfer',round=round_id,arm=arm,stealth=stealth,direction=direction,result=data,profiled=args.profile,
                        core_cpu_s_GiB=sum(y['cpu']-x['cpu'] for x,y in zip(before,after))/(amount/1024**3),
                        host_cpu_s_GiB=(host_after['busy_seconds']-host_before['busy_seconds'])/(amount/1024**3))
             peers(cli,round_id,'after')
@@ -259,4 +305,7 @@ if __name__=='__main__':
         for name in ['stock','candidate','output']:parser.add_argument('--'+name,required=True)
         parser.add_argument('--core-name',default='easytier-core')
         parser.add_argument('--order',help='comma-separated diagnostic arms; defaults to the full interleaved matrix')
+        parser.add_argument('--unpaced-probe',help='existing compiled easytier-perf-probe; no Core rebuild required')
+        parser.add_argument('--transfer-bytes',type=int,default=1073741824)
+        parser.add_argument('--profile',action='store_true',help='separate diagnostic run; rates are not comparison evidence')
         run(parser.parse_args())

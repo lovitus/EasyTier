@@ -1,6 +1,11 @@
 name: Actual Core UDP flush-boundary experiment
 'on':
   workflow_dispatch:
+    inputs:
+      saturation:
+        description: Run saturation and separate CPU profiles instead of repeating fixed-load measurements
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
@@ -12,7 +17,7 @@ concurrency:
 jobs:
   core-flush:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       FORK_SHA: c6772dbfef2395ff96b39bd4801945d92212dffb
       CARGO_INCREMENTAL: '0'
@@ -72,12 +77,39 @@ jobs:
           sha256sum flush-binaries/{stock,candidate}/easytier-{core,cli} > flush-evidence/binaries.sha256
           file flush-binaries/{stock,candidate}/easytier-core > flush-evidence/binary-format.txt
       - name: Run actual Core comparisons and explicit Stealth/UDP checks
+        if: ${{ !inputs.saturation }}
         shell: bash
         run: |
           set -euo pipefail
           sudo timeout --signal=TERM --kill-after=15s 480s python3 tools/mesh-udp-flush/lab.py \
             --stock flush-binaries/stock --candidate flush-binaries/candidate --output flush-evidence/lab \
             | tee flush-evidence/lab.log
+      - name: Prepare unpaced probe and profiling tools
+        if: ${{ inputs.saturation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)"
+          rustc +1.95 --edition=2021 -O tools/easytier-perf-probe.rs -o flush-binaries/perf-probe
+          sha256sum tools/easytier-perf-probe.rs flush-binaries/perf-probe > flush-evidence/probe.sha256
+      - name: Uninstrumented direct and mesh saturation comparisons
+        if: ${{ inputs.saturation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo timeout --signal=TERM --kill-after=15s 1200s python3 tools/mesh-udp-flush/lab.py \
+            --stock flush-binaries/stock --candidate flush-binaries/candidate \
+            --unpaced-probe flush-binaries/perf-probe --output flush-evidence/saturation \
+            --order stock,legacy,gso,gso,legacy,legacy,gso,stock
+      - name: Separate CPU profiles, excluded from throughput comparisons
+        if: ${{ inputs.saturation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo timeout --signal=TERM --kill-after=15s 600s python3 tools/mesh-udp-flush/lab.py \
+            --stock flush-binaries/stock --candidate flush-binaries/candidate \
+            --unpaced-probe flush-binaries/perf-probe --output flush-evidence/profiles \
+            --order legacy,gso --profile
       - name: Preserve failures and artifact identities
         if: always()
         shell: bash
