@@ -335,3 +335,27 @@ lifetimes and sixteen 256 MiB directional transfers. Existing integrity,
 UDP echo, ICMP progress, Stealth activation, scratch recovery and teardown
 checks remain unchanged. Short compatibility measurements are not three-run
 performance evidence. IPv6, mixed-flow and physical-host claims remain open.
+
+### Exact-artifact compatibility result
+
+Run https://github.com/lovitus/EasyTier/actions/runs/36085051623 passed at
+harness `32ac890f64c8cc99de82be1244eb90ddc1ed268d`, reusing the exact
+837349f8 candidate artifact without compilation. Capacity 0/8192 x Stealth
+off/on x legacy/GSO completed all eight combinations: sixteen directional
+256 MiB transfers and digest/half-close checks, eight UDP echo checks,
+ICMP progress, thirty-two peer observations, sixteen TUN metric records,
+and all process/namespace cleanup. All four root-route comparisons matched.
+Stealth-on writer metrics explicitly observed enabled outer sealing; it was
+not inferred solely from configuration. No scratch allocation was lost.
+
+The 8 KiB mode expanded batches with and without Stealth, in both legacy
+and GSO modes. The zero-capacity control never promoted or expanded frames.
+These short runs close this combination check, not three-sample performance
+acceptance, mixed-flow fairness, IPv6, physical-host or duration testing.
+
+Artifact 10842419482 is 127160 bytes. Its full archive SHA-256 and all 235
+internal manifest entries were verified:
+`bf99b3318416af043dea33186240914787b0105b26a5fb510d4381a076ddf8d6`.
+Current next step: exercise the existing candidate on inner IPv6 and mixed
+flows using bounded fixture extensions, not another Core build. No production
+adoption or release has been made.
