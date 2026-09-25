@@ -498,3 +498,86 @@ Next measurement should observe the existing receive-ring rejection boundary
 and correlate a lost packet across Core stages, rather than repeat unchanged
 captures. Production adoption remains unapproved; prior measured CPU and
 throughput improvements remain fixture-specific evidence, not acceptance.
+
+### Packet-stage diagnostic candidate in progress
+
+Commit dd061adb adds bounded, opt-in observations only to disposable CI source:
+ICMP identity before encryption, ciphertext payload fingerprint after encryption,
+UDP receive / ring rejection / peer receive fingerprints, and decoded ICMP
+identity before NIC enqueue. Queue behavior and packet contents are unchanged.
+Per-process output is capped at 8192 records; overflow invalidates evidence.
+The fixture is inner IPv6 echo (104 bytes) with the pinned 28-byte AES-GCM tail.
+This is not a general protocol classifier or production feature.
+
+Run 36088594844 builds this candidate once, reuses stock/load-generator artifacts,
+and then executes the bounded interleaved localization batch. Local syntax,
+format and workflow gates passed. The authorized status helper reached its
+600-second observation timeout; it did not report a terminal workflow failure.
+Unique next step: resume status observation of run 36088594844 and inspect its
+artifact. Do not redispatch or rebuild because this observation timed out.
+
+### Packet-stage evidence confirms receive-ring rejection for one lost echo
+
+Run 36088594844 at dd061adb built the diagnostic candidate successfully;
+eight existing contract tests passed. The localization batch remains FAIL:
+trace-2-8192 legacy download loses ICMP echo ID 47227 sequence 10.
+
+Correlated records for ciphertext payload fingerprint `2328586c6fc92eb0`:
+
+1. Endpoint 0: encrypted_tx, plaintext identity (128, 47227, 10).
+2. Endpoint 1: udp_rx with the same fingerprint.
+3. Endpoint 1: ring_reject with the same fingerprint.
+4. Endpoint 1: no peer_rx or nic_enqueue for that echo; no TUN delivery.
+
+The sender TUN captures the request. Receiver TUN does not. Captures report
+79/78 records respectively, matching their filter-received counts, and zero
+capture-kernel drops. Neither Core trace overflows. This sample directly
+identifies existing UDP receive-ring rejection, not a NAT, network-interface,
+TUN kernel, or reply-generation failure. It does not retrospectively prove
+the cause of every earlier uninstrumented loss.
+
+The exact source uses a 128-slot receive ring with four slots reserved for
+non-Data traffic. is_lossy classifies all PacketType::Data, not just inner
+UDP. PeerConn consumes that ring and awaits a separate 128-slot MPSC send;
+PeerManager then performs decrypt, metrics, decompression, ACL/pipeline and
+NIC delivery. This bounds the next performance question: service rate and
+backpressure along that chain, not ICMP-specific prioritization. Do not
+remove either bound, silently enlarge buffers, or classify encrypted payload
+as ICMP to make the test pass. Diagnostic throughput is not acceptance data.
+
+Artifact 10845561111: 57 selected evidence files verified against its internal
+manifest; only 688005 ZIP-range bytes fetched. Full archive digest was not
+locally verified. Raw selected files and retrieval provenance remain private.
+Unique next step: reconcile prior receive-path experiments with the now-proven
+ring bottleneck, then choose a bounded scheduling/consumption experiment that
+measures throughput, CPU, timer/Pong fairness and loss together. No production
+rollout or extra replay of the unchanged diagnostic is justified.
+
+### Receive optimization selection after source reconciliation
+
+Do not replay the rejected writer-side yield or large 64 KiB scratch approach.
+The natural-cohort probe models a synchronous I/O owner, not Core's receive
+ring -> PeerConn -> MPSC -> PeerManager -> NIC chain. Its successful kernel
+mechanism results do not establish receive-task scheduling correctness.
+
+Upstream 86222771c59652bcce0098b5f9eaf19dbfa2c988 changes host egress from
+awaited send to try_send/drop. That protects shared-router liveness but moves
+the drop boundary; it is not a demonstrated bandwidth/CPU fix and should not
+be adopted just to remove receive-ring rejections from this experiment.
+
+Dependency reconciliation found Core Cargo.lock at Tokio 1.52.1, while the
+existing standalone probe lock uses 1.53.1. A new scheduling comparison must
+use the Core version; previous probe results must retain their own version.
+Inspection of the local exact Tokio 1.52.1 source confirms recv() consumes
+cooperative budget and returns one semaphore permit per item. recv_many()
+consumes one budget unit per bounded batch and returns permits together.
+This is a concrete mechanism to test, not proof of gain. An unbounded
+try_recv loop would bypass this fairness contract and is not the proposal.
+
+The next small-tool experiment should compare recv() against recv_many(8)
+and recv_many(32), using the same bounded queues, packet order and payload
+work, with explicit per-item/per-batch budget alternatives. Measure timer
+and control-packet latency, loss, throughput and CPU together; test both
+single-thread and multi-thread scheduling. Report extra locally held batch
+capacity rather than claiming memory bounds are identical. No Core edit
+until this mechanism has evidence; no extra full Core build for the model.

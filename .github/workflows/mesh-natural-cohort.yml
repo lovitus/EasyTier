@@ -6,6 +6,10 @@ name: Mesh natural-cohort kernel mechanism
         description: Run only the locked small GRO capacity contract, without Core or network setup
         type: boolean
         default: true
+      recv_budget_only:
+        description: Run the exact-Core-version bounded receive scheduling model only
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths:
@@ -18,7 +22,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   capacity-contract:
-    if: ${{ inputs.capacity_only }}
+    if: ${{ inputs.capacity_only && !inputs.recv_budget_only }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -49,7 +53,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   kernel-mechanism:
-    if: ${{ !inputs.capacity_only }}
+    if: ${{ !inputs.capacity_only && !inputs.recv_budget_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -125,3 +129,32 @@ jobs:
             cohort-binaries/
           retention-days: 30
           if-no-files-found: error
+  receive-budget:
+    if: ${{ inputs.recv_budget_only }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Build and run the isolated scheduling model
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p recv-evidence
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold
+          rustup toolchain install 1.95.0 --profile minimal
+          printf '%s\n' "$GITHUB_SHA" > recv-evidence/source-sha.txt
+          lscpu > recv-evidence/cpu.txt
+          cp tools/mesh-recv-budget/Cargo.lock recv-evidence/Cargo.lock
+          timeout 300 cargo +1.95.0 build --locked --release --manifest-path tools/mesh-recv-budget/Cargo.toml 2>&1 | tee recv-evidence/build.log
+          timeout 180 tools/mesh-recv-budget/target/release/mesh-recv-budget > recv-evidence/results.jsonl
+          sha256sum tools/mesh-recv-budget/target/release/mesh-recv-budget > recv-evidence/binary.sha256
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: mesh-recv-budget-${{ github.sha }}
+          path: recv-evidence/
+          if-no-files-found: error
+          retention-days: 30
