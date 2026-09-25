@@ -143,7 +143,7 @@ def run(args):
                                     for i,(role,ns) in enumerate(zip(['client','server'],names))],
                scope='same GitHub runner, two network namespaces, veth; not physical-host/WAN evidence',
                profiled=args.profile,unpaced=bool(args.unpaced_probe))
-        if args.unpaced_probe and not args.profile and not args.tun_trace:
+        if args.unpaced_probe and not args.profile and not args.tun_trace and args.tun_head_capacity is None:
             for repeat in range(3):
                 for direction in ['upload','download']:
                     label=f'direct-{repeat}-{direction}'
@@ -177,10 +177,15 @@ def run(args):
             for i,ns in enumerate(names):
                 cfg=out/f'r{round_id}-cfg-{i}';cfg.mkdir();home=cfg/'home';home.mkdir()
                 metrics_dir=cfg/'issue4-flush-metrics';metrics_dir.mkdir()
+                tun_metrics_dir=cfg/'issue4-tun-metrics'
+                if args.tun_head_capacity is not None:tun_metrics_dir.mkdir()
                 env={k:v for k,v in os.environ.items() if not k.startswith('ET_')}
                 env.update({'HOME':str(home),'XDG_CONFIG_HOME':str(home/'config'),'RUST_LOG':'warn'})
                 if arm!='stock':env.update({'ET_ISSUE4_FLUSH_MODE':arm,'ET_ISSUE4_EXPERIMENT':'ISOLATED_LAB_ONLY',
                                              'ET_ISSUE4_FLUSH_METRICS_DIR':str(metrics_dir)})
+                if args.tun_head_capacity is not None:
+                    env.update({'ET_ISSUE4_TUN_HEAD_CAPACITY':str(args.tun_head_capacity),
+                                'ET_ISSUE4_TUN_METRICS_DIR':str(tun_metrics_dir)})
                 argv=[path/args.core_name,'--config-dir',cfg,'--network-name','flush-lab',
                       '--network-secret','isolated-test-only','--ipv4',f'10.88.0.{i+1}',
                       '--listeners',f'udp://192.0.2.{i+1}:35904','--hostname',f'flush-{i}',
@@ -275,6 +280,15 @@ def run(args):
             assert all(x['exit']==0 and not x['killed'] for x in exits)
             for i in range(2):
                 log=out/f'r{round_id}-{arm}-core-{i}.log';metrics_dir=out/f'r{round_id}-cfg-{i}'/'issue4-flush-metrics'
+                if args.tun_head_capacity is not None:
+                    files=list((out/f'r{round_id}-cfg-{i}'/'issue4-tun-metrics').glob('*.json'))
+                    assert len(files)==1,'missing/ambiguous TUN metrics'
+                    stats=json.loads(files[0].read_text())
+                    record('tun_capacity',round=round_id,endpoint=i,stats=stats)
+                    assert stats['capacity']==args.tun_head_capacity and stats['completed']>0
+                    assert stats['scratch_lost']==0
+                    if args.tun_head_capacity==0:assert stats['promoted']==0
+                    else:assert stats['scratch_capacity']==args.tun_head_capacity
                 # Stock never loads the diagnostic overlay or its metrics env.
                 # Its expected absence is the negative activation control.
                 sink,writer,errors = ([],[],[]) if arm=='stock' else parse_stats(metrics_dir)
@@ -343,4 +357,5 @@ if __name__=='__main__':
         parser.add_argument('--transfer-bytes',type=int,default=1073741824)
         parser.add_argument('--profile',action='store_true',help='separate diagnostic run; rates are not comparison evidence')
         parser.add_argument('--tun-trace',action='store_true',help='bounded write trace; rates are not comparison evidence')
+        parser.add_argument('--tun-head-capacity',type=int,choices=[0,4096,8192],help='requires isolated TUN overlay; records per-endpoint metrics')
         run(parser.parse_args())

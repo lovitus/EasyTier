@@ -1,0 +1,172 @@
+// Diagnostic-only overlay: not a production configuration/API.
+type FlushFuture = Pin<
+    Box<
+        dyn Future<
+                Output = (
+                    io::Result<usize>,
+                    GROTable,
+                    Vec<BytesMut>,
+                    Option<BytesMut>,
+                    bool,
+                    usize,
+                    bool,
+                ),
+            > + Send,
+    >,
+>;
+
+pub(crate) struct LinuxTunOffloadSink {
+    device: Arc<AsyncDevice>,
+    pending: Vec<BytesMut>,
+    gro: Option<GROTable>,
+    flush_future: Option<FlushFuture>,
+    scratch: Option<BytesMut>,
+    head_capacity: usize,
+    metrics_dir: Option<std::path::PathBuf>,
+    cohorts: Vec<u64>,
+    promoted: u64,
+    copied_bytes: u64,
+    completed: u64,
+    expanded_batches: u64,
+    max_frame: usize,
+    scratch_lost: u64,
+}
+
+impl LinuxTunOffloadSink {
+    pub(crate) fn new(device: Arc<AsyncDevice>) -> Self {
+        let isolated = std::env::var("ET_ISSUE4_EXPERIMENT").as_deref() == Ok("ISOLATED_LAB_ONLY");
+        let head_capacity = if isolated {
+            std::env::var("ET_ISSUE4_TUN_HEAD_CAPACITY")
+                .unwrap_or_else(|_| "0".to_owned())
+                .parse::<usize>()
+                .expect("invalid diagnostic capacity")
+        } else {
+            0
+        };
+        assert!(matches!(head_capacity, 0 | 4096 | 8192));
+        Self {
+            device,
+            pending: Vec::with_capacity(IDEAL_BATCH_SIZE),
+            gro: Some(GROTable::new()),
+            flush_future: None,
+            scratch: (head_capacity > 0).then(|| BytesMut::with_capacity(head_capacity)),
+            head_capacity,
+            metrics_dir: if isolated {
+                std::env::var_os("ET_ISSUE4_TUN_METRICS_DIR").map(Into::into)
+            } else {
+                None
+            },
+            cohorts: vec![0; IDEAL_BATCH_SIZE + 1],
+            promoted: 0,
+            copied_bytes: 0,
+            completed: 0,
+            expanded_batches: 0,
+            max_frame: 0,
+            scratch_lost: 0,
+        }
+    }
+
+    fn poll_flush_inner(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+        if self.flush_future.is_none() {
+            if self.pending.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            let device = self.device.clone();
+            let mut packets = std::mem::take(&mut self.pending);
+            self.cohorts[packets.len()] += 1;
+            let before_max = packets.iter().map(BytesMut::len).max().unwrap_or(0);
+            let candidate = if packets.len() > 1 && self.scratch.is_some() {
+                packets.iter().position(|frame| {
+                    if frame.len() >= self.head_capacity || frame.capacity() >= self.head_capacity {
+                        return false;
+                    }
+                    let Some(ip) = frame.get(VIRTIO_NET_HDR_LEN..) else {
+                        return false;
+                    };
+                    match ip.first().map(|v| v >> 4) {
+                        Some(4) => ip.len() >= 40 && ip[0] & 15 == 5 && ip[9] == 6,
+                        Some(6) => ip.len() >= 60 && ip[6] == 6,
+                        _ => false,
+                    }
+                })
+            } else {
+                None
+            };
+            let promoted_ptr = candidate.map(|index| {
+                let mut head = self.scratch.take().expect("checked scratch");
+                head.clear();
+                head.extend_from_slice(&packets[index]);
+                self.promoted += 1;
+                self.copied_bytes += packets[index].len() as u64;
+                let ptr = head.as_ptr() as usize;
+                packets[index] = head;
+                ptr
+            });
+            let mut gro = self.gro.take().expect("offload GRO state missing");
+            self.flush_future = Some(Box::pin(async move {
+                let result = device
+                    .send_multiple(&mut gro, &mut packets, VIRTIO_NET_HDR_LEN)
+                    .await;
+                let maximum = packets.iter().map(BytesMut::len).max().unwrap_or(0);
+                // GRO may swap the head during a prepend. Recover the exact
+                // allocation only after writes, not an arbitrary large frame.
+                let scratch = promoted_ptr.and_then(|ptr| {
+                    packets
+                        .iter()
+                        .position(|p| p.as_ptr() as usize == ptr)
+                        .map(|index| packets.swap_remove(index))
+                });
+                let lost = promoted_ptr.is_some() && scratch.is_none();
+                (
+                    result,
+                    gro,
+                    packets,
+                    scratch,
+                    maximum > before_max,
+                    maximum,
+                    lost,
+                )
+            }));
+        }
+        let (result, gro, mut packets, scratch, expanded, maximum, lost) = ready!(
+            self.flush_future
+                .as_mut()
+                .expect("offload flush future missing")
+                .as_mut()
+                .poll(cx)
+        );
+        self.flush_future = None;
+        self.completed += 1;
+        self.expanded_batches += u64::from(expanded);
+        self.max_frame = self.max_frame.max(maximum);
+        self.scratch_lost += u64::from(lost);
+        if let Some(mut scratch) = scratch {
+            scratch.clear();
+            self.scratch = Some(scratch);
+        }
+        packets.clear();
+        self.pending = packets;
+        self.gro = Some(gro);
+        result.map(|_| ()).map_err(Into::into).into()
+    }
+}
+
+impl Drop for LinuxTunOffloadSink {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.metrics_dir {
+            let value = serde_json::json!({
+                "capacity": self.head_capacity, "cohorts": self.cohorts,
+                "promoted": self.promoted, "copied_bytes": self.copied_bytes,
+                "completed": self.completed, "expanded_batches": self.expanded_batches,
+                "max_frame": self.max_frame, "scratch_lost": self.scratch_lost,
+                "scratch_capacity": self.scratch.as_ref().map(BytesMut::capacity),
+            });
+            if let Err(error) = std::fs::write(
+                dir.join(format!("tun-{}.json", std::process::id())),
+                value.to_string(),
+            ) {
+                eprintln!("diagnostic TUN metrics write failed: {error}");
+            }
+        }
+    }
+}

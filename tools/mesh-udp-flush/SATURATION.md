@@ -238,3 +238,27 @@ behavior and do not add sleeps/yields, change ordering or modify crypto.
 The old 64 KiB scratch regression is still a reason to require actual-Core
 A/B evidence before adopting anything. The earlier small-tool failures remain
 failures; this successful run does not retroactively reclassify them.
+
+## Actual-Core bounded-head experiment prepared
+
+The disposable-source overlay compares capacities 0/4096/8192 in one
+candidate binary, with the previous UDP GSO diagnostic unchanged. The stock
+binary and unpaced load generator are reused from artifact 10841125115;
+only the new diagnostic Core is built. Nine interleaved rounds provide three
+samples per capacity and direction with the existing 1 GiB workload.
+
+The overlay keeps one reusable allocation per TUN sink, promotes at most one
+eligible TCP frame per naturally available multi-packet flush, and skips
+singletons and frames already large enough. It never waits to form a batch,
+changes packet ordering before writes, or changes receive/crypto/routing.
+Allocation recovery follows its pointer after GRO swaps rather than selecting
+an arbitrary large input. Counters record cohort sizes, copied bytes, expanded
+batches, maximum frame and lost scratch; all three modes include counters.
+Expanded-batch counters are conservative (larger than the original maximum),
+not exact output packet counts. Cancellation/teardown remains existing sink
+ownership, not a new runtime. Missing metrics or lost scratch fail the run.
+
+Failure modes being tested: no useful cohorts, copy cost exceeding syscall
+savings, payload corruption, stuck writes/ICMP, resource residue, and buffer
+reuse failure. The existing integrity, UDP echo, transport, metric and cleanup
+checks remain mandatory. No result or production acceptance is claimed yet.
