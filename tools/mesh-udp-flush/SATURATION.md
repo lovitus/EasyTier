@@ -8,8 +8,11 @@ profile remains failed. TUN observation run 36081104653 also passed, reusing
 artifact 10841125115 for four bounded 64 MiB transfers without a rebuild.
 Run 36082689922 has now completed the isolated actual-Core comparison:
 8 KiB head capacity improved throughput and CPU/GiB over capacity zero.
-Next step: test the exact candidate's remaining compatibility boundaries
-before any production adoption; this Linux fixture is not full acceptance.
+Current gate: replay 36086239105 failed in both capacity-zero legacy and
+8192/GSO cases. Loss is not established as a head-capacity regression.
+Next step: correlate receive-ring rejection with missing ICMP sequences;
+do not change buffering, retry policy or the zero-loss assertion first.
+This Linux fixture is not full acceptance.
 Production Core and the unresolved GSO rejection assertion are unchanged.
 
 ## Receive-side follow-up
@@ -390,3 +393,38 @@ This diagnostic does not increase socket buffers or modify production code.
 
 Artifact 10844195055 complete archive digest and 387 internal files verified:
 `04072d757fd310d9fdf2dcce79c07a8bf37901e5c161bde01645d027177bb370`.
+
+### Bounded replay: loss also occurs without either optimization
+
+Run 36086239105 reused the exact executable from run 36082689922; no
+rebuild. Harness 0396b444 interleaved capacities 0,8192,8192,0,0,8192,
+with legacy then GSO, inner IPv6, Stealth off and concurrent opposing
+256 MiB transfers. The aggregate remains FAIL, preserving every assertion.
+
+- Replay 0, capacity 0, legacy download: 2/20 ICMP replies missing.
+- Replays 1 through 4: passed their selected checks.
+- Replay 5, capacity 8192, GSO download: 1/20 ICMP replies missing.
+
+Both failing intervals have zero delta in UDP RcvbufErrors and interface
+error/drop counters. Veth transmit/receive byte and packet deltas match
+between endpoints. Receiver ICMP echo-reply counts equal received requests,
+but received requests are fewer than sender requests. These aggregate
+counters narrow the investigation; they do not locate an individual lost
+packet. Ping starts before the counter snapshot, so counter deltas cover
+19 requests rather than the complete 20-packet ping.
+
+A passing replay-5 legacy upload has 21 UDP RcvbufErrors but zero ICMP loss.
+Therefore neither absence nor presence of that counter alone explains the
+failed ICMP gate. No performance comparison may treat these failed runs as
+accepted compatibility evidence.
+
+Source inspection identifies an existing candidate loss boundary:
+UdpConnection::handle_packet_from_remote uses RingSink::try_send for
+ZCPacket::is_lossy(), which classifies PacketType::Data rather than the
+inner transport protocol. RingSink rejects at the reserved-capacity
+boundary before total capacity is exhausted. This is a hypothesis needing
+packet-correlated evidence, not permission to remove bounded queues or
+change prioritization. Production source remains unchanged.
+
+Artifact 10843962028 complete archive digest and 523 internal entries verified:
+`c5fa8f28818c243ec1a56760c97d1ffc2a5f124085edbbdf9ee08f9037815b2b`.

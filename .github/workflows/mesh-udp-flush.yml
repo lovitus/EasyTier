@@ -242,7 +242,7 @@ jobs:
           cp reused/flush-evidence/{binaries.sha256,experiment-sha.txt,diagnostic-source.json} profile-evidence/
           printf '%s\n' "$GITHUB_SHA" > profile-evidence/harness-sha.txt
           sudo apt-get update -qq
-          sudo apt-get install -y iproute2 iputils-ping ethtool linux-tools-common "linux-tools-$(uname -r)"
+          sudo apt-get install -y iproute2 iputils-ping ethtool tcpdump linux-tools-common "linux-tools-$(uname -r)"
           perf --version > profile-evidence/perf-version.txt
           uname -a > profile-evidence/kernel.txt
           lscpu > profile-evidence/cpu.txt
@@ -266,7 +266,7 @@ jobs:
                   --unpaced-probe reused/flush-binaries/perf-probe \
                   --output "profile-evidence/replay-${index}-${capacity}" \
                   --order legacy,gso --tun-head-capacity "$capacity" \
-                  --transfer-bytes 268435456 --inner-ipv6 --mixed-flow --network-counters; then
+                  --transfer-bytes 268435456 --inner-ipv6 --mixed-flow --network-counters --icmp-capture; then
                   printf 'replay %s capacity %s: PASS\n' "$index" "$capacity"
                 else
                   code=$?

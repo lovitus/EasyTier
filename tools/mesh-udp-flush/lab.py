@@ -221,11 +221,21 @@ def run(args):
                     addresses=json.loads(command(['ip','-j','-6','addr','show','dev','tun0'],ns).stdout)
                     assert any(a['local']==f'fd88::{i+1}' for dev in addresses for a in dev['addr_info'])
                     record('tun_ipv6',round=round_id,endpoint=i,state=addresses)
+            captures=[]
+            if args.icmp_capture:
+                assert args.inner_ipv6,'ICMP sequence capture requires inner IPv6'
+                for i,ns in enumerate(names):
+                    captures.append(spawn(['tcpdump','-nn','-tt','-l','-s','160','-c','128',
+                                           '-i','tun0','icmp6 and (ip6[40] == 128 or ip6[40] == 129)'],
+                                          f'r{round_id}-{arm}-icmp-{i}',ns))
             udp_server=spawn([sys.executable,__file__,'echo','server',inner_host],f'r{round_id}-udp-server',names[1])
             time.sleep(.2)
             response=command([sys.executable,__file__,'echo','client',inner_host],names[0]);udp_server.wait(timeout=4)
             assert udp_server.returncode==0
             record('udp_echo',round=round_id,arm=arm,stealth=stealth,result=json.loads(response.stdout))
+            for i,capture in enumerate(captures):
+                capture_log=(out/f'r{round_id}-{arm}-icmp-{i}.log').read_text()
+                assert capture.poll() is None and 'listening on tun0' in capture_log,'ICMP capture not ready'
             for direction in (['upload','download'] if round_id%2==0 else ['download','upload']):
                 label=f'r{round_id}-{arm}-{direction}'
                 server=spawn([sys.executable,integrity,'integrity','server',direction,inner_host],label+'-integrity',names[1])
@@ -304,6 +314,13 @@ def run(args):
                        mixed_flow=args.mixed_flow,inner_ipv6=args.inner_ipv6,
                        core_cpu_s_GiB=sum(y['cpu']-x['cpu'] for x,y in zip(before,after))/(amount*(2 if args.mixed_flow else 1)/1024**3),
                        host_cpu_s_GiB=(host_after['busy_seconds']-host_before['busy_seconds'])/(amount*(2 if args.mixed_flow else 1)/1024**3))
+            for i,capture in enumerate(captures):
+                stopped=stop(capture)
+                capture_log=(out/f'r{round_id}-{arm}-icmp-{i}.log').read_text()
+                record('icmp_capture',round=round_id,endpoint=i,stop=stopped,
+                       scope='packet sequence diagnosis only; not throughput acceptance')
+                assert stopped['exit']==0 and not stopped['killed']
+                assert '0 packets dropped by kernel' in capture_log,'ICMP capture incomplete'
             peers(cli,round_id,'after')
             exits=[stop(p) for p in cores];record('core_stop',round=round_id,arm=arm,values=exits)
             assert all(x['exit']==0 and not x['killed'] for x in exits)
@@ -386,6 +403,7 @@ if __name__=='__main__':
         parser.add_argument('--inner-ipv6',action='store_true',help='use Core IPv6 configuration for inner application traffic; underlay remains IPv4')
         parser.add_argument('--mixed-flow',action='store_true',help='concurrent opposite-direction bulk flow with independent port and result check')
         parser.add_argument('--network-counters',action='store_true',help='record per-namespace protocol and link counters around transfers')
+        parser.add_argument('--icmp-capture',action='store_true',help='bounded inner-IPv6 TUN sequence capture; not performance evidence')
         parser.add_argument('--unpaced-probe',help='existing compiled easytier-perf-probe; no Core rebuild required')
         parser.add_argument('--transfer-bytes',type=int,default=1073741824)
         parser.add_argument('--profile',action='store_true',help='separate diagnostic run; rates are not comparison evidence')
