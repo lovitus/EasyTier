@@ -170,7 +170,7 @@ def run(args):
             requested = args.order.split(',')
             invalid = set(requested) - {'stock', 'legacy', 'stage', 'gso'}
             assert not invalid, f'unknown diagnostic arms: {sorted(invalid)}'
-            order = [(arm, False) for arm in requested]
+            order = [(arm, args.stealth) for arm in requested]
         for round_id,(arm,stealth) in enumerate(order):
             path=binaries['stock' if arm=='stock' else 'candidate'];cli=path/'easytier-cli'
             cores=[]
@@ -353,6 +353,7 @@ if __name__=='__main__':
         for name in ['stock','candidate','output']:parser.add_argument('--'+name,required=True)
         parser.add_argument('--core-name',default='easytier-core')
         parser.add_argument('--order',help='comma-separated diagnostic arms; defaults to the full interleaved matrix')
+        parser.add_argument('--stealth',action='store_true',help='enable existing secure/Stealth configuration for explicitly selected arms')
         parser.add_argument('--unpaced-probe',help='existing compiled easytier-perf-probe; no Core rebuild required')
         parser.add_argument('--transfer-bytes',type=int,default=1073741824)
         parser.add_argument('--profile',action='store_true',help='separate diagnostic run; rates are not comparison evidence')

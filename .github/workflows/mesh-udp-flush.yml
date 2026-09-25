@@ -18,6 +18,10 @@ name: Actual Core UDP flush-boundary experiment
         description: Build only the diagnostic candidate and compare bounded TUN head capacities
         type: boolean
         default: false
+      tun_compat:
+        description: In artifact-reuse mode verify bounded TUN with Stealth and legacy/GSO combinations
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
@@ -203,12 +207,14 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v5
         with:
-          artifact-ids: '10841125115'
-          run-id: '36074709548'
+          artifact-ids: ${{ inputs.tun_compat && '10842834881' || '10841125115' }}
+          run-id: ${{ inputs.tun_compat && '36082689922' || '36074709548' }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: reused
           merge-multiple: true
       - name: Verify exact existing binaries and prepare profiler
+        env:
+          TUN_COMPAT: ${{ inputs.tun_compat }}
         shell: bash
         run: |
           set -euo pipefail
@@ -216,7 +222,11 @@ jobs:
           mkdir -p reused/tools
           cp tools/easytier-perf-probe.rs reused/tools/
           cd reused
-          test "$(cat flush-evidence/experiment-sha.txt)" = 1639ec4534eb824ce88e7300b5fa1453839c4f25
+          expected=1639ec4534eb824ce88e7300b5fa1453839c4f25
+          if [[ "$TUN_COMPAT" == true ]]; then
+            expected=837349f8f5031d5c877b90edb6f195b6f9615af9
+          fi
+          test "$(cat flush-evidence/experiment-sha.txt)" = "$expected"
           sha256sum -c flush-evidence/binaries.sha256
           sha256sum -c flush-evidence/probe.sha256
           chmod +x flush-binaries/{stock,candidate}/easytier-{core,cli} flush-binaries/perf-probe
@@ -232,9 +242,25 @@ jobs:
       - name: Profile both exact Core modes without repeating saturation comparisons
         env:
           TUN_TRACE: ${{ inputs.tun_trace }}
+          TUN_COMPAT: ${{ inputs.tun_compat }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$TUN_COMPAT" == true ]]; then
+            for capacity in 0 8192; do
+              for stealth in false true; do
+                secure=()
+                if [[ "$stealth" == true ]]; then secure=(--stealth); fi
+                sudo timeout --signal=TERM --kill-after=15s 180s python3 tools/mesh-udp-flush/lab.py \
+                  --stock reused/flush-binaries/stock --candidate reused/flush-binaries/candidate \
+                  --unpaced-probe reused/flush-binaries/perf-probe \
+                  --output "profile-evidence/compat-${capacity}-${stealth}" \
+                  --order legacy,gso --tun-head-capacity "$capacity" \
+                  --transfer-bytes 268435456 "${secure[@]}"
+              done
+            done
+            exit 0
+          fi
           observation=(--profile)
           if [[ "$TUN_TRACE" == true ]]; then
             observation=(--tun-trace --transfer-bytes 67108864)

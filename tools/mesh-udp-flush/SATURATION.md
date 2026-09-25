@@ -327,3 +327,11 @@ Artifact 10842834881 is 130825152 bytes. Published outer SHA-256:
 Only selected evidence was downloaded by byte range (539584 bytes); all 34
 selected files matched the internal manifest. The full outer ZIP was not
 locally downloaded/rehash-verified. Raw files remain in private evidence.
+
+Exact-artifact compatibility follow-up uses `profile_only=true,tun_compat=true`
+with artifact 10842834881 and no Core compilation. It covers the Cartesian
+product of capacity 0/8192, Stealth off/on, UDP legacy/GSO: eight endpoint-pair
+lifetimes and sixteen 256 MiB directional transfers. Existing integrity,
+UDP echo, ICMP progress, Stealth activation, scratch recovery and teardown
+checks remain unchanged. Short compatibility measurements are not three-run
+performance evidence. IPv6, mixed-flow and physical-host claims remain open.
