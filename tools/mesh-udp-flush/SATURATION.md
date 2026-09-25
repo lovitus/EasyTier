@@ -369,3 +369,24 @@ each result checked and CPU normalized by both payloads. Existing digest/
 half-close and UDP echo use the selected address family. ICMP progress and
 all prior cleanup/activation gates remain. This is a short coexistence
 check, not a latency fairness bound, IPv6-underlay or durability proof.
+
+### Extended compatibility failed: ICMP loss remains an adoption gate
+
+Run 36085716874 at 5a1e4d6a failed without relaxing any assertion. Completed
+capacity-zero IPv4/inner-IPv6 mixed cases with Stealth off/on, and capacity
+8192 IPv4 Stealth-off mixed case. Capacity 8192, Stealth off, inner IPv6,
+GSO failed ICMP progress: sequence 9 was missing (19/20 replies, 5% loss)
+during concurrent opposite-direction 256 MiB transfers. Both bulk transfers
+completed. The preceding legacy round passed; remaining cases did not run.
+This is NOT complete extended acceptance and NOT a proven causal regression
+from head capacity based on one observation. Do not publish this candidate.
+
+Failure cleanup was clean; scratch_lost and pending_on_drop were zero for
+both endpoints. Existing logs/metrics do not establish the packet-loss layer.
+Preserve exact binaries and unchanged zero-loss assertion for six interleaved
+0/8192 replays with per-namespace protocol and interface counters. Each failed
+invocation remains failed; replay aggregation must exit nonzero if any fails.
+This diagnostic does not increase socket buffers or modify production code.
+
+Artifact 10844195055 complete archive digest and 387 internal files verified:
+`04072d757fd310d9fdf2dcce79c07a8bf37901e5c161bde01645d027177bb370`.

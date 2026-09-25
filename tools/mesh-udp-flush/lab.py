@@ -93,6 +93,12 @@ def run(args):
         return result
     def host_cpu():
         with open('/proc/stat') as f:return host_cpu_values(f.readline(),os.sysconf('SC_CLK_TCK'))
+    def network_counters(label):
+        for i,ns in enumerate(names):
+            counters=command(['sh','-c','for file in /proc/net/snmp /proc/net/snmp6 /proc/net/netstat; do printf "\\n### %s\\n" "$file"; cat "$file"; done'],ns)
+            (out/f'{label}-network-{i}.txt').write_text(counters.stdout)
+            links=command(['ip','-s','-j','link','show'],ns)
+            (out/f'{label}-links-{i}.json').write_text(links.stdout)
     def types(value):
         if isinstance(value,list):return [v for item in value for v in types(item)]
         if isinstance(value,dict):
@@ -245,6 +251,7 @@ def run(args):
                     mixed_server=spawn(load_command+['server','--listen',mixed_target,'--sessions','1','--timeout-seconds',str(transfer_timeout)],label+'-mixed-server',names[1],env)
                 time.sleep(.2)
                 ping=spawn(['ping']+(['-6'] if args.inner_ipv6 else [])+['-c','20','-i','0.1','-W','1',inner_host],label+'-ping',names[0])
+                if args.network_counters:network_counters(label+'-before')
                 before=snapshot(cores);host_before=host_cpu()
                 if args.mixed_flow:
                     other_direction='download' if direction=='upload' else 'upload'
@@ -266,6 +273,7 @@ def run(args):
                     record('tun_trace_complete',round=round_id,arm=arm,direction=direction,
                            scope='instrumented write counts only; not throughput acceptance')
                 host_after=host_cpu();after=snapshot(cores)
+                if args.network_counters:network_counters(label+'-after')
                 if profiler:
                     perf_control(ctl_write,ack_read,'stop')
                     profiler.wait(timeout=10)
@@ -377,6 +385,7 @@ if __name__=='__main__':
         parser.add_argument('--stealth',action='store_true',help='enable existing secure/Stealth configuration for explicitly selected arms')
         parser.add_argument('--inner-ipv6',action='store_true',help='use Core IPv6 configuration for inner application traffic; underlay remains IPv4')
         parser.add_argument('--mixed-flow',action='store_true',help='concurrent opposite-direction bulk flow with independent port and result check')
+        parser.add_argument('--network-counters',action='store_true',help='record per-namespace protocol and link counters around transfers')
         parser.add_argument('--unpaced-probe',help='existing compiled easytier-perf-probe; no Core rebuild required')
         parser.add_argument('--transfer-bytes',type=int,default=1073741824)
         parser.add_argument('--profile',action='store_true',help='separate diagnostic run; rates are not comparison evidence')

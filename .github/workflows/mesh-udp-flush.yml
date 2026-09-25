@@ -26,6 +26,10 @@ name: Actual Core UDP flush-boundary experiment
         description: With tun_compat, exercise IPv4/inner-IPv6 concurrent opposite-direction flows
         type: boolean
         default: false
+      loss_replay:
+        description: With tun_compat, replay the IPv6 mixed-load ICMP failure with kernel counters
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
@@ -248,10 +252,31 @@ jobs:
           TUN_TRACE: ${{ inputs.tun_trace }}
           TUN_COMPAT: ${{ inputs.tun_compat }}
           EXTENDED_TUN: ${{ inputs.extended_tun }}
+          LOSS_REPLAY: ${{ inputs.loss_replay }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ "$TUN_COMPAT" == true ]]; then
+            if [[ "$LOSS_REPLAY" == true ]]; then
+              failed=0
+              index=0
+              for capacity in 0 8192 8192 0 0 8192; do
+                if sudo timeout --signal=TERM --kill-after=15s 180s python3 tools/mesh-udp-flush/lab.py \
+                  --stock reused/flush-binaries/stock --candidate reused/flush-binaries/candidate \
+                  --unpaced-probe reused/flush-binaries/perf-probe \
+                  --output "profile-evidence/replay-${index}-${capacity}" \
+                  --order legacy,gso --tun-head-capacity "$capacity" \
+                  --transfer-bytes 268435456 --inner-ipv6 --mixed-flow --network-counters; then
+                  printf 'replay %s capacity %s: PASS\n' "$index" "$capacity"
+                else
+                  code=$?
+                  printf 'replay %s capacity %s: FAIL exit %s\n' "$index" "$capacity" "$code"
+                  failed=1
+                fi
+                index=$((index + 1))
+              done
+              exit "$failed"
+            fi
             families=(ipv4)
             if [[ "$EXTENDED_TUN" == true ]]; then families+=(ipv6); fi
             for capacity in 0 8192; do
