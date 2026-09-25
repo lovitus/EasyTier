@@ -38,6 +38,8 @@ def echo(role,host='10.88.0.2'):
 
 
 def run(args):
+    assert 0 < args.paced_mbps <= 1000
+    assert not (args.unpaced_probe and args.paced_mbps != 200), 'rate control cannot apply to unpaced probe'
     inner_host='fd88::2' if args.inner_ipv6 else '10.88.0.2'
     inner_target=f'[{inner_host}]:35902' if args.inner_ipv6 else f'{inner_host}:35902'
     mixed_target=f'[{inner_host}]:35906' if args.inner_ipv6 else f'{inner_host}:35906'
@@ -168,7 +170,8 @@ def run(args):
                                      'overlay':f'10.88.0.{i+1}'}
                                     for i,(role,ns) in enumerate(zip(['client','server'],names))],
                scope='same GitHub runner, two network namespaces, veth; not physical-host/WAN evidence',
-               profiled=args.profile,unpaced=bool(args.unpaced_probe),inner_ipv6=args.inner_ipv6,mixed_flow=args.mixed_flow)
+               profiled=args.profile,unpaced=bool(args.unpaced_probe),inner_ipv6=args.inner_ipv6,mixed_flow=args.mixed_flow,
+               paced_mbps=None if args.unpaced_probe else args.paced_mbps)
         if args.unpaced_probe and not args.profile and not args.tun_trace and args.tun_head_capacity is None:
             for repeat in range(3):
                 for direction in ['upload','download']:
@@ -260,7 +263,7 @@ def run(args):
                 assert server.returncode==0
                 record('integrity',round=round_id,arm=arm,stealth=stealth,direction=direction,result=json.loads(result.stdout))
                 amount=args.transfer_bytes if args.unpaced_probe else (33554432 if stealth else 67108864)
-                env={**os.environ,'ET_PACED_MBPS':'200'}
+                env={**os.environ,'ET_PACED_MBPS':str(args.paced_mbps)}
                 profiler=None
                 if args.profile:
                     ctl_read,ctl_write=os.pipe();ack_read,ack_write=os.pipe()
@@ -285,7 +288,7 @@ def run(args):
                 if args.tun_trace:
                     tun_trace=TunWriteTrace(out,label,cores)
                     tun_trace.start()
-                result=command(['env','ET_PACED_MBPS=200']+load_command+['client','--target',inner_target,'--direction',direction,'--bytes',str(amount),'--timeout-seconds',str(transfer_timeout)],names[0],check=False,timeout=transfer_timeout+10)
+                result=command(['env',f'ET_PACED_MBPS={args.paced_mbps}']+load_command+['client','--target',inner_target,'--direction',direction,'--bytes',str(amount),'--timeout-seconds',str(transfer_timeout)],names[0],check=False,timeout=transfer_timeout+10)
                 if args.mixed_flow:
                     mixed_client.wait(timeout=transfer_timeout+10);mixed_server.wait(timeout=4)
                     assert mixed_client.returncode==0 and mixed_server.returncode==0
@@ -321,7 +324,7 @@ def run(args):
                 record('raw_transfer',round=round_id,arm=arm,stealth=stealth,direction=direction,before=before,after=after,host_before=host_before,host_after=host_after,exit=result.returncode,stdout=result.stdout)
                 server.wait(timeout=4);assert result.returncode==0 and server.returncode==0
                 data=json.loads(result.stdout);assert data['ok'] and data['bytes']==amount
-                if not args.unpaced_probe:assert data['rate_cap_mbps']==200
+                if not args.unpaced_probe:assert data['rate_cap_mbps']==args.paced_mbps
                 for first,last in zip(before,after):assert(first['pid'],first['start'])==(last['pid'],last['start'])
                 ping.wait(timeout=5);text=(out/(label+'-ping.log')).read_text()
                 loss=re.search(r'([0-9.]+)% packet loss',text)
@@ -436,6 +439,7 @@ if __name__=='__main__':
         parser.add_argument('--icmp-capture',action='store_true',help='bounded inner-IPv6 TUN sequence capture; not performance evidence')
         parser.add_argument('--packet-trace',action='store_true',help='requires isolated packet-trace overlay; diagnostic rates only')
         parser.add_argument('--unpaced-probe',help='existing compiled easytier-perf-probe; no Core rebuild required')
+        parser.add_argument('--paced-mbps',type=int,default=200,help='diagnostic cap per flow; never replaces unpaced acceptance')
         parser.add_argument('--transfer-bytes',type=int,default=1073741824)
         parser.add_argument('--profile',action='store_true',help='separate diagnostic run; rates are not comparison evidence')
         parser.add_argument('--tun-trace',action='store_true',help='bounded write trace; rates are not comparison evidence')

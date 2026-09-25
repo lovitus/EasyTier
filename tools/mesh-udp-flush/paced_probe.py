@@ -50,7 +50,7 @@ def send(sock, size):
 
 def address(value):
     host, port = value.rsplit(":", 1)
-    return host, int(port)
+    return host.removeprefix("[").removesuffix("]"), int(port)
 
 
 def configure(sock, timeout):
@@ -59,11 +59,14 @@ def configure(sock, timeout):
 
 
 def server(args):
-    with socket.socket() as listener:
+    host, port = address(args.listen)
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.settimeout(args.timeout_seconds)
-        listener.bind(address(args.listen))
+        listener.bind((host, port))
         listener.listen(1)
+        print(json.dumps({"event": "ready"}), flush=True)
         for _ in range(args.sessions):
             stream, _ = listener.accept()
             with stream:

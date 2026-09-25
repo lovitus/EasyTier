@@ -697,3 +697,111 @@ do not wait for a batch to fill. This mechanism is Linux-specific and must
 not be presented as a cross-platform fix. Reuse existing GSO/TUN evidence
 separately and retain the receive-ring rejection as an unresolved overload
 behavior, not evidence that receive syscall batching fixes it.
+
+### Real UDP receive syscall experiment: insufficient benefit for Core edits
+
+Run 36092642667 / c93dbbcc380581f03f18b76cb2125471fd91502f succeeded.
+This compiled only udp_receive, not Core. Eighteen trials compare recvmsg(1)
+with nonblocking recvmmsg(8/32), three repetitions in alternating order,
+with two-second saturated or pulse64/1ms supply. Two threads exchange real
+loopback UDP datagrams: 1400-byte data and 64-byte control markers. Every
+received datagram checks length, source, sequence and payload. Receive CPU
+uses CLOCK_THREAD_CPUTIME_ID; timing includes validation and drain overhead.
+All arms report the same effective SO_RCVBUF of 524288 bytes.
+
+Three-trial medians:
+
+| Supply | Max batch | Delivered Mbit/s | Receiver CPU s/GiB | Packets/nonempty syscall |
+| --- | ---: | ---: | ---: | ---: |
+| saturated | 1 | 7080.52 | 0.8617 | 1.000 |
+| saturated | 8 | 7088.26 | 0.8837 | 1.353 |
+| saturated | 32 | 7008.67 | 0.9082 | 1.339 |
+| paced | 1 | 617.65 | 0.9072 | 1.000 |
+| paced | 8 | 620.18 | 0.8757 | 1.429 |
+| paced | 32 | 619.83 | 0.9354 | 1.325 |
+
+All paced arms lost zero datagrams and control markers. Saturated loss is
+NOT zero: batch1 lost 2615/953/2076 data-or-control datagrams; batch8 lost
+26/0/0; batch32 lost 1924/510/1853. Control losses were 2/2/1, 0/0/0 and
+2/0/2 respectively. Successful execution means integrity/accounting
+assertions passed, not loss-free operation. No Core reserved-ring control
+policy exists in this model. Control p99 is conditional on delivered
+markers, so do not call it guaranteed latency or ignore missing markers.
+
+Batch8 saturated receiver CPU/GiB increased about 2.6%; batch32 about 5.4%.
+The paced batch8 reduction is about 3.5%, without enough evidence to justify
+production complexity. Low natural occupancy explains why a max batch of
+32 does not mean 32 packets/syscall. This single-send loopback workload does
+not prove behavior with GRO/GSO or a real NIC. It also does not model Tokio
+fairness, encryption, ring rejection, cross-platform behavior or WAN limits.
+The 100ms idle prelude yielded five 20ms poll waits in every arm; that is the
+explicit tool timeout policy, not evidence of an event-driven Core idle fix.
+
+Decision: no production recvmmsg patch from these results. Avoid further
+model tuning merely to obtain a positive result. Existing actual-Core UDP
+GSO and bounded TUN scratch gains remain the stronger candidates; their
+mixed-load acceptance remains open. A future receive experiment needs an
+actual-Core profile or observed receive burst distribution supporting it.
+
+Artifact 10846481166 was only 8569 bytes; full ZIP SHA256 verified:
+`23ad45efd0a1647a37c66656f7e213f64c86d44365b12ef965cc85d45d9f2765`.
+Source SHA inside artifact matches the dispatched SHA. No large Core matrix
+was downloaded. Initial local rustfmt failed because rustup was absent
+from PATH; adding the existing HOME/.cargo/bin resolved it, then the normal
+pre-commit checks passed. One workflow observation and one artifact metadata
+request encountered transient GitHub transport failures; the same run was
+observed/retrieved again, never rebuilt or redispatched.
+
+### Original symptom host: current low-load observation, not a load acceptance
+
+On 2026-09-25, a bounded read-only 30-second observation of the original
+lab-laptop's already-running Core completed without replacing or restarting
+it. It reports 3.0.16-4-391c191c, Linux 6.8.0-40 x86_64. Current executable
+SHA256 is `5c3986318f81b4c6fb3df71a8099ed69a5d7590a2ad5af97ddc58d77dc8d838a`.
+This differs from the earlier profiling artifact hash; the version string
+alone must not be used to claim identical build flags or artifact identity.
+No CLI arguments, credentials or private host addressing are published.
+
+perf stat measured 735.25ms task-clock over 30.002576930s (about 2.45% of one
+CPU), 7094 context switches, 911 migrations and 198 page faults. Independent
+process user+system counters increased by 80 ticks at 100Hz across a 30.05s
+snapshot window. These windows differ slightly; do not force identical CPU
+numbers. PID and process start tick stayed identical. Threads remained 13.
+RSS increased from 48196 to 48832 KiB; one short interval cannot establish
+or exclude a memory leak.
+
+TUN deltas were RX 15133 bytes/98 packets, TX 10718 bytes/79 packets, with no
+TUN error/drop increment. This is LOW LOAD, not zero traffic: management
+traffic and background peers remained active. It does not reproduce idle
+full-core usage at this time and does not answer saturated CPU/GiB or the
+historical slow-Wi-Fi question. No load, interface change, firewall change,
+service kill or deployment was performed. Private raw evidence is retained
+outside Git. Current issue comments were reconciled through pagination;
+no new independent team approval was present in the latest five comments.
+
+The existing actual-Core fixture exposes no rate-control flag; do not
+pretend the standalone paced syscall model validates a paced mesh path.
+Next acceptance work must continue with the measured GSO/TUN candidate,
+keeping original saturation/zero-loss failures visible, rather than
+substituting this quiet production snapshot or unrelated synthetic PASS.
+
+### Next exact-artifact comparison: existing paced fixture, not weaker acceptance
+
+The lab's default path already uses paced_probe.py at 200 Mbit/s. The prior
+statement about no rate-control flag did not mean no paced implementation
+existed. Reuse that implementation; do not create another load framework.
+The standalone sender's IPv4-only socket and unstripped bracketed IPv6
+literal prevented using it for the known inner-IPv6 mixed-flow scene.
+Only that fixture address-family handling is extended. An optional
+--paced-mbps (default unchanged at 200) carries the same cap to both senders
+and checks the reported cap. Unpaced scenarios keep their old semantics.
+
+The paced_tun workflow input reuses artifact 10842834881, including its
+existing binary checksum checks, with no Core/toolchain rebuild. Compare
+200 and 600 Mbit/s PER FLOW, two opposite-direction flows, capacities 0 and
+8192, legacy/GSO, three interleaved repetitions. Actual measured rates, not
+the nominal cap or their sum, govern interpretation. Keep zero ICMP loss,
+content/half-close, UDP echo, peer transport, scratch ownership and cleanup
+assertions unchanged. No packet tracing is enabled during CPU measurement.
+Original unpaced failures remain FAIL regardless of this additional lane.
+No new source-string/mocked tests or red/green workflow framework is added.

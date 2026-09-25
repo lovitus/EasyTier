@@ -34,6 +34,10 @@ name: Actual Core UDP flush-boundary experiment
         description: With tun_capacity, build bounded packet-stage diagnostics and run loss localization
         type: boolean
         default: false
+      paced_tun:
+        description: Reuse existing candidate for fixed-load inner-IPv6 mixed-flow comparison; never rebuild Core
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
@@ -45,7 +49,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   core-flush:
-    if: ${{ !inputs.profile_only }}
+    if: ${{ !inputs.profile_only && !inputs.paced_tun }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -239,7 +243,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
   profile-only:
-    if: ${{ inputs.profile_only }}
+    if: ${{ inputs.profile_only || inputs.paced_tun }}
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -248,14 +252,14 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v5
         with:
-          artifact-ids: ${{ inputs.tun_compat && '10842834881' || '10841125115' }}
-          run-id: ${{ inputs.tun_compat && '36082689922' || '36074709548' }}
+          artifact-ids: ${{ (inputs.tun_compat || inputs.paced_tun) && '10842834881' || '10841125115' }}
+          run-id: ${{ (inputs.tun_compat || inputs.paced_tun) && '36082689922' || '36074709548' }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: reused
           merge-multiple: true
       - name: Verify exact existing binaries and prepare profiler
         env:
-          TUN_COMPAT: ${{ inputs.tun_compat }}
+          TUN_COMPAT: ${{ inputs.tun_compat || inputs.paced_tun }}
         shell: bash
         run: |
           set -euo pipefail
@@ -286,9 +290,33 @@ jobs:
           TUN_COMPAT: ${{ inputs.tun_compat }}
           EXTENDED_TUN: ${{ inputs.extended_tun }}
           LOSS_REPLAY: ${{ inputs.loss_replay }}
+          PACED_TUN: ${{ inputs.paced_tun }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$PACED_TUN" == true ]]; then
+            failed=0
+            for rate in 200 600; do
+              index=0
+              for capacity in 0 8192 8192 0 0 8192; do
+                order=legacy,gso
+                if (( index % 2 )); then order=gso,legacy; fi
+                if sudo timeout --signal=TERM --kill-after=15s 150s python3 tools/mesh-udp-flush/lab.py \
+                  --stock reused/flush-binaries/stock --candidate reused/flush-binaries/candidate \
+                  --output "profile-evidence/paced-${rate}-${index}-${capacity}" \
+                  --order "$order" --tun-head-capacity "$capacity" --paced-mbps "$rate" \
+                  --inner-ipv6 --mixed-flow --network-counters; then
+                  printf 'paced rate %s capacity %s: PASS\n' "$rate" "$capacity"
+                else
+                  code=$?
+                  printf 'paced rate %s capacity %s: FAIL exit %s\n' "$rate" "$capacity" "$code"
+                  failed=1
+                fi
+                index=$((index + 1))
+              done
+            done
+            exit "$failed"
+          fi
           if [[ "$TUN_COMPAT" == true ]]; then
             if [[ "$LOSS_REPLAY" == true ]]; then
               failed=0
