@@ -4,8 +4,10 @@ Current cursor: run 36074709548 completed the uninstrumented saturation lane.
 Profile recovery run 36080205599 passed with the same executable bytes:
 2,568 CPU samples, both endpoints represented in each capture, no reported
 sample loss, and clean namespace/process teardown. The original failed
-profile remains failed. Next step: profile_only=true plus tun_trace=true,
-reusing artifact 10841125115 for four bounded 64 MiB transfers, not a rebuild.
+profile remains failed. TUN observation run 36081104653 also passed, reusing
+artifact 10841125115 for four bounded 64 MiB transfers without a rebuild.
+Next step: distinguish receive-buffer capacity, naturally available batch
+size and GRO eligibility before proposing any production receive change.
 Production Core and the unresolved GSO rejection assertion are unchanged.
 
 ## Receive-side follow-up
@@ -26,6 +28,39 @@ lost records fail the observation rather than silently undercounting.
 Do not revive the previously reverted large GRO scratch buffer, infer
 merge failure solely from this old capture, or conflate transport GSO with
 inner TCP GRO. No production receive-path change is included here.
+
+### Exact candidate TUN observation
+
+Run: https://github.com/lovitus/EasyTier/actions/runs/36081104653
+Harness: 085bef3ac302daf11a2a8c2d6396f8b316526e8f.
+The same GitHub runner hosts client/server namespaces connected by a veth;
+IPv4 UDP mesh, AES-GCM, Stealth disabled, inner TUN MTU 1360 with a 10-byte
+virtio header. Each direction transfers 64 MiB. No physical-host claim.
+
+| Mode | Direction | Receiver successful write calls | Writes above 1370 bytes |
+| --- | --- | ---: | ---: |
+| legacy | upload | 51317 | 0 |
+| legacy | download | 51315 | 0 |
+| GSO | upload | 51318 | 0 |
+| GSO | download | 51314 | 0 |
+
+All recorded TUN writes returned their requested byte count. Both endpoints'
+thread and TUN fd identities remained unchanged; trace overrun, commit
+overrun and dropped-event counters were zero. All entry/exit pairs selected
+for TUN writes were matched. Four transfer/trace lanes, integrity, UDP echo,
+ICMP, diagnostic activation and cleanup passed; root routes were unchanged.
+Twenty cleanup records were clean, with no forced kills.
+
+Artifact 10841254098, complete ZIP SHA-256:
+`7df04bc5a002cac1d68989b07dd0aee7c62f138df1629b7eee35a571f39878cb`.
+The complete digest and all 84 internal manifest entries were checked.
+Raw evidence remains outside Git. Instrumented rates are not performance
+acceptance data and must not be pooled with the earlier saturation samples.
+
+This supports a concrete remaining receive-side target: this workload did
+not produce larger TUN writes even with outer UDP GSO enabled. It does not
+establish why GRO failed to combine packets or promise a gain from larger
+buffers. Keep the prior large-scratch regression as a negative result.
 
 ## Completed saturation measurement and remaining profile recovery
 
