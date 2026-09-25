@@ -205,3 +205,36 @@ the probe compile. The existing tool observes expanded frame lengths instead.
 A repair should assert merged head length and payload bytes through public
 buffers, without reporting inferred emission indices as measured output.
 Both failures are harness errors, not negative production GRO results.
+
+### Capacity contract completed
+
+Run https://github.com/lovitus/EasyTier/actions/runs/36082188054 passed at
+`d9db50e4d95ae8bcf3a1d2ae98f4606b5d744b81`. All 20 cohort/capacity combinations
+executed through public apply_gro and buffers. The fixture uses 1,320-byte
+TCP payloads, valid IPv4/TCP checksums, ordered same-flow ACK segments and
+28-byte modeled AEAD tail capacity. It uses Vec with an exact capacity to
+model the source-derived slice bound; it does not execute bytes 1.9.0 or
+Core encryption and is not a full packet-path or cross-platform test.
+
+| Head capacity | Maximum observed segments in head, cohort up to 32 |
+| --- | ---: |
+| 1398 bytes (1370-byte frame plus 28-byte tail) | 1 |
+| 4096 bytes | 3 |
+| 8192 bytes | 6 |
+| 65545 bytes | 32 |
+
+Singletons stayed singletons. Merged head payloads exactly matched the
+corresponding concatenated original payloads; the other input payloads
+remained intact. These are observed head sizes, NOT a measured output-frame
+list or throughput result. No dependency visibility was changed.
+Artifact 10842292695 complete archive digest was verified:
+`6ef1cf6fe7012f776ef8e66708db4887b65df64b3ff5cb21f854d5f8aeafd597`.
+
+Current next step: one isolated actual-Core comparison of unchanged versus
+bounded head capacity, with natural cohort histogram, expanded-frame counts,
+uninstrumented throughput/CPU and cleanup. Prefer testing 4/8 KiB bounded
+reusable storage before considering larger buffers. Preserve singleton
+behavior and do not add sleeps/yields, change ordering or modify crypto.
+The old 64 KiB scratch regression is still a reason to require actual-Core
+A/B evidence before adopting anything. The earlier small-tool failures remain
+failures; this successful run does not retroactively reclassify them.
