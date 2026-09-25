@@ -50,7 +50,7 @@ def run(args):
     transfer_timeout=120 if args.unpaced_probe else 20
     integrity=Path(__file__).resolve().parents[1]/'core-packet-path-probe/natural_cohort_lab.py'
     names=['etfa'+str(os.getpid()),'etfb'+str(os.getpid())]
-    children=[];created=[];rows=[];control_fds=[];tun_trace=None
+    children=[];created=[];rows=[];control_fds=[];tun_trace=None;capture_stderr={}
     def record(kind,**data):
         row={'kind':kind,**data};rows.append(row)
         with (out/'results.jsonl').open('a') as f:f.write(json.dumps(row)+'\n')
@@ -59,11 +59,23 @@ def run(args):
                          capture_output=True,text=True,timeout=timeout)
         if check and p.returncode:raise RuntimeError(f'{argv}: {p.returncode}: {p.stderr}')
         return p
-    def spawn(argv,label,ns,env=None,pass_fds=()):
+    def spawn(argv,label,ns,env=None,pass_fds=(),wait_for=None):
         with (out/(label+'.log')).open('w') as log:
             p=subprocess.Popen(['ip','netns','exec',ns]+list(map(str,argv)),stdout=log,
-                               stderr=log,start_new_session=True,env=env,pass_fds=pass_fds)
-        children.append(p);return p
+                               stderr=subprocess.PIPE if wait_for else log,start_new_session=True,env=env,pass_fds=pass_fds)
+        children.append(p)
+        if wait_for:
+            prefix=bytearray();capture_stderr[p.pid]=(out/(label+'.stderr'),prefix)
+            deadline=time.monotonic()+10
+            while wait_for.encode() not in prefix:
+                remaining=deadline-time.monotonic()
+                if remaining<=0 or not select.select([p.stderr],[],[],remaining)[0]:
+                    raise RuntimeError(f'{label}: capture readiness timed out: {prefix.decode(errors="replace")}')
+                chunk=os.read(p.stderr.fileno(),4096)
+                if not chunk:raise RuntimeError(f'{label}: capture exited before readiness: {prefix.decode(errors="replace")}')
+                prefix.extend(chunk)
+                if len(prefix)>65536:raise RuntimeError(f'{label}: excessive readiness output')
+        return p
     def perf_control(write_fd,read_fd,command_name):
         os.write(write_fd,(command_name+'\n').encode())
         readable,_,_=select.select([read_fd],[],[],30)
@@ -77,6 +89,10 @@ def run(args):
             try:p.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 killed=True;os.killpg(p.pid,signal.SIGKILL);p.wait(timeout=3)
+        if p.pid in capture_stderr:
+            path,prefix=capture_stderr.pop(p.pid)
+            path.write_bytes(bytes(prefix)+p.stderr.read())
+            p.stderr.close()
         return {'pid':p.pid,'exit':p.returncode,'killed':killed}
     def routes(label):
         value={family:command(['ip','-j',family,'route','show','table','all']).stdout for family in ['-4','-6']}
@@ -227,15 +243,14 @@ def run(args):
                 for i,ns in enumerate(names):
                     captures.append(spawn(['tcpdump','-nn','-tt','-l','-s','160','-c','128',
                                            '-i','tun0','icmp6 and (ip6[40] == 128 or ip6[40] == 129)'],
-                                          f'r{round_id}-{arm}-icmp-{i}',ns))
+                                          f'r{round_id}-{arm}-icmp-{i}',ns,wait_for='listening on tun0'))
             udp_server=spawn([sys.executable,__file__,'echo','server',inner_host],f'r{round_id}-udp-server',names[1])
             time.sleep(.2)
             response=command([sys.executable,__file__,'echo','client',inner_host],names[0]);udp_server.wait(timeout=4)
             assert udp_server.returncode==0
             record('udp_echo',round=round_id,arm=arm,stealth=stealth,result=json.loads(response.stdout))
-            for i,capture in enumerate(captures):
-                capture_log=(out/f'r{round_id}-{arm}-icmp-{i}.log').read_text()
-                assert capture.poll() is None and 'listening on tun0' in capture_log,'ICMP capture not ready'
+            for capture in captures:
+                assert capture.poll() is None,'ICMP capture exited before load'
             for direction in (['upload','download'] if round_id%2==0 else ['download','upload']):
                 label=f'r{round_id}-{arm}-{direction}'
                 server=spawn([sys.executable,integrity,'integrity','server',direction,inner_host],label+'-integrity',names[1])
@@ -316,7 +331,7 @@ def run(args):
                        host_cpu_s_GiB=(host_after['busy_seconds']-host_before['busy_seconds'])/(amount*(2 if args.mixed_flow else 1)/1024**3))
             for i,capture in enumerate(captures):
                 stopped=stop(capture)
-                capture_log=(out/f'r{round_id}-{arm}-icmp-{i}.log').read_text()
+                capture_log=(out/f'r{round_id}-{arm}-icmp-{i}.stderr').read_text()
                 record('icmp_capture',round=round_id,endpoint=i,stop=stopped,
                        scope='packet sequence diagnosis only; not throughput acceptance')
                 assert stopped['exit']==0 and not stopped['killed']

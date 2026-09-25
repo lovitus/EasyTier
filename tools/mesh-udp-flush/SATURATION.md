@@ -428,3 +428,23 @@ change prioritization. Production source remains unchanged.
 
 Artifact 10843962028 complete archive digest and 523 internal entries verified:
 `c5fa8f28818c243ec1a56760c97d1ffc2a5f124085edbbdf9ee08f9037815b2b`.
+
+### Sequence capture outcome: observation readiness defect, no reproduced loss
+
+Run 36087085329 at 2ac127bb reused the same Core executable. Aggregate FAIL:
+first capacity-zero replay stopped at `ICMP capture not ready`, with empty
+capture logs. The new harness checks readiness without waiting for the
+capture-ready event; its existing UDP warmup is not a readiness guarantee.
+This is a harness defect, not Core failure. Do not retry unchanged blindly.
+
+The other five cases completed both modes/directions (20 transfers). Both
+TUN endpoints captured matching ICMP IDs and sequences 1..20 for all of
+these transfers, with zero capture-kernel drops. Original loss did not
+reproduce under observation; this neither clears the earlier gate nor
+proves receive-ring rejection. Capture rates are not performance evidence.
+
+Artifact 10844366449 and 533 internal entries verified; full SHA256:
+`6fc23ac38c0c8e3c76d0877c412527d651b90de9a888c19c5f7c84ab1e0af5eb`.
+Next prerequisite: bounded event-driven capture readiness, preserving
+failure/cleanup evidence and the original zero-loss assertion. No production
+buffer or priority change is supported by these observations yet.
