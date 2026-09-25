@@ -196,3 +196,12 @@ The new job omitted mold although inherited Cargo configuration passes
 failure, not a failing GRO contract. Original artifact and logs are retained
 privately. Do not claim the capacity matrix passed. The required harness
 repair is installing mold as the existing kernel-mechanism job does.
+
+Follow-up run 36081873242 at cc63dc75 installed mold successfully, but
+compilation then rejected the new probe's direct access to GROTable.to_write
+(E0616, private field). No matrix rows ran. The dependency exposes apply_gro,
+but not its emission-index list; do not change dependency visibility to make
+the probe compile. The existing tool observes expanded frame lengths instead.
+A repair should assert merged head length and payload bytes through public
+buffers, without reporting inferred emission indices as measured output.
+Both failures are harness errors, not negative production GRO results.

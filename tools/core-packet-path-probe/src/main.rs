@@ -385,31 +385,31 @@ fn capacity_contract() {
                 frames[0] = head;
             }
             let actual_capacity = frames[0].capacity();
+            let headers = VIRTIO_NET_HDR_LEN + IPV4_HEADER_LEN + TCP_HEADER_LEN;
+            let expected_payload: Vec<u8> = frames
+                .iter()
+                .flat_map(|frame| frame[headers..].iter().copied())
+                .collect();
             let mut gro = GROTable::new();
             gro.apply_gro(&mut frames, VIRTIO_NET_HDR_LEN, false)
                 .expect("GRO rejected valid fixture");
-            let max_frame = gro.to_write.iter().map(|&i| frames[i].len()).max().unwrap();
-            let payload_sum: usize = gro
-                .to_write
-                .iter()
-                .map(|&i| frames[i].len() - VIRTIO_NET_HDR_LEN - IPV4_HEADER_LEN - TCP_HEADER_LEN)
-                .sum();
-            assert_eq!(payload_sum, count * PAYLOAD);
-            if head_capacity == 0 {
+            // tun-rs intentionally requires one extra offset of tailroom.
+            let expected_segments =
+                count.min((actual_capacity - headers - VIRTIO_NET_HDR_LEN) / PAYLOAD);
+            let head_payload = &frames[0][headers..];
+            assert_eq!(head_payload.len(), expected_segments * PAYLOAD);
+            assert_eq!(head_payload, &expected_payload[..head_payload.len()]);
+            for (index, frame) in frames.iter().enumerate().skip(1) {
+                assert_eq!(frame.len(), headers + PAYLOAD);
                 assert_eq!(
-                    gro.to_write.len(),
-                    count,
-                    "tight slices unexpectedly merged"
-                );
-            } else if count > 1 {
-                assert!(
-                    gro.to_write.len() < count,
-                    "capacity did not enable eligible merge"
+                    &frame[headers..],
+                    &expected_payload[index * PAYLOAD..(index + 1) * PAYLOAD]
                 );
             }
             println!(
-                "{{\"cohort\":{count},\"head_capacity\":{actual_capacity},\"output_frames\":{},\"max_frame_bytes\":{max_frame},\"payload_bytes\":{payload_sum}}}",
-                gro.to_write.len()
+                "{{\"cohort\":{count},\"head_capacity\":{actual_capacity},\"head_segments\":{},\"head_frame_bytes\":{},\"payload_verified\":true}}",
+                head_payload.len() / PAYLOAD,
+                frames[0].len()
             );
         }
     }
