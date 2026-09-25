@@ -30,6 +30,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p capacity-evidence
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mold
+          mold --version > capacity-evidence/linker.txt
           rustup toolchain install 1.95.0 --profile minimal
           cp tools/core-packet-path-probe/Cargo.lock capacity-evidence/Cargo.lock
           printf '%s\n' "$GITHUB_SHA" > capacity-evidence/source-sha.txt

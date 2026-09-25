@@ -188,3 +188,11 @@ It checks output payload length conservation and merge/no-merge behavior
 for 1/2/4/8/32 segments. It is not a byte-integrity or throughput acceptance
 claim, not a production patch, and not permission to restore the reverted
 64 KiB scratch optimization. Results are pending the small-tool CI run.
+
+Capacity-only run 36081657966 at a94cfe7f did not execute the experiment.
+The new job omitted mold although inherited Cargo configuration passes
+`-fuse-ld=mold`; dependency build-script linking failed with exit 101
+(`collect2: fatal error: cannot find ld`). This is a harness prerequisite
+failure, not a failing GRO contract. Original artifact and logs are retained
+privately. Do not claim the capacity matrix passed. The required harness
+repair is installing mold as the existing kernel-mechanism job does.
