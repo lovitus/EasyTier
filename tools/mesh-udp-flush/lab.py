@@ -212,6 +212,7 @@ def run(args):
                 if args.tun_head_capacity is not None:
                     env.update({'ET_ISSUE4_TUN_HEAD_CAPACITY':str(args.tun_head_capacity),
                                 'ET_ISSUE4_TUN_METRICS_DIR':str(tun_metrics_dir)})
+                if args.packet_trace:env['ET_ISSUE4_PACKET_TRACE']='1'
                 argv=[path/args.core_name,'--config-dir',cfg,'--network-name','flush-lab',
                       '--network-secret','isolated-test-only','--ipv4',f'10.88.0.{i+1}',
                       '--listeners',f'udp://192.0.2.{i+1}:35904','--hostname',f'flush-{i}',
@@ -347,6 +348,12 @@ def run(args):
             peers(cli,round_id,'after')
             exits=[stop(p) for p in cores];record('core_stop',round=round_id,arm=arm,values=exits)
             assert all(x['exit']==0 and not x['killed'] for x in exits)
+            if args.packet_trace:
+                for i in range(2):
+                    trace=(out/f'r{round_id}-{arm}-core-{i}.log').read_text()
+                    assert 'ISSUE4_PACKET_TRACE_OVERFLOW' not in trace,'packet trace exceeded bound'
+                    for stage in ('encrypted_tx','udp_rx','peer_rx','nic_enqueue'):
+                        assert f'ISSUE4_PACKET stage={stage} ' in trace,('missing trace stage',stage)
             for i in range(2):
                 log=out/f'r{round_id}-{arm}-core-{i}.log';metrics_dir=out/f'r{round_id}-cfg-{i}'/'issue4-flush-metrics'
                 if args.tun_head_capacity is not None:
@@ -427,6 +434,7 @@ if __name__=='__main__':
         parser.add_argument('--mixed-flow',action='store_true',help='concurrent opposite-direction bulk flow with independent port and result check')
         parser.add_argument('--network-counters',action='store_true',help='record per-namespace protocol and link counters around transfers')
         parser.add_argument('--icmp-capture',action='store_true',help='bounded inner-IPv6 TUN sequence capture; not performance evidence')
+        parser.add_argument('--packet-trace',action='store_true',help='requires isolated packet-trace overlay; diagnostic rates only')
         parser.add_argument('--unpaced-probe',help='existing compiled easytier-perf-probe; no Core rebuild required')
         parser.add_argument('--transfer-bytes',type=int,default=1073741824)
         parser.add_argument('--profile',action='store_true',help='separate diagnostic run; rates are not comparison evidence')

@@ -30,6 +30,10 @@ name: Actual Core UDP flush-boundary experiment
         description: With tun_compat, replay the IPv6 mixed-load ICMP failure with kernel counters
         type: boolean
         default: false
+      packet_trace:
+        description: With tun_capacity, build bounded packet-stage diagnostics and run loss localization
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
@@ -88,7 +92,7 @@ jobs:
           mkdir -p flush-evidence flush-binaries/stock flush-binaries/candidate
           python3 -m py_compile tools/mesh-udp-flush/*.py
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pkg-config clang cmake libssl-dev libprotobuf-dev libpcap-dev iproute2 iputils-ping ethtool
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pkg-config clang cmake libssl-dev libprotobuf-dev libpcap-dev iproute2 iputils-ping ethtool tcpdump
           rustup component add --toolchain 1.95 rustfmt
           protoc --version > flush-evidence/protoc.txt
           test "$(cat flush-evidence/protoc.txt)" = 'libprotoc 35.1'
@@ -103,6 +107,7 @@ jobs:
       - name: Build stock, then the bounded diagnostic batch and contract tests
         env:
           TUN_CAPACITY: ${{ inputs.tun_capacity }}
+          PACKET_TRACE: ${{ inputs.packet_trace }}
         shell: bash
         run: |
           set -euo pipefail
@@ -125,6 +130,12 @@ jobs:
             sha256sum easytier/src/instance/linux_tun_offload.rs > "$root/flush-evidence/tun-formatted-source.sha256"
             git diff -- easytier/src/instance/linux_tun_offload.rs > "$root/flush-evidence/tun-diagnostic-only.patch"
           fi
+          if [[ "$PACKET_TRACE" == true ]]; then
+            test "$TUN_CAPACITY" = true
+            python3 "$root/tools/mesh-udp-flush/packet_trace_prepare.py" "$PWD" > "$root/flush-evidence/packet-trace-source.json"
+            rustfmt +1.95 --edition 2024 easytier/src/peers/peer_manager.rs
+            git diff -- easytier/src/peers/peer_manager.rs > "$root/flush-evidence/packet-trace-peer.patch"
+          fi
           rustfmt +1.95 --edition 2024 easytier/src/tunnel/udp.rs
           sha256sum easytier/src/tunnel/udp.rs > "$root/flush-evidence/formatted-source.sha256"
           git diff --check
@@ -145,7 +156,7 @@ jobs:
             --stock flush-binaries/stock --candidate flush-binaries/candidate --output flush-evidence/lab \
             | tee flush-evidence/lab.log
       - name: Interleaved same-binary TUN capacity comparison
-        if: ${{ inputs.tun_capacity }}
+        if: ${{ inputs.tun_capacity && !inputs.packet_trace }}
         shell: bash
         run: |
           set -euo pipefail
@@ -157,6 +168,28 @@ jobs:
               --tun-head-capacity "$capacity" --output "flush-evidence/tun-${index}-${capacity}"
             index=$((index + 1))
           done
+      - name: Bounded packet-stage loss localization
+        if: ${{ inputs.packet_trace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          index=0
+          for capacity in 0 8192 8192 0 0 8192; do
+            if sudo timeout --signal=TERM --kill-after=15s 180s python3 tools/mesh-udp-flush/lab.py \
+              --stock flush-binaries/stock --candidate flush-binaries/candidate \
+              --unpaced-probe flush-binaries/perf-probe --output "flush-evidence/trace-${index}-${capacity}" \
+              --order legacy,gso --tun-head-capacity "$capacity" --transfer-bytes 268435456 \
+              --inner-ipv6 --mixed-flow --network-counters --icmp-capture --packet-trace; then
+              printf 'trace %s: PASS\n' "$index"
+            else
+              code=$?
+              printf 'trace %s: FAIL exit %s\n' "$index" "$code"
+              failed=1
+            fi
+            index=$((index + 1))
+          done
+          exit "$failed"
       - name: Prepare unpaced probe and profiling tools
         if: ${{ inputs.saturation }}
         shell: bash

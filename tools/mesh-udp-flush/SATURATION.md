@@ -470,3 +470,31 @@ Do not infer a Core queue repair from this observer defect.
 
 Complete archive SHA256:
 `2d5bdc00f6910c9a534d787294340dba41ff6e8299cdeb0e79539092c712a3cc`.
+
+### Complete capture reproduces reply-path loss
+
+Run 36087998291 at d85f6770 retains FAIL. The first five suites completed
+with complete 80-record paired captures. The sixth suite, capacity 8192,
+legacy mode, Stealth off, inner IPv6 mixed upload, reproduced 1/20 ICMP loss.
+This is not an outer UDP GSO-only failure: GSO calls are zero in this case.
+
+ICMP ID 24162 sequence 3 is captured as a request at both TUN endpoints.
+Endpoint 1 captures its reply at timestamp 1790304904.664075, but endpoint 0
+never captures that reply. Endpoint 1 has 40 records, endpoint 0 has 39;
+both report equal captured/filter-received counts and zero capture-kernel
+drops. The original ping assertion fails. This establishes a missing reply
+between peer TUN egress and local TUN ingress, not failure to generate the
+reply and not the previous capture-tail defect.
+
+Neither endpoint reports an increment in UDP receive-buffer errors during
+this transfer. Both writers have zero GSO calls, EAGAIN and pending-on-drop;
+TUN scratch_lost is zero. These aggregate counters do not distinguish Core
+receive-ring rejection from other mesh processing or TUN delivery failures.
+Do not change queue capacity/backpressure based on this alone.
+
+Artifact 10843988454 and 570 internal entries verified; complete SHA256:
+`420fa84617c4b55cb5800db01c430e54aa8c8c5da765331bfef7880cd743cd68`.
+Next measurement should observe the existing receive-ring rejection boundary
+and correlate a lost packet across Core stages, rather than repeat unchanged
+captures. Production adoption remains unapproved; prior measured CPU and
+throughput improvements remain fixture-specific evidence, not acceptance.
