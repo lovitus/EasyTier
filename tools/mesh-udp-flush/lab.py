@@ -241,7 +241,7 @@ def run(args):
             if args.icmp_capture:
                 assert args.inner_ipv6,'ICMP sequence capture requires inner IPv6'
                 for i,ns in enumerate(names):
-                    captures.append(spawn(['tcpdump','-nn','-tt','-l','-s','160','-c','128',
+                    captures.append(spawn(['tcpdump','--immediate-mode','-nn','-tt','-l','-s','160','-c','80',
                                            '-i','tun0','icmp6 and (ip6[40] == 128 or ip6[40] == 129)'],
                                           f'r{round_id}-{arm}-icmp-{i}',ns,wait_for='listening on tun0'))
             udp_server=spawn([sys.executable,__file__,'echo','server',inner_host],f'r{round_id}-udp-server',names[1])
@@ -330,8 +330,16 @@ def run(args):
                        core_cpu_s_GiB=sum(y['cpu']-x['cpu'] for x,y in zip(before,after))/(amount*(2 if args.mixed_flow else 1)/1024**3),
                        host_cpu_s_GiB=(host_after['busy_seconds']-host_before['busy_seconds'])/(amount*(2 if args.mixed_flow else 1)/1024**3))
             for i,capture in enumerate(captures):
+                capture.wait(timeout=5)
                 stopped=stop(capture)
                 capture_log=(out/f'r{round_id}-{arm}-icmp-{i}.stderr').read_text()
+                packet_log=(out/f'r{round_id}-{arm}-icmp-{i}.log').read_text()
+                observed=re.findall(r'ICMP6, echo (request|reply), id (\d+), seq (\d+)',packet_log)
+                identifiers={ident for _,ident,_ in observed}
+                assert len(observed)==80 and len(identifiers)==2,'ICMP capture missing records'
+                for ident in identifiers:
+                    for kind in ('request','reply'):
+                        assert sorted(int(seq) for typ,key,seq in observed if typ==kind and key==ident)==list(range(1,21)),'ICMP capture sequence gap'
                 record('icmp_capture',round=round_id,endpoint=i,stop=stopped,
                        scope='packet sequence diagnosis only; not throughput acceptance')
                 assert stopped['exit']==0 and not stopped['killed']

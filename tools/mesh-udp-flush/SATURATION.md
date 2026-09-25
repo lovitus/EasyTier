@@ -448,3 +448,25 @@ Artifact 10844366449 and 533 internal entries verified; full SHA256:
 Next prerequisite: bounded event-driven capture readiness, preserving
 failure/cleanup evidence and the original zero-loss assertion. No production
 buffer or priority change is supported by these observations yet.
+
+### Readiness repaired; successful workload is not complete capture evidence
+
+Run 36087535015 at 81febf47 passed six suites and 24 directional mixed-load
+transfer checks using unchanged Core bytes. Capture startup now waits for
+an explicit listening event with a ten-second bound. No Core rebuild.
+
+Independent artifact inspection found a separate tail-completeness gap:
+seven of twelve paired captures contain 78 records, despite tcpdump reporting
+80 received by filter and zero kernel drops. Both endpoints omit only the
+last ping's sequence-20 request/reply; ping itself received all 20 replies.
+The other five paired captures contain all 80 records. Observed keys match
+between endpoints, with maximum observed RTT 2.548 ms, but truncated traces
+cannot establish complete per-packet coverage or a latency upper bound.
+
+The original intermittent loss did not reproduce. Neither CI success nor
+zero capture-kernel drops clears the previous failed gate. Before further
+loss replay, require capture drain/completeness rather than a fixed delay.
+Do not infer a Core queue repair from this observer defect.
+
+Complete archive SHA256:
+`2d5bdc00f6910c9a534d787294340dba41ff6e8299cdeb0e79539092c712a3cc`.
