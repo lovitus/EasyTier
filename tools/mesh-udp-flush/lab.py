@@ -19,11 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'core-packet-path-p
 from natural_cohort_lab import host_cpu_values
 
 
-def echo(role):
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+def echo(role,host='10.88.0.2'):
+    with socket.socket(socket.AF_INET6 if ':' in host else socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.settimeout(3)
         if role == 'server':
-            sock.bind(('10.88.0.2',35905))
+            sock.bind((host,35905))
             for _ in range(30):
                 payload, address = sock.recvfrom(2048)
                 sock.sendto(payload,address)
@@ -31,13 +31,16 @@ def echo(role):
             for sequence in range(30):
                 size=[1,64,1200][sequence%3]
                 payload=sequence.to_bytes(4,'big')+bytes([sequence])*size
-                sock.sendto(payload,('10.88.0.2',35905))
+                sock.sendto(payload,(host,35905))
                 reply,address=sock.recvfrom(2048)
-                assert reply==payload and address==('10.88.0.2',35905)
+                assert reply==payload and address[:2]==(host,35905)
             print(json.dumps({'ok':True,'datagrams':30,'sizes':[1,64,1200]}))
 
 
 def run(args):
+    inner_host='fd88::2' if args.inner_ipv6 else '10.88.0.2'
+    inner_target=f'[{inner_host}]:35902' if args.inner_ipv6 else f'{inner_host}:35902'
+    mixed_target=f'[{inner_host}]:35906' if args.inner_ipv6 else f'{inner_host}:35906'
     out=Path(args.output).resolve();out.mkdir(parents=True,exist_ok=False)
     binaries={'stock':Path(args.stock).resolve(),'candidate':Path(args.candidate).resolve()}
     loadgen=Path(__file__).with_name('paced_probe.py').resolve()
@@ -126,7 +129,8 @@ def run(args):
         for ns in names:
             command(['ip','netns','add',ns]);created.append(ns)
             command(['ip','-n',ns,'link','set','lo','up'])
-            command(['sysctl','-qw','net.ipv6.conf.all.disable_ipv6=1','net.ipv6.conf.default.disable_ipv6=1'],ns)
+            disabled='0' if args.inner_ipv6 else '1'
+            command(['sysctl','-qw',f'net.ipv6.conf.all.disable_ipv6={disabled}',f'net.ipv6.conf.default.disable_ipv6={disabled}'],ns)
         command(['ip','link','add','under0','netns',names[0],'type','veth','peer','name','under0','netns',names[1]])
         for i,ns in enumerate(names):
             command(['ip','-n',ns,'addr','add',f'192.0.2.{i+1}/30','dev','under0'])
@@ -142,7 +146,7 @@ def run(args):
                                      'overlay':f'10.88.0.{i+1}'}
                                     for i,(role,ns) in enumerate(zip(['client','server'],names))],
                scope='same GitHub runner, two network namespaces, veth; not physical-host/WAN evidence',
-               profiled=args.profile,unpaced=bool(args.unpaced_probe))
+               profiled=args.profile,unpaced=bool(args.unpaced_probe),inner_ipv6=args.inner_ipv6,mixed_flow=args.mixed_flow)
         if args.unpaced_probe and not args.profile and not args.tun_trace and args.tun_head_capacity is None:
             for repeat in range(3):
                 for direction in ['upload','download']:
@@ -190,11 +194,12 @@ def run(args):
                       '--network-secret','isolated-test-only','--ipv4',f'10.88.0.{i+1}',
                       '--listeners',f'udp://192.0.2.{i+1}:35904','--hostname',f'flush-{i}',
                       '--rpc-portal','127.0.0.1:35903','--mtu','1380','--dev-name','tun0',
-                      '--disable-ipv6','true','--disable-p2p','true','--disable-upnp','true',
+                      '--disable-ipv6',str(not args.inner_ipv6).lower(),'--disable-p2p','true','--disable-upnp','true',
                       '--disable-encryption','false','--encryption-algorithm','aes-gcm',
                       '--compression','none','--accept-dns','false',
                       '--secure-mode',str(stealth).lower(),'--stealth-mode',str(stealth).lower()]
                 if i==0:argv+=['--peers','udp://192.0.2.2:35904']
+                if args.inner_ipv6:argv+=['--ipv6',f'fd88::{i+1}/64']
                 cores.append(spawn(argv,f'r{round_id}-{arm}-core-{i}',ns,env))
             (out/f'r{round_id}-{arm}-core-pids.json').write_text(
                 json.dumps([core.pid for core in cores])
@@ -206,16 +211,20 @@ def run(args):
                 link=json.loads(command(['ip','-j','-d','link','show','tun0'],ns).stdout)
                 assert link and link[0]['mtu']==1360 and link[0]['linkinfo']['info_data']['vnet_hdr']
                 record('tun',round=round_id,endpoint=i,state=link)
-            udp_server=spawn([sys.executable,__file__,'echo','server'],f'r{round_id}-udp-server',names[1])
+                if args.inner_ipv6:
+                    addresses=json.loads(command(['ip','-j','-6','addr','show','dev','tun0'],ns).stdout)
+                    assert any(a['local']==f'fd88::{i+1}' for dev in addresses for a in dev['addr_info'])
+                    record('tun_ipv6',round=round_id,endpoint=i,state=addresses)
+            udp_server=spawn([sys.executable,__file__,'echo','server',inner_host],f'r{round_id}-udp-server',names[1])
             time.sleep(.2)
-            response=command([sys.executable,__file__,'echo','client'],names[0]);udp_server.wait(timeout=4)
+            response=command([sys.executable,__file__,'echo','client',inner_host],names[0]);udp_server.wait(timeout=4)
             assert udp_server.returncode==0
             record('udp_echo',round=round_id,arm=arm,stealth=stealth,result=json.loads(response.stdout))
             for direction in (['upload','download'] if round_id%2==0 else ['download','upload']):
                 label=f'r{round_id}-{arm}-{direction}'
-                server=spawn([sys.executable,integrity,'integrity','server',direction],label+'-integrity',names[1])
+                server=spawn([sys.executable,integrity,'integrity','server',direction,inner_host],label+'-integrity',names[1])
                 time.sleep(.2)
-                result=command([sys.executable,integrity,'integrity','client',direction],names[0]);server.wait(timeout=4)
+                result=command([sys.executable,integrity,'integrity','client',direction,inner_host],names[0]);server.wait(timeout=4)
                 assert server.returncode==0
                 record('integrity',round=round_id,arm=arm,stealth=stealth,direction=direction,result=json.loads(result.stdout))
                 amount=args.transfer_bytes if args.unpaced_probe else (33554432 if stealth else 67108864)
@@ -231,14 +240,25 @@ def run(args):
                     for fd in [ctl_read,ack_write]:os.close(fd);control_fds.remove(fd)
                     perf_control(ctl_write,ack_read,'enable')
                     record('profile_ready',round=round_id,direction=direction,pids=[p.pid for p in cores])
-                server=spawn(load_command+['server','--listen','10.88.0.2:35902','--sessions','1','--timeout-seconds',str(transfer_timeout)],label+'-server',names[1],env)
+                server=spawn(load_command+['server','--listen',inner_target,'--sessions','1','--timeout-seconds',str(transfer_timeout)],label+'-server',names[1],env)
+                if args.mixed_flow:
+                    mixed_server=spawn(load_command+['server','--listen',mixed_target,'--sessions','1','--timeout-seconds',str(transfer_timeout)],label+'-mixed-server',names[1],env)
                 time.sleep(.2)
-                ping=spawn(['ping','-c','20','-i','0.1','-W','1','10.88.0.2'],label+'-ping',names[0])
+                ping=spawn(['ping']+(['-6'] if args.inner_ipv6 else [])+['-c','20','-i','0.1','-W','1',inner_host],label+'-ping',names[0])
                 before=snapshot(cores);host_before=host_cpu()
+                if args.mixed_flow:
+                    other_direction='download' if direction=='upload' else 'upload'
+                    mixed_client=spawn(load_command+['client','--target',mixed_target,'--direction',other_direction,'--bytes',str(amount),'--timeout-seconds',str(transfer_timeout)],label+'-mixed-client',names[0],env)
                 if args.tun_trace:
                     tun_trace=TunWriteTrace(out,label,cores)
                     tun_trace.start()
-                result=command(['env','ET_PACED_MBPS=200']+load_command+['client','--target','10.88.0.2:35902','--direction',direction,'--bytes',str(amount),'--timeout-seconds',str(transfer_timeout)],names[0],check=False,timeout=transfer_timeout+10)
+                result=command(['env','ET_PACED_MBPS=200']+load_command+['client','--target',inner_target,'--direction',direction,'--bytes',str(amount),'--timeout-seconds',str(transfer_timeout)],names[0],check=False,timeout=transfer_timeout+10)
+                if args.mixed_flow:
+                    mixed_client.wait(timeout=transfer_timeout+10);mixed_server.wait(timeout=4)
+                    assert mixed_client.returncode==0 and mixed_server.returncode==0
+                    mixed_data=json.loads((out/(label+'-mixed-client.log')).read_text())
+                    assert mixed_data['ok'] and mixed_data['bytes']==amount
+                    record('mixed_transfer',round=round_id,arm=arm,stealth=stealth,direction=other_direction,result=mixed_data)
                 if tun_trace:
                     tun_trace.finish()
                     tun_trace.close()
@@ -273,8 +293,9 @@ def run(args):
                 loss=re.search(r'([0-9.]+)% packet loss',text)
                 assert ping.returncode==0 and loss and float(loss[1])==0,'ICMP progress failed'
                 record('transfer',round=round_id,arm=arm,stealth=stealth,direction=direction,result=data,profiled=args.profile,tun_traced=args.tun_trace,
-                       core_cpu_s_GiB=sum(y['cpu']-x['cpu'] for x,y in zip(before,after))/(amount/1024**3),
-                       host_cpu_s_GiB=(host_after['busy_seconds']-host_before['busy_seconds'])/(amount/1024**3))
+                       mixed_flow=args.mixed_flow,inner_ipv6=args.inner_ipv6,
+                       core_cpu_s_GiB=sum(y['cpu']-x['cpu'] for x,y in zip(before,after))/(amount*(2 if args.mixed_flow else 1)/1024**3),
+                       host_cpu_s_GiB=(host_after['busy_seconds']-host_before['busy_seconds'])/(amount*(2 if args.mixed_flow else 1)/1024**3))
             peers(cli,round_id,'after')
             exits=[stop(p) for p in cores];record('core_stop',round=round_id,arm=arm,values=exits)
             assert all(x['exit']==0 and not x['killed'] for x in exits)
@@ -347,13 +368,15 @@ def run(args):
 
 
 if __name__=='__main__':
-    if len(sys.argv)>1 and sys.argv[1]=='echo':echo(sys.argv[2])
+    if len(sys.argv)>1 and sys.argv[1]=='echo':echo(sys.argv[2],sys.argv[3] if len(sys.argv)>3 else '10.88.0.2')
     else:
         parser=argparse.ArgumentParser()
         for name in ['stock','candidate','output']:parser.add_argument('--'+name,required=True)
         parser.add_argument('--core-name',default='easytier-core')
         parser.add_argument('--order',help='comma-separated diagnostic arms; defaults to the full interleaved matrix')
         parser.add_argument('--stealth',action='store_true',help='enable existing secure/Stealth configuration for explicitly selected arms')
+        parser.add_argument('--inner-ipv6',action='store_true',help='use Core IPv6 configuration for inner application traffic; underlay remains IPv4')
+        parser.add_argument('--mixed-flow',action='store_true',help='concurrent opposite-direction bulk flow with independent port and result check')
         parser.add_argument('--unpaced-probe',help='existing compiled easytier-perf-probe; no Core rebuild required')
         parser.add_argument('--transfer-bytes',type=int,default=1073741824)
         parser.add_argument('--profile',action='store_true',help='separate diagnostic run; rates are not comparison evidence')

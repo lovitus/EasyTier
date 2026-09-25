@@ -359,3 +359,13 @@ internal manifest entries were verified:
 Current next step: exercise the existing candidate on inner IPv6 and mixed
 flows using bounded fixture extensions, not another Core build. No production
 adoption or release has been made.
+
+Extended compatibility preparation: reuse the same artifact with
+`profile_only=true,tun_compat=true,extended_tun=true`. Core's existing
+`--ipv6` option assigns inner ULA addresses; no manual TUN address injection
+or production changes. Underlay is still IPv4. Both IPv4 and inner IPv6
+run opposite-direction TCP transfers concurrently on separate ports, with
+each result checked and CPU normalized by both payloads. Existing digest/
+half-close and UDP echo use the selected address family. ICMP progress and
+all prior cleanup/activation gates remain. This is a short coexistence
+check, not a latency fairness bound, IPv6-underlay or durability proof.

@@ -22,6 +22,10 @@ name: Actual Core UDP flush-boundary experiment
         description: In artifact-reuse mode verify bounded TUN with Stealth and legacy/GSO combinations
         type: boolean
         default: false
+      extended_tun:
+        description: With tun_compat, exercise IPv4/inner-IPv6 concurrent opposite-direction flows
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
@@ -243,20 +247,28 @@ jobs:
         env:
           TUN_TRACE: ${{ inputs.tun_trace }}
           TUN_COMPAT: ${{ inputs.tun_compat }}
+          EXTENDED_TUN: ${{ inputs.extended_tun }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ "$TUN_COMPAT" == true ]]; then
+            families=(ipv4)
+            if [[ "$EXTENDED_TUN" == true ]]; then families+=(ipv6); fi
             for capacity in 0 8192; do
               for stealth in false true; do
                 secure=()
                 if [[ "$stealth" == true ]]; then secure=(--stealth); fi
-                sudo timeout --signal=TERM --kill-after=15s 180s python3 tools/mesh-udp-flush/lab.py \
-                  --stock reused/flush-binaries/stock --candidate reused/flush-binaries/candidate \
-                  --unpaced-probe reused/flush-binaries/perf-probe \
-                  --output "profile-evidence/compat-${capacity}-${stealth}" \
-                  --order legacy,gso --tun-head-capacity "$capacity" \
-                  --transfer-bytes 268435456 "${secure[@]}"
+                for family in "${families[@]}"; do
+                  extra=()
+                  if [[ "$EXTENDED_TUN" == true ]]; then extra+=(--mixed-flow); fi
+                  if [[ "$family" == ipv6 ]]; then extra+=(--inner-ipv6); fi
+                  sudo timeout --signal=TERM --kill-after=15s 180s python3 tools/mesh-udp-flush/lab.py \
+                    --stock reused/flush-binaries/stock --candidate reused/flush-binaries/candidate \
+                    --unpaced-probe reused/flush-binaries/perf-probe \
+                    --output "profile-evidence/compat-${capacity}-${stealth}-${family}" \
+                    --order legacy,gso --tun-head-capacity "$capacity" \
+                    --transfer-bytes 268435456 "${secure[@]}" "${extra[@]}"
+                done
               done
             done
             exit 0

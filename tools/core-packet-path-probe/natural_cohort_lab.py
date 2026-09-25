@@ -13,20 +13,20 @@ import sys
 import time
 
 
-def integrity(role, direction):
+def integrity(role, direction, host="10.88.0.2"):
     count = 1048595
     chunk = bytes(range(256)) * 256
     expected = hashlib.sha256((chunk * (count // len(chunk) + 1))[:count]).hexdigest()
     if role == "server":
-        listener = socket.socket()
+        listener = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.settimeout(5)
-        listener.bind(("10.88.0.2", 35802))
+        listener.bind((host, 35802))
         listener.listen(1)
         sock, _ = listener.accept()
         listener.close()
     else:
-        sock = socket.create_connection(("10.88.0.2", 35802), timeout=5)
+        sock = socket.create_connection((host, 35802), timeout=5)
     sock.settimeout(5)
     sending = (role == "client") == (direction == "upload")
     if sending:
@@ -268,7 +268,7 @@ def lab(args):
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "integrity":
-        integrity(sys.argv[2], sys.argv[3])
+        integrity(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else "10.88.0.2")
     else:
         parser = argparse.ArgumentParser()
         parser.add_argument("--binary", required=True)
