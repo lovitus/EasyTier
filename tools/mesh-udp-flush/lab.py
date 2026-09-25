@@ -13,6 +13,7 @@ import statistics
 import subprocess
 import sys
 import time
+from tun_trace import TunWriteTrace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'core-packet-path-probe'))
 from natural_cohort_lab import host_cpu_values
@@ -46,7 +47,7 @@ def run(args):
     transfer_timeout=120 if args.unpaced_probe else 20
     integrity=Path(__file__).resolve().parents[1]/'core-packet-path-probe/natural_cohort_lab.py'
     names=['etfa'+str(os.getpid()),'etfb'+str(os.getpid())]
-    children=[];created=[];rows=[];control_fds=[]
+    children=[];created=[];rows=[];control_fds=[];tun_trace=None
     def record(kind,**data):
         row={'kind':kind,**data};rows.append(row)
         with (out/'results.jsonl').open('a') as f:f.write(json.dumps(row)+'\n')
@@ -142,7 +143,7 @@ def run(args):
                                     for i,(role,ns) in enumerate(zip(['client','server'],names))],
                scope='same GitHub runner, two network namespaces, veth; not physical-host/WAN evidence',
                profiled=args.profile,unpaced=bool(args.unpaced_probe))
-        if args.unpaced_probe and not args.profile:
+        if args.unpaced_probe and not args.profile and not args.tun_trace:
             for repeat in range(3):
                 for direction in ['upload','download']:
                     label=f'direct-{repeat}-{direction}'
@@ -229,7 +230,16 @@ def run(args):
                 time.sleep(.2)
                 ping=spawn(['ping','-c','20','-i','0.1','-W','1','10.88.0.2'],label+'-ping',names[0])
                 before=snapshot(cores);host_before=host_cpu()
+                if args.tun_trace:
+                    tun_trace=TunWriteTrace(out,label,cores)
+                    tun_trace.start()
                 result=command(['env','ET_PACED_MBPS=200']+load_command+['client','--target','10.88.0.2:35902','--direction',direction,'--bytes',str(amount),'--timeout-seconds',str(transfer_timeout)],names[0],check=False,timeout=transfer_timeout+10)
+                if tun_trace:
+                    tun_trace.finish()
+                    tun_trace.close()
+                    tun_trace=None
+                    record('tun_trace_complete',round=round_id,arm=arm,direction=direction,
+                           scope='instrumented write counts only; not throughput acceptance')
                 host_after=host_cpu();after=snapshot(cores)
                 if profiler:
                     perf_control(ctl_write,ack_read,'stop')
@@ -257,7 +267,7 @@ def run(args):
                 ping.wait(timeout=5);text=(out/(label+'-ping.log')).read_text()
                 loss=re.search(r'([0-9.]+)% packet loss',text)
                 assert ping.returncode==0 and loss and float(loss[1])==0,'ICMP progress failed'
-                record('transfer',round=round_id,arm=arm,stealth=stealth,direction=direction,result=data,profiled=args.profile,
+                record('transfer',round=round_id,arm=arm,stealth=stealth,direction=direction,result=data,profiled=args.profile,tun_traced=args.tun_trace,
                        core_cpu_s_GiB=sum(y['cpu']-x['cpu'] for x,y in zip(before,after))/(amount/1024**3),
                        host_cpu_s_GiB=(host_after['busy_seconds']-host_before['busy_seconds'])/(amount/1024**3))
             peers(cli,round_id,'after')
@@ -289,7 +299,10 @@ def run(args):
         record('failure',error=repr(error));raise
     finally:
         try:
-            cleanup=[stop(p) for p in reversed(children)]
+            try:
+                if tun_trace:tun_trace.close()
+            finally:
+                cleanup=[stop(p) for p in reversed(children)]
             for fd in control_fds:os.close(fd)
             for ns in reversed(created):
                 remaining=command(['ip','netns','pids',ns],check=False).stdout.strip()
@@ -329,4 +342,5 @@ if __name__=='__main__':
         parser.add_argument('--unpaced-probe',help='existing compiled easytier-perf-probe; no Core rebuild required')
         parser.add_argument('--transfer-bytes',type=int,default=1073741824)
         parser.add_argument('--profile',action='store_true',help='separate diagnostic run; rates are not comparison evidence')
+        parser.add_argument('--tun-trace',action='store_true',help='bounded write trace; rates are not comparison evidence')
         run(parser.parse_args())

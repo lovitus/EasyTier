@@ -10,6 +10,10 @@ name: Actual Core UDP flush-boundary experiment
         description: Reuse the exact 1639ec45 binaries and run only the corrected profile lane
         type: boolean
         default: false
+      tun_trace:
+        description: In the artifact-reuse lane, collect short TUN write traces instead of CPU profiles
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
@@ -175,13 +179,19 @@ jobs:
           lscpu > profile-evidence/cpu.txt
           python3 -m py_compile tools/mesh-udp-flush/lab.py
       - name: Profile both exact Core modes without repeating saturation comparisons
+        env:
+          TUN_TRACE: ${{ inputs.tun_trace }}
         shell: bash
         run: |
           set -euo pipefail
+          observation=(--profile)
+          if [[ "$TUN_TRACE" == true ]]; then
+            observation=(--tun-trace --transfer-bytes 67108864)
+          fi
           sudo timeout --signal=TERM --kill-after=15s 600s python3 tools/mesh-udp-flush/lab.py \
             --stock reused/flush-binaries/stock --candidate reused/flush-binaries/candidate \
             --unpaced-probe reused/flush-binaries/perf-probe --output profile-evidence/lab \
-            --order legacy,gso --profile
+            --order legacy,gso "${observation[@]}"
       - name: Preserve profile evidence
         if: always()
         shell: bash

@@ -1,10 +1,31 @@
 # Pure mesh bottleneck diagnosis
 
-Current cursor: run 36074709548 completed the uninstrumented saturation lane;
-the independent profile lane failed with exit 255 and zero CPU sample records.
-Next step: dispatch profile_only=true, reusing artifact 10841125115 from that
-run. No Core rebuild or repeat of the completed saturation matrix.
+Current cursor: run 36074709548 completed the uninstrumented saturation lane.
+Profile recovery run 36080205599 passed with the same executable bytes:
+2,568 CPU samples, both endpoints represented in each capture, no reported
+sample loss, and clean namespace/process teardown. The original failed
+profile remains failed. Next step: profile_only=true plus tun_trace=true,
+reusing artifact 10841125115 for four bounded 64 MiB transfers, not a rebuild.
 Production Core and the unresolved GSO rejection assertion are unchanged.
+
+## Receive-side follow-up
+
+The recovered profiles put inclusive TUN flush stacks at 26-29 percent of
+remaining GSO CPU samples. These include kernel receive processing; the
+wrapper's self cost is small. This does not justify removing the wrapper.
+Evidence: https://github.com/lovitus/EasyTier/issues/4#issuecomment-5824935812
+
+An older retained syscall capture has 26,118 successful receiver TUN writes
+per transfer in four traces, none above 1,370 bytes. This is an older binary
+and paced workload, not evidence of current GSO candidate merge behavior.
+The new observation records syscall entry/exit, exact TUN fd and thread
+identities, and trace loss counters on the existing exact candidate. Rates
+and CPU from traced transfers are diagnostic only. Changed identities or
+lost records fail the observation rather than silently undercounting.
+
+Do not revive the previously reverted large GRO scratch buffer, infer
+merge failure solely from this old capture, or conflate transport GSO with
+inner TCP GRO. No production receive-path change is included here.
 
 ## Completed saturation measurement and remaining profile recovery
 
@@ -47,7 +68,7 @@ incorrect. The parent issue already records both experiments:
   10.11/10.29 percent and increased CPU/GiB by 13.67/12.95 percent.
   This does not explain all mesh processing cost and is not a recommendation
   to disable security. It is a separate experiment, not additional samples
-  to pool into the release comparison.
+to pool into the release comparison.
 - Existing profiles: https://github.com/lovitus/EasyTier/issues/4#issuecomment-5699311395
   Cost spans kernel UDP/IP, crypto, peer receive, queues, TUN and routing.
   Short samples do not establish a new busy loop or justify optimizing
