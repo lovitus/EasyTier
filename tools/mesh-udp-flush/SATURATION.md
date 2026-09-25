@@ -581,3 +581,45 @@ and control-packet latency, loss, throughput and CPU together; test both
 single-thread and multi-thread scheduling. Report extra locally held batch
 capacity rather than claiming memory bounds are identical. No Core edit
 until this mechanism has evidence; no extra full Core build for the model.
+
+### Locked receive scheduling model: modest mechanism gain, loss remains
+
+Run 36091355557 / 7dc84a0c passed the standalone model's order, payload and
+accepted/delivered accounting assertions in 24 trials. Core was not built.
+Tokio 1.52.1, async-ringbuf 0.3.1 and futures 0.3.30 follow the Core lock.
+The model has a 128-slot ring with four reserved slots, a 128-slot MPSC,
+synthetic per-packet CPU work and a one-million-packet unpaced producer.
+It is not actual UDP, crypto, NIC throughput or a no-loss acceptance test.
+
+Three-run medians, units million delivered packets/s and CPU s/million:
+
+| Runtime | Consumer | Goodput | CPU | Data drops / million offered | Control p99 us |
+| --- | --- | ---: | ---: | ---: | ---: |
+| current-thread | recv | 2.568 | 0.392 | 31248 | 8 |
+| current-thread | batch8 | 2.664 | 0.372 | 31248 | 7 |
+| current-thread | batch32 | 2.676 | 0.372 | 31248 | 6 |
+| current-thread | batch32 + per-item budget | 2.689 | 0.372 | 31248 | 6 |
+| two-workers | recv | 3.209 | 0.861 | 755914 | 69 |
+| two-workers | batch8 | 3.377 | 0.844 | 705462 | 54 |
+| two-workers | batch32 | 3.347 | 0.771 | 668590 | 51 |
+| two-workers | batch32 + per-item budget | 3.297 | 0.812 | 678507 | 53 |
+
+All trials delivered reserved control messages; maximum observed control delay
+was 89 us. Timer p99 values are about 1.0 ms and maximum observed overshoot
+1.961 ms. Short trials and process CPU tick quantization limit precision;
+these are observations, not production fairness bounds or proof of a stable
+10-percent CPU reduction. Local batch storage is 1280/5120 bytes for 8/32
+model packets, versus 160 bytes for one model packet, excluding Vec metadata.
+Real ZCPacket payload retention would differ and must not use these byte sizes.
+
+No arm eliminates ring loss. In single-thread mode the identical drop count
+reflects the model's producer budget versus reserved-ring boundary; in the
+multi-thread mode the unconstrained producer overwhelms the chain. This is
+not a prediction of Core loss rates. The roughly 4-5 percent goodput change
+is a modest mechanism signal, not sufficient evidence for a production patch
+or a claim that batching solves the proven Core rejection. A paced offered-load
+comparison and longer CPU measurement are needed before selecting this change;
+do not trigger a full Core rebuild based only on these short saturation trials.
+
+Artifact 10845801728 complete ZIP digest verified:
+`d6cd257b5f2828b1f04e51fb7b12ec544a1dc51c25c6c1a06b0400c17fd2ae20`.

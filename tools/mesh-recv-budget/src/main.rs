@@ -51,7 +51,8 @@ fn cpu_seconds(ticks: f64) -> f64 {
     (fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()) as f64 / ticks
 }
 
-async fn trial(runtime: &str, mode: &str, repeat: usize, ticks: f64) {
+async fn trial(runtime: &str, mode: &str, repeat: usize, ticks: f64, paced: bool) {
+    let packet_count = if paced { 128_000u64 } else { 5_000_000u64 };
     let (mut producer, mut ring) = AsyncHeapRb::<Packet>::new(128).split();
     let (tx, mut rx) = mpsc::channel::<Packet>(128);
     let done = Arc::new(AtomicBool::new(false));
@@ -81,7 +82,14 @@ async fn trial(runtime: &str, mode: &str, repeat: usize, ticks: f64) {
     let sender = tokio::spawn(async move {
         let (mut accepted, mut sum, mut data_drops, mut control_drops, mut control_sent) =
             (0u64, 0u64, 0u64, 0u64, 0u64);
-        for seq in 0..1_000_000u64 {
+        let mut pulse_deadline = tokio::time::Instant::now();
+        for seq in 0..packet_count {
+            if paced && seq % 64 == 0 {
+                tokio::time::sleep_until(pulse_deadline).await;
+                // No catch-up burst after scheduler delay. Actual offered rate
+                // is reported; this is not a precise network rate generator.
+                pulse_deadline = tokio::time::Instant::now() + Duration::from_millis(1);
+            }
             // Model one cooperative I/O operation per received datagram.
             // No claim that this reproduces real socket/crypto processing cost.
             tokio::task::consume_budget().await;
@@ -142,11 +150,16 @@ async fn trial(runtime: &str, mode: &str, repeat: usize, ticks: f64) {
     let mut timers = timer.await.unwrap();
     assert_eq!((count, sum), (offered.0, offered.1));
     assert_eq!(controls.len() as u64, offered.4);
-    assert_eq!(count + offered.2 + offered.3 + offered.4, 1_000_000);
+    assert_eq!(count + offered.2 + offered.3 + offered.4, packet_count);
     let timer_max = timers.iter().copied().max().unwrap_or(0);
     let control_max = controls.iter().copied().max().unwrap_or(0);
     let timer_p99 = percentile(&mut timers, 99);
     let control_p99 = percentile(&mut controls, 99);
+    let mode = format!("{mode}:{}", if paced { "pulse64" } else { "saturated" });
+    eprintln!(
+        "OFFER runtime={runtime} mode={mode} repeat={repeat} packets={packet_count} elapsed_s={elapsed} actual_offered_pps={}",
+        packet_count as f64 / elapsed
+    );
     println!(
         "{{\"runtime\":\"{runtime}\",\"mode\":\"{mode}\",\"repeat\":{repeat},\"delivered\":{count},\"data_drops\":{},\"control_drops\":{},\"goodput_pps\":{},\"cpu_s_per_million_delivered\":{},\"batches\":{batches},\"extra_local_slots\":{limit},\"packet_size\":{},\"timer_samples\":{},\"timer_p99_us\":{timer_p99},\"timer_max_us\":{timer_max},\"control_p99_us\":{control_p99},\"control_max_us\":{control_max}}}",
         offered.2,
@@ -189,7 +202,8 @@ fn main() {
                 ["batch32-budget", "batch32", "batch8", "recv"]
             };
             for mode in modes {
-                runtime.block_on(trial(kind, mode, repeat, ticks));
+                runtime.block_on(trial(kind, mode, repeat, ticks, false));
+                runtime.block_on(trial(kind, mode, repeat, ticks, true));
             }
         }
     }

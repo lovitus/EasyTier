@@ -149,7 +149,7 @@ jobs:
           lscpu > recv-evidence/cpu.txt
           cp tools/mesh-recv-budget/Cargo.lock recv-evidence/Cargo.lock
           timeout 300 cargo +1.95.0 build --locked --release --manifest-path tools/mesh-recv-budget/Cargo.toml 2>&1 | tee recv-evidence/build.log
-          timeout 180 tools/mesh-recv-budget/target/release/mesh-recv-budget > recv-evidence/results.jsonl
+          timeout 300 tools/mesh-recv-budget/target/release/mesh-recv-budget > recv-evidence/results.jsonl 2> recv-evidence/offered-load.log
           sha256sum tools/mesh-recv-budget/target/release/mesh-recv-budget > recv-evidence/binary.sha256
       - uses: actions/upload-artifact@v5
         if: always()
