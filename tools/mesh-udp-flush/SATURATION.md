@@ -6,8 +6,10 @@ Profile recovery run 36080205599 passed with the same executable bytes:
 sample loss, and clean namespace/process teardown. The original failed
 profile remains failed. TUN observation run 36081104653 also passed, reusing
 artifact 10841125115 for four bounded 64 MiB transfers without a rebuild.
-Next step: distinguish receive-buffer capacity, naturally available batch
-size and GRO eligibility before proposing any production receive change.
+Run 36082689922 has now completed the isolated actual-Core comparison:
+8 KiB head capacity improved throughput and CPU/GiB over capacity zero.
+Next step: test the exact candidate's remaining compatibility boundaries
+before any production adoption; this Linux fixture is not full acceptance.
 Production Core and the unresolved GSO rejection assertion are unchanged.
 
 ## Receive-side follow-up
@@ -262,3 +264,66 @@ Failure modes being tested: no useful cohorts, copy cost exceeding syscall
 savings, payload corruption, stuck writes/ICMP, resource residue, and buffer
 reuse failure. The existing integrity, UDP echo, transport, metric and cleanup
 checks remain mandatory. No result or production acceptance is claimed yet.
+
+Current execution: run 36082689922, harness 837349f8, dispatched with
+`tun_capacity=true`. The bounded 600-second status wait returned timeout,
+not a workflow failure; no terminal result has been obtained. Keep this
+same run/artifact identity on continuation. Do not dispatch a duplicate or
+claim throughput/CPU results before the existing run completes.
+
+## Actual-Core result: bounded head capacity benefits this workload
+
+Run https://github.com/lovitus/EasyTier/actions/runs/36082689922 completed
+successfully at harness `837349f8f5031d5c877b90edb6f195b6f9615af9`.
+Core base remains c6772dbf plus the isolated UDP and TUN overlays. Candidate
+Core SHA-256: `d5a10eedde39a37913db9d4a7d8f35d18848d9451cf93f6d57c1085bb42b33ca`.
+
+Both endpoints are isolated client/server namespaces on the same GitHub
+Ubuntu 22.04 runner: AMD EPYC 7763, Linux 6.8.0-1064-azure. Underlay veth,
+IPv4 UDP mesh, AES-GCM, Stealth off, compression none, inner TUN MTU 1360.
+This is neither two physical hosts nor a WAN/10 GbE benchmark. All modes
+use outer UDP GSO and the same candidate bytes, with only head capacity
+changed. Nine interleaved rounds, one unpaced GiB per direction per round;
+three samples per capacity and direction, without perf/trace instrumentation.
+The common diagnostic counters are enabled in every mode.
+
+| Capacity | Upload samples Mbps | Download samples Mbps | Median up/down Mbps | Median two-Core CPU s/GiB up/down |
+| --- | --- | --- | --- | --- |
+| 0 | 1370.55, 1370.89, 1381.62 | 1123.16, 1379.37, 1405.52 | 1370.89 / 1379.37 | 17.91 / 17.52 |
+| 4096 | 1431.93, 1458.65, 1461.01 | 1442.44, 1466.33, 1450.73 | 1458.65 / 1450.73 | 17.04 / 17.02 |
+| 8192 | 1508.54, 1507.80, 1555.20 | 1574.61, 1564.65, 1564.27 | 1508.54 / 1564.65 | 16.21 / 15.75 |
+
+Relative to capacity zero, 4 KiB throughput improved 6.40/5.17 percent;
+8 KiB improved 10.04/13.43 percent with CPU/GiB down 9.49/10.10 percent.
+The low baseline download sample is retained, not discarded. Do not combine
+these medians with another runner's earlier GSO results as a new measured
+combined speedup.
+
+Across each mode's six endpoint lifetimes (including functional checks):
+
+| Capacity | Flushes | Singleton flushes | Mean cohort | Promoted heads | Expanded batches | Copied bytes | Maximum frame | Scratch lost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 400865 | 41682 | 15.30 | 0 | 0 | 0 | 1370 | 0 |
+| 4096 | 401879 | 33889 | 15.11 | 367990 | 247443 | 350608056 | 4006 | 0 |
+| 8192 | 441706 | 35561 | 13.26 | 406145 | 294984 | 416512406 | 8022 | 0 |
+
+Thus natural cohorts exist; this workload was not restricted to singleton
+flushes. Capacity promotion produced larger frames and improved measured
+CPU/throughput despite copying. Expanded batches are not output-write counts.
+The storage addition is one 4/8 KiB reusable buffer per experimental TUN sink,
+not per TCP connection. End-RSS and lifetime high-water sums stayed around
+60-62 MiB across modes; differences are not a demonstrated memory reduction
+or long-duration leak result. High-water sums are not simultaneous peaks.
+
+Eight existing UDP contract tests, 18 transfer/digest/half-close lanes,
+nine UDP-echo checks, ICMP progress, actual transport/activation, 18 TUN
+metric files and all nine cleanups passed. Routes were unchanged in all
+nine runs; no scratch was lost. The exact candidate has not yet established
+Stealth-enabled, mixed-flow/interactive, physical-host, IPv6 or long-running
+acceptance for this receive change. Production source remains untouched.
+
+Artifact 10842834881 is 130825152 bytes. Published outer SHA-256:
+`04aadac13d18425a73d26c9cde857df03a93e17b42d606de10589a18a12b1fc0`.
+Only selected evidence was downloaded by byte range (539584 bytes); all 34
+selected files matched the internal manifest. The full outer ZIP was not
+locally downloaded/rehash-verified. Raw files remain in private evidence.
