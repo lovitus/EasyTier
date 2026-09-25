@@ -1,10 +1,33 @@
 # Pure mesh bottleneck diagnosis
 
-Current cursor: syntax, format and workflow static checks passed before the
-artifact-availability adjustment; runtime measurements remain unexecuted.
-Next step: check the complete batch and dispatch the existing Core flush
-workflow once with saturation=true.
+Current cursor: run 36074709548 completed the uninstrumented saturation lane;
+the independent profile lane failed with exit 255 and zero CPU sample records.
+Next step: dispatch profile_only=true, reusing artifact 10841125115 from that
+run. No Core rebuild or repeat of the completed saturation matrix.
 Production Core and the unresolved GSO rejection assertion are unchanged.
+
+## Completed saturation measurement and remaining profile recovery
+
+Harness 1639ec4534eb824ce88e7300b5fa1453839c4f25 measured same-binary legacy
+1125.65/1130.53 Mbps versus GSO 1400.46/1412.15 Mbps (three samples per
+direction). Two-Core CPU seconds/GiB were 24.36/24.29 versus 17.51/17.37.
+This is approximately 25 percent higher single-flow throughput and 28 percent
+lower CPU/GiB on this runner, not a WAN or production acceptance claim.
+Eight contract tests and the saturation lane's integrity, ICMP, transport,
+metric and cleanup gates passed. The whole run remains FAIL for profiling.
+Detailed evidence: https://github.com/lovitus/EasyTier/issues/4#issuecomment-5824616876
+
+The failed recording contains metadata but no PERF_RECORD_SAMPLE records.
+The recovery uses perf's documented fd control with --delay=-1, enable/ack
+before load and stop/ack after load, rather than signal termination. Exit 0
+and actual samples for both Core PIDs are required; 255 is not accepted.
+The original recording is not repaired or reclassified as successful.
+Reference: https://github.com/torvalds/linux/blob/v6.8/tools/perf/Documentation/perf-record.txt
+
+The profile-only job checks the archived binary and probe hashes. The probe
+source comes from the current checkout and must match the old source hash;
+it is not compiled again. The Core and probe executable bytes are unchanged.
+Profiled rates remain excluded from throughput comparison.
 
 ## Established evidence: do not restart the baseline investigation
 

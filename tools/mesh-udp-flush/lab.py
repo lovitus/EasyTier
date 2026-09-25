@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import socket
 import statistics
@@ -45,7 +46,7 @@ def run(args):
     transfer_timeout=120 if args.unpaced_probe else 20
     integrity=Path(__file__).resolve().parents[1]/'core-packet-path-probe/natural_cohort_lab.py'
     names=['etfa'+str(os.getpid()),'etfb'+str(os.getpid())]
-    children=[];created=[];rows=[]
+    children=[];created=[];rows=[];control_fds=[]
     def record(kind,**data):
         row={'kind':kind,**data};rows.append(row)
         with (out/'results.jsonl').open('a') as f:f.write(json.dumps(row)+'\n')
@@ -54,11 +55,17 @@ def run(args):
                          capture_output=True,text=True,timeout=timeout)
         if check and p.returncode:raise RuntimeError(f'{argv}: {p.returncode}: {p.stderr}')
         return p
-    def spawn(argv,label,ns,env=None):
+    def spawn(argv,label,ns,env=None,pass_fds=()):
         with (out/(label+'.log')).open('w') as log:
             p=subprocess.Popen(['ip','netns','exec',ns]+list(map(str,argv)),stdout=log,
-                               stderr=log,start_new_session=True,env=env)
+                               stderr=log,start_new_session=True,env=env,pass_fds=pass_fds)
         children.append(p);return p
+    def perf_control(write_fd,read_fd,command_name):
+        os.write(write_fd,(command_name+'\n').encode())
+        readable,_,_=select.select([read_fd],[],[],30)
+        if not readable:raise RuntimeError(f'perf {command_name} acknowledgement timed out')
+        reply=os.read(read_fd,64)
+        if reply.rstrip(b'\0\n')!=b'ack':raise RuntimeError(f'perf {command_name} unexpected acknowledgement {reply!r}')
     def stop(p):
         killed=False
         if p.poll() is None:
@@ -207,26 +214,39 @@ def run(args):
                 record('integrity',round=round_id,arm=arm,stealth=stealth,direction=direction,result=json.loads(result.stdout))
                 amount=args.transfer_bytes if args.unpaced_probe else (33554432 if stealth else 67108864)
                 env={**os.environ,'ET_PACED_MBPS':'200'}
+                profiler=None
+                if args.profile:
+                    ctl_read,ctl_write=os.pipe();ack_read,ack_write=os.pipe()
+                    control_fds.extend([ctl_read,ctl_write,ack_read,ack_write])
+                    profiler=spawn(['perf','record','--delay=-1',f'--control=fd:{ctl_read},{ack_write}',
+                                    '-e','cpu-clock','-F','99','--call-graph','fp',
+                                    '-p',','.join(str(p.pid) for p in cores),'-o',out/(label+'.perf.data')],
+                                   label+'-perf',names[0],pass_fds=(ctl_read,ack_write))
+                    for fd in [ctl_read,ack_write]:os.close(fd);control_fds.remove(fd)
+                    perf_control(ctl_write,ack_read,'enable')
+                    record('profile_ready',round=round_id,direction=direction,pids=[p.pid for p in cores])
                 server=spawn(load_command+['server','--listen','10.88.0.2:35902','--sessions','1','--timeout-seconds',str(transfer_timeout)],label+'-server',names[1],env)
                 time.sleep(.2)
                 ping=spawn(['ping','-c','20','-i','0.1','-W','1','10.88.0.2'],label+'-ping',names[0])
-                profiler=None
-                if args.profile:
-                    profiler=spawn(['perf','record','-e','cpu-clock','-F','99','--call-graph','fp',
-                                    '-p',','.join(str(p.pid) for p in cores),'-o',out/(label+'.perf.data')],
-                                   label+'-perf',names[0])
-                    time.sleep(.2)
-                    assert profiler.poll() is None,'perf failed to attach'
                 before=snapshot(cores);host_before=host_cpu()
                 result=command(['env','ET_PACED_MBPS=200']+load_command+['client','--target','10.88.0.2:35902','--direction',direction,'--bytes',str(amount),'--timeout-seconds',str(transfer_timeout)],names[0],check=False,timeout=transfer_timeout+10)
                 host_after=host_cpu();after=snapshot(cores)
                 if profiler:
-                    os.killpg(profiler.pid,signal.SIGINT)
+                    perf_control(ctl_write,ack_read,'stop')
                     profiler.wait(timeout=10)
                     assert profiler.returncode==0,'perf recording failed'
+                    for fd in [ctl_write,ack_read]:os.close(fd);control_fds.remove(fd)
+                    samples=command(['perf','script','-i',out/(label+'.perf.data'),'-F','pid'],timeout=60)
+                    (out/(label+'-sample-pids.txt')).write_text(samples.stdout)
+                    counts={p.pid:sum(line.strip()==str(p.pid) for line in samples.stdout.splitlines()) for p in cores}
+                    record('profile_samples',round=round_id,direction=direction,counts=counts)
+                    assert all(counts.values()),'profile missing samples for a Core endpoint'
                     report=command(['perf','report','--stdio','--no-children','--sort','comm,pid,dso,symbol',
                                     '-i',out/(label+'.perf.data')],timeout=60)
                     (out/(label+'-perf-report.txt')).write_text(report.stdout)
+                    callgraph=command(['perf','report','--stdio','--children','--sort','pid,symbol',
+                                       '-g','graph,0.5,caller','-i',out/(label+'.perf.data')],timeout=60)
+                    (out/(label+'-perf-callgraph.txt')).write_text(callgraph.stdout)
                 (out/(label+'-client.json')).write_text(result.stdout)
                 (out/(label+'-client.stderr')).write_text(result.stderr)
                 record('raw_transfer',round=round_id,arm=arm,stealth=stealth,direction=direction,before=before,after=after,host_before=host_before,host_after=host_after,exit=result.returncode,stdout=result.stdout)
@@ -270,6 +290,7 @@ def run(args):
     finally:
         try:
             cleanup=[stop(p) for p in reversed(children)]
+            for fd in control_fds:os.close(fd)
             for ns in reversed(created):
                 remaining=command(['ip','netns','pids',ns],check=False).stdout.strip()
                 result=command(['ip','netns','delete',ns],check=False)

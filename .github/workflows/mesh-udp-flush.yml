@@ -6,16 +6,22 @@ name: Actual Core UDP flush-boundary experiment
         description: Run saturation and separate CPU profiles instead of repeating fixed-load measurements
         type: boolean
         default: false
+      profile_only:
+        description: Reuse the exact 1639ec45 binaries and run only the corrected profile lane
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: issue4-udp-flush-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   core-flush:
+    if: ${{ !inputs.profile_only }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -130,5 +136,64 @@ jobs:
           path: |
             flush-evidence/
             flush-binaries/
+          retention-days: 30
+          if-no-files-found: error
+  profile-only:
+    if: ${{ inputs.profile_only }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          artifact-ids: '10841125115'
+          run-id: '36074709548'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: reused
+          merge-multiple: true
+      - name: Verify exact existing binaries and prepare profiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p profile-evidence
+          mkdir -p reused/tools
+          cp tools/easytier-perf-probe.rs reused/tools/
+          cd reused
+          test "$(cat flush-evidence/experiment-sha.txt)" = 1639ec4534eb824ce88e7300b5fa1453839c4f25
+          sha256sum -c flush-evidence/binaries.sha256
+          sha256sum -c flush-evidence/probe.sha256
+          chmod +x flush-binaries/{stock,candidate}/easytier-{core,cli} flush-binaries/perf-probe
+          cd ..
+          cp reused/flush-evidence/{binaries.sha256,experiment-sha.txt,diagnostic-source.json} profile-evidence/
+          printf '%s\n' "$GITHUB_SHA" > profile-evidence/harness-sha.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y iproute2 iputils-ping ethtool linux-tools-common "linux-tools-$(uname -r)"
+          perf --version > profile-evidence/perf-version.txt
+          uname -a > profile-evidence/kernel.txt
+          lscpu > profile-evidence/cpu.txt
+          python3 -m py_compile tools/mesh-udp-flush/lab.py
+      - name: Profile both exact Core modes without repeating saturation comparisons
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo timeout --signal=TERM --kill-after=15s 600s python3 tools/mesh-udp-flush/lab.py \
+            --stock reused/flush-binaries/stock --candidate reused/flush-binaries/candidate \
+            --unpaced-probe reused/flush-binaries/perf-probe --output profile-evidence/lab \
+            --order legacy,gso --profile
+      - name: Preserve profile evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p profile-evidence
+          sudo chown -R "$(id -u):$(id -g)" profile-evidence
+          find profile-evidence -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > profile-evidence/SHA256SUMS
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: issue4-profile-${{ github.sha }}
+          path: profile-evidence/
           retention-days: 30
           if-no-files-found: error
