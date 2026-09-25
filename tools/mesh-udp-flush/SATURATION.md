@@ -623,3 +623,77 @@ do not trigger a full Core rebuild based only on these short saturation trials.
 
 Artifact 10845801728 complete ZIP digest verified:
 `d6cd257b5f2828b1f04e51fb7b12ec544a1dc51c25c6c1a06b0400c17fd2ae20`.
+
+### Longer and paced scheduling comparison: do not adopt recv_many now
+
+Run 36091675062 / c5c3af4d completed 48 model trials (three repetitions,
+four consumer modes, two runtime types, saturated and pulse64 supply).
+Saturation uses five million offers. Pulse64 waits at least one millisecond
+between 64-packet offers without catch-up; measured actual supply is about
+31k packets/s, NOT a claim that a 64k/s network rate was achieved. Accepted
+packet order/payload/count assertions passed. No Core was built or changed.
+
+Within this run, current-thread saturated batch8/32 retains a roughly 4-5%
+goodput benefit. On two workers, recv is 2.380M delivered packets/s versus
+2.353M batch8 and 2.266M batch32. CPU s/million is 1.234 versus 1.250/1.288.
+These reverse the earlier short-run direction; do not pool different runner
+runs or report only the favorable samples. At pulse64 supply, all modes have
+zero data/control drops but no distinguishable CPU saving: current-thread
+medians 0.547 CPU s/million throughout, two-worker recv/batch8 both 1.329.
+CPU tick granularity still limits low-duty estimates.
+
+Decision: do not introduce recv_many or change production cooperative budget
+based on this model. It has not shown a robust multi-thread performance win
+and does not resolve overload rejection. Stop expanding this model just to
+obtain a favorable result. Existing GSO and bounded TUN-head gains are separate
+actual-Core experiments and are neither confirmed nor invalidated by this
+negative scheduling result. The exact receive-ring drop evidence remains.
+
+Artifact 10845887193 complete ZIP SHA256 verified:
+`9ebf1823f53ff47864ded0d69e1f808e69948ed28fe97d76f03f55c7614f5389`.
+Next performance investigation should return to measured actual-Core hot-path
+costs, preserving current queue bounds and control-plane behavior, rather
+than treating loss relocation or a synthetic batching win as a Core repair.
+
+### Actual-Core self-cost reconciliation after the scheduling rejection
+
+Revisited the legacy upload/download reports from run 36080205599, without
+new builds or traffic. Sum only the top-level self-overhead rows, never the
+indented inclusive call chains. The displayed rounded rows sum to 99.03%
+(upload) and 98.66% (download), so these are approximate reported shares,
+not exact counts or exhaustive attribution.
+
+| Self-cost grouping | Upload % | Download % |
+| --- | ---: | ---: |
+| Kernel symbols | 56.32 | 54.55 |
+| Non-kernel symbols | 42.71 | 44.11 |
+| Recognizable crypto symbols | 5.80 | 5.62 |
+| Recognizable allocation/copy symbols | 2.82 | 2.36 |
+| Recognizable async/scheduler symbols | 9.86 | 12.63 |
+| Socks5Server filter symbols | 2.42 | 1.48 |
+
+Only kernel/non-kernel form a partition. The other labels are conservative
+symbol-name buckets, can overlap, and miss inlined or unresolved work.
+Kernel share includes transport, TUN, scheduling and other kernel work;
+it is NOT equivalent to the cost removable by batching UDP receives.
+These samples do not justify changing crypto or removing the SOCKS filter.
+The inspected filter also has a stale-entry-count safeguard; eliminating
+its map check merely because it appears in a profile is not safe evidence.
+
+Next bounded mechanism experiment: compare nonblocking single-datagram
+receive with bounded recvmmsg at the socket boundary, not recv_many at the
+MPSC boundary. Preserve datagram boundaries, source addresses, truncation
+reporting, queue capacity and control-plane policy. Report actual batch
+occupancy, syscall count, delivered bytes, loss, CPU, idle wakeups and
+control/timer latency at paced and saturated supply. Keep this in a small
+standalone tool before considering a Core overlay. No production edit is
+approved by this cost grouping alone, and no new throughput claim is made.
+
+Reference: https://man7.org/linux/man-pages/man2/recvmmsg.2.html
+Use nonblocking readiness rather than the recvmmsg timeout argument: the
+manual documents that timeout checking can leave a partially filled batch
+blocked indefinitely. Bound each receive drain and preserve cancellation;
+do not wait for a batch to fill. This mechanism is Linux-specific and must
+not be presented as a cross-platform fix. Reuse existing GSO/TUN evidence
+separately and retain the receive-ring rejection as an unresolved overload
+behavior, not evidence that receive syscall batching fixes it.
