@@ -164,3 +164,27 @@ The report must distinguish send syscalls, receive work, crypto, copying,
 allocation and scheduling from actual samples. GSO savings alone do not
 prove the overall bottleneck is solved. No production fallback, wire,
 routing, TUN or crypto change is authorized by this diagnostic.
+
+### Capacity mechanism and historical fixture correction
+
+Exact Core base c6772dbf: both UDP receive loops use `buf.split()`;
+bytes 1.9.0 `split_to(len)` sets the returned capacity to `len`.
+Ring decrypt truncates the AEAD tail in place. The TUN sink then slices off
+outer headers, without reserving space. A full-size frame therefore has
+only the short AEAD tail as spare capacity, not the receiver allocation's
+8 KiB or the old standalone probe's assumed 4 KiB per packet.
+
+Locked tun-rs 2.8.7 refuses TCP coalescing when the destination capacity is
+insufficient; it deliberately does not allocate. Thus capacity is a concrete
+barrier on this path, even when several eligible segments form a batch.
+This does not establish actual cohort sizes or quantify a safe fix's gain.
+
+The previous 4 KiB Vec fixture is a synthetic model, not a faithful model
+of UDP split-slice ownership. Its historical timing results remain recorded
+but cannot prove the production capacity behavior. A new capacity-only mode
+reuses its valid TCP generator and the locked GRO implementation, holds
+bytes/order/cohort constant and varies only the head buffer capacity.
+It checks output payload length conservation and merge/no-merge behavior
+for 1/2/4/8/32 segments. It is not a byte-integrity or throughput acceptance
+claim, not a production patch, and not permission to restore the reverted
+64 KiB scratch optimization. Results are pending the small-tool CI run.

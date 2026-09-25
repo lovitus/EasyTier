@@ -1,5 +1,11 @@
 name: Mesh natural-cohort kernel mechanism
 'on':
+  workflow_dispatch:
+    inputs:
+      capacity_only:
+        description: Run only the locked small GRO capacity contract, without Core or network setup
+        type: boolean
+        default: true
   push:
     branches: ['codex/issue4-natural-cohort']
     paths:
@@ -11,7 +17,36 @@ concurrency:
   group: mesh-natural-cohort-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  capacity-contract:
+    if: ${{ inputs.capacity_only }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Run locked standalone GRO capacity experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p capacity-evidence
+          rustup toolchain install 1.95.0 --profile minimal
+          cp tools/core-packet-path-probe/Cargo.lock capacity-evidence/Cargo.lock
+          printf '%s\n' "$GITHUB_SHA" > capacity-evidence/source-sha.txt
+          timeout 300 cargo +1.95.0 run --locked --release \
+            --manifest-path tools/core-packet-path-probe/Cargo.toml \
+            --bin core-packet-path-probe -- --capacity-contract \
+            > capacity-evidence/results.jsonl 2> capacity-evidence/build.log
+          git diff --exit-code -- tools/core-packet-path-probe/Cargo.lock
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: gro-capacity-${{ github.sha }}
+          path: capacity-evidence/
+          if-no-files-found: error
+          retention-days: 30
   kernel-mechanism:
+    if: ${{ !inputs.capacity_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
