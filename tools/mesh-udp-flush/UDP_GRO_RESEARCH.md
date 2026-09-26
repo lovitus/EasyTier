@@ -349,12 +349,14 @@ has 11 clean cleanup entries and unchanged host routes. Traced timings are not
 performance evidence. The contract results from the separately executed test
 binary remain valid; they did not use this lab's filtered Core environment.
 
-The proposed correction is an explicit, optional lab argument, passed by the
-GRO driver and applied after environment isolation. Its default must preserve
-existing lab behaviour; unrelated `ET_` variables must remain excluded. Keep
-every activation, integrity, ICMP and lifecycle assertion. Reuse the same
-immutable Core binary instead of rebuilding. This newly identified harness
-correction is awaiting maintainer confirmation and is not implemented here.
+The maintainer approved the correction. The lab now takes an explicit optional
+`--udp-gro-mode=off/on` argument, passed by the GRO driver and applied after
+environment isolation. Omission preserves existing lab behaviour; unrelated
+`ET_` variables remain excluded. Every activation, integrity, ICMP and lifecycle
+assertion is unchanged. The next run reuses the same immutable Core binary,
+without recompiling the receiver or altering product code. Run `36273977755`
+is the retained runtime failure for this wiring defect; the corrected live-Core
+activation check must pass before any green or performance claim is made.
 
 ## Residual Core cost: existing profile, not another performance claim
 

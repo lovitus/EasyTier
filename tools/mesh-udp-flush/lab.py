@@ -292,6 +292,9 @@ def run(args):
                 if args.tun_head_capacity is not None:tun_metrics_dir.mkdir()
                 env={k:v for k,v in os.environ.items() if not k.startswith('ET_')}
                 env.update({'HOME':str(home),'XDG_CONFIG_HOME':str(home/'config'),'RUST_LOG':'warn'})
+                # Only this explicit experiment argument crosses Core env isolation.
+                if args.udp_gro_mode is not None:
+                    env['ET_ISSUE4_UDP_GRO']=args.udp_gro_mode
                 if arm!='stock':env.update({'ET_ISSUE4_FLUSH_MODE':arm,'ET_ISSUE4_EXPERIMENT':'ISOLATED_LAB_ONLY',
                                              'ET_ISSUE4_FLUSH_METRICS_DIR':str(metrics_dir)})
                 if args.tun_head_capacity is not None:
@@ -535,6 +538,7 @@ if __name__=='__main__':
         parser.add_argument('--network-counters',action='store_true',help='record per-namespace protocol and link counters around transfers')
         parser.add_argument('--icmp-capture',action='store_true',help='bounded inner-IPv6 TUN sequence capture; not performance evidence')
         parser.add_argument('--packet-trace',action='store_true',help='requires isolated packet-trace overlay; diagnostic rates only')
+        parser.add_argument('--udp-gro-mode',choices=['off','on'],help='isolated GRO receiver only; explicit selector after Core environment isolation')
         parser.add_argument('--unpaced-probe',help='existing compiled easytier-perf-probe; no Core rebuild required')
         parser.add_argument('--paced-mbps',type=int,default=200,help='diagnostic cap per flow; never replaces unpaced acceptance')
         parser.add_argument('--transfer-bytes',type=int,default=1073741824)

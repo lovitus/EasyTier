@@ -2,7 +2,6 @@
 """Same-binary receive off/on, using unchanged packet/lifecycle lab assertions."""
 import argparse
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -28,10 +27,9 @@ for outer, inner in families:
         for mode in order:
             index = len(rows)
             output = root / f'{index:02d}-{mode}-outer{outer}-inner{inner}-stealth{int(stealth)}'
-            env = {**os.environ, 'ET_ISSUE4_UDP_GRO': mode}
-            env.pop('ET_ISSUE4_GRO_METRICS', None)
             command = [sys.executable, str(lab), '--stock', str(binaries), '--candidate', str(binaries),
-                       '--order', 'stock', '--network-counters', '--output', str(output)]
+                       '--order', 'stock', '--network-counters', '--output', str(output),
+                       '--udp-gro-mode', mode]
             if outer == 6: command.append('--underlay-ipv6')
             if inner == 6: command.append('--inner-ipv6')
             if stealth: command.append('--stealth')
@@ -45,7 +43,7 @@ for outer, inner in families:
                 command = ['strace', '-ff', '-qq', '-s', '0', '-e', 'trace=setsockopt,recvmsg',
                            '-o', str(root / f'{index:02d}-recv'), *command]
             with (root / f'{index:02d}.log').open('w') as log:
-                result = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=360)
+                result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=360)
             row = {'index': index, 'mode': mode, 'outer': outer, 'inner': inner, 'stealth': stealth,
                    'phase': args.phase, 'exit': result.returncode, 'output': output.name,
                    'performance_evidence': args.phase != 'activation'}
