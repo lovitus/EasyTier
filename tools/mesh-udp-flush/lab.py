@@ -297,7 +297,9 @@ def run(args):
                 if args.tun_head_capacity is not None:
                     env.update({'ET_ISSUE4_TUN_HEAD_CAPACITY':str(args.tun_head_capacity),
                                 'ET_ISSUE4_TUN_METRICS_DIR':str(tun_metrics_dir)})
-                if args.packet_trace:env['ET_ISSUE4_PACKET_TRACE']='1'
+                if args.packet_trace:
+                    env.update({'ET_ISSUE4_PACKET_TRACE':'1',
+                                'ET_ISSUE4_EXPERIMENT':'ISOLATED_LAB_ONLY'})
                 argv=[endpoint_path/args.core_name,'--config-dir',cfg,'--network-name','flush-lab',
                       '--network-secret','isolated-test-only','--ipv4',f'10.88.0.{i+1}',
                       '--listeners',f'udp://{listen_host}:35904','--hostname',f'flush-{i}',

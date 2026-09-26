@@ -7,7 +7,11 @@ import subprocess
 import sys
 
 root = Path(sys.argv[1]).resolve()
-base = 'c6772dbfef2395ff96b39bd4801945d92212dffb'
+base = sys.argv[2] if len(sys.argv) == 3 else 'c6772dbfef2395ff96b39bd4801945d92212dffb'
+assert base in {
+    'c6772dbfef2395ff96b39bd4801945d92212dffb',
+    '3166ab672d347cdcc5a6768bc77056cd8ec38323',
+}, 'packet diagnostics require an explicitly audited source revision'
 assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip() == base
 changes = {}
 

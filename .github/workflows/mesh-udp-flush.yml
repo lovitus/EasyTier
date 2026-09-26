@@ -34,6 +34,10 @@ name: Actual Core UDP flush-boundary experiment
         description: With tun_capacity, build bounded packet-stage diagnostics and run loss localization
         type: boolean
         default: false
+      packet_trace_current:
+        description: Observe packet loss on pinned integrated Core 3166ab67; diagnostics only, no performance acceptance
+        type: boolean
+        default: false
       paced_tun:
         description: Reuse existing candidate for fixed-load inner-IPv6 mixed-flow comparison; never rebuild Core
         type: boolean
@@ -49,7 +53,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   core-flush:
-    if: ${{ !inputs.profile_only && !inputs.paced_tun }}
+    if: ${{ !inputs.profile_only && !inputs.paced_tun && !inputs.packet_trace_current }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -243,7 +247,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
   profile-only:
-    if: ${{ inputs.profile_only || inputs.paced_tun }}
+    if: ${{ (inputs.profile_only || inputs.paced_tun) && !inputs.packet_trace_current }}
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -382,3 +386,102 @@ jobs:
           path: profile-evidence/
           retention-days: 30
           if-no-files-found: error
+
+  integrated-packet-trace:
+    if: ${{ inputs.packet_trace_current }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 3166ab672d347cdcc5a6768bc77056cd8ec38323
+      TARGET: x86_64-unknown-linux-musl
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '2'
+      CARGO_PROFILE_RELEASE_STRIP: none
+      RUSTFLAGS: -C force-frame-pointers=yes -C link-arg=-Wl,--build-id=sha1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Prepare the same maintained musl build prerequisites
+        uses: ./.github/actions/prepare-build
+        with:
+          target: x86_64-unknown-linux-musl
+          pnpm: 'false'
+          gui: 'false'
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare pinned source and observation-only overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p packet-evidence packet-binaries
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq iproute2 iputils-ping ethtool tcpdump binutils
+          timeout 90 git fetch --no-tags --depth=1 origin "$SOURCE_SHA"
+          git worktree add --detach "$RUNNER_TEMP/packet-trace-source" "$SOURCE_SHA"
+          python3 -m py_compile tools/mesh-udp-flush/lab.py tools/mesh-udp-flush/packet_trace_prepare.py
+          python3 tools/mesh-udp-flush/packet_trace_prepare.py "$RUNNER_TEMP/packet-trace-source" "$SOURCE_SHA" > packet-evidence/overlay.json
+          rustfmt +1.95 --edition 2024 "$RUNNER_TEMP/packet-trace-source/easytier/src/peers/peer_manager.rs" "$RUNNER_TEMP/packet-trace-source/easytier/src/tunnel/udp.rs"
+          git -C "$RUNNER_TEMP/packet-trace-source" diff --check
+          git -C "$RUNNER_TEMP/packet-trace-source" diff --exit-code -- Cargo.lock
+          git -C "$RUNNER_TEMP/packet-trace-source" diff --binary > packet-evidence/observation-only.patch
+          cp "$RUNNER_TEMP/packet-trace-source/Cargo.lock" packet-evidence/Cargo.lock
+          printf '%s\n' "$SOURCE_SHA" > packet-evidence/core-source-sha.txt
+          printf '%s\n' "$GITHUB_SHA" > packet-evidence/harness-sha.txt
+          printf '%s\n' 'Diagnostic overlay only; queue, budget, packet bytes and production source unchanged. Instrumented rates are not performance acceptance.' > packet-evidence/BOUNDARY.txt
+          uname -a > packet-evidence/kernel.txt
+          lscpu > packet-evidence/cpu.txt
+          rustc +1.95 -Vv > packet-evidence/toolchain.txt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: profiling-comparator
+          shared-key: linux-x86_64-musl
+          workspaces: ${{ runner.temp }}/packet-trace-source -> target
+          cache-targets: true
+          cache-on-failure: true
+      - name: Build only the diagnostic Core and matching CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD"
+          cd "$RUNNER_TEMP/packet-trace-source"
+          timeout 1800 cargo +1.95 build --locked --release --target "$TARGET" -j "$(nproc)" -p easytier --bin easytier-core --bin easytier-cli --features jemalloc 2>&1 | tee "$root/packet-evidence/build.log"
+          git diff --exit-code -- Cargo.lock
+          install -m 0755 "target/$TARGET/release/easytier-core" "target/$TARGET/release/easytier-cli" "$root/packet-binaries/"
+          cd "$root"
+          rustc +1.95 --edition 2024 -O tools/easytier-perf-probe.rs -o packet-binaries/probe
+          sha256sum packet-binaries/* > packet-evidence/binaries.sha256
+          file packet-binaries/* > packet-evidence/binary-format.txt
+          readelf -n packet-binaries/easytier-core > packet-evidence/build-id.txt
+      - name: Localize the first saturated IPv6 control-progress failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          for index in 0 1 2 3 4 5; do
+            sudo timeout --signal=TERM --kill-after=10s 180s python3 tools/mesh-udp-flush/lab.py \
+              --stock packet-binaries --candidate packet-binaries --order stock \
+              --unpaced-probe packet-binaries/probe --transfer-bytes 1073741824 \
+              --inner-ipv6 --network-counters --icmp-capture --packet-trace \
+              --output "packet-evidence/case-$index"
+          done
+      - name: Preserve bounded failure evidence and exact diagnostic binaries
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p packet-evidence packet-binaries
+          sudo chown -R "$(id -u):$(id -g)" packet-evidence packet-binaries
+          find packet-evidence -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > packet-evidence/SHA256SUMS
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: integrated-packet-evidence-${{ github.sha }}
+          path: packet-evidence/
+          retention-days: 30
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: integrated-packet-diagnostic-binaries-${{ github.sha }}
+          path: packet-binaries/
+          retention-days: 30
+          if-no-files-found: warn
