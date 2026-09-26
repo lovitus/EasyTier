@@ -309,5 +309,12 @@ is claimed. The proposed correction is to ask the installed HWE package for
 its file list and require the resulting perf executable, rather than assume
 an installation directory. Core remains frozen at `3a1f3d9f`.
 
-The unique next step is that narrow harness correction and the same
-artifact-only observation. No already-completed acceptance matrix needs rerun.
+The first correction, harness `41048205`, also failed before Core startup in
+[run 36227743112](https://github.com/lovitus/EasyTier/actions/runs/36227743112):
+`dpkg-query -L` rejects package-name wildcards (exit 2). The failure log is
+preserved; no runtime result is claimed. The corrected command uses `-W` for
+pattern expansion, then calls `-L` with each exact package name, as required by
+the [dpkg-query contract](https://manpages.debian.org/bookworm/dpkg/dpkg-query.1.en.html).
+
+The unique next step is that corrected artifact-only observation. No
+already-completed acceptance matrix needs rerun.
