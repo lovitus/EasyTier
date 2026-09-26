@@ -295,6 +295,19 @@ policy engine, operational-host deployment, or production edit is part of it.
 References: [Ubuntu package](https://packages.ubuntu.com/jammy/linux-tools-generic-hwe-22.04)
 and [perf record call-graph options](https://man7.org/linux/man-pages/man1/perf-record.1.html).
 
-Status: implementation prepared; no CPU profile or idle result claimed yet.
-The unique next step is this artifact-only observation, followed by hotspot
-analysis against the exact source and an evidence update to issues #4/#8 and PR #9.
+Status: run [36227357275](https://github.com/lovitus/EasyTier/actions/runs/36227357275)
+failed in the new perf-tool preparation step, before any Core was launched.
+The existing packages passed their identity checks. Ubuntu installed
+`linux-hwe-6.8-tools-6.8.0-138`, but the harness searched only regular files under
+`/usr/lib/linux-tools-*`; it produced no `perf-path.txt`. This is a harness
+tool-discovery failure, not a Core regression or a completed profile.
+
+Failure evidence artifact `10900384496` was downloaded and verified against
+SHA-256 `50c5264df430be8b6f8d4f9c84079c7d2dc4bee18d3a4259940b406cb058c4b5`.
+The original failure log is preserved privately. No CPU profile or idle result
+is claimed. The proposed correction is to ask the installed HWE package for
+its file list and require the resulting perf executable, rather than assume
+an installation directory. Core remains frozen at `3a1f3d9f`.
+
+The unique next step is that narrow harness correction and the same
+artifact-only observation. No already-completed acceptance matrix needs rerun.
