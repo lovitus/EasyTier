@@ -382,10 +382,10 @@ def run(args):
                     counts={p.pid:sum(line.strip()==str(p.pid) for line in samples.stdout.splitlines()) for p in cores}
                     record('profile_samples',round=round_id,direction=direction,counts=counts)
                     assert all(counts.values()),'profile missing samples for a Core endpoint'
-                    report=command([args.perf_path,'report','--stdio','--no-children','--sort','comm,pid,dso,symbol',
+                    report=command([args.perf_path,'report','--stdio','--no-children','--no-inline','-g','none','--sort','comm,pid,dso,symbol',
                                     '-i',out/(label+'.perf.data')],timeout=60)
                     (out/(label+'-perf-report.txt')).write_text(report.stdout)
-                    callgraph=command([args.perf_path,'report','--stdio','--children','--sort','pid,symbol',
+                    callgraph=command([args.perf_path,'report','--stdio','--children','--no-inline','--sort','pid,symbol',
                                        '-g','graph,0.5,caller','-i',out/(label+'.perf.data')],timeout=60)
                     (out/(label+'-perf-callgraph.txt')).write_text(callgraph.stdout)
                 (out/(label+'-client.json')).write_text(result.stdout)

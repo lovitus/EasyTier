@@ -254,6 +254,8 @@ jobs:
           lscpu > exact-evidence/cpu.txt
       - name: Prepare a recorded userspace perf tool without changing the runner kernel
         if: ${{ inputs.artifact_profile_only }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -268,6 +270,12 @@ jobs:
           "$perf_path" version --build-options > exact-evidence/perf-version.txt
           dpkg-query -W 'linux-tools*' > exact-evidence/perf-packages.txt
           sudo "$perf_path" stat -e cpu-clock -- true 2> exact-evidence/perf-preflight.txt
+          # Reuse the preserved baseline samples before collecting anything new.
+          # Their kernel symbols may be unavailable on this different runner.
+          gh api repos/lovitus/EasyTier/actions/artifacts/10901790217/zip > exact-evidence/previous-profile.zip
+          printf '%s\n' '40ad5860076722ffe8408c3c605922a9708c125b36c34a5b58e07498aa6c3ccd  exact-evidence/previous-profile.zip' | sha256sum -c -
+          unzip -p exact-evidence/previous-profile.zip profile/00-baseline-v4-stealth0/r0-stock-upload.perf.data > exact-evidence/previous-baseline.perf.data
+          timeout --signal=TERM --kill-after=5s 60s "$perf_path" report --stdio --no-children --no-inline -g none --sort comm,pid,dso,symbol -i exact-evidence/previous-baseline.perf.data > exact-evidence/previous-baseline-flat.txt 2> exact-evidence/previous-baseline-flat.stderr
       - name: Interleaved fixed-load, dual-stack overlay and Stealth checks
         if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only }}
         shell: bash

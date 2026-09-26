@@ -279,8 +279,10 @@ policy engine, operational-host deployment, or production edit is part of it.
   including per-process CPU time, RSS/high-water RSS, FD count and thread count.
   These are bounded observations, not proof of long-term leak freedom.
 - Reuse the existing perf attachment/acknowledgement and per-PID sample checks.
-  Sample both Cores at 99 Hz during each 2 GiB upload/download using an 8 KiB
-  DWARF stack dump; retain raw perf data, flat reports and call graphs.
+  Sample both Cores at 99 Hz during each 2 GiB upload/download using the frame
+  pointers already enabled in the exact artifact build; retain raw perf data,
+  flat reports and call graphs. Inline symbol expansion is disabled for bounded
+  reporting; this does not remove or change recorded instruction-pointer samples.
 - Preserve integrity/half-close, UDP echo, ICMP progress, clean process exit,
   namespace cleanup and unchanged root-route assertions. Profiled throughput is
   diagnostic only and must not replace the completed unprofiled comparison.
@@ -316,5 +318,23 @@ preserved; no runtime result is claimed. The corrected command uses `-W` for
 pattern expansion, then calls `-L` with each exact package name, as required by
 the [dpkg-query contract](https://manpages.debian.org/bookworm/dpkg/dpkg-query.1.en.html).
 
-The unique next step is that corrected artifact-only observation. No
-already-completed acceptance matrix needs rerun.
+Run [36227931747](https://github.com/lovitus/EasyTier/actions/runs/36227931747),
+harness `094293f0`, passed perf preparation and actually sampled the baseline.
+Two before-traffic idle intervals measured aggregate Core CPU of 0.2667% and
+0.2333%, paired RSS about 51 MiB, 13 threads per Core at the interval ends and
+declining FD counts. Upload captured 2232/2341 samples from the two Core PIDs.
+The subsequent `perf report` exceeded its 60-second analysis timeout; this is
+not an application timeout, completed paired comparison, or after-load result.
+The raw profile is preserved in artifact `10901790217`, verified SHA-256
+`40ad5860076722ffe8408c3c605922a9708c125b36c34a5b58e07498aa6c3ccd`.
+
+The exact source workflow already sets `-C force-frame-pointers=yes`; the extra
+DWARF recording was unnecessary. The next observation returns to existing
+frame-pointer recording, disables inline expansion and callchain display in
+the flat report, and retains a separate callgraph report. It first replays the
+preserved baseline data without a new Core execution. Kernel symbols in this
+cross-run replay may be unavailable and must not be invented or treated as a
+fresh profile. Actual paired profiling still occurs on one runner.
+
+The unique next step is this bounded report/observation. No already-completed
+acceptance matrix or Core build needs rerun; no functional assertion changes.

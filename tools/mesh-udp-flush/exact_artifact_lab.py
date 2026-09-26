@@ -169,7 +169,7 @@ def run(root, phase, probe, perf_path):
         if phase == 'profile':
             assert perf_path and perf_path.is_file()
             command += ['--profile', '--idle-observe', '--perf-path', str(perf_path.resolve()),
-                        '--profile-call-graph', 'dwarf,8192', '--transfer-bytes', '2147483648']
+                        '--profile-call-graph', 'fp', '--transfer-bytes', '2147483648']
         if phase == 'trace':
             command += ['--paced-mbps', '50']
             command = ['strace', '-ff', '-qq', '-s', '1', '-e', 'trace=sendmsg',
