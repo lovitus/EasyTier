@@ -131,7 +131,9 @@ def run(args):
         for i,ns in enumerate(names):
             result=command([cli,'-p','127.0.0.1:35903','-o','json','peer','list'],ns)
             (out/f'r{round_id}-{label}-peers-{i}.json').write_text(result.stdout)
-            actual=types(json.loads(result.stdout));assert actual and set(actual)=={'udp'},actual
+            actual=types(json.loads(result.stdout))
+            expected='udp6' if args.underlay_ipv6 else 'udp'
+            assert actual and set(actual)=={expected},(actual,expected)
             record('peer',round=round_id,endpoint=i,phase=label,actual=actual)
     def parse_stats(metrics_dir):
         sink=[];writer=[];errors=[]

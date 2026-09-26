@@ -154,3 +154,19 @@ record includes the independently selected server; the run record identifies
 both package labels. No rate gain is claimed from this compatibility matrix.
 This extends the existing E2E inputs, not a new mock/test framework or a claim
 that baseline compatibility is defective. Results remain pending execution.
+
+Run `36224324021` at harness `c0f883f3` failed after all eight IPv4-underlay
+mixed-version cases passed. The first IPv6-underlay baseline/baseline case
+successfully connected, but the inherited IPv4-only CLI assertion expected
+`udp` while the real CLI correctly returned `udp6`. This is a harness omission,
+not a candidate Core failure. Both Core processes exited zero, both namespaces
+were removed, and root routes remained unchanged for that failed case.
+
+Source contract: `easytier-cli.rs` populates `tunnel_proto` using
+`PeerRoutePair::get_conn_protos()`; `proto/common.rs::display_tunnel_type()`
+normalizes its display scheme using the resolved endpoint address family.
+Therefore the corrected assertion requires exactly `udp` for IPv4 underlay
+and exactly `udp6` for IPv6 underlay. It does not allow both indiscriminately
+or accept another transport. Other assertions and both Core packages are
+unchanged. The original failed run remains failed; IPv6 traffic acceptance
+is pending the corrected run, not inferred from a successful handshake.
