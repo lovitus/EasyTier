@@ -602,7 +602,14 @@ jobs:
           set -euo pipefail
           mkdir -p gro-evidence gro-binaries
           sudo apt-get update -qq
-          sudo apt-get install -y -qq iproute2 iputils-ping ethtool tcpdump binutils
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iputils-ping ethtool tcpdump binutils bridge-utils miniupnpd miniupnpd-iptables iptables
+          # Match the formal Test job's namespace/UPnP prerequisites. These
+          # affect only this disposable hosted runner, never a deployed host.
+          sudo modprobe br_netfilter
+          sudo sysctl net.bridge.bridge-nf-call-iptables=0
+          sudo sysctl net.bridge.bridge-nf-call-ip6tables=0
+          sudo sysctl net.ipv6.conf.lo.disable_ipv6=0
+          sudo ip addr add 2001:db8::2/64 dev lo
           rustup component add --toolchain 1.95 rustfmt
           timeout 90 git fetch --no-tags --depth=1 origin "$SOURCE_SHA"
           git worktree add --detach "$RUNNER_TEMP/gro-source" "$SOURCE_SHA"
@@ -631,6 +638,9 @@ jobs:
       - name: Existing UDP contracts and real kernel adapter contracts
         env:
           ET_ISSUE4_UDP_GRO: 'on'
+          # Compile/cache as runner; elevate only the resulting test process,
+          # as the formal Test workflow does for its archived test binaries.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUNNER: 'sudo -E'
         shell: bash
         run: |
           set -euo pipefail

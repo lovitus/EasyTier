@@ -245,3 +245,14 @@ execution. Preserve every current assertion and the failed run; do not modify
 Core, the receive adapter, test expectations or the peer/queue policy to address
 this setup error. Permission to correct this newly introduced workflow defect
 has been requested separately. No automatic retry has been dispatched.
+
+### Fixture-only continuation
+
+The continuation corrects only the isolated workflow environment using the
+formal Test job's existing prerequisites: bridge/UPnP/iptables packages,
+`br_netfilter` settings, loopback IPv6 fixture, and privileged test execution.
+Cargo still compiles and caches as the runner user; Cargo's target runner
+executes only the resulting test process with `sudo -E`. The exact Core source,
+receive adapter, both test filters, every test expectation and all lab assertions
+are unchanged. The first failed run remains the diagnostic record; this is not
+a same-SHA retry or a performance result. One corrected experiment is dispatched.
