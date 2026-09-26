@@ -250,37 +250,14 @@ mod issue4_flush {
     async fn send_frames(socket: &UdpSocket, address: SocketAddr, frames: &[Frame], stats: &mut WriterStats) -> io::Result<bool> {
         let mut begin = 0;
         while begin < frames.len() {
-            let mut end = if stats.mode == Mode::Gso && !stats.gso_disabled { group_end(frames, begin) } else { begin + 1 };
+            let end = if stats.mode == Mode::Gso { group_end(frames, begin) } else { begin + 1 };
             let written = if end == begin + 1 {
                 stats.calls += 1;
                 socket.send_to(&frames[begin].bytes, address).await?
             } else {
-                match send_group(socket, address, &frames[begin..end], stats).await {
-                    Ok(written) => written,
-                    Err(error) if matches!(error.raw_os_error(),
-                        Some(libc::EINVAL | libc::EIO | libc::ENOPROTOOPT | libc::EOPNOTSUPP)) => {
-                        // The rejected sendmsg accepted no group bytes. Keep the
-                        // already-sealed frames and resume at this group's first
-                        // item, not at the start of the vector. Subsequent groups
-                        // and calls use singles for this writer's lifetime.
-                        // Do not apply this to TUN send_multiple (partial writes)
-                        // or to the synthetic short-success error from send_group.
-                        stats.gso_disabled = true;
-                        stats.capability_fallbacks += 1;
-                        tracing::debug!(%error, "UDP GSO unavailable; using individual datagrams");
-                        end = begin + 1;
-                        stats.calls += 1;
-                        socket.send_to(&frames[begin].bytes, address).await?
-                    }
-                    Err(error) => return Err(error),
-                }
+                send_group(socket, address, &frames[begin..end], stats).await?
             };
             if written == 0 { return Ok(false); }
-            let expected: usize = frames[begin..end].iter().map(|frame| frame.bytes.len()).sum();
-            if written != expected {
-                return Err(io::Error::new(io::ErrorKind::WriteZero,
-                    "short UDP submission; not replayed"));
-            }
             stats.packets += (end - begin) as u64;
             begin = end;
         }
