@@ -170,7 +170,7 @@ or accept another transport. Other assertions and both Core packages are
 unchanged. The original failed run remains failed; IPv6 traffic acceptance
 is pending the corrected run, not inferred from a successful handshake.
 
-## Compatibility result and current task cursor
+## Compatibility result
 
 Corrected run [36224742826](https://github.com/lovitus/EasyTier/actions/runs/36224742826)
 at harness `50d9091f44f32ed08eefb2fb85c713e7d49cea1e` completed SUCCESS.
@@ -200,12 +200,10 @@ speedup is inferred from these functional checks.
 
 Remaining: relay acceptance, high-load simultaneous mixed-flow receive-ring
 loss, idle CPU and sustained resources, original-hardware/WAN performance,
-and non-Linux/other-architecture build acceptance. Next action is a bounded
-three-peer relay check using the same packages, with route evidence proving
-that endpoint traffic actually traverses the intermediate peer. Do not rebuild
-Core or claim relay success from a direct peer list.
+and non-Linux/other-architecture build acceptance. The bounded three-peer relay
+follow-up using these same packages is recorded below.
 
-## Bounded relay extension, pending execution
+## Bounded relay extension
 
 `artifact_relay_only=true` reuses the same artifacts with no Rust compilation.
 The existing lab gains one optional relay package. Its two endpoint namespaces
@@ -228,3 +226,42 @@ the last two combinations also cover the reverse endpoint orientation. This
 is not a relay performance claim or exhaustive cross-family relay matrix.
 Results remain pending. Production source and existing package identities stay
 unchanged; prior failures and direct-path performance records remain preserved.
+
+### Relay result: exact packages, not inferred from peer status
+
+Run [36225644719](https://github.com/lovitus/EasyTier/actions/runs/36225644719)
+at harness `8a1de37eb5efe3dc2d5a42f1ff46990c8beb18ca` completed SUCCESS.
+Evidence artifact `10900851933` has independently verified SHA-256
+`723f9d5e579a24123299ecde96bd2bceb8517263fe12b96ab4bb54f1beddd50b`.
+Client, relay and server hashes match the same previously verified baseline
+and candidate packages. No Core source was changed or rebuilt.
+
+All 24 cases passed. The recorded evidence includes 48 checks that endpoints
+have no direct underlay L3 route, 96 endpoint route observations with two hops
+through `10.88.0.3`, and 96 relay route observations with one hop to the endpoints.
+Before/after protocol observations include 72 IPv4 and 72 IPv6 peer queries,
+covering 96 direct link entries per family. IPv4/IPv6 kernel forwarding was
+disabled in the relay namespace during setup; the independent no-direct-route
+and Core route observations also prevent attributing a direct path to relay.
+
+Actual traffic completed 48 integrity/half-close transfers, 720 checked UDP
+echo datagrams and 960/960 ICMP replies. All 72 Core processes exited zero
+without forced killing, all 72 namespaces were removed, and all 24 root-route
+snapshots were unchanged. Each of BBB, CCC, BCB, CBC, BCC and CBB completed
+four family/Stealth cases with traffic in both directions. This is functional
+relay acceptance for this matrix, not relay throughput or WAN acceptance.
+
+## Current task cursor
+
+Production candidate: PR #9, `3a1f3d9f`, still unmerged and not deployed to an
+operational host. Its exact packages now have direct-path CPU/rate evidence,
+IPv4/IPv6-underlay mixed-version acceptance, and three-peer relay acceptance.
+Evidence-only commits and research harness changes do not change that Core SHA.
+
+Still open: high-load simultaneous mixed-flow receive-ring loss, idle CPU and
+sustained resource behavior, original-host/WAN performance, and non-Linux /
+other-architecture build acceptance. The short runs do not prove leak freedom;
+the earlier full Test workflow's leaky passing test remains a separate caveat.
+Next action: reuse the symbol-bearing packages for bounded idle/resource samples
+and actual Core CPU profiles to identify the remaining cost, rather than add
+another speculative production optimization or rebuild the same Core.
