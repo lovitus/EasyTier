@@ -14,6 +14,10 @@ name: Mesh natural-cohort kernel mechanism
         description: Compare real nonblocking UDP receive syscalls without Core
         type: boolean
         default: false
+      artifact_pair:
+        description: 'Optional JSON: baseline and candidate each contain immutable artifact id and source sha; no Core rebuild'
+        type: string
+        default: ''
   push:
     branches: ['codex/issue4-natural-cohort']
     paths:
@@ -26,7 +30,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   capacity-contract:
-    if: ${{ inputs.capacity_only && !inputs.recv_budget_only && !inputs.udp_receive_only }}
+    if: ${{ !inputs.artifact_pair && inputs.capacity_only && !inputs.recv_budget_only && !inputs.udp_receive_only }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -57,7 +61,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   kernel-mechanism:
-    if: ${{ !inputs.capacity_only && !inputs.recv_budget_only && !inputs.udp_receive_only }}
+    if: ${{ !inputs.artifact_pair && !inputs.capacity_only && !inputs.recv_budget_only && !inputs.udp_receive_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -134,7 +138,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
   receive-budget:
-    if: ${{ inputs.recv_budget_only && !inputs.udp_receive_only }}
+    if: ${{ !inputs.artifact_pair && inputs.recv_budget_only && !inputs.udp_receive_only }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -163,7 +167,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   udp-receive:
-    if: ${{ inputs.udp_receive_only }}
+    if: ${{ !inputs.artifact_pair && inputs.udp_receive_only }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -190,5 +194,67 @@ jobs:
         with:
           name: udp-receive-${{ github.sha }}
           path: udp-receive-evidence/
+          if-no-files-found: error
+          retention-days: 30
+  packaged-core:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_pair != '' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Fetch and verify existing exact-source Core packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_PAIR: ${{ inputs.artifact_pair }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p exact-evidence
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq iproute2 iputils-ping ethtool strace binutils
+          rustup toolchain install 1.95.0 --profile minimal
+          python3 -m py_compile tools/mesh-udp-flush/exact_artifact_lab.py
+          python3 tools/mesh-udp-flush/exact_artifact_lab.py prepare --output exact-evidence
+          rustc +1.95.0 --edition 2024 -O tools/easytier-perf-probe.rs -o exact-evidence/probe
+          sha256sum exact-evidence/probe > exact-evidence/probe.sha256
+          uname -a > exact-evidence/kernel.txt
+          lscpu > exact-evidence/cpu.txt
+      - name: Interleaved fixed-load, dual-stack overlay and Stealth checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py fixed --output exact-evidence
+      - name: Separate low-rate syscall activation evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 240s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py trace --output exact-evidence
+      - name: Unpaced comparison with unchanged control-progress assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py saturation --output exact-evidence --probe exact-evidence/probe
+      - name: Preserve scoped evidence
+        if: always()
+        shell: bash
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" exact-evidence
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: packaged-core-comparison-${{ github.sha }}
+          path: |
+            exact-evidence/
+            !exact-evidence/binaries/
+            !exact-evidence/cli-artifact.zip
+            !exact-evidence/probe
           if-no-files-found: error
           retention-days: 30
