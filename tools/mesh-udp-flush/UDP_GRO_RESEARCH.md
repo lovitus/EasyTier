@@ -207,3 +207,41 @@ Pending gates: compiler/tests, actual Core GRO occupancy, fixed-load CPU/RSS,
 saturated and opposite-direction mixed load. The first failure stops its phase
 and remains evidence. No production benefit, loss fix, WAN result, unsupported
 platform benefit or release acceptance is asserted before these gates finish.
+
+### First isolated Core attempt: validation environment failure
+
+Run `36268964745`, harness
+`4e14d18a5e87f361303c82e566d91b7ef6a50e2c`, completed with **FAIL**.
+The immutable base remains `3166ab672d347cdcc5a6768bc77056cd8ec38323`.
+
+- The optimized Core test library compiled. The selected UDP suite passed
+  **39/39** in 22.89 seconds, including the three receive-adapter contracts.
+- IPv4 and IPv6 kernel negative controls each returned one **11,533-byte**
+  aggregate without splitting, rather than the required 1,400-byte first
+  datagram. The split path preserved all tested datagram bytes/boundaries.
+  This is an explicit splitter-bypass negative control, not a claim that the
+  unchanged GRO-disabled production baseline violates datagram boundaries.
+- Both selected plain/Stealth hole-punch handshake cases passed. The wider
+  `hole_punch_listener_` filter also selected two UPnP integration cases.
+  Both failed in `UpnpIntegrationEnv::new`, before constructing the listener,
+  at `ip link add name br_upnp type bridge`: **Operation not permitted**.
+- The experimental workflow omitted the formal Test workflow's privileged
+  namespace/UPnP fixture setup. This is a real validation-environment defect,
+  not a passing run, not an established GRO regression and not an excuse to
+  waive or remove the two tests.
+- The standalone Core/CLI build and all actual-Core performance comparisons
+  were skipped after this failure. There is **no actual-Core GRO throughput,
+  CPU or RSS improvement result** from this run.
+
+Evidence artifact `10915795267` is 102,856 bytes. Its full ZIP SHA-256 is
+`24e466fe648336defccefb496f3936d617f20fd03e016caa926056b8513b3dd6`.
+All 13 ZIP members passed CRC checks and all 12 manifest entries matched their
+SHA-256 values. Raw logs remain private. The prior combined saturation failure
+is still open.
+
+The narrowly scoped correction is to use the existing formal Test environment:
+UPnP/iptables dependencies, bridge netfilter settings and privileged test-binary
+execution. Preserve every current assertion and the failed run; do not modify
+Core, the receive adapter, test expectations or the peer/queue policy to address
+this setup error. Permission to correct this newly introduced workflow defect
+has been requested separately. No automatic retry has been dispatched.
