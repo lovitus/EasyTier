@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import select
 import signal
 import socket
@@ -17,6 +18,8 @@ from tun_trace import TunWriteTrace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'core-packet-path-probe'))
 from natural_cohort_lab import host_cpu_values
+
+CORE_LOG_LIMIT_BYTES = 2 * 1024 * 1024
 
 
 def echo(role,host='10.88.0.2'):
@@ -65,7 +68,7 @@ def run(args):
     names=['etfa'+str(os.getpid()),'etfb'+str(os.getpid())]
     relay_name='etfr'+str(os.getpid())
     all_names=names+[relay_name] if args.relay_core_dir else names
-    children=[];created=[];rows=[];control_fds=[];tun_trace=None;capture_stderr={}
+    children=[];created=[];rows=[];control_fds=[];tun_trace=None;capture_stderr={};core_logs=[]
     def record(kind,**data):
         row={'kind':kind,**data};rows.append(row)
         with (out/'results.jsonl').open('a') as f:f.write(json.dumps(row)+'\n')
@@ -74,11 +77,21 @@ def run(args):
                          capture_output=True,text=True,timeout=timeout)
         if check and p.returncode:raise RuntimeError(f'{argv}: {p.returncode}: {p.stderr}')
         return p
-    def spawn(argv,label,ns,env=None,pass_fds=(),wait_for=None):
-        with (out/(label+'.log')).open('w') as log:
+    def limit_core_files():
+        # Kernel-enforced even while the parent is waiting for traffic. A log
+        # storm must fail the case, not fill the runner or create a huge dump.
+        resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+        resource.setrlimit(resource.RLIMIT_FSIZE,(CORE_LOG_LIMIT_BYTES,CORE_LOG_LIMIT_BYTES))
+    def spawn(argv,label,ns,env=None,pass_fds=(),wait_for=None,core=False):
+        log_path=out/(label+'.log')
+        with log_path.open('w') as log:
             p=subprocess.Popen(['ip','netns','exec',ns]+list(map(str,argv)),stdout=log,
-                               stderr=subprocess.PIPE if wait_for else log,start_new_session=True,env=env,pass_fds=pass_fds)
+                               stderr=subprocess.PIPE if wait_for else log,start_new_session=True,env=env,pass_fds=pass_fds,
+                               preexec_fn=limit_core_files if core else None)
         children.append(p)
+        if core:
+            core_logs.append((p,log_path))
+            record('core_log_limit',pid=p.pid,log=log_path.name,bytes=CORE_LOG_LIMIT_BYTES)
         if wait_for:
             prefix=bytearray();capture_stderr[p.pid]=(out/(label+'.stderr'),prefix)
             deadline=time.monotonic()+10
@@ -113,6 +126,9 @@ def run(args):
         value={family:command(['ip','-j',family,'route','show','table','all']).stdout for family in ['-4','-6']}
         (out/(label+'.json')).write_text(json.dumps(value,indent=2));return value
     def snapshot(processes):
+        for _,log in core_logs:
+            if log.stat().st_size>=CORE_LOG_LIMIT_BYTES:
+                raise RuntimeError(f'Core log growth bound reached: {log.name}')
         result=[]
         for p in processes:
             fields=Path(f'/proc/{p.pid}/stat').read_text().rsplit(')',1)[1].split()
@@ -294,7 +310,7 @@ def run(args):
                     if i<2:argv+=['--peers',f'udp://{relay_hosts[i]}:35904']
                 elif i==0:argv+=['--peers',f'udp://{underlay_hosts[1]}:35904']
                 if args.inner_ipv6:argv+=['--ipv6',f'fd88::{i+1}/64']
-                cores.append(spawn(argv,f'r{round_id}-{arm}-core-{i}',ns,env))
+                cores.append(spawn(argv,f'r{round_id}-{arm}-core-{i}',ns,env,core=True))
             (out/f'r{round_id}-{arm}-core-pids.json').write_text(
                 json.dumps([core.pid for core in cores])
             )
@@ -466,6 +482,11 @@ def run(args):
                 if tun_trace:tun_trace.close()
             finally:
                 cleanup=[stop(p) for p in reversed(children)]
+                for process,log in core_logs:
+                    size=log.stat().st_size
+                    record('core_log_result',pid=process.pid,log=log.name,bytes=size,
+                           limit_bytes=CORE_LOG_LIMIT_BYTES,limit_reached=size>=CORE_LOG_LIMIT_BYTES,
+                           exit=process.returncode,sha256=hashlib.sha256(log.read_bytes()).hexdigest())
             for fd in control_fds:os.close(fd)
             for ns in reversed(created):
                 remaining=command(['ip','netns','pids',ns],check=False).stdout.strip()
@@ -476,6 +497,7 @@ def run(args):
             after_routes=routes('host-routes-after')
             record('root_routes',unchanged=before_routes==after_routes)
     assert before_routes==after_routes
+    assert all(log.stat().st_size<CORE_LOG_LIMIT_BYTES for _,log in core_logs),'Core log growth limit reached'
     assert all(x['exit']==0 and not x.get('killed') and not x.get('remaining') for x in cleanup)
     summary=[]
     for arm in ['stock','legacy','stage','gso']:
