@@ -416,6 +416,7 @@ jobs:
           mkdir -p packet-evidence packet-binaries
           sudo apt-get update -qq
           sudo apt-get install -y -qq iproute2 iputils-ping ethtool tcpdump binutils
+          rustup component add --toolchain 1.95 rustfmt
           timeout 90 git fetch --no-tags --depth=1 origin "$SOURCE_SHA"
           git worktree add --detach "$RUNNER_TEMP/packet-trace-source" "$SOURCE_SHA"
           python3 -m py_compile tools/mesh-udp-flush/lab.py tools/mesh-udp-flush/packet_trace_prepare.py

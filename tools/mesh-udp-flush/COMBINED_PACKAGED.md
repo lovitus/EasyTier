@@ -137,3 +137,14 @@ reproduce, the original failure remains unresolved rather than becoming PASS.
 Production queue bounds, scheduling, ciphertext, route selection and TUN
 behavior are unchanged. Original-host, WAN, sustained resources and mixed-flow
 acceptance remain open. There is no merge, deployment or release from this report.
+
+### Diagnostic setup failure, not a Core result
+
+Run `36262853021` at harness `7c10eccb52febbfb1bd75c46afeb2929a8d74e19`
+failed before compilation or traffic. The observation overlay applied, but
+Rust 1.95 lacked the rustfmt component. The new diagnostic job had omitted
+the component-install step already used by the historical experiment job.
+The failed log is retained; zero traffic cases ran. The correction installs
+that component explicitly and changes neither the Core source nor assertions.
+The next run is a repaired diagnostic execution, not a retry of the failed
+uninstrumented A/B to obtain a passing result.
