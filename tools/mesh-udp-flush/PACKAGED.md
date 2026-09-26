@@ -298,6 +298,60 @@ uses the existing `capacity_only` workflow; no workflow or Core build changes
 are needed. Status before dispatch: **NOT RUN**. Previous experiment throughput
 is not re-labelled as validation of these new assertions.
 
+### Completed locked head contract
+
+[Run 36230603039](https://github.com/lovitus/EasyTier/actions/runs/36230603039)
+is SUCCESS at research source `e3436d5c75a3ceba77268abbcb7d1c4826817554`.
+Only the existing capacity job ran; Core was not rebuilt. Artifact `10901843038`
+is 6031 bytes and its complete ZIP SHA-256 matches the GitHub digest:
+`82fe477dc89579469b5b0639424457789769701cde9fd08ee9fe50d053f0241d`.
+The artifact source SHA also matches the run. A local Perl/locale error interrupted
+the first checksum attempt; the same downloaded file was verified with the C
+locale. This was not a test failure, and no workflow or download was repeated.
+
+- The existing 20 capacity rows passed.
+- Forty IPv4/IPv6 byte-round-trip cases passed using the real GRO emission list
+  and GSO splitter, including checksum, flags, sequence, length and multiplicity.
+- The identical two-packet/one-emission predicate is false without a head and
+  true with the 8 KiB head for both families. This is a mechanism-level negative
+  control, not a claim that a production baseline test was executed here.
+- Both prepend fixtures move the promoted allocation from slot 1 to slot 0,
+  even though another allocation has the same capacity. Original-slot recovery
+  would select the wrong buffer; allocation-identity recovery succeeds.
+- Invalid TCP checksums stay invalid and unmerged; oversized packets bypass
+  promotion; shared-slab tail bytes remain intact.
+- A real GRO `InvalidInput` preserves its error kind and permits head recovery.
+- One thousand alternating-family reuses retain the same allocation address,
+  8192-byte capacity and empty recovered length. No long-duration leak claim.
+
+The bounded benefit is important and remains visible rather than being hidden
+by larger pools. For sequential 1320-byte payloads in either address family:
+
+| Input packets | Emission entries with one 8 KiB head |
+|---:|---:|
+| 1 | 1 |
+| 2 | 1 |
+| 4 | 1 |
+| 8 | 3 |
+| 32 | 27 |
+| 128 | 123 |
+
+These are library emission entries, not observed syscalls in this test. The
+head fits six such payloads; it does not turn an entire large cohort into one
+write. A reversed narrow pair still emits two packets. This limitation is
+accepted to keep allocation and ownership narrow. It does not invalidate the
+earlier matched-rate 18.4% experimental CPU/GiB improvement, but that historical
+gain remains tied to its different artifact/workload and must be re-measured
+on any future integrated candidate.
+
+The next production proposal is confined to the Linux offload sink: one head,
+promotion of at most one already-queued TCP packet, identity-based recovery
+after the unchanged `send_multiple` future completes, and existing error
+propagation with no replay. No dependency upgrade, queue growth, timer, receive
+scheduler change, routing change or non-Linux implementation is bundled. Exact
+production lifecycle/error tests and artifact A/B acceptance are still required;
+this standalone tool does not prove those gates.
+
 ## Current task cursor
 
 Production candidate: PR #9, `3a1f3d9f`, still unmerged and not deployed to an
@@ -489,7 +543,11 @@ in a profile does not justify discarding those prior comparisons.
   overall performance task complete or describe this as a released fix.
 - Completed source audit: the bounded TUN-head experiment preserves the existing
   write future/error boundary; upstream 2.8.11 does not remove its capacity limit.
-- Unique next step: run the small locked head contract on GitHub and record the
-  byte/ownership/negative-control evidence, then decide the minimal production
-  batch. No protocol rewrite, queue growth, sleep, ICMP exemption or whole-batch
-  replay is authorized by these profiles. Production remains frozen.
+- Locked head contract passed with verified artifact evidence above. The source
+  audit and prior actual-Core measurements justify a separate bounded Linux TUN
+  integration batch, not a dependency upgrade or another receive-ring rewrite.
+- Unique next step: implement that narrow production batch on a new branch based
+  on the frozen UDP candidate, preserving `send_multiple` and its partial-write,
+  cancellation and error boundaries; verify exact code before artifact A/B.
+  No protocol rewrite, queue growth, sleep, ICMP exemption or whole-batch replay.
+  PR #9 remains independently reviewable and unchanged.
