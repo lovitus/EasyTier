@@ -9,7 +9,9 @@ use anyhow::Context;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use dashmap::DashMap;
-use futures::{StreamExt, stream::FuturesUnordered};
+#[cfg(any(not(target_os = "linux"), test))]
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use rand::{Rng, SeedableRng};
 use zerocopy::{AsBytes, FromBytes};
 
@@ -312,6 +314,7 @@ fn get_zcpacket_from_buf(buf: BytesMut, allow_stun: bool) -> Result<ZCPacket, Tu
     Ok(zc_packet)
 }
 
+#[cfg(not(target_os = "linux"))]
 #[instrument]
 async fn forward_from_ring_to_udp(
     mut ring_recv: RingStream,
@@ -493,7 +496,7 @@ impl UdpTunnelListenerData {
             return;
         }
 
-        let ring_for_send_udp = Arc::new(RingTunnel::new(128));
+        let ring_for_send_udp = Arc::new(RingTunnel::new(UDP_SEND_RING_CAPACITY));
         let ring_for_recv_udp = Arc::new(RingTunnel::new(128));
         tracing::debug!(
             ?ring_for_send_udp,
@@ -543,7 +546,7 @@ impl UdpTunnelListenerData {
 
         let conn = Box::new(TunnelWrapper::new_with_associate_data(
             Box::new(RingStream::new(ring_for_recv_udp)),
-            Box::new(RingSink::new(ring_for_send_udp)),
+            make_udp_send_sink(ring_for_send_udp),
             Some(TunnelInfo {
                 tunnel_type: "udp".to_owned(),
                 local_addr: Some(self.local_url.clone().into()),
@@ -1192,7 +1195,7 @@ impl UdpTunnelConnector {
         conn_id: u32,
         stealth: std::sync::Arc<crate::tunnel::stealth::OuterSessionState>,
     ) -> Result<Box<dyn super::Tunnel>, super::TunnelError> {
-        let ring_for_send_udp = Arc::new(RingTunnel::new(128));
+        let ring_for_send_udp = Arc::new(RingTunnel::new(UDP_SEND_RING_CAPACITY));
         let ring_for_recv_udp = Arc::new(RingTunnel::new(128));
         tracing::debug!(
             ?ring_for_send_udp,
@@ -1278,7 +1281,7 @@ impl UdpTunnelConnector {
 
         Ok(Box::new(TunnelWrapper::new_with_associate_data(
             Box::new(RingStream::new(ring_for_recv_udp)),
-            Box::new(RingSink::new(ring_for_send_udp)),
+            make_udp_send_sink(ring_for_send_udp),
             Some(TunnelInfo {
                 tunnel_type: "udp".to_owned(),
                 local_addr: Some(
@@ -1448,6 +1451,38 @@ impl super::TunnelConnector for UdpTunnelConnector {
     fn require_stealth(&mut self) {
         Self::require_stealth(self);
     }
+}
+
+#[cfg(target_os = "linux")]
+#[path = "udp_gso.rs"]
+mod udp_gso;
+
+#[cfg(target_os = "linux")]
+const UDP_SEND_RING_CAPACITY: usize = udp_gso::RING;
+#[cfg(not(target_os = "linux"))]
+const UDP_SEND_RING_CAPACITY: usize = 128;
+
+fn make_udp_send_sink(ring: Arc<RingTunnel>) -> Box<dyn crate::tunnel::ZCPacketSink + Unpin> {
+    #[cfg(target_os = "linux")]
+    {
+        udp_gso::make(ring)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Box::new(RingSink::new(ring))
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[instrument]
+async fn forward_from_ring_to_udp(
+    ring_recv: RingStream,
+    socket: &Arc<UdpSocket>,
+    addr: &SocketAddr,
+    conn_id: u32,
+    stealth: &std::sync::Arc<crate::tunnel::stealth::OuterSessionState>,
+) -> Option<TunnelError> {
+    udp_gso::forward(ring_recv, socket, addr, conn_id, stealth).await
 }
 
 #[cfg(test)]
