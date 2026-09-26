@@ -87,3 +87,18 @@ pressure on both receive paths; it is not a new performance comparison.
 
 No production patch, queue enlargement, control-packet prioritization,
 `recv_many`/`recvmmsg` revival, merge or release follows from this result.
+
+### Mixed-flow follow-up prepared
+
+The existing workflow now accepts `packet_trace_reuse=true` with
+`extended_tun=true`. It downloads only the pinned diagnostic binary/evidence
+artifacts on the hosted runner, checks both full archive digests, originating
+run and SHA, and all three executable digests before execution. Compiler,
+toolchain preparation, Rust cache and Core build steps are skipped. No new
+binary artifact duplicates the retained payload.
+
+The same bounded lab enables its existing concurrent opposite-direction
+transfer. At most six cases run; the first assertion failure stops the batch.
+Strict ICMP/integrity assertions and the log/cleanup bounds are unchanged.
+This is a different outstanding load shape, not another unchanged single-flow
+retry. Outcomes are pending and must not be inferred from the prior six passes.

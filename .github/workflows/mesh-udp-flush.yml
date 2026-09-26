@@ -38,6 +38,10 @@ name: Actual Core UDP flush-boundary experiment
         description: Observe packet loss on pinned integrated Core 3166ab67; diagnostics only, no performance acceptance
         type: boolean
         default: false
+      packet_trace_reuse:
+        description: Reuse immutable integrated diagnostic binaries without rebuilding; extended_tun enables mixed flow
+        type: boolean
+        default: false
       paced_tun:
         description: Reuse existing candidate for fixed-load inner-IPv6 mixed-flow comparison; never rebuild Core
         type: boolean
@@ -53,7 +57,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   core-flush:
-    if: ${{ !inputs.profile_only && !inputs.paced_tun && !inputs.packet_trace_current }}
+    if: ${{ !inputs.profile_only && !inputs.paced_tun && !inputs.packet_trace_current && !inputs.packet_trace_reuse }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -247,7 +251,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
   profile-only:
-    if: ${{ (inputs.profile_only || inputs.paced_tun) && !inputs.packet_trace_current }}
+    if: ${{ (inputs.profile_only || inputs.paced_tun) && !inputs.packet_trace_current && !inputs.packet_trace_reuse }}
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -388,7 +392,7 @@ jobs:
           if-no-files-found: error
 
   integrated-packet-trace:
-    if: ${{ inputs.packet_trace_current }}
+    if: ${{ inputs.packet_trace_current || inputs.packet_trace_reuse }}
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     env:
@@ -403,6 +407,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Prepare the same maintained musl build prerequisites
+        if: ${{ !inputs.packet_trace_reuse }}
         uses: ./.github/actions/prepare-build
         with:
           target: x86_64-unknown-linux-musl
@@ -410,6 +415,7 @@ jobs:
           gui: 'false'
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Prepare pinned source and observation-only overlay
+        if: ${{ !inputs.packet_trace_reuse }}
         shell: bash
         run: |
           set -euo pipefail
@@ -433,6 +439,7 @@ jobs:
           lscpu > packet-evidence/cpu.txt
           rustc +1.95 -Vv > packet-evidence/toolchain.txt
       - uses: Swatinem/rust-cache@v2
+        if: ${{ !inputs.packet_trace_reuse }}
         with:
           prefix-key: profiling-comparator
           shared-key: linux-x86_64-musl
@@ -440,6 +447,7 @@ jobs:
           cache-targets: true
           cache-on-failure: true
       - name: Build only the diagnostic Core and matching CLI
+        if: ${{ !inputs.packet_trace_reuse }}
         shell: bash
         run: |
           set -euo pipefail
@@ -453,16 +461,86 @@ jobs:
           sha256sum packet-binaries/* > packet-evidence/binaries.sha256
           file packet-binaries/* > packet-evidence/binary-format.txt
           readelf -n packet-binaries/easytier-core > packet-evidence/build-id.txt
-      - name: Localize the first saturated IPv6 control-progress failure
+      - name: Reuse and verify immutable diagnostic binaries without compiling
+        if: ${{ inputs.packet_trace_reuse }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p packet-evidence packet-binaries
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq iproute2 iputils-ping ethtool tcpdump binutils
+          python3 - <<'PY'
+          import hashlib, json, os, shutil, sys, zipfile
+          from pathlib import Path
+          sys.path.insert(0, 'tools/mesh-udp-flush')
+          from exact_artifact_lab import download
+          root = Path('packet-evidence')
+          original_harness = 'cfd1dc2ec1157c6d1449eed845b97eedf9a30c69'
+          binary_sha = 'b6c7fd95e007339644d16a104bc9a70a1e5f449f86937cddaa0c02d3f46be165'
+          evidence_sha = 'ee5f413bc2435a2d9f40c8a76212eaee418ab0a20526f25bb67c93b323172b6e'
+          expected = {
+              'easytier-core': 'b165f67da30203ae2eea86c05e5f4b157552d5168c23710ae39c75d518006680',
+              'easytier-cli': 'b462eb22b7a9d54b0eab6c69892c4af6c5f499d78a7ce492087963f2a92b27e0',
+              'probe': '62596a8dd4f53e538c0696e3f746d6010e03758f62fe00822510bc8d15c61ab0',
+          }
+          archive = root / 'reused-binaries.zip'
+          metadata = download(10912354766, archive, binary_sha)
+          assert metadata['workflow_run']['id'] == 36263145990
+          assert metadata['workflow_run']['head_sha'] == original_harness
+          with zipfile.ZipFile(archive) as zipped:
+              assert set(zipped.namelist()) == set(expected)
+              for name, sha in expected.items():
+                  target = Path('packet-binaries') / name
+                  with zipped.open(name) as source, target.open('xb') as destination:
+                      shutil.copyfileobj(source, destination)
+                  with target.open('rb') as stream:
+                      assert hashlib.file_digest(stream, 'sha256').hexdigest() == sha
+                  target.chmod(0o755)
+          archive.unlink()
+          archive = root / 'reused-evidence.zip'
+          metadata = download(10912384647, archive, evidence_sha)
+          assert metadata['workflow_run']['id'] == 36263145990
+          assert metadata['workflow_run']['head_sha'] == original_harness
+          with zipfile.ZipFile(archive) as zipped:
+              assert zipped.read('core-source-sha.txt').decode().strip() == os.environ['SOURCE_SHA']
+              assert zipped.read('harness-sha.txt').decode().strip() == original_harness
+              build = root / 'reused-build'
+              build.mkdir()
+              for name in ('core-source-sha.txt', 'harness-sha.txt', 'overlay.json',
+                           'observation-only.patch', 'binaries.sha256', 'build-id.txt', 'toolchain.txt'):
+                  (build / name).write_bytes(zipped.read(name))
+          archive.unlink()
+          (root / 'reuse.json').write_text(json.dumps({
+              'source': os.environ['SOURCE_SHA'], 'original_harness': original_harness,
+              'harness': os.environ['GITHUB_SHA'], 'binary_artifact': 10912354766,
+              'binary_archive_sha256': binary_sha, 'evidence_artifact': 10912384647,
+              'evidence_archive_sha256': evidence_sha, 'binaries': expected,
+              'core_rebuilt': False, 'performance_evidence': False,
+          }, indent=2))
+          PY
+          python3 -m py_compile tools/mesh-udp-flush/lab.py
+          uname -a > packet-evidence/kernel.txt
+          lscpu > packet-evidence/cpu.txt
+          sha256sum packet-binaries/* > packet-evidence/binaries.sha256
+          readelf -n packet-binaries/easytier-core > packet-evidence/build-id.txt
+          printf '%s\n' "$GITHUB_SHA" > packet-evidence/harness-sha.txt
+          printf '%s\n' 'Reused diagnostic bytes; no Core build. Packet correlation only, not performance acceptance.' > packet-evidence/BOUNDARY.txt
+      - name: Localize the first saturated IPv6 control-progress failure
+        env:
+          MIXED_FLOW: ${{ inputs.extended_tun }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          extra=()
+          if [[ "$MIXED_FLOW" == true ]]; then extra+=(--mixed-flow); fi
           for index in 0 1 2 3 4 5; do
             sudo timeout --signal=TERM --kill-after=10s 180s python3 tools/mesh-udp-flush/lab.py \
               --stock packet-binaries --candidate packet-binaries --order stock \
               --unpaced-probe packet-binaries/probe --transfer-bytes 1073741824 \
               --inner-ipv6 --network-counters --icmp-capture --packet-trace \
-              --output "packet-evidence/case-$index"
+              --output "packet-evidence/case-$index" "${extra[@]}"
           done
       - name: Preserve bounded failure evidence and exact diagnostic binaries
         if: always()
@@ -480,7 +558,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
       - uses: actions/upload-artifact@v5
-        if: always()
+        if: ${{ always() && !inputs.packet_trace_reuse }}
         with:
           name: integrated-packet-diagnostic-binaries-${{ github.sha }}
           path: packet-binaries/
