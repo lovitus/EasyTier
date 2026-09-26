@@ -45,6 +45,10 @@ def run(args):
     mixed_target=f'[{inner_host}]:35906' if args.inner_ipv6 else f'{inner_host}:35906'
     out=Path(args.output).resolve();out.mkdir(parents=True,exist_ok=False)
     binaries={'stock':Path(args.stock).resolve(),'candidate':Path(args.candidate).resolve()}
+    if args.server_core_dir:
+        binaries['server']=args.server_core_dir.resolve()
+    underlay_ips=[f'2001:db8:88::{i+1}' if args.underlay_ipv6 else f'192.0.2.{i+1}' for i in range(2)]
+    underlay_hosts=[f'[{ip}]' if ':' in ip else ip for ip in underlay_ips]
     loadgen=Path(__file__).with_name('paced_probe.py').resolve()
     if args.unpaced_probe:
         loadgen=Path(args.unpaced_probe).resolve()
@@ -153,11 +157,14 @@ def run(args):
         for ns in names:
             command(['ip','netns','add',ns]);created.append(ns)
             command(['ip','-n',ns,'link','set','lo','up'])
-            disabled='0' if args.inner_ipv6 else '1'
+            disabled='0' if args.inner_ipv6 or args.underlay_ipv6 else '1'
             command(['sysctl','-qw',f'net.ipv6.conf.all.disable_ipv6={disabled}',f'net.ipv6.conf.default.disable_ipv6={disabled}'],ns)
         command(['ip','link','add','under0','netns',names[0],'type','veth','peer','name','under0','netns',names[1]])
         for i,ns in enumerate(names):
-            command(['ip','-n',ns,'addr','add',f'192.0.2.{i+1}/30','dev','under0'])
+            if args.underlay_ipv6:
+                command(['ip','-n',ns,'-6','addr','add',f'{underlay_ips[i]}/64','dev','under0','nodad'])
+            else:
+                command(['ip','-n',ns,'addr','add',f'{underlay_ips[i]}/30','dev','under0'])
             command(['ip','-n',ns,'link','set','under0','mtu','1500','up'])
             # Match all arms; do not rely on veth carrying an existing GSO skb.
             command(['ethtool','-K','under0','tx-udp-segmentation','off','tso','off','gro','on'],ns)
@@ -166,21 +173,22 @@ def run(args):
             expected={'tcp-segmentation-offload':'off','tx-udp-segmentation':'off','generic-receive-offload':'on'}
             actual={k.strip():v.strip().split()[0] for line in features.splitlines() if ':' in line for k,v in [line.split(':',1)] if k.strip() in expected}
             assert actual==expected,actual
-        record('topology',endpoints=[{'role':role,'namespace':ns,'underlay':f'192.0.2.{i+1}',
+        record('topology',endpoints=[{'role':role,'namespace':ns,'underlay':underlay_ips[i],
                                      'overlay':f'10.88.0.{i+1}'}
                                     for i,(role,ns) in enumerate(zip(['client','server'],names))],
                scope='same GitHub runner, two network namespaces, veth; not physical-host/WAN evidence',
                profiled=args.profile,unpaced=bool(args.unpaced_probe),inner_ipv6=args.inner_ipv6,mixed_flow=args.mixed_flow,
+               underlay_ipv6=args.underlay_ipv6,
                paced_mbps=None if args.unpaced_probe else args.paced_mbps)
         if args.unpaced_probe and not args.profile and not args.tun_trace and args.tun_head_capacity is None:
             for repeat in range(3):
                 for direction in ['upload','download']:
                     label=f'direct-{repeat}-{direction}'
-                    server=spawn(load_command+['server','--listen','192.0.2.2:35902','--sessions','1',
+                    server=spawn(load_command+['server','--listen',f'{underlay_hosts[1]}:35902','--sessions','1',
                                                '--timeout-seconds',str(transfer_timeout)],label,names[1])
                     time.sleep(.2)
                     host_before=host_cpu()
-                    result=command(load_command+['client','--target','192.0.2.2:35902','--direction',direction,
+                    result=command(load_command+['client','--target',f'{underlay_hosts[1]}:35902','--direction',direction,
                                                  '--bytes',str(args.transfer_bytes),'--timeout-seconds',
                                                  str(transfer_timeout)],names[0],check=False,timeout=transfer_timeout+10)
                     host_after=host_cpu()
@@ -204,6 +212,7 @@ def run(args):
             path=binaries['stock' if arm=='stock' else 'candidate'];cli=path/'easytier-cli'
             cores=[]
             for i,ns in enumerate(names):
+                endpoint_path=binaries['server'] if i==1 and 'server' in binaries else path
                 cfg=out/f'r{round_id}-cfg-{i}';cfg.mkdir();home=cfg/'home';home.mkdir()
                 metrics_dir=cfg/'issue4-flush-metrics';metrics_dir.mkdir()
                 tun_metrics_dir=cfg/'issue4-tun-metrics'
@@ -216,15 +225,15 @@ def run(args):
                     env.update({'ET_ISSUE4_TUN_HEAD_CAPACITY':str(args.tun_head_capacity),
                                 'ET_ISSUE4_TUN_METRICS_DIR':str(tun_metrics_dir)})
                 if args.packet_trace:env['ET_ISSUE4_PACKET_TRACE']='1'
-                argv=[path/args.core_name,'--config-dir',cfg,'--network-name','flush-lab',
+                argv=[endpoint_path/args.core_name,'--config-dir',cfg,'--network-name','flush-lab',
                       '--network-secret','isolated-test-only','--ipv4',f'10.88.0.{i+1}',
-                      '--listeners',f'udp://192.0.2.{i+1}:35904','--hostname',f'flush-{i}',
+                      '--listeners',f'udp://{underlay_hosts[i]}:35904','--hostname',f'flush-{i}',
                       '--rpc-portal','127.0.0.1:35903','--mtu','1380','--dev-name','tun0',
-                      '--disable-ipv6',str(not args.inner_ipv6).lower(),'--disable-p2p','true','--disable-upnp','true',
+                      '--disable-ipv6',str(not (args.inner_ipv6 or args.underlay_ipv6)).lower(),'--disable-p2p','true','--disable-upnp','true',
                       '--disable-encryption','false','--encryption-algorithm','aes-gcm',
                       '--compression','none','--accept-dns','false',
                       '--secure-mode',str(stealth).lower(),'--stealth-mode',str(stealth).lower()]
-                if i==0:argv+=['--peers','udp://192.0.2.2:35904']
+                if i==0:argv+=['--peers',f'udp://{underlay_hosts[1]}:35904']
                 if args.inner_ipv6:argv+=['--ipv6',f'fd88::{i+1}/64']
                 cores.append(spawn(argv,f'r{round_id}-{arm}-core-{i}',ns,env))
             (out/f'r{round_id}-{arm}-core-pids.json').write_text(
@@ -431,6 +440,8 @@ if __name__=='__main__':
         parser=argparse.ArgumentParser()
         for name in ['stock','candidate','output']:parser.add_argument('--'+name,required=True)
         parser.add_argument('--core-name',default='easytier-core')
+        parser.add_argument('--server-core-dir',type=Path,help='optional independently identified server package for mixed-version checks')
+        parser.add_argument('--underlay-ipv6',action='store_true',help='IPv6-only veth underlay and explicit IPv6 UDP listener/peer URLs')
         parser.add_argument('--order',help='comma-separated diagnostic arms; defaults to the full interleaved matrix')
         parser.add_argument('--stealth',action='store_true',help='enable existing secure/Stealth configuration for explicitly selected arms')
         parser.add_argument('--inner-ipv6',action='store_true',help='use Core IPv6 configuration for inner application traffic; underlay remains IPv4')

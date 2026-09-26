@@ -124,16 +124,29 @@ def run(root, phase, probe):
     # Keep the lab's stock arm: it does not enable or require diagnostic source
     # overlays. The actual arm/source identity is recorded outside that lab.
     order = ['baseline', 'candidate', 'candidate', 'baseline', 'baseline', 'candidate']
-    cases = [(family, stealth, label) for family in (4, 6)
+    cases = [(4, family, stealth, label, label) for family in (4, 6)
              for stealth in ((False, True) if phase == 'fixed' else (False,)) for label in order]
     if phase == 'trace':
-        cases = [(4, True, 'candidate')]
-    for index, (family, stealth, label) in enumerate(cases):
-        output = suite / f'{index:02d}-{label}-v{family}-stealth{int(stealth)}'
+        cases = [(4, 4, True, 'candidate', 'candidate')]
+    if phase == 'compatibility':
+        cases = [(outer, inner, stealth, client, server)
+                 for outer in (4, 6) for inner in (4, 6) for stealth in (False, True)
+                 for client, server in [('baseline', 'baseline'), ('baseline', 'candidate'),
+                                        ('candidate', 'baseline'), ('candidate', 'candidate')]
+                 if outer == 6 or client != server]
+    for index, (outer, family, stealth, label, server_label) in enumerate(cases):
+        suffix = f'{label}-v{family}-stealth{int(stealth)}'
+        if phase == 'compatibility':
+            suffix = f'{label}-to-{server_label}-outer{outer}-' + suffix
+        output = suite / f'{index:02d}-{suffix}'
         binaries = root / 'binaries' / label
         command = [sys.executable, str(lab), '--stock', str(binaries), '--candidate', str(binaries),
                    '--core-name', 'easytier-core-no-leaf', '--order', 'stock', '--output', str(output),
                    '--network-counters']
+        if outer == 6:
+            command.append('--underlay-ipv6')
+        if server_label != label:
+            command += ['--server-core-dir', str(root / 'binaries' / server_label)]
         if family == 6:
             command.append('--inner-ipv6')
         if stealth:
@@ -147,7 +160,7 @@ def run(root, phase, probe):
                        '-o', str(suite / 'sendmsg'), *command]
         with (suite / f'{index:02d}.log').open('w') as log:
             completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=360)
-        row = {'label': label, 'inner_ip_family': family, 'underlay_ip_family': 4,
+        row = {'label': label, 'server_label': server_label, 'inner_ip_family': family, 'underlay_ip_family': outer,
                'stealth': stealth, 'exit_code': completed.returncode, 'output': str(output.relative_to(root))}
         results.append(row)
         (suite / 'runs.json').write_text(json.dumps(results, indent=2))
@@ -166,7 +179,7 @@ def run(root, phase, probe):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('phase', choices=['prepare', 'fixed', 'trace', 'saturation'])
+    parser.add_argument('phase', choices=['prepare', 'fixed', 'trace', 'saturation', 'compatibility'])
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--probe', type=Path)
     args = parser.parse_args()

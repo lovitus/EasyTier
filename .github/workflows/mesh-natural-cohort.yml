@@ -18,6 +18,10 @@ name: Mesh natural-cohort kernel mechanism
         description: 'Optional JSON: baseline and candidate each contain immutable artifact id and source sha; no Core rebuild'
         type: string
         default: ''
+      artifact_compatibility_only:
+        description: Reuse the packages for IPv6-underlay and mixed-version checks only
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths:
@@ -214,34 +218,46 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ARTIFACT_PAIR: ${{ inputs.artifact_pair }}
+          COMPATIBILITY_ONLY: ${{ inputs.artifact_compatibility_only }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p exact-evidence
           sudo apt-get update -qq
           sudo apt-get install -y -qq iproute2 iputils-ping ethtool strace binutils
-          rustup toolchain install 1.95.0 --profile minimal
           python3 -m py_compile tools/mesh-udp-flush/exact_artifact_lab.py
           python3 tools/mesh-udp-flush/exact_artifact_lab.py prepare --output exact-evidence
-          rustc +1.95.0 --edition 2024 -O tools/easytier-perf-probe.rs -o exact-evidence/probe
-          sha256sum exact-evidence/probe > exact-evidence/probe.sha256
+          if [[ "$COMPATIBILITY_ONLY" != 'true' ]]; then
+            rustup toolchain install 1.95.0 --profile minimal
+            rustc +1.95.0 --edition 2024 -O tools/easytier-perf-probe.rs -o exact-evidence/probe
+            sha256sum exact-evidence/probe > exact-evidence/probe.sha256
+          fi
           uname -a > exact-evidence/kernel.txt
           lscpu > exact-evidence/cpu.txt
       - name: Interleaved fixed-load, dual-stack overlay and Stealth checks
+        if: ${{ !inputs.artifact_compatibility_only }}
         shell: bash
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py fixed --output exact-evidence
       - name: Separate low-rate syscall activation evidence
+        if: ${{ !inputs.artifact_compatibility_only }}
         shell: bash
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 240s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py trace --output exact-evidence
       - name: Unpaced comparison with unchanged control-progress assertions
+        if: ${{ !inputs.artifact_compatibility_only }}
         shell: bash
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py saturation --output exact-evidence --probe exact-evidence/probe
+      - name: IPv6-underlay and both mixed-version placements
+        if: ${{ inputs.artifact_compatibility_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py compatibility --output exact-evidence
       - name: Preserve scoped evidence
         if: always()
         shell: bash

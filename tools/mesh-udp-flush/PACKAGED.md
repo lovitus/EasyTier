@@ -135,3 +135,22 @@ to resolve every Core performance bottleneck or reach 10 Gbit/s.
 Next: extend the existing package-only lab to IPv6-underlay and both placements
 of mixed baseline/candidate peers, reusing these same immutable packages. Keep
 the production source frozen and do not weaken existing assertions.
+
+## Compatibility-only input extension
+
+`artifact_compatibility_only=true` reuses the same verified packages and skips
+the already completed performance/trace phases. It adds no Core build and no
+new product configuration. The existing lab now accepts an optional server
+package directory and an IPv6-only underlay; all previous defaults and assertions
+remain intact. IPv6 underlay assigns only `2001:db8:88::1/64` and `::2/64` to the
+isolated veths and uses explicit bracketed IPv6 listener/peer URLs. Namespace
+IPv6 is enabled independently of the inner application address family.
+
+The 24-case functional matrix covers both inner families and Stealth states:
+both mixed-version placements over IPv4, plus baseline/baseline,
+baseline/candidate, candidate/baseline and candidate/candidate over IPv6.
+Pure-version IPv4 cases already measured above are not repeated. The binary
+record includes the independently selected server; the run record identifies
+both package labels. No rate gain is claimed from this compatibility matrix.
+This extends the existing E2E inputs, not a new mock/test framework or a claim
+that baseline compatibility is defective. Results remain pending execution.
