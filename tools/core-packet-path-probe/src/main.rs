@@ -13,6 +13,7 @@ const DEFAULT_PACKETS: usize = 300_000;
 const DEFAULT_PAYLOAD_BYTES: usize = 1360;
 const DEFAULT_ROUTE_WORK: usize = 64;
 const DEFAULT_ROUNDS: usize = 3;
+// Historical synthetic model, not the capacity of a split UDP receive slice.
 const PRODUCTION_FRAME_CAPACITY: usize = 4096;
 
 #[derive(Clone, Copy, Debug)]
@@ -310,6 +311,10 @@ fn median(mut values: Vec<f64>) -> f64 {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    if std::env::args().any(|arg| arg == "--capacity-contract") {
+        capacity_contract();
+        return;
+    }
     let packets = parse_value("packets", DEFAULT_PACKETS);
     let payload_bytes = parse_value("payload-bytes", DEFAULT_PAYLOAD_BYTES);
     let route_work = parse_value("route-work", DEFAULT_ROUTE_WORK);
@@ -352,5 +357,60 @@ async fn main() {
             max_gro_frame_bytes,
             expanded_gro_frames,
         );
+    }
+}
+
+// Hold bytes, order and cohort constant; vary only the first packet capacity.
+// This is an eligibility experiment, not a throughput benchmark.
+fn capacity_contract() {
+    const PAYLOAD: usize = 1320;
+    const AEAD_TAIL: usize = 28;
+    for count in [1, 2, 4, 8, 32] {
+        for head_capacity in [0, 4096, 8192, 65545] {
+            let mut frames: Vec<Vec<u8>> = (0..count)
+                .map(|sequence| {
+                    let mut frame = build_tcp_packet(sequence as u64, PAYLOAD, 0).frame;
+                    // Model split-at-length followed by in-place AEAD truncate.
+                    let len = frame.len();
+                    frame.resize(len + AEAD_TAIL, 0);
+                    let mut frame = frame.into_boxed_slice().into_vec();
+                    frame.truncate(len);
+                    assert_eq!(frame.capacity(), len + AEAD_TAIL);
+                    frame
+                })
+                .collect();
+            if head_capacity != 0 {
+                let mut head = Vec::with_capacity(head_capacity);
+                head.extend_from_slice(&frames[0]);
+                frames[0] = head;
+            }
+            let actual_capacity = frames[0].capacity();
+            let headers = VIRTIO_NET_HDR_LEN + IPV4_HEADER_LEN + TCP_HEADER_LEN;
+            let expected_payload: Vec<u8> = frames
+                .iter()
+                .flat_map(|frame| frame[headers..].iter().copied())
+                .collect();
+            let mut gro = GROTable::new();
+            gro.apply_gro(&mut frames, VIRTIO_NET_HDR_LEN, false)
+                .expect("GRO rejected valid fixture");
+            // tun-rs intentionally requires one extra offset of tailroom.
+            let expected_segments =
+                count.min((actual_capacity - headers - VIRTIO_NET_HDR_LEN) / PAYLOAD);
+            let head_payload = &frames[0][headers..];
+            assert_eq!(head_payload.len(), expected_segments * PAYLOAD);
+            assert_eq!(head_payload, &expected_payload[..head_payload.len()]);
+            for (index, frame) in frames.iter().enumerate().skip(1) {
+                assert_eq!(frame.len(), headers + PAYLOAD);
+                assert_eq!(
+                    &frame[headers..],
+                    &expected_payload[index * PAYLOAD..(index + 1) * PAYLOAD]
+                );
+            }
+            println!(
+                "{{\"cohort\":{count},\"head_capacity\":{actual_capacity},\"head_segments\":{},\"head_frame_bytes\":{},\"payload_verified\":true}}",
+                head_payload.len() / PAYLOAD,
+                frames[0].len()
+            );
+        }
     }
 }

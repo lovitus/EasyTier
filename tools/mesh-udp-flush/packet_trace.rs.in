@@ -1,0 +1,56 @@
+// Isolated diagnostics only. Fingerprints cover ciphertext, never keys.
+fn issue4_packet_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("ET_ISSUE4_PACKET_TRACE").as_deref() == Ok("1")
+            && std::env::var("ET_ISSUE4_EXPERIMENT").as_deref() == Ok("ISOLATED_LAB_ONLY")
+    })
+}
+
+pub(crate) fn issue4_icmp_identity(packet: &ZCPacket) -> Option<(u8, u16, u16)> {
+    if !issue4_packet_trace_enabled() {
+        return None;
+    }
+    let p = packet.payload();
+    if p.len() != 104 || p[0] >> 4 != 6 || p[6] != 58 || !matches!(p[40], 128 | 129) {
+        return None;
+    }
+    Some((
+        p[40],
+        u16::from_be_bytes([p[44], p[45]]),
+        u16::from_be_bytes([p[46], p[47]]),
+    ))
+}
+
+pub(crate) fn issue4_packet_trace(
+    stage: &str,
+    packet: &ZCPacket,
+    identity: Option<(u8, u16, u16)>,
+) {
+    use std::hash::Hasher;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static RECORDS: AtomicUsize = AtomicUsize::new(0);
+    if !issue4_packet_trace_enabled() {
+        return;
+    }
+    // Fixture: 104-byte IPv6 echo plus the locked 28-byte AES-GCM tail.
+    // Equal-sized non-ICMP packets are retained for correlation, not classified.
+    if identity.is_none() && packet.payload().len() != 132 {
+        return;
+    }
+    let count = RECORDS.fetch_add(1, Ordering::Relaxed);
+    if count >= 8192 {
+        if count == 8192 {
+            eprintln!("ISSUE4_PACKET_TRACE_OVERFLOW");
+        }
+        return;
+    }
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    hash.write(packet.payload());
+    eprintln!(
+        "ISSUE4_PACKET stage={} fingerprint={:016x} icmp={:?}",
+        stage,
+        hash.finish(),
+        identity
+    );
+}

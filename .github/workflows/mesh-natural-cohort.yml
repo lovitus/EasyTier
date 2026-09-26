@@ -1,0 +1,194 @@
+name: Mesh natural-cohort kernel mechanism
+'on':
+  workflow_dispatch:
+    inputs:
+      capacity_only:
+        description: Run only the locked small GRO capacity contract, without Core or network setup
+        type: boolean
+        default: true
+      recv_budget_only:
+        description: Run the exact-Core-version bounded receive scheduling model only
+        type: boolean
+        default: false
+      udp_receive_only:
+        description: Compare real nonblocking UDP receive syscalls without Core
+        type: boolean
+        default: false
+  push:
+    branches: ['codex/issue4-natural-cohort']
+    paths:
+      - '.github/workflows/mesh-natural-cohort.yml'
+      - 'tools/core-packet-path-probe/**'
+permissions:
+  contents: read
+concurrency:
+  group: mesh-natural-cohort-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  capacity-contract:
+    if: ${{ inputs.capacity_only && !inputs.recv_budget_only && !inputs.udp_receive_only }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Run locked standalone GRO capacity experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p capacity-evidence
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mold
+          mold --version > capacity-evidence/linker.txt
+          rustup toolchain install 1.95.0 --profile minimal
+          cp tools/core-packet-path-probe/Cargo.lock capacity-evidence/Cargo.lock
+          printf '%s\n' "$GITHUB_SHA" > capacity-evidence/source-sha.txt
+          timeout 300 cargo +1.95.0 run --locked --release \
+            --manifest-path tools/core-packet-path-probe/Cargo.toml \
+            --bin core-packet-path-probe -- --capacity-contract \
+            > capacity-evidence/results.jsonl 2> capacity-evidence/build.log
+          git diff --exit-code -- tools/core-packet-path-probe/Cargo.lock
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: gro-capacity-${{ github.sha }}
+          path: capacity-evidence/
+          if-no-files-found: error
+          retention-days: 30
+  kernel-mechanism:
+    if: ${{ !inputs.capacity_only && !inputs.recv_budget_only && !inputs.udp_receive_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Prepare small standalone tool only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p cohort-evidence cohort-binaries
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iputils-ping ethtool mold musl-tools
+          mold --version > cohort-evidence/linker.txt
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          rustup target add --toolchain 1.95.0 x86_64-unknown-linux-musl
+          rustc +1.95.0 --version --verbose > cohort-evidence/toolchain.txt
+          uname -a > cohort-evidence/kernel.txt
+          lscpu > cohort-evidence/cpu.txt
+          cp tools/core-packet-path-probe/Cargo.lock cohort-evidence/Cargo.lock
+          printf '%s\n' "$GITHUB_SHA" > cohort-evidence/source-sha.txt
+          printf '%s\n' 'Kernel mechanism only: no Core, routing, encryption, policy, or WAN performance claim.' > cohort-evidence/BOUNDARY.txt
+      - name: Build and test locked tool, not EasyTier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tools/core-packet-path-probe/natural_cohort_lab.py
+          python3 -m unittest discover -s tools/core-packet-path-probe -p 'test_natural_cohort_lab.py' -v 2>&1 | tee cohort-evidence/accounting-tests.log
+          rustfmt +1.95.0 --edition 2024 --check tools/core-packet-path-probe/src/bin/natural_cohort.rs
+          timeout 300 cargo +1.95.0 build --locked --release --target x86_64-unknown-linux-musl --manifest-path tools/core-packet-path-probe/Cargo.toml --bin natural_cohort 2>&1 | tee cohort-evidence/build.log
+          timeout 120 cargo +1.95.0 test --locked --release --target x86_64-unknown-linux-musl --manifest-path tools/core-packet-path-probe/Cargo.toml --bin natural_cohort -- --test-threads=1 2>&1 | tee cohort-evidence/tests.log
+          rustc +1.95.0 --edition 2024 --target x86_64-unknown-linux-musl -O tools/easytier-perf-probe.rs -o cohort-binaries/probe
+          cp tools/core-packet-path-probe/target/x86_64-unknown-linux-musl/release/natural_cohort cohort-binaries/
+          file cohort-binaries/* > cohort-evidence/binary-format.txt
+          sha256sum cohort-binaries/* > cohort-evidence/binaries.sha256
+          git diff --exit-code -- tools/core-packet-path-probe/Cargo.lock
+      - name: Verify namespace-only setup and controlled device features
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo timeout --signal=TERM --kill-after=5s 45s python3 tools/core-packet-path-probe/natural_cohort_lab.py \
+            --binary cohort-binaries/natural_cohort --probe cohort-binaries/probe \
+            --output cohort-evidence/setup --setup-only --underlay-profile segmented \
+            | tee cohort-evidence/setup.log
+      - name: Real TUN cohorts with software segmentation before veth
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo timeout --signal=TERM --kill-after=10s 480s python3 tools/core-packet-path-probe/natural_cohort_lab.py \
+            --binary cohort-binaries/natural_cohort --probe cohort-binaries/probe --output cohort-evidence/lab --underlay-profile segmented \
+            | tee cohort-evidence/run.log
+      - name: Keep failures and exact tool identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" cohort-evidence cohort-binaries
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          root = Path('cohort-evidence')
+          files = [{'file': str(p.relative_to(root)), 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(root.rglob('*')) if p.is_file()]
+          (root/'manifest.json').write_text(json.dumps(files, indent=2))
+          PY
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: mesh-natural-cohort-${{ github.sha }}
+          path: |
+            cohort-evidence/
+            cohort-binaries/
+          retention-days: 30
+          if-no-files-found: error
+  receive-budget:
+    if: ${{ inputs.recv_budget_only && !inputs.udp_receive_only }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Build and run the isolated scheduling model
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p recv-evidence
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold
+          rustup toolchain install 1.95.0 --profile minimal
+          printf '%s\n' "$GITHUB_SHA" > recv-evidence/source-sha.txt
+          lscpu > recv-evidence/cpu.txt
+          cp tools/mesh-recv-budget/Cargo.lock recv-evidence/Cargo.lock
+          timeout 300 cargo +1.95.0 build --locked --release --manifest-path tools/mesh-recv-budget/Cargo.toml 2>&1 | tee recv-evidence/build.log
+          timeout 300 tools/mesh-recv-budget/target/release/mesh-recv-budget > recv-evidence/results.jsonl 2> recv-evidence/offered-load.log
+          sha256sum tools/mesh-recv-budget/target/release/mesh-recv-budget > recv-evidence/binary.sha256
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: mesh-recv-budget-${{ github.sha }}
+          path: recv-evidence/
+          if-no-files-found: error
+          retention-days: 30
+  udp-receive:
+    if: ${{ inputs.udp_receive_only }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Build and run isolated real UDP syscall comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p udp-receive-evidence
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold
+          rustup toolchain install 1.95.0 --profile minimal
+          printf '%s\n' "$GITHUB_SHA" > udp-receive-evidence/source-sha.txt
+          lscpu > udp-receive-evidence/cpu.txt
+          uname -a > udp-receive-evidence/kernel.txt
+          cp tools/core-packet-path-probe/Cargo.lock udp-receive-evidence/Cargo.lock
+          timeout 300 cargo +1.95.0 build --locked --release --manifest-path tools/core-packet-path-probe/Cargo.toml --bin udp_receive 2>&1 | tee udp-receive-evidence/build.log
+          timeout 90 tools/core-packet-path-probe/target/release/udp_receive > udp-receive-evidence/results.jsonl 2> udp-receive-evidence/run.log
+          sha256sum tools/core-packet-path-probe/target/release/udp_receive > udp-receive-evidence/binary.sha256
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: udp-receive-${{ github.sha }}
+          path: udp-receive-evidence/
+          if-no-files-found: error
+          retention-days: 30

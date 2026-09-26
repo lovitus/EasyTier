@@ -1,0 +1,384 @@
+name: Actual Core UDP flush-boundary experiment
+'on':
+  workflow_dispatch:
+    inputs:
+      saturation:
+        description: Run saturation and separate CPU profiles instead of repeating fixed-load measurements
+        type: boolean
+        default: false
+      profile_only:
+        description: Reuse the exact 1639ec45 binaries and run only the corrected profile lane
+        type: boolean
+        default: false
+      tun_trace:
+        description: In the artifact-reuse lane, collect short TUN write traces instead of CPU profiles
+        type: boolean
+        default: false
+      tun_capacity:
+        description: Build only the diagnostic candidate and compare bounded TUN head capacities
+        type: boolean
+        default: false
+      tun_compat:
+        description: In artifact-reuse mode verify bounded TUN with Stealth and legacy/GSO combinations
+        type: boolean
+        default: false
+      extended_tun:
+        description: With tun_compat, exercise IPv4/inner-IPv6 concurrent opposite-direction flows
+        type: boolean
+        default: false
+      loss_replay:
+        description: With tun_compat, replay the IPv6 mixed-load ICMP failure with kernel counters
+        type: boolean
+        default: false
+      packet_trace:
+        description: With tun_capacity, build bounded packet-stage diagnostics and run loss localization
+        type: boolean
+        default: false
+      paced_tun:
+        description: Reuse existing candidate for fixed-load inner-IPv6 mixed-flow comparison; never rebuild Core
+        type: boolean
+        default: false
+  push:
+    branches: ['codex/issue4-natural-cohort']
+    paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: issue4-udp-flush-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  core-flush:
+    if: ${{ !inputs.profile_only && !inputs.paced_tun }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      FORK_SHA: c6772dbfef2395ff96b39bd4801945d92212dffb
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '1'
+      CARGO_PROFILE_RELEASE_STRIP: 'false'
+      RUSTFLAGS: '-C force-frame-pointers=yes -C link-arg=-fuse-ld=mold'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Use the maintained Core build prerequisites
+        uses: ./.github/actions/prepare-build
+        with:
+          target: x86_64-unknown-linux-gnu
+          pnpm: 'false'
+          gui: 'false'
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v5
+        if: ${{ inputs.tun_capacity }}
+        with:
+          artifact-ids: '10841125115'
+          run-id: '36074709548'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: reused
+          merge-multiple: true
+      - name: Verify reused baseline and load generator
+        if: ${{ inputs.tun_capacity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reused/tools
+          cp tools/easytier-perf-probe.rs reused/tools/
+          cd reused
+          test "$(cat flush-evidence/experiment-sha.txt)" = 1639ec4534eb824ce88e7300b5fa1453839c4f25
+          sha256sum -c flush-evidence/binaries.sha256
+          sha256sum -c flush-evidence/probe.sha256
+          chmod +x flush-binaries/{stock,candidate}/easytier-{core,cli} flush-binaries/perf-probe
+      - name: Prepare exact source and required build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p flush-evidence flush-binaries/stock flush-binaries/candidate
+          python3 -m py_compile tools/mesh-udp-flush/*.py
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pkg-config clang cmake libssl-dev libprotobuf-dev libpcap-dev iproute2 iputils-ping ethtool tcpdump
+          rustup component add --toolchain 1.95 rustfmt
+          protoc --version > flush-evidence/protoc.txt
+          test "$(cat flush-evidence/protoc.txt)" = 'libprotoc 35.1'
+          timeout 90 git fetch --no-tags --depth=1 origin "$FORK_SHA"
+          git worktree add --detach "$RUNNER_TEMP/flush-source" "$FORK_SHA"
+          lscpu > flush-evidence/cpu.txt
+          uname -a > flush-evidence/kernel.txt
+          rustc +1.95 --version --verbose > flush-evidence/toolchain.txt
+          cp "$RUNNER_TEMP/flush-source/Cargo.lock" flush-evidence/Cargo.lock
+          printf '%s\n' "$GITHUB_SHA" > flush-evidence/experiment-sha.txt
+          printf '%s\n' 'GNU Ubuntu 22.04; Rust 1.95; default+jemalloc; stock plus same-binary legacy/stage/gso; no production rollout' > flush-evidence/BOUNDARY.txt
+      - name: Build stock, then the bounded diagnostic batch and contract tests
+        env:
+          TUN_CAPACITY: ${{ inputs.tun_capacity }}
+          PACKET_TRACE: ${{ inputs.packet_trace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/flush-target"
+          export RUSTFLAGS='-C force-frame-pointers=yes -C link-arg=-fuse-ld=mold'
+          cd "$RUNNER_TEMP/flush-source"
+          if [[ "$TUN_CAPACITY" == true ]]; then
+            cp "$root/reused/flush-binaries/stock/"* "$root/flush-binaries/stock/"
+            cp "$root/reused/flush-binaries/perf-probe" "$root/flush-binaries/perf-probe"
+            cp "$root/reused/flush-evidence/probe.sha256" "$root/flush-evidence/probe.sha256"
+          else
+            timeout 1800 cargo +1.95 build --locked --release -j "$(nproc)" -p easytier --bin easytier-core --bin easytier-cli --features jemalloc 2>&1 | tee "$root/flush-evidence/stock-build.log"
+            cp "$CARGO_TARGET_DIR/release/easytier-core" "$CARGO_TARGET_DIR/release/easytier-cli" "$root/flush-binaries/stock/"
+          fi
+          python3 "$root/tools/mesh-udp-flush/prepare.py" "$PWD" > "$root/flush-evidence/diagnostic-source.json"
+          if [[ "$TUN_CAPACITY" == true ]]; then
+            python3 "$root/tools/mesh-udp-flush/tun_prepare.py" "$PWD" > "$root/flush-evidence/tun-source.json"
+            rustfmt +1.95 --edition 2024 easytier/src/instance/linux_tun_offload.rs
+            sha256sum easytier/src/instance/linux_tun_offload.rs > "$root/flush-evidence/tun-formatted-source.sha256"
+            git diff -- easytier/src/instance/linux_tun_offload.rs > "$root/flush-evidence/tun-diagnostic-only.patch"
+          fi
+          if [[ "$PACKET_TRACE" == true ]]; then
+            test "$TUN_CAPACITY" = true
+            python3 "$root/tools/mesh-udp-flush/packet_trace_prepare.py" "$PWD" > "$root/flush-evidence/packet-trace-source.json"
+            rustfmt +1.95 --edition 2024 easytier/src/peers/peer_manager.rs
+            git diff -- easytier/src/peers/peer_manager.rs > "$root/flush-evidence/packet-trace-peer.patch"
+          fi
+          rustfmt +1.95 --edition 2024 easytier/src/tunnel/udp.rs
+          sha256sum easytier/src/tunnel/udp.rs > "$root/flush-evidence/formatted-source.sha256"
+          git diff --check
+          git diff --exit-code -- Cargo.lock
+          git diff -- easytier/src/tunnel/udp.rs > "$root/flush-evidence/diagnostic-only.patch"
+          timeout 900 cargo +1.95 build --locked --release -j "$(nproc)" -p easytier --bin easytier-core --bin easytier-cli --features jemalloc 2>&1 | tee "$root/flush-evidence/candidate-build.log"
+          cp "$CARGO_TARGET_DIR/release/easytier-core" "$CARGO_TARGET_DIR/release/easytier-cli" "$root/flush-binaries/candidate/"
+          timeout 900 cargo +1.95 test --locked --release -j "$(nproc)" -p easytier --lib --features jemalloc issue4_flush_ -- --test-threads=1 2>&1 | tee "$root/flush-evidence/contract-tests.log"
+          cd "$root"
+          sha256sum flush-binaries/{stock,candidate}/easytier-{core,cli} > flush-evidence/binaries.sha256
+          file flush-binaries/{stock,candidate}/easytier-core > flush-evidence/binary-format.txt
+      - name: Run actual Core comparisons and explicit Stealth/UDP checks
+        if: ${{ !inputs.saturation && !inputs.tun_capacity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo timeout --signal=TERM --kill-after=15s 480s python3 tools/mesh-udp-flush/lab.py \
+            --stock flush-binaries/stock --candidate flush-binaries/candidate --output flush-evidence/lab \
+            | tee flush-evidence/lab.log
+      - name: Interleaved same-binary TUN capacity comparison
+        if: ${{ inputs.tun_capacity && !inputs.packet_trace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          index=0
+          for capacity in 0 4096 8192 8192 4096 0 4096 0 8192; do
+            sudo timeout --signal=TERM --kill-after=15s 180s python3 tools/mesh-udp-flush/lab.py \
+              --stock flush-binaries/stock --candidate flush-binaries/candidate \
+              --unpaced-probe flush-binaries/perf-probe --order gso \
+              --tun-head-capacity "$capacity" --output "flush-evidence/tun-${index}-${capacity}"
+            index=$((index + 1))
+          done
+      - name: Bounded packet-stage loss localization
+        if: ${{ inputs.packet_trace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          index=0
+          for capacity in 0 8192 8192 0 0 8192; do
+            if sudo timeout --signal=TERM --kill-after=15s 180s python3 tools/mesh-udp-flush/lab.py \
+              --stock flush-binaries/stock --candidate flush-binaries/candidate \
+              --unpaced-probe flush-binaries/perf-probe --output "flush-evidence/trace-${index}-${capacity}" \
+              --order legacy,gso --tun-head-capacity "$capacity" --transfer-bytes 268435456 \
+              --inner-ipv6 --mixed-flow --network-counters --icmp-capture --packet-trace; then
+              printf 'trace %s: PASS\n' "$index"
+            else
+              code=$?
+              printf 'trace %s: FAIL exit %s\n' "$index" "$code"
+              failed=1
+            fi
+            index=$((index + 1))
+          done
+          exit "$failed"
+      - name: Prepare unpaced probe and profiling tools
+        if: ${{ inputs.saturation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)"
+          rustc +1.95 --edition=2021 -O tools/easytier-perf-probe.rs -o flush-binaries/perf-probe
+          sha256sum tools/easytier-perf-probe.rs flush-binaries/perf-probe > flush-evidence/probe.sha256
+      - name: Uninstrumented direct and mesh saturation comparisons
+        if: ${{ inputs.saturation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo timeout --signal=TERM --kill-after=15s 1200s python3 tools/mesh-udp-flush/lab.py \
+            --stock flush-binaries/stock --candidate flush-binaries/candidate \
+            --unpaced-probe flush-binaries/perf-probe --output flush-evidence/saturation \
+            --order stock,legacy,gso,gso,legacy,legacy,gso,stock
+      - name: Separate CPU profiles, excluded from throughput comparisons
+        if: ${{ inputs.saturation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo timeout --signal=TERM --kill-after=15s 600s python3 tools/mesh-udp-flush/lab.py \
+            --stock flush-binaries/stock --candidate flush-binaries/candidate \
+            --unpaced-probe flush-binaries/perf-probe --output flush-evidence/profiles \
+            --order legacy,gso --profile
+      - name: Preserve failures and artifact identities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" flush-evidence flush-binaries
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json
+          root=Path('flush-evidence')
+          rows=[{'file':str(p.relative_to(root)),'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(root.rglob('*')) if p.is_file()]
+          (root/'manifest.json').write_text(json.dumps(rows,indent=2))
+          PY
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: issue4-udp-flush-${{ github.sha }}
+          path: |
+            flush-evidence/
+            flush-binaries/
+          retention-days: 30
+          if-no-files-found: error
+  profile-only:
+    if: ${{ inputs.profile_only || inputs.paced_tun }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          artifact-ids: ${{ (inputs.tun_compat || inputs.paced_tun) && '10842834881' || '10841125115' }}
+          run-id: ${{ (inputs.tun_compat || inputs.paced_tun) && '36082689922' || '36074709548' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: reused
+          merge-multiple: true
+      - name: Verify exact existing binaries and prepare profiler
+        env:
+          TUN_COMPAT: ${{ inputs.tun_compat || inputs.paced_tun }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p profile-evidence
+          mkdir -p reused/tools
+          cp tools/easytier-perf-probe.rs reused/tools/
+          cd reused
+          expected=1639ec4534eb824ce88e7300b5fa1453839c4f25
+          if [[ "$TUN_COMPAT" == true ]]; then
+            expected=837349f8f5031d5c877b90edb6f195b6f9615af9
+          fi
+          test "$(cat flush-evidence/experiment-sha.txt)" = "$expected"
+          sha256sum -c flush-evidence/binaries.sha256
+          sha256sum -c flush-evidence/probe.sha256
+          chmod +x flush-binaries/{stock,candidate}/easytier-{core,cli} flush-binaries/perf-probe
+          cd ..
+          cp reused/flush-evidence/{binaries.sha256,experiment-sha.txt,diagnostic-source.json} profile-evidence/
+          printf '%s\n' "$GITHUB_SHA" > profile-evidence/harness-sha.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y iproute2 iputils-ping ethtool tcpdump linux-tools-common "linux-tools-$(uname -r)"
+          perf --version > profile-evidence/perf-version.txt
+          uname -a > profile-evidence/kernel.txt
+          lscpu > profile-evidence/cpu.txt
+          python3 -m py_compile tools/mesh-udp-flush/lab.py
+      - name: Profile both exact Core modes without repeating saturation comparisons
+        env:
+          TUN_TRACE: ${{ inputs.tun_trace }}
+          TUN_COMPAT: ${{ inputs.tun_compat }}
+          EXTENDED_TUN: ${{ inputs.extended_tun }}
+          LOSS_REPLAY: ${{ inputs.loss_replay }}
+          PACED_TUN: ${{ inputs.paced_tun }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$PACED_TUN" == true ]]; then
+            failed=0
+            for rate in 200 600; do
+              index=0
+              for capacity in 0 8192 8192 0 0 8192; do
+                order=legacy,gso
+                if (( index % 2 )); then order=gso,legacy; fi
+                if sudo timeout --signal=TERM --kill-after=15s 150s python3 tools/mesh-udp-flush/lab.py \
+                  --stock reused/flush-binaries/stock --candidate reused/flush-binaries/candidate \
+                  --output "profile-evidence/paced-${rate}-${index}-${capacity}" \
+                  --order "$order" --tun-head-capacity "$capacity" --paced-mbps "$rate" \
+                  --inner-ipv6 --mixed-flow --network-counters; then
+                  printf 'paced rate %s capacity %s: PASS\n' "$rate" "$capacity"
+                else
+                  code=$?
+                  printf 'paced rate %s capacity %s: FAIL exit %s\n' "$rate" "$capacity" "$code"
+                  failed=1
+                fi
+                index=$((index + 1))
+              done
+            done
+            exit "$failed"
+          fi
+          if [[ "$TUN_COMPAT" == true ]]; then
+            if [[ "$LOSS_REPLAY" == true ]]; then
+              failed=0
+              index=0
+              for capacity in 0 8192 8192 0 0 8192; do
+                if sudo timeout --signal=TERM --kill-after=15s 180s python3 tools/mesh-udp-flush/lab.py \
+                  --stock reused/flush-binaries/stock --candidate reused/flush-binaries/candidate \
+                  --unpaced-probe reused/flush-binaries/perf-probe \
+                  --output "profile-evidence/replay-${index}-${capacity}" \
+                  --order legacy,gso --tun-head-capacity "$capacity" \
+                  --transfer-bytes 268435456 --inner-ipv6 --mixed-flow --network-counters --icmp-capture; then
+                  printf 'replay %s capacity %s: PASS\n' "$index" "$capacity"
+                else
+                  code=$?
+                  printf 'replay %s capacity %s: FAIL exit %s\n' "$index" "$capacity" "$code"
+                  failed=1
+                fi
+                index=$((index + 1))
+              done
+              exit "$failed"
+            fi
+            families=(ipv4)
+            if [[ "$EXTENDED_TUN" == true ]]; then families+=(ipv6); fi
+            for capacity in 0 8192; do
+              for stealth in false true; do
+                secure=()
+                if [[ "$stealth" == true ]]; then secure=(--stealth); fi
+                for family in "${families[@]}"; do
+                  extra=()
+                  if [[ "$EXTENDED_TUN" == true ]]; then extra+=(--mixed-flow); fi
+                  if [[ "$family" == ipv6 ]]; then extra+=(--inner-ipv6); fi
+                  sudo timeout --signal=TERM --kill-after=15s 180s python3 tools/mesh-udp-flush/lab.py \
+                    --stock reused/flush-binaries/stock --candidate reused/flush-binaries/candidate \
+                    --unpaced-probe reused/flush-binaries/perf-probe \
+                    --output "profile-evidence/compat-${capacity}-${stealth}-${family}" \
+                    --order legacy,gso --tun-head-capacity "$capacity" \
+                    --transfer-bytes 268435456 "${secure[@]}" "${extra[@]}"
+                done
+              done
+            done
+            exit 0
+          fi
+          observation=(--profile)
+          if [[ "$TUN_TRACE" == true ]]; then
+            observation=(--tun-trace --transfer-bytes 67108864)
+          fi
+          sudo timeout --signal=TERM --kill-after=15s 600s python3 tools/mesh-udp-flush/lab.py \
+            --stock reused/flush-binaries/stock --candidate reused/flush-binaries/candidate \
+            --unpaced-probe reused/flush-binaries/perf-probe --output profile-evidence/lab \
+            --order legacy,gso "${observation[@]}"
+      - name: Preserve profile evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p profile-evidence
+          sudo chown -R "$(id -u):$(id -g)" profile-evidence
+          find profile-evidence -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > profile-evidence/SHA256SUMS
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: issue4-profile-${{ github.sha }}
+          path: profile-evidence/
+          retention-days: 30
+          if-no-files-found: error

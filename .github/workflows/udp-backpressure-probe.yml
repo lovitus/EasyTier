@@ -1,0 +1,73 @@
+name: UDP kernel backpressure fixture
+'on':
+  push:
+    branches: ['codex/issue4-natural-cohort']
+    paths:
+      - 'tools/udp-backpressure-probe/**'
+      - 'tools/mesh-udp-flush/adapter.rs.in'
+      - '.github/workflows/udp-backpressure-probe.yml'
+permissions:
+  contents: read
+concurrency:
+  group: udp-backpressure-fixture-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  kernel-fixture:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Build the small fixture only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p backpressure-evidence
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 mold
+          mold --version > backpressure-evidence/linker.txt
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          rustfmt +1.95.0 --edition 2024 --check tools/udp-backpressure-probe/probe.rs
+          python3 -m py_compile tools/udp-backpressure-probe/lab.py
+          rustc +1.95.0 --edition 2024 --test tools/udp-backpressure-probe/probe.rs -o "$RUNNER_TEMP/udp-backpressure-tests"
+          "$RUNNER_TEMP/udp-backpressure-tests" | tee backpressure-evidence/unit-tests.log
+          rustc +1.95.0 --edition 2024 -O tools/udp-backpressure-probe/probe.rs -o "$RUNNER_TEMP/udp-backpressure-probe"
+          printf '%s\n' "$GITHUB_SHA" > backpressure-evidence/source-sha.txt
+          rustc +1.95.0 --version --verbose > backpressure-evidence/toolchain.txt
+      - name: Require real IPv4 and IPv6 EAGAIN and recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo timeout --signal=TERM --kill-after=5s 60s python3 tools/udp-backpressure-probe/lab.py \
+            --binary "$RUNNER_TEMP/udp-backpressure-probe" --output backpressure-evidence/lab \
+            | tee backpressure-evidence/lab.log
+      - name: Build actual adapter functions with Core-matched dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt +1.95.0 --edition 2024 --check tools/udp-backpressure-probe/tokio/build.rs tools/udp-backpressure-probe/tokio/src/main.rs
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/adapter-target"
+          timeout 240 cargo +1.95.0 build --locked --release --manifest-path tools/udp-backpressure-probe/tokio/Cargo.toml
+          cp tools/udp-backpressure-probe/tokio/Cargo.lock backpressure-evidence/adapter-Cargo.lock
+          sha256sum tools/mesh-udp-flush/adapter.rs.in tools/udp-backpressure-probe/tokio/build.rs > backpressure-evidence/adapter-source.sha256
+          find "$CARGO_TARGET_DIR/release/build" -path '*/out/actual_send.rs' -exec cp '{}' backpressure-evidence/actual_send.rs \;
+          test -s backpressure-evidence/actual_send.rs
+          sudo timeout --signal=TERM --kill-after=5s 90s python3 tools/udp-backpressure-probe/lab.py \
+            --binary "$CARGO_TARGET_DIR/release/udp-adapter-backpressure-probe" --adapter \
+            --output backpressure-evidence/adapter-lab | tee backpressure-evidence/adapter-lab.log
+      - name: Preserve bounded evidence including failure
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" backpressure-evidence
+          find backpressure-evidence -type f -print0 | sort -z | xargs -0 sha256sum > "$RUNNER_TEMP/backpressure-checksums.txt"
+          cp "$RUNNER_TEMP/backpressure-checksums.txt" backpressure-evidence/SHA256SUMS
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: udp-backpressure-${{ github.sha }}
+          path: backpressure-evidence/
+          retention-days: 30
+          if-no-files-found: error

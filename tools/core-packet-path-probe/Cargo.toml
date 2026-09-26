@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+libc = "0.2"
 tokio = { version = "1.45", features = ["macros", "rt", "sync"] }
 tun-rs = { version = "=2.8.7", default-features = false }
 
