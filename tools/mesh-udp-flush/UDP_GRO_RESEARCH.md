@@ -161,3 +161,49 @@ The next candidate must be experimental and compared against the retained
 Core saving, introduce an unbounded pending queue, or use this result to
 clear run `36260893872`'s missing IPv6 echo. Original-host acceptance also
 remains outstanding; this evidence is hosted-runner loopback only.
+
+## Isolated Core adapter: ownership audit and pending acceptance
+
+Status: EXPERIMENT ONLY. The frozen Core remains
+`3166ab672d347cdcc5a6768bc77056cd8ec38323`; the earlier combined
+saturation failure is not cleared by the standalone mechanism result.
+
+Audited ownership at that exact source:
+
+- `StunClientBuilder::stop` aborts and joins its receive tasks. The successful
+  `get_udp_port_mapping_with_socket` path awaits it before returning the socket.
+- `UdpSocketArray::add_new_socket` publishes a punched socket and then breaks
+  its read loop. Subsequent array operations only send or remove that entry.
+- `UdpConnectAttempt` finishes SACK negotiation before `build_tunnel` creates
+  its data receiver. Failed handshakes returned to the punch array never
+  enable this experiment's GRO option.
+- `UdpTunnelListenerData::do_forward_task` is the listener's sole reader;
+  its STUN replies and hole-punch forwarding use send-only socket clones.
+- The adapter therefore enters only the listener data loop and post-SACK
+  connector data loop. It is not added to generic bind, STUN, or SACK reads.
+  This audit does not claim arbitrary external callers may share raw readers
+  with an established tunnel.
+
+The disposable adapter copies each segment into the existing `BytesMut` spare
+capacity before existing framing, Stealth authentication and ring submission.
+It does not put references to a large shared allocation into queued packets.
+The scratch cost is exactly 65,536 bytes per enabled receive owner, plus small
+metadata; it is not memory-neutral. Queue capacities, MTU, send batching,
+connection selection and wire format are unchanged. Unsupported GRO uses the
+original reader. Ready buffered segments consume Tokio cooperative budget.
+Truncated/invalid ancillary batches are discarded rather than parsed as packets.
+Ordinary datagram truncation retains the existing output-capacity boundary.
+
+The experiment adds no production option, dependency or public API. Its
+`ET_ISSUE4_UDP_GRO=on/off` selector and shutdown-only counters exist only in a
+GitHub runner overlay. The same binary is compared interleaved, using unchanged
+`lab.py` integrity, ICMP, resource and cleanup assertions. Tests include a real
+kernel negative control that bypasses splitting, IPv4/IPv6 boundaries and short
+tails, interleaved source/control datagrams, zero-byte datagrams, bounded queued
+allocations and current-thread cooperative progress. Existing UDP/Stealth and
+hole-punch listener tests run with the adapter enabled.
+
+Pending gates: compiler/tests, actual Core GRO occupancy, fixed-load CPU/RSS,
+saturated and opposite-direction mixed load. The first failure stops its phase
+and remains evidence. No production benefit, loss fix, WAN result, unsupported
+platform benefit or release acceptance is asserted before these gates finish.
