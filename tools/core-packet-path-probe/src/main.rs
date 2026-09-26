@@ -6,6 +6,8 @@ use std::{hint::black_box, time::Duration, time::Instant};
 use tokio::{sync::mpsc, task::yield_now};
 use tun_rs::{GROTable, VIRTIO_NET_HDR_LEN};
 
+mod tun_head_contract;
+
 const CHANNEL_CAPACITY: usize = 32;
 const IPV4_HEADER_LEN: usize = 20;
 const TCP_HEADER_LEN: usize = 20;
@@ -313,6 +315,7 @@ fn median(mut values: Vec<f64>) -> f64 {
 async fn main() {
     if std::env::args().any(|arg| arg == "--capacity-contract") {
         capacity_contract();
+        tun_head_contract::run();
         return;
     }
     let packets = parse_value("packets", DEFAULT_PACKETS);

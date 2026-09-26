@@ -12,7 +12,10 @@ Successful results only authorize a small Linux offload experiment; an exact
 artifact still needs real-network functional, performance, and resource
 validation.
 
-Run on the dedicated builder:
+Run through the existing `Mesh natural-cohort kernel mechanism` workflow with
+`capacity_only=true`. Builds/tests do not run on the maintainer's Mac or private
+builders. The following commands describe the historical scheduling experiment,
+not a current instruction to use a private builder:
 
 ```sh
 cd /workspace/tools/core-packet-path-probe
@@ -31,7 +34,7 @@ target/debug/core-packet-path-probe \
   --scratch-capacity=65545
 ```
 
-Validated on `192.168.2.160`:
+Historical synthetic results (not an exact-Core receive-buffer measurement):
 
 - Production-like 4096-byte buffers coalesced a 32-packet input batch only in
   pairs; the largest GRO frame was 2770 bytes.
@@ -44,3 +47,25 @@ Validated on `192.168.2.160`:
 
 The probe deliberately does not use `writev`: TUN preserves packet boundaries
 per `write`, so generic vectored writes are not a valid batching mechanism.
+
+## Bounded head contract
+
+`--capacity-contract` also exercises the existing 8 KiB head mechanism using
+the Core's exact `bytes 1.9.0` and `tun-rs 2.8.7`. It calls the real `handle_gro`
+and `gso_split`, checks the actual emission list and compares all reconstructed
+IP bytes, including checksum/flags/sequence and multiplicity. Out-of-order
+cohorts are compared as packet multisets; this does not claim cross-flow order
+preservation beyond the library's existing GRO behavior.
+
+The same one-write predicate is false without promotion and true with the
+bounded head. A prepend fixture has two equally large allocations and proves
+that recovering the original slot would select the wrong allocation. IPv4/IPv6,
+cohort sizes through 128, shared receive slabs, flags, invalid checksums, short
+tails, oversized packets, a GRO error and 1000 head reuses cover the selected
+ownership boundary. No buffer allocation is enlarged during GRO.
+
+This is a standalone API/mechanism contract, not a production regression test,
+kernel partial-write test, runtime cancellation test, memory-leak proof or new
+performance result. The async sink's existing partial-write/error/cancellation
+semantics are audited separately in `../mesh-udp-flush/PACKAGED.md`. A future
+production patch still needs exact-artifact acceptance.

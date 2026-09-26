@@ -251,6 +251,53 @@ snapshots were unchanged. Each of BBB, CCC, BCB, CBC, BCC and CBB completed
 four family/Stealth cases with traffic in both directions. This is functional
 relay acceptance for this matrix, not relay throughput or WAN acceptance.
 
+### Bounded TUN head source audit, 2026-09-26
+
+The existing `tun_capacity.rs.in` experiment owns one 8192-byte scratch per
+Linux offload sink, not per packet or connection. It promotes at most one
+eligible TCP frame in an already available cohort and neither waits for more
+packets nor enlarges the queue. Frames that are too large or already have enough
+capacity, non-TCP traffic, and single-packet cohorts keep their existing path.
+The dependency still decides GRO eligibility; this is not a second GRO engine.
+
+The locked async `send_multiple` implementation resets the table, applies GRO,
+then awaits each emitted write. Some writes may succeed before it returns an
+error. It may also continue after non-EBADFD write errors. The existing experiment
+leaves that call and its result propagation unchanged. Whole-batch retry is
+unsafe and remains prohibited. Reclamation runs after the awaited operation
+returns either success or error; it cannot run while a pending write owns the
+frame. Cancelling a caller's flush does not remove the future stored in the
+sink. Dropping the sink drops that future and its owned buffers. These are
+source-level ownership findings, not newly executed cancellation/partial-write
+tests.
+
+TCP prepend can swap frame positions. Reclaiming by original index or merely
+matching capacity is wrong; the experiment uses allocation identity. Locked
+GRO checks available capacity before resizing/appending, so a correctly sized
+scratch should not reallocate. If identity cannot be recovered, the experiment
+records the loss and stops promoting instead of allocating repeated replacement
+heads. Current production `3a1f3d9f` has none of these scratch changes.
+
+The authoritative upstream release is now
+[`tun-rs 2.8.11`](https://github.com/tun-rs/tun-rs/releases/tag/2.8.11),
+commit `d0f764c135a34ad92360462f89a40b59f373cc06`; the Docs.rs latest page observed
+earlier was stale at 2.8.9. The exact 2.8.7-to-2.8.11 comparison shows the Linux
+offload change is in `gso_split` output validation, not GRO head capacity or
+async `send_multiple`. [Upstream PR #164](https://github.com/tun-rs/tun-rs/pull/164)
+is therefore a separate read/segmentation-side candidate, not a substitute for
+this write-side experiment. No dependency update is bundled here. A crates.io
+metadata request returned HTTP 403; the version/diff conclusion instead comes
+from the official GitHub release and exact tagged comparison, not that failed
+request.
+
+The standalone contract is being extended using exact Core `bytes 1.9.0` rather
+than the probe's previously resolved 1.12.1. It checks real library output and
+allocation identity with a no-head negative control, a wrong-slot negative
+control, IPv4/IPv6 packet-byte reconstruction, fixed capacity and reuse. It
+uses the existing `capacity_only` workflow; no workflow or Core build changes
+are needed. Status before dispatch: **NOT RUN**. Previous experiment throughput
+is not re-labelled as validation of these new assertions.
+
 ## Current task cursor
 
 Production candidate: PR #9, `3a1f3d9f`, still unmerged and not deployed to an
@@ -440,8 +487,9 @@ in a profile does not justify discarding those prior comparisons.
 - Open: original-host/WAN behavior, long-duration resources, mixed-flow receive
   ring overload and other-platform/architecture acceptance. Do not call the
   overall performance task complete or describe this as a released fix.
-- Unique next step: audit and reuse the already-measured bounded TUN-head
-  experiment against the locked API, including fixed memory ownership, buffer
-  recovery and partial-write/cancellation semantics, before proposing a new
-  production batch. No protocol rewrite, queue growth, sleep, ICMP exemption or
-  whole-batch replay is authorized by these profiles.
+- Completed source audit: the bounded TUN-head experiment preserves the existing
+  write future/error boundary; upstream 2.8.11 does not remove its capacity limit.
+- Unique next step: run the small locked head contract on GitHub and record the
+  byte/ownership/negative-control evidence, then decide the minimal production
+  batch. No protocol rewrite, queue growth, sleep, ICMP exemption or whole-batch
+  replay is authorized by these profiles. Production remains frozen.
