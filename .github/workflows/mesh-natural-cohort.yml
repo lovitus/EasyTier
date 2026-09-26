@@ -14,6 +14,11 @@ name: Mesh natural-cohort kernel mechanism
         description: Compare real nonblocking UDP receive syscalls without Core
         type: boolean
         default: false
+      udp_receive_mode:
+        description: Standalone receiver experiment (requires udp_receive_only)
+        type: choice
+        options: [recvmmsg, gro]
+        default: recvmmsg
       artifact_pair:
         description: 'Optional JSON: baseline and candidate each contain immutable artifact id and source sha; no Core rebuild'
         type: string
@@ -187,6 +192,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Build and run isolated real UDP syscall comparison
+        env:
+          PROBE_BIN: ${{ inputs.udp_receive_mode == 'gro' && 'udp_gro' || 'udp_receive' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -198,9 +205,11 @@ jobs:
           lscpu > udp-receive-evidence/cpu.txt
           uname -a > udp-receive-evidence/kernel.txt
           cp tools/core-packet-path-probe/Cargo.lock udp-receive-evidence/Cargo.lock
-          timeout 300 cargo +1.95.0 build --locked --release --manifest-path tools/core-packet-path-probe/Cargo.toml --bin udp_receive 2>&1 | tee udp-receive-evidence/build.log
-          timeout 90 tools/core-packet-path-probe/target/release/udp_receive > udp-receive-evidence/results.jsonl 2> udp-receive-evidence/run.log
-          sha256sum tools/core-packet-path-probe/target/release/udp_receive > udp-receive-evidence/binary.sha256
+          timeout 300 cargo +1.95.0 build --locked --release --manifest-path tools/core-packet-path-probe/Cargo.toml --bin "$PROBE_BIN" 2>&1 | tee udp-receive-evidence/build.log
+          probe_timeout=90
+          if [ "$PROBE_BIN" = udp_gro ]; then probe_timeout=120; fi
+          timeout "$probe_timeout" "tools/core-packet-path-probe/target/release/$PROBE_BIN" > udp-receive-evidence/results.jsonl 2> udp-receive-evidence/run.log
+          sha256sum "tools/core-packet-path-probe/target/release/$PROBE_BIN" > udp-receive-evidence/binary.sha256
       - uses: actions/upload-artifact@v5
         if: always()
         with:
