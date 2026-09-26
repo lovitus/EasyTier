@@ -19,6 +19,50 @@ use crate::tunnel::{
 const MAX_PACKET_SIZE: usize = 4096;
 const MAX_GSO_FRAME_SIZE: usize = VIRTIO_NET_HDR_LEN + 65535;
 
+// One allocation per Linux offload sink, not per packet/flow. Small decrypted
+// slices otherwise prevent tun-rs from coalescing even an already queued pair.
+// Keep the measured 8 KiB bound; do not grow queues or wait to form a cohort.
+const GRO_HEAD_CAPACITY: usize = 8192;
+
+fn promote_gro_head(packets: &mut [BytesMut], head: &mut Option<BytesMut>) -> Option<usize> {
+    if packets.len() < 2 || head.is_none() {
+        return None;
+    }
+    let index = packets.iter().position(|frame| {
+        if frame.len() >= GRO_HEAD_CAPACITY || frame.capacity() >= GRO_HEAD_CAPACITY {
+            return false;
+        }
+        let Some(packet) = frame.get(VIRTIO_NET_HDR_LEN..) else {
+            return false;
+        };
+        match packet.first().map(|byte| byte >> 4) {
+            Some(4) => packet.len() >= 40 && packet[0] & 15 == 5 && packet[9] == 6,
+            Some(6) => packet.len() >= 60 && packet[6] == 6,
+            _ => false,
+        }
+    })?;
+    let mut buffer = head.take()?;
+    buffer.clear();
+    buffer.extend_from_slice(&packets[index]);
+    let identity = buffer.as_ptr() as usize;
+    packets[index] = buffer;
+    Some(identity)
+}
+
+fn reclaim_gro_head(packets: &mut Vec<BytesMut>, identity: usize) -> Option<BytesMut> {
+    // tun-rs may swap slots when prepending. Equal capacities are not identities.
+    let index = packets
+        .iter()
+        .position(|packet| packet.as_ptr() as usize == identity)?;
+    let mut head = packets.swap_remove(index);
+    head.clear();
+    Some(head)
+}
+
+#[cfg(test)]
+#[path = "linux_tun_offload_tests.rs"]
+mod tests;
+
 struct ReadBatch {
     original: Vec<u8>,
     packets: Vec<BytesMut>,
@@ -132,6 +176,8 @@ pub(crate) struct LinuxTunOffloadSink {
     pending: Vec<BytesMut>,
     gro: Option<GROTable>,
     flush_future: Option<FlushFuture>,
+    gro_head: Option<BytesMut>,
+    gro_head_identity: Option<usize>,
 }
 
 impl LinuxTunOffloadSink {
@@ -141,6 +187,8 @@ impl LinuxTunOffloadSink {
             pending: Vec::with_capacity(IDEAL_BATCH_SIZE),
             gro: Some(GROTable::new()),
             flush_future: None,
+            gro_head: Some(BytesMut::with_capacity(GRO_HEAD_CAPACITY)),
+            gro_head_identity: None,
         }
     }
 
@@ -151,6 +199,7 @@ impl LinuxTunOffloadSink {
             }
             let device = self.device.clone();
             let mut packets = std::mem::take(&mut self.pending);
+            self.gro_head_identity = promote_gro_head(&mut packets, &mut self.gro_head);
             let mut gro = self.gro.take().expect("offload GRO state missing");
             self.flush_future = Some(Box::pin(async move {
                 let result = device
@@ -168,6 +217,16 @@ impl LinuxTunOffloadSink {
                 .poll(cx)
         );
         self.flush_future = None;
+        // The stored future owns the head until all attempted writes complete,
+        // even if a caller cancels its flush. A partial write followed by an error
+        // must not replay the cohort; preserve send_multiple's original result.
+        if let Some(identity) = self.gro_head_identity.take() {
+            self.gro_head = reclaim_gro_head(&mut packets, identity);
+            if self.gro_head.is_none() {
+                // Fail back to ordinary packet buffers, without repeated allocations.
+                tracing::warn!("TUN GRO head was not retained; disabling head promotion");
+            }
+        }
         packets.clear();
         self.pending = packets;
         self.gro = Some(gro);
