@@ -1,6 +1,7 @@
 # GSO supply and UDP GRO receive: bounded mechanism research
 
-Status: prepared, not executed. No production Core change, merge or release.
+Status: standalone mechanism completed; useful paced CPU result, not Core acceptance.
+No production Core change, merge or release.
 The original combined saturation failure remains open.
 
 ## Why this differs from the rejected recvmmsg experiment
@@ -76,3 +77,87 @@ kernel fallback or any non-Linux platform.
 The 100 ms idle prelude and 20 ms poll timeout are explicit tool mechanics,
 not evidence about event-driven Core idle power. No new Core configuration,
 buffer budget, dependency or production public API is introduced.
+
+## Result: 24 completed trials, meaningful CPU saving but no saturation clearance
+
+[Run 36267284991](https://github.com/lovitus/EasyTier/actions/runs/36267284991)
+succeeded at exact source `8cb045fda9c83d62ecb434ceaf7de259d34d2862`.
+Both endpoints were local UDP sockets on the same GitHub Ubuntu runner:
+Intel Xeon 6973P-C, four logical CPUs / two cores, Linux
+`6.8.0-1064-azure`, x86_64. IPv4 and IPv6 were separate trials, not a WAN
+path or a mixed-family connection. No Core process was built or run.
+
+The locked probe build took 10.83 seconds. The artifact records probe SHA-256
+`ea7607c420cd8a9b3866fe69dbd9ccaf5eab1490c9392b2651f79faee774913c`.
+This is the runner's binary-hash record, not a separately downloaded and
+rehashed executable. Evidence artifact `10914064389` is 9,875 bytes; its full
+ZIP SHA-256 and all eight members' CRCs were verified:
+`9cb7e50a0ee5d008dde74f434cfd7cec1751ddb7cf53a565c2f8fb62c3eb8f51`.
+Its source SHA matches the run. All eight arm/family/load groups have exactly
+three distinct repetitions. Effective SO_RCVBUF is 524,288 bytes in every
+trial. Build output and Cargo.lock are retained with the evidence; the tool
+does not instantiate a Tokio runtime.
+
+### Paced supply: three-trial medians
+
+CPU units are seconds per delivered GiB. Total CPU includes the standalone
+producer and receiver, not two EasyTier Core processes.
+
+| Family | GRO | Delivered Mbit/s | Receiver CPU | Total CPU | Delivered-control p99 median, us |
+| --- | --- | ---: | ---: | ---: | ---: |
+| IPv4 | off | 637.33 | 1.2097 | 1.8999 | 36 |
+| IPv4 | on | 649.83 | 0.5760 | 1.0013 | 32 |
+| IPv6 | off | 642.55 | 1.0864 | 1.6657 | 32 |
+| IPv6 | on | 652.03 | 0.5844 | 0.9660 | 42 |
+
+All twelve paced trials have zero data loss and zero control loss, across
+1,389,888 delivered datagrams. Receiver CPU/GiB falls 52.38% on IPv4 and
+46.21% on IPv6; total producer-plus-receiver CPU/GiB falls 47.30% and 42.01%.
+GRO delivers about 7.732 datagrams per nonempty call versus exactly one
+without GRO; maximum observed receive batch is eight. Short final segments
+and single controls passed the same length/source/payload checks.
+
+Receiver CPU sample ranges are 1.1532-1.2250 versus 0.5732-0.6197 on IPv4,
+and 1.0086-1.0918 versus 0.5102-0.6037 on IPv6. These support the direction
+within this short mechanism trial, not a precision guarantee on deployed
+Core. Relative sleeping makes the paced offered rate slightly dependent on
+sender work; rates differ by about 1-2%, so they are not exactly equal-load
+or externally clocked trials.
+
+IPv6 control latency did not remain identical: p99 samples move from
+31/35/32 to 50/42/41 microseconds. Do not describe this as no control-latency
+regression. No control was lost at this paced load, but the ten-microsecond
+median increase needs evaluation in an actual Core scheduling context.
+
+### Saturation: overload remains visible
+
+| Family | GRO | Delivered Mbit/s median | Receiver CPU/GiB median | Sent, all three trials | Received, all three trials |
+| --- | --- | ---: | ---: | ---: | ---: |
+| IPv4 | off | 9,939.81 | 0.8643 | 12,956,160 | 5,350,204 |
+| IPv4 | on | 21,238.08 | 0.4045 | 24,310,208 | 11,474,324 |
+| IPv6 | off | 10,197.24 | 0.8425 | 15,215,808 | 5,475,005 |
+| IPv6 | on | 21,533.70 | 0.3990 | 32,552,192 | 11,606,045 |
+
+Every saturation trial loses data and controls. Offered traffic also rises
+substantially with GRO, so the approximately doubled delivered goodput is
+not a like-for-like offered-rate comparison and absolutely not a loss-free
+Core throughput claim. GRO is not congestion control and does not repair
+the separately observed Core receive-ring rejection. No missing packet was
+waived or filtered from these totals.
+
+## Disposition and next boundary
+
+The paced result supports a narrowly scoped actual-Core experiment, rather
+than discarding receive offload based on the earlier individual-send model.
+It does not yet authorize a production receive-path change or release.
+Before an overlay, reconcile the socket owners and all receive call sites;
+GRO must never be enabled on a socket still read by an unaware handshake,
+STUN or other datagram consumer. Split using validated metadata before
+per-datagram Stealth/authentication, and preserve source identity, packet
+ownership, existing queue bounds and cooperative scheduling.
+
+The next candidate must be experimental and compared against the retained
+`3166ab67` binary. Do not claim the 46-52% receiver mechanism saving as a
+Core saving, introduce an unbounded pending queue, or use this result to
+clear run `36260893872`'s missing IPv6 echo. Original-host acceptance also
+remains outstanding; this evidence is hosted-runner loopback only.
