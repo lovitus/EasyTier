@@ -638,16 +638,21 @@ jobs:
       - name: Existing UDP contracts and real kernel adapter contracts
         env:
           ET_ISSUE4_UDP_GRO: 'on'
-          # Compile/cache as runner; elevate only the resulting test process,
-          # as the formal Test workflow does for its archived test binaries.
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUNNER: 'sudo -E'
         shell: bash
         run: |
           set -euo pipefail
           root="$PWD"
           cd "$RUNNER_TEMP/gro-source"
-          timeout 1800 cargo +1.95 test --locked --release --target "$TARGET" -j "$(nproc)" -p easytier --lib --features jemalloc tunnel::udp -- --test-threads=1 --nocapture 2>&1 | tee "$root/gro-evidence/udp-tests.log"
-          timeout 120 cargo +1.95 test --locked --release --target "$TARGET" -j "$(nproc)" -p easytier --lib --features jemalloc hole_punch_listener_ -- --test-threads=1 --nocapture 2>&1 | tee "$root/gro-evidence/hole-punch-tests.log"
+          # Compile once as runner. Like formal Test's archive/run split, both
+          # filters execute the same binary; neither can implicitly recompile.
+          timeout 1800 cargo +1.95 test --locked --release --target "$TARGET" -j "$(nproc)" -p easytier --lib --features jemalloc --no-run --message-format=json \
+            > "$root/gro-evidence/test-build.jsonl" 2> "$root/gro-evidence/test-build.log"
+          mapfile -t test_binaries < <(jq -r 'select(.reason == "compiler-artifact" and .target.name == "easytier" and .profile.test == true and .executable != null) | .executable' "$root/gro-evidence/test-build.jsonl" | sort -u)
+          test "${#test_binaries[@]}" = 1
+          install -m 0755 "${test_binaries[0]}" "$root/gro-binaries/udp-contract-tests"
+          sha256sum "$root/gro-binaries/udp-contract-tests" > "$root/gro-evidence/test-binary.sha256"
+          sudo -E timeout 1800 "$root/gro-binaries/udp-contract-tests" tunnel::udp --test-threads=1 --nocapture 2>&1 | tee "$root/gro-evidence/udp-tests.log"
+          sudo -E timeout 120 "$root/gro-binaries/udp-contract-tests" hole_punch_listener_ --test-threads=1 --nocapture 2>&1 | tee "$root/gro-evidence/hole-punch-tests.log"
       - name: Build one experimental Core and matching CLI
         shell: bash
         run: |

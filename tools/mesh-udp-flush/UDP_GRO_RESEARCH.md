@@ -256,3 +256,28 @@ executes only the resulting test process with `sudo -E`. The exact Core source,
 receive adapter, both test filters, every test expectation and all lab assertions
 are unchanged. The first failed run remains the diagnostic record; this is not
 a same-SHA retry or a performance result. One corrected experiment is dispatched.
+
+### Second attempt: test command recompiled before its run deadline
+
+Run `36270378757`, harness
+`a165f0944eeb931ce5bd498fa4b6fb5bd7ce80da`, is **FAIL**, not a passing
+UPnP result. The privileged UDP invocation again passed **39/39** in 23.10
+seconds. The next `cargo test` invocation printed `Compiling easytier` and
+exited **124** at its 120-second command limit, before any of the four selected
+hole-punch tests started. The initial permission failure was not re-observed,
+but its affected UPnP behaviors are still unverified in this experiment.
+The retained output does not identify the fingerprint which caused Cargo to
+recompile; do not claim a proven cache or source-mutation root cause.
+
+Evidence artifact `10915304489`, 92,047 bytes, has ZIP SHA-256
+`eef7ee52731ab995e1a4143028c91a64a5c4179e23a182f9c0ab4cad45c60560`.
+All 13 members passed CRC and all 12 manifest digests matched. Core binary build
+and performance phases again did not run. Both prior failures remain visible.
+
+The narrow harness correction separates compilation from execution, following
+formal Test's compile/archive/run model: one `cargo test --no-run` with machine
+readable artifact identity, then both unchanged filters execute the exact same
+checksummed test binary under `sudo -E`. Both execution deadlines are unchanged;
+no test assertion, filter, adapter or production behavior changes. The test
+binary is retained in the existing experiment artifact even on later failure,
+so future harness diagnosis need not discard the expensive compilation result.
