@@ -266,7 +266,7 @@ Next action: reuse the symbol-bearing packages for bounded idle/resource samples
 and actual Core CPU profiles to identify the remaining cost, rather than add
 another speculative production optimization or rebuild the same Core.
 
-## Active cursor: exact-package CPU and idle-resource observation
+## Exact-package CPU and idle-resource observation
 
 The 24-case relay milestone is complete. The next observation reuses the same
 baseline `c6772dbfef2395ff96b39bd4801945d92212dffb` and candidate
@@ -297,7 +297,7 @@ policy engine, operational-host deployment, or production edit is part of it.
 References: [Ubuntu package](https://packages.ubuntu.com/jammy/linux-tools-generic-hwe-22.04)
 and [perf record call-graph options](https://man7.org/linux/man-pages/man1/perf-record.1.html).
 
-Status: run [36227357275](https://github.com/lovitus/EasyTier/actions/runs/36227357275)
+Historical failure: run [36227357275](https://github.com/lovitus/EasyTier/actions/runs/36227357275)
 failed in the new perf-tool preparation step, before any Core was launched.
 The existing packages passed their identity checks. Ubuntu installed
 `linux-hwe-6.8-tools-6.8.0-138`, but the harness searched only regular files under
@@ -336,5 +336,112 @@ preserved baseline data without a new Core execution. Kernel symbols in this
 cross-run replay may be unavailable and must not be invented or treated as a
 fresh profile. Actual paired profiling still occurs on one runner.
 
-The unique next step is this bounded report/observation. No already-completed
-acceptance matrix or Core build needs rerun; no functional assertion changes.
+The report/observation below supersedes that pending status. No already-completed
+acceptance matrix or Core build was rerun; no functional assertion changed.
+
+### Completed paired observation, 2026-09-26
+
+[Run 36228443503](https://github.com/lovitus/EasyTier/actions/runs/36228443503)
+is SUCCESS at research harness `234c260307d89bd4c130d204258a57420a49d0c5`.
+Evidence artifact `10902180949` was downloaded and its full ZIP SHA-256 verified:
+`0ccff4584b3ead7a099068dbc4ff60d388b29d89c957c3448b01c3c47e08eed2`.
+The source and actual executable hashes still match the immutable baseline and
+candidate listed above. No Core build, production patch, merge or release occurred.
+
+Both endpoints were isolated namespaces on one Ubuntu 22.04 hosted runner,
+Linux `6.8.0-1064-azure`, AMD EPYC 7763, four visible CPUs. Each Core owned one
+mesh TUN. Path: direct UDP, IPv4 underlay and inner traffic, AES-GCM, Stealth off,
+no Leaf/Mihomo. This is not original-device, WAN, multi-peer cluster, or other
+platform evidence. Each pair performed one 2 GiB upload and one 2 GiB download.
+Sampled throughput is excluded from performance-gain claims; the earlier
+three-interleaved-sample unprofiled comparison remains the throughput evidence.
+
+CPU below is the sum of both Core processes, with 100% meaning one CPU core.
+Each cell covers the 30-second and subsequent 60-second idle intervals.
+RSS is the sum at interval ends, not an interval peak.
+
+| Pair | Before-load CPU | After-load CPU | Before-load RSS MiB | After-load RSS MiB |
+|---|---:|---:|---:|---:|
+| Baseline | 0.233-0.250% | 0.250-0.267% | 50.527-50.617 | 51.352-51.469 |
+| Candidate | 0.267% | 0.267-0.283% | 49.891-50.516 | 50.914-50.969 |
+
+FD counts stayed within the observed 24-29 range per Core. Both pairs ended
+with 13 threads per Core; the candidate ended with 29/28 FDs, within its startup
+observation. No idle full-core loop or continuing short-window resource growth
+was observed. This is not proof of long-term leak freedom or a memory reduction.
+
+The four recordings contain 16,473 Core samples; each endpoint is represented
+and every flat report states zero lost samples. The previous baseline recording
+was also successfully decoded without a new Core execution. Its unresolved
+cross-run kernel addresses are not named or used to infer current kernel costs.
+
+| Completed evidence | Count |
+|---|---:|
+| Idle observation intervals | 8 |
+| Digest/half-close transfers | 4 |
+| Checked UDP echoes | 60 |
+| ICMP replies / requests | 80 / 80 |
+| Clean Core exits, no forced kill | 4 |
+| Removed namespaces | 4 |
+| Unchanged root-route checks | 2 |
+
+### What the CPU stacks establish
+
+The following percentages sum the same symbol's inclusive percentage across
+worker threads. Rows can overlap through ancestry and MUST NOT be added together.
+Percentages are rounded samples, not an independent benchmark or exact cost
+accounting. The numerator/denominator changes after optimization, so a larger
+TUN percentage does not itself mean the TUN implementation regressed.
+
+| Inclusive path | Baseline upload / download | Candidate upload / download |
+|---|---:|---:|
+| `LinuxTunOffloadSink::poll_flush_inner` | 25.77 / 27.53% | 33.49 / 34.35% |
+| Kernel `tun_chr_write_iter`, inside that path | 17.67 / 18.80% | 21.40 / 24.34% |
+| UDP send syscall: baseline `__sys_sendto`, candidate `__sys_sendmsg` | 29.01 / 29.18% | 16.55 / 17.58% |
+| UDP `__sys_recvfrom` | 7.03 / 6.84% | 8.41 / 9.51% |
+
+Candidate direct/self AES encrypt/decrypt update samples total about 3.3-3.8%.
+This host has hardware AES/VAES; it does not establish crypto cost on other CPUs.
+The largest remaining selected path is mesh TUN delivery including its kernel
+work, not the policy engine. Sender sample counts fall from 2220 to 1407 on
+upload and 2350 to 1457 on download; receiver counts are 2339 to 2089 and 2522 to
+2089. This supports the transmit-side mechanism, not a new throughput claim.
+
+The `poll_close` label in the graph is not evidence of repeated tunnel teardown:
+[the exact source](https://github.com/lovitus/EasyTier/blob/3a1f3d9fc840a37a7649448a042bf44035bfaf7b/easytier/src/instance/linux_tun_offload.rs#L203)
+has both `poll_flush` and `poll_close` delegate to the same flush routine.
+
+### Source/history reconciliation and next boundary
+
+The exact source's sink takes the packet's existing `BytesMut` slice and passes
+it to `tun-rs::send_multiple`; it does not provision extra GRO head capacity.
+Locked `tun-rs 2.8.7` explicitly refuses append/prepend coalescing when head
+capacity is insufficient (`offload.rs` lines 927 and 962; UDP line 884). The
+inspected file was checked against the checksum-verified registry archive:
+crate `ea75f145e8f32c72b1afdf137f2181810b0232be9930519e8d82071b4a3b3bdf`,
+file `3c976dc63de66e6d868cb7381f0b46f2bba01b479ebc5988b3add9c5e139a071`.
+This establishes a possible capacity-limited coalescing mechanism; this profile
+alone does not measure actual head capacities or the number of rejected merges.
+
+This is not a new speculative rewrite. Prior actual-Core
+[run 36093630841](https://github.com/lovitus/EasyTier/actions/runs/36093630841)
+already found an additional 18.4% CPU/GiB reduction from bounded 8 KiB scratch on
+top of GSO at matched approximately 192 Mbit/s in its paced IPv6 mixed-flow
+fixture. That is a different experimental artifact/workload and is not added
+to this candidate's gain. The unpaced receive-ring loss remains unresolved.
+The negative `recv_many` and `recvmmsg` results remain negative; a receive syscall
+in a profile does not justify discarding those prior comparisons.
+
+## Current task cursor
+
+- Production candidate remains frozen at `3a1f3d9f`, draft PR #9, unmerged.
+- Completed: exact-package throughput/CPU comparison, IPv6 and mixed-version
+  checks, three-peer relay, and the bounded idle/profile observation above.
+- Open: original-host/WAN behavior, long-duration resources, mixed-flow receive
+  ring overload and other-platform/architecture acceptance. Do not call the
+  overall performance task complete or describe this as a released fix.
+- Unique next step: audit and reuse the already-measured bounded TUN-head
+  experiment against the locked API, including fixed memory ownership, buffer
+  recovery and partial-write/cancellation semantics, before proposing a new
+  production batch. No protocol rewrite, queue growth, sleep, ICMP exemption or
+  whole-batch replay is authorized by these profiles.
