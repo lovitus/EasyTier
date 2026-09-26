@@ -204,3 +204,27 @@ and non-Linux/other-architecture build acceptance. Next action is a bounded
 three-peer relay check using the same packages, with route evidence proving
 that endpoint traffic actually traverses the intermediate peer. Do not rebuild
 Core or claim relay success from a direct peer list.
+
+## Bounded relay extension, pending execution
+
+`artifact_relay_only=true` reuses the same artifacts with no Rust compilation.
+The existing lab gains one optional relay package. Its two endpoint namespaces
+have disjoint veth subnets, with no direct L3 route to one another; only the
+relay namespace has both links. IPv4 and IPv6 forwarding are explicitly
+disabled inside that namespace. Both endpoints connect only to the relay,
+and automatic P2P remains disabled. No host firewall or root route is changed.
+
+Route JSON is checked using the exact baseline CLI contract: on both endpoints,
+the other endpoint must have `path_len=2` and next-hop virtual IPv4 `10.88.0.3`;
+the relay must report both endpoints at `path_len=1`. These checks run before
+and after real traffic, in addition to the existing transport, integrity,
+half-close, UDP echo, ICMP and cleanup checks. Every role has its own recorded
+binary digest. All three Cores participate in bounded lifetime and cleanup.
+
+The 24 functional cases cover IPv4 and IPv6 underlays with the matching inner
+family, both Stealth configurations, and six client/relay/server version
+combinations: BBB, CCC, BCB, CBC, BCC, CBB. Both transfer directions are checked;
+the last two combinations also cover the reverse endpoint orientation. This
+is not a relay performance claim or exhaustive cross-family relay matrix.
+Results remain pending. Production source and existing package identities stay
+unchanged; prior failures and direct-path performance records remain preserved.

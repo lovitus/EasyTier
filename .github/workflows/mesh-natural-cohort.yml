@@ -22,6 +22,10 @@ name: Mesh natural-cohort kernel mechanism
         description: Reuse the packages for IPv6-underlay and mixed-version checks only
         type: boolean
         default: false
+      artifact_relay_only:
+        description: Reuse the packages for a bounded three-peer relay check only
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths:
@@ -219,15 +223,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ARTIFACT_PAIR: ${{ inputs.artifact_pair }}
           COMPATIBILITY_ONLY: ${{ inputs.artifact_compatibility_only }}
+          RELAY_ONLY: ${{ inputs.artifact_relay_only }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p exact-evidence
+          if [[ "$COMPATIBILITY_ONLY" == 'true' && "$RELAY_ONLY" == 'true' ]]; then
+            printf '%s\n' 'Choose one artifact-only validation mode.' >&2
+            exit 1
+          fi
           sudo apt-get update -qq
           sudo apt-get install -y -qq iproute2 iputils-ping ethtool strace binutils
           python3 -m py_compile tools/mesh-udp-flush/exact_artifact_lab.py
           python3 tools/mesh-udp-flush/exact_artifact_lab.py prepare --output exact-evidence
-          if [[ "$COMPATIBILITY_ONLY" != 'true' ]]; then
+          if [[ "$COMPATIBILITY_ONLY" != 'true' && "$RELAY_ONLY" != 'true' ]]; then
             rustup toolchain install 1.95.0 --profile minimal
             rustc +1.95.0 --edition 2024 -O tools/easytier-perf-probe.rs -o exact-evidence/probe
             sha256sum exact-evidence/probe > exact-evidence/probe.sha256
@@ -235,19 +244,19 @@ jobs:
           uname -a > exact-evidence/kernel.txt
           lscpu > exact-evidence/cpu.txt
       - name: Interleaved fixed-load, dual-stack overlay and Stealth checks
-        if: ${{ !inputs.artifact_compatibility_only }}
+        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only }}
         shell: bash
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py fixed --output exact-evidence
       - name: Separate low-rate syscall activation evidence
-        if: ${{ !inputs.artifact_compatibility_only }}
+        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only }}
         shell: bash
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 240s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py trace --output exact-evidence
       - name: Unpaced comparison with unchanged control-progress assertions
-        if: ${{ !inputs.artifact_compatibility_only }}
+        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only }}
         shell: bash
         run: |
           set -euo pipefail
@@ -258,6 +267,12 @@ jobs:
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py compatibility --output exact-evidence
+      - name: Three-peer relay with route and no-direct-path evidence
+        if: ${{ inputs.artifact_relay_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py relay --output exact-evidence
       - name: Preserve scoped evidence
         if: always()
         shell: bash
