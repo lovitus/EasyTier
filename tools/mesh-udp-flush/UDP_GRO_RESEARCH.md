@@ -1,6 +1,7 @@
 # GSO supply and UDP GRO receive: bounded mechanism research
 
-Status: standalone mechanism completed; useful paced CPU result, not Core acceptance.
+Status: standalone mechanism and 43 Core contracts completed; actual-Core GRO
+comparison is incomplete because the experiment driver lost its activation option.
 No production Core change, merge or release.
 The original combined saturation failure remains open.
 
@@ -203,7 +204,8 @@ tails, interleaved source/control datagrams, zero-byte datagrams, bounded queued
 allocations and current-thread cooperative progress. Existing UDP/Stealth and
 hole-punch listener tests run with the adapter enabled.
 
-Pending gates: compiler/tests, actual Core GRO occupancy, fixed-load CPU/RSS,
+Compiler/contracts subsequently passed in run `36271631477` (39 UDP and four
+hole-punch tests). Pending gates: actual Core GRO occupancy, fixed-load CPU/RSS,
 saturated and opposite-direction mixed load. The first failure stops its phase
 and remains evidence. No production benefit, loss fix, WAN result, unsupported
 platform benefit or release acceptance is asserted before these gates finish.
@@ -282,7 +284,7 @@ no test assertion, filter, adapter or production behavior changes. The test
 binary is retained in the existing experiment artifact even on later failure,
 so future harness diagnosis need not discard the expensive compilation result.
 
-### Third attempt: contracts complete; Drop-only observation invalid
+### Third attempt: contracts complete; missing metrics initially misattributed
 
 Run `36271631477`, harness
 `d06292a42ac3c1d0b7f020b4e7b8a535a95e6f17`, remains **FAIL**.
@@ -294,12 +296,14 @@ UDP echo, byte-integrity and zero-loss ICMP checks. Both Core processes exited
 were unchanged. No on sample or A/B performance result was collected.
 
 The harness then failed because there were **zero** shutdown metric files.
-That assertion incorrectly treated a diagnostic `Receiver::drop` write as
-mandatory during process termination. The existing launcher ends its instance
-runtime with `shutdown_background()` (`easytier/src/launcher.rs`), so diagnostic
-destructor completion before process exit is not an established contract. This
-is neither evidence of a GRO throughput failure nor proof of a product leak.
-Do not change product shutdown to accommodate the observation tool.
+The first explanation attributed this to diagnostic `Receiver::drop` writes
+not completing before `shutdown_background()`. That attribution was not proved
+and is withdrawn: the fourth attempt established that the existing lab removes
+the experiment's environment variables before spawning Core. This includes both
+the activation option and the old metrics path. Non-waiting runtime shutdown
+is still not a guarantee of diagnostic destructor writes, but it is not the
+demonstrated cause of this sample. Do not change product shutdown to accommodate
+the observation tool. Neither run proves a Core GRO regression or product leak.
 
 Evidence artifact `10916103565` (183,728 bytes), ZIP SHA-256:
 `4ec18e240a098ad011e11160b171982e915e360be4daa71461813a42a8820737`.
@@ -321,3 +325,81 @@ traffic, integrity, ICMP and cleanup assertions. The old Drop-only diagnostic
 assertion is replaced because its premise was false, not because packet or
 lifecycle acceptance is relaxed. No receive-adapter or production change is
 included. Earlier failures remain recorded and actual Core benefit is pending.
+
+### Fourth attempt: the lab removes the experiment selector
+
+Run `36273977755`, harness `00c191f7f099d31e4e0ac687cfe02dd909acb20c`,
+reused artifact `10915569351` after outer and inner digest checks on the runner.
+There was no Core compilation. The run is **FAIL**, not a completed off/on
+comparison. Both IPv4/Stealth cases completed the existing traffic and cleanup
+checks, but both recorded zero successful UDP_GRO enables and zero GRO receives.
+The activation assertion stopped the run before IPv6 or untraced performance.
+
+The source boundary explains this directly. `gro_lab.py` puts
+`ET_ISSUE4_UDP_GRO` in its child environment, while `lab.py::run` constructs each
+Core environment by excluding every key beginning with `ET_`. The two case
+labels therefore both ran GRO-off. The earlier metrics path was also removed.
+The external syscall observer correctly caught this; do not remove its assertion
+or present equal off-path samples as a negative GRO performance result.
+
+Evidence artifact `10916640738` is 248,136 bytes, with ZIP SHA-256
+`fd3e49dbf9cea731f164fbe1e8b805e6806d507f1cc0f295f32bf9ffb4a988a8`.
+All 362 ZIP members passed CRC and all 361 manifest digests matched. Each case
+has 11 clean cleanup entries and unchanged host routes. Traced timings are not
+performance evidence. The contract results from the separately executed test
+binary remain valid; they did not use this lab's filtered Core environment.
+
+The proposed correction is an explicit, optional lab argument, passed by the
+GRO driver and applied after environment isolation. Its default must preserve
+existing lab behaviour; unrelated `ET_` variables must remain excluded. Keep
+every activation, integrity, ICMP and lifecycle assertion. Reuse the same
+immutable Core binary instead of rebuilding. This newly identified harness
+correction is awaiting maintainer confirmation and is not implemented here.
+
+## Residual Core cost: existing profile, not another performance claim
+
+While the harness correction awaits confirmation, the existing flat profiles
+from run `36235812507` were analysed without another build or deployment.
+Their candidate is **`6e90dbf102e5c93d56c531b87eea1858c4a8e61e`**, not the
+later experimental receiver. Artifact `10904457128` has verified ZIP SHA-256
+`535f0f80d919aaee7abd05bc4f471ee0860394e00c5f4595c713349bf17650af`.
+Both endpoints were Core processes in two network namespaces joined by veth
+on one GitHub runner: AMD EPYC 9V45, four logical CPUs, Linux 6.8.0-1064-azure.
+The path was UDP/IPv4 underlay, IPv4 overlay, Stealth off, with no Leaf policy.
+These are not WAN, original-host, or sustained-load acceptance results.
+
+The candidate upload/download captures contain 1,032/1,053 CPU-clock samples
+and report zero lost samples. All 500/507 printed rows were parsed. The reports
+use `--no-children`, so these are self samples, not inclusive call-stack totals.
+Each printed row is rounded to two decimals: their totals are 100.58% and
+98.21%, respectively. Do not give aggregated percentages false precision or
+use them as measured achievable savings.
+
+| Observed self-sample location | Upload, approximate % | Download, approximate % |
+| --- | ---: | ---: |
+| All kernel locations | 45.8 | 46.5 |
+| AES-GCM encode/decode update assembly only | 4.3 | 5.4 |
+| SOCKS peer packet filter closure | 3.3 | 3.1 |
+| Userspace `memcpy` | 2.8 | 2.5 |
+| Bounded MPSC sender future | 1.8 | 2.4 |
+
+The AES row excludes other crypto work; it is not total encryption cost. Kernel
+samples include scheduling, locks and packet processing, not just UDP receive.
+Flat samples cannot attribute all of those to one syscall or infer a GRO gain.
+
+The SOCKS filter deserves a bounded follow-up, not deletion. The exact
+`easytier/src/gateway/socks5.rs` blob is identical at the profiled `6e90dbf1`
+and frozen `3166ab67`: `63c30e5f780e3d265fd307ecafd132b058ebb3ae`.
+`try_process_packet_from_peer()` still loads the entry/enabled flags and checks
+`entries.is_empty()` before passing inactive traffic through. Its existing
+`socks5_mirrors_fragmented_udp_even_when_entry_count_is_stale_zero` regression
+explicitly requires a nonempty table to be honoured when the counter is zero.
+Removing that table check based on the counter alone would violate the current
+contract. The samples also do not isolate how much of the closure's self time
+comes from that check versus other inlined work.
+
+The evidence-based order remains: obtain a valid actual-Core GRO comparison;
+only then consider a focused mechanism experiment for inactive filter or queue
+cost. No crypto/stack replacement, queue enlargement, filter bypass or production
+patch is justified by this profile alone. The original combined saturation
+failure and original-host acceptance remain open.
