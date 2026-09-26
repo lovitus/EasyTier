@@ -805,3 +805,194 @@ content/half-close, UDP echo, peer transport, scratch ownership and cleanup
 assertions unchanged. No packet tracing is enabled during CPU measurement.
 Original unpaced failures remain FAIL regardless of this additional lane.
 No new source-string/mocked tests or red/green workflow framework is added.
+
+### Exact candidate, paced inner-IPv6 mixed load: positive CPU result
+
+Run 36093630841 succeeded at harness 0cb5c1fbc0090fcad683ca52535336dd61c2a6f2.
+It reused the previously built Core candidate
+`d5a10eedde39a37913db9d4a7d8f35d18848d9451cf93f6d57c1085bb42b33ca`
+from artifact 10842834881; no Core was rebuilt. Hardware: one GitHub VM,
+AMD EPYC 7763, four visible CPUs. Both endpoints are isolated namespaces
+on that VM with veth IPv4 UDP underlay and inner IPv6 TCP. AES-GCM enabled,
+Stealth off, TUN MTU 1360. No WAN, physical NIC or cross-platform claim.
+
+12 suites, 24 Core-pair lifecycles, 48 primary and 48 concurrent reverse
+transfers completed. Also passed 48 integrity/half-close checks, 24 UDP
+checks of 30 echoes each, and all 48 ping runs (960/960 echo replies).
+All Core exits were zero without forced kill; scratch_lost summed to zero.
+The root-route invariance assertion stayed enabled. Combined Core RSS
+snapshots ranged 60,940,288-63,303,680 bytes across all arms; this is not a
+per-arm memory saving or long-term leak measurement. No tracing ran during
+CPU comparisons.
+
+Each row below pools six primary measurement windows (three repetitions,
+two directions; each window includes a concurrent reverse flow). CPU/GiB
+is the sum of both Core process CPU deltas divided by both delivered flows'
+bytes. Conventional median averages the two middle samples for six values.
+Measured Mbit/s is for the primary flow, NOT aggregate throughput.
+
+| Per-flow configured cap | Arm | TUN scratch | Actual primary Mbit/s median | Core CPU s/GiB median | CPU sample range |
+| ---: | --- | ---: | ---: | ---: | --- |
+| 200 | legacy | 0 | 192.08 | 31.20 | 30.96-31.44 |
+| 200 | GSO | 0 | 192.15 | 22.20 | 21.84-22.40 |
+| 200 | legacy | 8192 | 192.10 | 29.60 | 29.28-29.84 |
+| 200 | GSO | 8192 | 192.20 | 18.12 | 18.00-18.32 |
+| 600 | legacy | 0 | 500.95 | 24.52 | 24.24-24.80 |
+| 600 | GSO | 0 | 518.66 | 19.84 | 19.44-20.08 |
+| 600 | legacy | 8192 | 508.72 | 23.52 | 22.96-23.76 |
+| 600 | GSO | 8192 | 524.14 | 17.28 | 17.04-17.76 |
+
+At the nearly identical ~192 Mbit/s primary rate, GSO plus 8KiB scratch
+reduces Core CPU/GiB by 41.9% versus legacy/zero, and scratch alone adds an
+18.4% reduction over GSO/zero. At the higher configured cap, combined
+reduction is 29.5% and incremental scratch reduction 12.9%, but actual
+rates differ: none achieves the configured 600 Mbit/s. Do not call this an
+exactly matched 600 Mbit/s experiment or a new saturated-bandwidth record.
+Within each rate/arm, CPU sample ranges support the direction rather than
+one favorable outlier. This is useful actual-Core evidence, unlike the
+negative standalone receive models.
+
+Boundary: this closes the paced IPv6 mixed-load comparison only. The prior
+unpaced ICMP failures remain FAIL, including the baseline ring rejection.
+It does not establish a production-safe fix for every overload condition,
+other platforms, actual physical hosts, or Stealth in this new workload.
+Next work should reconcile the two positive overlays into one bounded
+production proposal with activation/fallback/lifetime review, then validate
+the exact candidate on the original hardware without replacing production
+first. Do not re-open recv_many/recvmmsg based solely on these results.
+
+Evidence artifact 10845874849 is about 1 MiB, full ZIP SHA256 verified:
+`0a8a3dbb38bd0c5e59215c3905223d291aba70c1038b451f0412bdfb3b218152`.
+Artifact harness SHA and reused binary hashes match the selected candidate.
+
+### Production-boundary source audit: do not copy diagnostic overlays verbatim
+
+Inspected adapter.rs.in and tun_capacity.rs.in, then reconciled the locked
+registry tun-rs 2.8.7 checksum
+`ea75f145e8f32c72b1afdf137f2181810b0232be9930519e8d82071b4a3b3bdf`.
+This is source analysis, not new runtime validation.
+
+1. UDP capability fallback is absent in the diagnostic writer. send_group
+   propagates a non-Interrupted error; send_frames propagates it; forward
+   terminates with IOError. A kernel/device that cannot accept UDP_SEGMENT
+   therefore loses the writer instead of retaining legacy sends. This is a
+   production admission blocker, not a regression discovered in a shipped
+   feature. Existing successful GSO tests do not cover unsupported kernels.
+2. Preserve each Frame's already-sealed bytes while handling such rejection.
+   Any permitted fallback must send only the rejected group's unchanged
+   datagrams in order, never reseal them, never replay previously completed
+   groups, and never retry an ambiguous short successful submission. A
+   per-writer capability decision is sufficient; no global capability
+   manager, new queue or background probe is justified. EAGAIN remains
+   readiness-driven; permanent errors must not trigger an unbounded loop.
+   Exact fallback errno policy still requires kernel/reference evidence;
+   do not silently classify every network error as lack of GSO support.
+3. Preserve the diagnostic ownership bound: 32 staging + 64 ring + 32 wire
+   slots, versus the legacy 128-slot ring. Do not retain a 128-slot ring
+   AND add staging/wire slots while claiming unchanged memory bounds. Packet
+   ownership bounds are not total RSS bounds; payload sizes and temporaries
+   still matter. Control and gate-key traffic remain single datagrams.
+4. TUN scratch reclamation is supported by the exact dependency implementation:
+   coalesce_tcp_packets checks target capacity before resize/extend and may
+   swap buffer elements for prepend. Matching the allocation pointer after
+   send_multiple, rather than assuming a fixed vector index, is appropriate.
+   BytesMut owns the allocation in the future; cancellation/drop releases it.
+   Missing reclamation must disable this optimization rather than allocate
+   repeatedly, panic or turn it into a pool. Existing measured scratch_lost=0
+   is evidence for tested paths, not an exhaustive cancellation guarantee.
+5. TUN error handling is DIFFERENT from one UDP sendmsg. tun-rs's
+   async_device/unix/mod.rs::send_multiple loops through write candidates,
+   can keep going after an individual write error, and finally returns Err.
+   Some packets may already have been delivered. Never replay the whole TUN
+   batch on Err as a supposed legacy fallback; that can duplicate traffic.
+   Preserve existing error propagation and reclaim owned memory only.
+6. Diagnostic environment switches, process-global OnceLock mode, namespace
+   assertions, panic on environment values, per-drop JSON/files and detailed
+   counters are not production configuration/lifecycle APIs. A production
+   proposal must use existing configuration ownership and cfg boundaries;
+   do not expose these experimental flags as a supported public interface.
+7. The dependency's tcp_gro also copies packet bytes into a temporary Vec.
+   This is a source fact, not a measured dominant cost or authorization to
+   fork tun-rs. Do not add that separate optimization to this delivery batch.
+
+Remaining proof before adoption: bounded unsupported-GSO fallback with exact
+wire/order checks; true backpressure/cancellation cleanup; unchanged fallback
+on non-Linux paths; isolated exact-artifact measurement on original hardware.
+The paced CPU improvement is retained, but none of these requirements is
+marked passed by that result. Production source remains unchanged.
+
+### Bounded GSO fallback implementation prepared (uncommitted/unvalidated)
+
+adapter.rs.in now retains a per-writer gso_disabled flag and a diagnostic
+fallback count. Only grouped send errors EINVAL/EIO/ENOPROTOOPT/EOPNOTSUPP
+select individual sends for the rejected group's first frame and all later
+frames. Already completed groups are never restarted; Frame bytes are not
+resealed. Other errors propagate; a short successful submission is not
+replayed. Packet/staging/ring bounds, grouping, protocol and TUN behavior
+are unchanged. This is still a runner-local experimental overlay, not a
+shipped production patch.
+
+Kernel/reference research: Linux v6.8 net/ipv4/udp.c::udp_send_skb frees the
+GSO skb and returns EINVAL for sk_no_check_tx; ordinary non-GSO sends follow
+the checksum-disabled send branch. It also rejects unsupported checksum/
+transform conditions with EIO. Quinn's current quinn-udp/src/unix.rs turns
+off segmentation following EIO/EINVAL; this is supporting precedent, not
+code imported into this project or proof of every errno on every kernel.
+A raw-content fetch returned HTTP429; the kernel evidence was obtained from
+the corresponding GitHub v6.8 source page, not inferred from that failure.
+
+- https://github.com/torvalds/linux/blob/v6.8/net/ipv4/udp.c
+- https://raw.githubusercontent.com/quinn-rs/quinn/main/quinn-udp/src/unix.rs
+
+Prepared real-socket regression: set SO_NO_CHECK on a test-only IPv4 socket;
+prove grouped send actually returns EINVAL; then use send_frames with a
+single-send prefix, a group and a single-send suffix. Receive exact frame
+bytes/source/order twice, require only one capability fallback/GSO attempt,
+and check no extra datagram remains. No fake sender replaces the tested
+object. The overall case has a three-second bound. This new case has NOT
+been compiled/run, and has no red/green evidence yet; do not commit it as
+validated or count it toward the eight previously passed contracts.
+
+Local Rust parser/format rendering and maintained pre-commit checks passed.
+Neither establishes kernel behavior or a new artifact. The next required
+work is the unchanged-send_frames red and updated-send_frames green run,
+followed by the existing exact-Core fixture checks for the new artifact.
+No TUN whole-batch fallback, production source modification, deployment or
+release was made in this step.
+
+### Integration seam reconciliation while candidate-test policy is unresolved
+
+Source search in this experimental tree found no implemented
+experimental_features/exp_feature/enable_udp_gso hooks. Earlier discussion
+of an --exp-feature interface is not evidence that this tree supplies one.
+Do not promise to reuse a nonexistent switch or introduce a general feature
+registry merely for this optimization.
+
+Current UDP ownership has two concrete construction points:
+UdpTunnelListenerData::handle_new_connect and
+UdpTunnelConnector::build_tunnel. Each creates separate 128-slot send and
+receive rings and a connection-local Stealth state. UdpConnection::new
+owns an AbortOnDrop forward task and reports termination through its close
+channel. A future integration must update both SEND-side factories together,
+leave the receive ring unchanged, and preserve that close/abort ownership.
+Per-writer GSO-disable state naturally lives inside forward_from_ring_to_udp;
+it needs neither GlobalCtx ownership nor a process-global OnceLock. Shared
+listener sockets do not imply that one peer's fallback must disable every
+other peer's route. Recreating a connection starts a fresh capability trial.
+
+This identifies a small internal seam, not an approved default-on rollout.
+No runtime config schema, public constructor signature, CLI option, GUI
+control, receiving-ring policy, or persistent capability state was changed.
+The fallback WIP and its new regression are still uncommitted and unrun.
+The requested narrow exception for staging an unvalidated experimental SHA
+on GitHub has not yet received an explicit reply; do not interpret an
+unsubmitted suggested answer as approval or claim a workflow is running.
+
+### Candidate staging authorization
+
+The maintainer explicitly approved staging this unvalidated experimental batch on
+GitHub so the existing workflow can compile and test it. This supersedes the
+pending-authorization note above, not the validation requirements. Approval does
+not authorize merging, production deployment, or release. The new real-kernel
+GSO-rejection regression remains unvalidated until the workflow supplies evidence;
+prior passing contracts do not cover it.

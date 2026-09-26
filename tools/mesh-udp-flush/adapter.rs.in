@@ -179,6 +179,8 @@ mod issue4_flush {
         calls: u64,
         gso_calls: u64,
         eagain: u64,
+        gso_disabled: bool,
+        capability_fallbacks: u64,
         stealth_enabled: bool,
         outer_seen: bool,
         histogram: [u64; WIRE + 1],
@@ -186,13 +188,15 @@ mod issue4_flush {
     impl WriterStats {
         fn new(mode: Mode, conn_id: u32) -> Self {
             Self { mode, conn_id, packets: 0, calls: 0, gso_calls: 0, eagain: 0,
+                   gso_disabled: false, capability_fallbacks: 0,
                    stealth_enabled: false, outer_seen: false, histogram: [0; WIRE + 1] }
         }
     }
     impl Drop for WriterStats {
         fn drop(&mut self) {
-            emit_stats("WRITER", format!("{{\"mode\":\"{}\",\"conn_id\":{},\"packets\":{},\"send_calls\":{},\"gso_calls\":{},\"eagain\":{},\"stealth_enabled\":{},\"outer_seen\":{},\"batch_histogram\":{:?}}}",
+            emit_stats("WRITER", format!("{{\"mode\":\"{}\",\"conn_id\":{},\"packets\":{},\"send_calls\":{},\"gso_calls\":{},\"eagain\":{},\"gso_disabled\":{},\"capability_fallbacks\":{},\"stealth_enabled\":{},\"outer_seen\":{},\"batch_histogram\":{:?}}}",
                 self.mode.name(), self.conn_id, self.packets, self.calls, self.gso_calls, self.eagain,
+                self.gso_disabled, self.capability_fallbacks,
                 self.stealth_enabled, self.outer_seen, self.histogram));
         }
     }
@@ -246,14 +250,37 @@ mod issue4_flush {
     async fn send_frames(socket: &UdpSocket, address: SocketAddr, frames: &[Frame], stats: &mut WriterStats) -> io::Result<bool> {
         let mut begin = 0;
         while begin < frames.len() {
-            let end = if stats.mode == Mode::Gso { group_end(frames, begin) } else { begin + 1 };
+            let mut end = if stats.mode == Mode::Gso && !stats.gso_disabled { group_end(frames, begin) } else { begin + 1 };
             let written = if end == begin + 1 {
                 stats.calls += 1;
                 socket.send_to(&frames[begin].bytes, address).await?
             } else {
-                send_group(socket, address, &frames[begin..end], stats).await?
+                match send_group(socket, address, &frames[begin..end], stats).await {
+                    Ok(written) => written,
+                    Err(error) if matches!(error.raw_os_error(),
+                        Some(libc::EINVAL | libc::EIO | libc::ENOPROTOOPT | libc::EOPNOTSUPP)) => {
+                        // The rejected sendmsg accepted no group bytes. Keep the
+                        // already-sealed frames and resume at this group's first
+                        // item, not at the start of the vector. Subsequent groups
+                        // and calls use singles for this writer's lifetime.
+                        // Do not apply this to TUN send_multiple (partial writes)
+                        // or to the synthetic short-success error from send_group.
+                        stats.gso_disabled = true;
+                        stats.capability_fallbacks += 1;
+                        tracing::debug!(%error, "UDP GSO unavailable; using individual datagrams");
+                        end = begin + 1;
+                        stats.calls += 1;
+                        socket.send_to(&frames[begin].bytes, address).await?
+                    }
+                    Err(error) => return Err(error),
+                }
             };
             if written == 0 { return Ok(false); }
+            let expected: usize = frames[begin..end].iter().map(|frame| frame.bytes.len()).sum();
+            if written != expected {
+                return Err(io::Error::new(io::ErrorKind::WriteZero,
+                    "short UDP submission; not replayed"));
+            }
             stats.packets += (end - begin) as u64;
             begin = end;
         }
@@ -432,6 +459,45 @@ mod issue4_flush {
             assert_ne!(outer1.bytes,outer2.bytes);
             assert_eq!(receiver.open_datagram(&outer1.bytes).unwrap(),plain);
             assert_eq!(receiver.open_datagram(&outer2.bytes).unwrap(),plain);
+        }
+        #[tokio::test]
+        async fn issue4_flush_real_kernel_rejection_falls_back_without_replay() {
+            timeout(Duration::from_secs(3), async {
+                let tx = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let rx = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let enabled: libc::c_int = 1;
+                // Linux udp_send_skb rejects UDP_SEGMENT with EINVAL when
+                // sk_no_check_tx is set. This modifies only this test socket;
+                // individual UDP sends remain valid. No injected send results.
+                assert_eq!(unsafe { libc::setsockopt(tx.as_raw_fd(), libc::SOL_SOCKET,
+                    libc::SO_NO_CHECK, (&enabled as *const libc::c_int).cast(),
+                    mem::size_of_val(&enabled) as libc::socklen_t) }, 0);
+                let state = crate::tunnel::stealth::OuterSessionState::disabled();
+                let mut frames = (0..6).map(|id| frame(packet(&[id;100]),7,&state)).collect::<Vec<_>>();
+                frames[0].batchable = false;
+                frames[5].batchable = false;
+                let mut raw_stats = WriterStats::new(Mode::Gso,7);
+                let error = send_group(&tx,rx.local_addr().unwrap(),&frames[1..5],&mut raw_stats)
+                    .await.unwrap_err();
+                assert_eq!(error.raw_os_error(),Some(libc::EINVAL));
+                let mut stats = WriterStats::new(Mode::Gso,7);
+                for pass in 1..=2 {
+                    assert!(send_frames(&tx,rx.local_addr().unwrap(),&frames,&mut stats).await.unwrap());
+                    for expected in &frames {
+                        let mut bytes = [0u8;2048];
+                        let (len,source) = rx.recv_from(&mut bytes).await.unwrap();
+                        assert_eq!(source,tx.local_addr().unwrap());
+                        assert_eq!(&bytes[..len],&expected.bytes[..]);
+                    }
+                    assert!(stats.gso_disabled);
+                    assert_eq!(stats.capability_fallbacks,1);
+                    assert_eq!(stats.gso_calls,1);
+                    assert_eq!(stats.packets,pass*frames.len() as u64);
+                }
+                let mut extra = [0u8;2048];
+                assert!(timeout(Duration::from_millis(30),rx.recv_from(&mut extra)).await.is_err(),
+                    "rejected GSO or earlier successful group must not be replayed");
+            }).await.expect("bounded kernel fallback contract");
         }
         #[tokio::test]
         async fn issue4_flush_gso_ipv4_ipv6_and_shared_socket_progress() {
