@@ -281,3 +281,43 @@ checksummed test binary under `sudo -E`. Both execution deadlines are unchanged;
 no test assertion, filter, adapter or production behavior changes. The test
 binary is retained in the existing experiment artifact even on later failure,
 so future harness diagnosis need not discard the expensive compilation result.
+
+### Third attempt: contracts complete; Drop-only observation invalid
+
+Run `36271631477`, harness
+`d06292a42ac3c1d0b7f020b4e7b8a535a95e6f17`, remains **FAIL**.
+All **39 UDP tests** and **4 hole-punch tests**, including both UPnP namespace
+cases, passed (22.76 s and 3.13 s). Optimized Core, CLI and the exact test binary
+were produced. The first fixed-load off case completed both 64 MiB transfers,
+UDP echo, byte-integrity and zero-loss ICMP checks. Both Core processes exited
+0 without forced kill; both namespaces were empty on deletion and host routes
+were unchanged. No on sample or A/B performance result was collected.
+
+The harness then failed because there were **zero** shutdown metric files.
+That assertion incorrectly treated a diagnostic `Receiver::drop` write as
+mandatory during process termination. The existing launcher ends its instance
+runtime with `shutdown_background()` (`easytier/src/launcher.rs`), so diagnostic
+destructor completion before process exit is not an established contract. This
+is neither evidence of a GRO throughput failure nor proof of a product leak.
+Do not change product shutdown to accommodate the observation tool.
+
+Evidence artifact `10916103565` (183,728 bytes), ZIP SHA-256:
+`4ec18e240a098ad011e11160b171982e915e360be4daa71461813a42a8820737`.
+All 64 members passed CRC; all 63 manifest digests matched.
+Binary artifact `10915569351` (210,751,920 bytes), published ZIP digest:
+`9532c659b5c51e280bc88f5af7d9afe5f4cdfd3a8d2695471282c4133f550cb3`.
+The large binary artifact stays on GitHub; its bytes will be verified there.
+Recorded Core SHA-256:
+`ae0d57a5c1c7d9568ff3158fcfd0c8b544a0a1cf236aab4b36706ca28d6b7777`;
+Build ID `7e874215b5dcf724df2af1461d1814eb75eedd9b`.
+
+Continuation reuses those immutable binaries without compiling. Activation is
+verified independently through bounded `setsockopt`/`recvmsg` traces, with no
+payload dump: off must have no GRO activation; on must have successful enabling
+and GRO aggregates from both endpoint source addresses. IPv4/IPv6 with Stealth
+are observed. Traced runs are explicitly excluded from performance statistics.
+The subsequent untraced fixed/saturated/mixed matrix keeps the original lab's
+traffic, integrity, ICMP and cleanup assertions. The old Drop-only diagnostic
+assertion is replaced because its premise was false, not because packet or
+lifecycle acceptance is relaxed. No receive-adapter or production change is
+included. Earlier failures remain recorded and actual Core benefit is pending.

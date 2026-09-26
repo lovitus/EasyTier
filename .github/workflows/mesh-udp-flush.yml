@@ -50,6 +50,10 @@ name: Actual Core UDP flush-boundary experiment
         description: Build one isolated receive-GRO adapter on pinned Core and compare off/on with unchanged lab assertions
         type: boolean
         default: false
+      udp_gro_reuse:
+        description: Reuse immutable d06292a4 GRO Core/test binaries; observe activation and compare without compiling
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
@@ -61,7 +65,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   core-flush:
-    if: ${{ !inputs.udp_gro_current && !inputs.profile_only && !inputs.paced_tun && !inputs.packet_trace_current && !inputs.packet_trace_reuse }}
+    if: ${{ !inputs.udp_gro_reuse && !inputs.udp_gro_current && !inputs.profile_only && !inputs.paced_tun && !inputs.packet_trace_current && !inputs.packet_trace_reuse }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -573,7 +577,7 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
   gro-contract-and-core:
-    if: ${{ inputs.udp_gro_current }}
+    if: ${{ inputs.udp_gro_current || inputs.udp_gro_reuse }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -591,12 +595,14 @@ jobs:
         with:
           python-version: '3.12'
       - uses: ./.github/actions/prepare-build
+        if: ${{ !inputs.udp_gro_reuse }}
         with:
           target: x86_64-unknown-linux-musl
           pnpm: 'false'
           gui: 'false'
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Prepare the immutable source and receive-only experiment
+        if: ${{ !inputs.udp_gro_reuse }}
         shell: bash
         run: |
           set -euo pipefail
@@ -629,6 +635,7 @@ jobs:
           rustc +1.95 -Vv > gro-evidence/toolchain.txt
           printf '%s\n' 'Experimental receive adapter only; one binary off/on, 64 KiB per enabled reader. No queue/crypto/wire/TUN changes. Prior integrated saturation FAIL remains open.' > gro-evidence/BOUNDARY.txt
       - uses: Swatinem/rust-cache@v2
+        if: ${{ !inputs.udp_gro_reuse }}
         with:
           prefix-key: profiling-comparator
           shared-key: linux-x86_64-musl
@@ -636,6 +643,7 @@ jobs:
           cache-targets: true
           cache-on-failure: true
       - name: Existing UDP contracts and real kernel adapter contracts
+        if: ${{ !inputs.udp_gro_reuse }}
         env:
           ET_ISSUE4_UDP_GRO: 'on'
         shell: bash
@@ -654,6 +662,7 @@ jobs:
           sudo -E timeout 1800 "$root/gro-binaries/udp-contract-tests" tunnel::udp --test-threads=1 --nocapture 2>&1 | tee "$root/gro-evidence/udp-tests.log"
           sudo -E timeout 120 "$root/gro-binaries/udp-contract-tests" hole_punch_listener_ --test-threads=1 --nocapture 2>&1 | tee "$root/gro-evidence/hole-punch-tests.log"
       - name: Build one experimental Core and matching CLI
+        if: ${{ !inputs.udp_gro_reuse }}
         shell: bash
         run: |
           set -euo pipefail
@@ -667,11 +676,78 @@ jobs:
           sha256sum gro-binaries/* > gro-evidence/binaries.sha256
           file gro-binaries/* > gro-evidence/binary-format.txt
           readelf -n gro-binaries/easytier-core > gro-evidence/build-id.txt
+      - name: Reuse exact experimental bytes and their completed contract evidence
+        if: ${{ inputs.udp_gro_reuse }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p gro-evidence gro-binaries
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq iproute2 iputils-ping ethtool tcpdump binutils
+          python3 - <<'PY'
+          import hashlib, json, os, shutil, sys, zipfile
+          from pathlib import Path
+          sys.path.insert(0, 'tools/mesh-udp-flush')
+          from exact_artifact_lab import download
+          root = Path('gro-evidence')
+          original = 'd06292a42ac3c1d0b7f020b4e7b8a535a95e6f17'
+          expected = {
+              'easytier-core': 'ae0d57a5c1c7d9568ff3158fcfd0c8b544a0a1cf236aab4b36706ca28d6b7777',
+              'easytier-cli': 'c131365de90ca80aec2f6098382f02ec20e4b09b8ad0e07495540fe8598c9464',
+              'probe': '62596a8dd4f53e538c0696e3f746d6010e03758f62fe00822510bc8d15c61ab0',
+              'udp-contract-tests': '0fffba25a65f0a8ddb5570d14ff6aa8881d3529a1bf239b83f887829f42d2f42',
+          }
+          archive = root / 'reused-binaries.zip'
+          meta = download(10915569351, archive, '9532c659b5c51e280bc88f5af7d9afe5f4cdfd3a8d2695471282c4133f550cb3')
+          assert meta['workflow_run']['id'] == 36271631477 and meta['workflow_run']['head_sha'] == original
+          with zipfile.ZipFile(archive) as z:
+              assert set(z.namelist()) == set(expected)
+              for name, sha in expected.items():
+                  target = Path('gro-binaries') / name
+                  with z.open(name) as src, target.open('xb') as dst:
+                      shutil.copyfileobj(src, dst)
+                  with target.open('rb') as stream:
+                      assert hashlib.file_digest(stream, 'sha256').hexdigest() == sha
+                  target.chmod(0o755)
+          archive.unlink()
+          archive = root / 'reused-evidence.zip'
+          meta = download(10916103565, archive, '4ec18e240a098ad011e11160b171982e915e360be4daa71461813a42a8820737')
+          assert meta['workflow_run']['id'] == 36271631477 and meta['workflow_run']['head_sha'] == original
+          with zipfile.ZipFile(archive) as z:
+              assert z.read('core-source-sha.txt').decode().strip() == os.environ['SOURCE_SHA']
+              assert z.read('harness-sha.txt').decode().strip() == original
+              assert 'test result: ok. 39 passed; 0 failed;' in z.read('udp-tests.log').decode()
+              assert 'test result: ok. 4 passed; 0 failed;' in z.read('hole-punch-tests.log').decode()
+              build = root / 'reused-build'
+              build.mkdir()
+              for name in ('core-source-sha.txt', 'harness-sha.txt', 'overlay.json', 'receive-overlay.patch',
+                           'udp_gro_experiment.rs', 'udp-tests.log', 'hole-punch-tests.log',
+                           'binaries.sha256', 'build-id.txt', 'toolchain.txt', 'Cargo.lock'):
+                  (build / name).write_bytes(z.read(name))
+          archive.unlink()
+          (root / 'reuse.json').write_text(json.dumps({
+              'source': os.environ['SOURCE_SHA'], 'original_harness': original,
+              'harness': os.environ['GITHUB_SHA'], 'binary_artifact': 10915569351,
+              'evidence_artifact': 10916103565, 'binaries': expected, 'core_rebuilt': False,
+          }, indent=2))
+          PY
+          python3 -m py_compile tools/mesh-udp-flush/{lab,gro_lab}.py
+          uname -a > gro-evidence/kernel.txt
+          lscpu > gro-evidence/cpu.txt
+          sha256sum gro-binaries/* > gro-evidence/binaries.sha256
+          readelf -n gro-binaries/easytier-core > gro-evidence/build-id.txt
+          printf '%s\n' "$SOURCE_SHA" > gro-evidence/core-source-sha.txt
+          printf '%s\n' "$GITHUB_SHA" > gro-evidence/harness-sha.txt
+      - name: Prepare external activation observer only
+        shell: bash
+        run: sudo apt-get install -y -qq strace
       - name: Interleaved actual Core CPU and functional comparisons
         shell: bash
         run: |
           set -euo pipefail
-          for phase in fixed saturation mixed; do
+          for phase in activation fixed saturation mixed; do
             sudo timeout --signal=TERM --kill-after=15s 1200s python3 tools/mesh-udp-flush/gro_lab.py \
               --binaries gro-binaries --phase "$phase" --output "gro-evidence/$phase"
           done
@@ -691,7 +767,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
       - uses: actions/upload-artifact@v5
-        if: always()
+        if: ${{ always() && !inputs.udp_gro_reuse }}
         with:
           name: core-gro-experimental-binaries-${{ github.sha }}
           path: gro-binaries/
