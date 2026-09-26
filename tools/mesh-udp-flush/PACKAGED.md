@@ -117,7 +117,7 @@ hardware limits. This is one runner and three samples, not a universal gain.
   These overlapping short-run ranges do not establish a memory optimization,
   bounded long-term RSS, or absence of a leak.
 
-### Current task cursor and remaining acceptance
+### Scope of the first measurement
 
 Deployed scope: immutable packages only in disposable GitHub namespaces.
 No operational host replacement, merge, tag or release has occurred. The
@@ -132,9 +132,8 @@ hardware/WAN, IPv6 underlay, relay, mixed-version, sustained memory and non-Linu
 compatibility acceptance are also incomplete. The optimization does not claim
 to resolve every Core performance bottleneck or reach 10 Gbit/s.
 
-Next: extend the existing package-only lab to IPv6-underlay and both placements
-of mixed baseline/candidate peers, reusing these same immutable packages. Keep
-the production source frozen and do not weaken existing assertions.
+IPv6-underlay and mixed-version follow-up evidence is recorded below. The
+production source stays frozen; the follow-up reuses the same packages.
 
 ## Compatibility-only input extension
 
@@ -170,3 +169,38 @@ and exactly `udp6` for IPv6 underlay. It does not allow both indiscriminately
 or accept another transport. Other assertions and both Core packages are
 unchanged. The original failed run remains failed; IPv6 traffic acceptance
 is pending the corrected run, not inferred from a successful handshake.
+
+## Compatibility result and current task cursor
+
+Corrected run [36224742826](https://github.com/lovitus/EasyTier/actions/runs/36224742826)
+at harness `50d9091f44f32ed08eefb2fb85c713e7d49cea1e` completed SUCCESS.
+Artifact `10900597139` has independently checked outer SHA-256
+`3d3ec15ff1f939c651632d945d4e9de5146fd483fed320bd96f39be3fe9b6935`.
+The baseline/candidate artifacts and their actual Core hashes are unchanged.
+
+All 24 cases passed. Source identity was checked separately for client and
+server from the lab's binary records, including the optional server override.
+The matrix covers eight mixed-version IPv4-underlay cases and sixteen
+IPv6-underlay cases across both inner families and both Stealth configurations.
+There were 32 exact `udp` observations and 64 exact `udp6` observations.
+
+The run completed 48 integrity/half-close transfers, 720 checked UDP echo
+datagrams and 960/960 ICMP replies. All 48 Core processes exited zero without
+forced killing, all 48 namespaces were removed, and root routes were unchanged
+in all 24 cases. This is real packaged-Core traffic evidence, not just handshake
+or CLI-state evidence. The historical failure above remains a harness failure;
+it is not relabeled as a passing run or a fixed production regression.
+
+Current deployed scope remains disposable GitHub namespaces. Production PR #9
+is still `3a1f3d9f`, with no operational host deployment, merge, tag or release.
+Direct UDP compatibility now covers IPv4 and IPv6 underlays, both inner families,
+Stealth configurations and both placements of mixed baseline/candidate peers.
+The earlier rate/CPU table still measures IPv4 underlay only; no IPv6-underlay
+speedup is inferred from these functional checks.
+
+Remaining: relay acceptance, high-load simultaneous mixed-flow receive-ring
+loss, idle CPU and sustained resources, original-hardware/WAN performance,
+and non-Linux/other-architecture build acceptance. Next action is a bounded
+three-peer relay check using the same packages, with route evidence proving
+that endpoint traffic actually traverses the intermediate peer. Do not rebuild
+Core or claim relay success from a direct peer list.
