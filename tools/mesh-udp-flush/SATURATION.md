@@ -996,3 +996,162 @@ pending-authorization note above, not the validation requirements. Approval does
 not authorize merging, production deployment, or release. The new real-kernel
 GSO-rejection regression remains unvalidated until the workflow supplies evidence;
 prior passing contracts do not cover it.
+
+### Capability fallback candidate CI handoff
+
+- Candidate: `b0d88e17c84d56736cc9f87d4bd1cae533e0b8f3`.
+- Local pre-commit checks passed before the experimental staging commit.
+- Run `36208946731` failed before compilation: download-artifact found zero
+  artifacts for historical run `36074709548`, so artifact `10841125115` could not
+  be reused. This is an artifact-availability failure, not a regression result.
+  Failure collection also reported absent output directories because setup had
+  not reached their creation. No test result was produced.
+- Run `36209030843` uses the same candidate with default inputs, rebuilding the
+  existing stock/control and UDP candidate rather than depending on that artifact.
+  This does not replace the pending bounded-TUN capacity comparison.
+- The mandated status helper reached its 600-second observation timeout without
+  reporting a terminal result. CI outcome and the new regression remain UNKNOWN.
+- Unique next step: collect the terminal outcome of run `36209030843`; do not
+  dispatch another build merely because observation timed out. Red/green evidence
+  is still pending; no production deployment, merge, or release occurred.
+
+The next bounded observation of run `36209030843` also ended with helper exit
+124 (`status=timeout`), not a terminal CI verdict. No replacement run was
+started. Compilation, regression and performance outcomes remain unverified;
+the unique next action remains collecting that run's terminal evidence.
+
+### Verified result: fallback candidate b0d88e17
+
+Run `36209030843` completed SUCCESS on exact candidate
+`b0d88e17c84d56736cc9f87d4bd1cae533e0b8f3`. The preceding timeout notes
+were observation timeouts and are superseded by this terminal evidence.
+Artifact `10895437417` was downloaded and its full ZIP digest verified:
+`e321fcb6e1fe1b1937f98fdc170f0865510effd23ab1fa004312520916647a06`.
+Extracted binaries were independently hashed against the included identities:
+
+- Stock Core: `c35374e171aa6de98e9f8844325ddef9c5c5d376214c4678249354792e5898da`.
+- Candidate Core: `0b97f81ca1ed46dd860a345de764b8430aff62995b3ceaf6f40cc4a9a3626c99`.
+- Production source base remains `c6772dbfef2395ff96b39bd4801945d92212dffb`;
+  this is the disposable UDP overlay, not a merged production implementation.
+
+Environment: Ubuntu 22.04, Linux 6.8.0-1064-azure, AMD EPYC 7763, four
+logical CPUs (two cores). Both endpoints are network namespaces on this one
+GitHub runner, joined by veth: client underlay `192.0.2.1`, overlay
+`10.88.0.1`; server underlay `192.0.2.2`, overlay `10.88.0.2`. Both underlay
+and overlay are IPv4. This is neither WAN nor original-host validation.
+The offered rate is capped at 200 Mbit/s; measured rates around 192 Mbit/s
+are not a bandwidth ceiling.
+
+Stealth-off medians, separately measured upload/download; CPU is the sum
+of both Core processes per delivered GiB. Stock has two samples per direction;
+other modes have three. Stealth-on compatibility samples are not pooled here.
+
+| Mode | Upload Mbit/s | Download Mbit/s | Upload CPU s/GiB | Download CPU s/GiB |
+| --- | ---: | ---: | ---: | ---: |
+| Stock | 192.316 | 192.327 | 34.24 | 33.68 |
+| Same-candidate legacy | 192.389 | 192.407 | 34.24 | 34.08 |
+| Staging only | 192.398 | 192.365 | 34.40 | 33.60 |
+| GSO | 192.335 | 192.319 | 24.00 | 24.80 |
+
+GSO lowers Core CPU/GiB by 29.9% upload and 27.2% download against the
+same-candidate legacy path at matched throughput. Staging alone does not
+show a meaningful improvement. Paired Core RSS observations range from
+60,948,480 to 63,700,992 bytes across all arms; this is not proof of an
+arm-specific memory reduction or long-duration leak freedom.
+
+Functional evidence:
+
+- Nine contract tests passed, including
+  `issue4_flush_real_kernel_rejection_falls_back_without_replay`.
+- Fourteen two-Core rounds; 28 bulk transfers and 28 integrity checks passed.
+  Six bulk transfers have Stealth enabled, 22 disabled.
+- 420 UDP echo datagrams passed; 560/560 concurrent ICMP probes returned.
+- All 28 Core process exits were zero, with no forced kill; namespace cleanup
+  succeeded and the harness recorded unchanged root routes.
+- Peer records remained UDP. GSO activation was present including Stealth-on
+  outer framing. Metric parsing had no errors.
+- Normal lab writers recorded zero capability fallbacks. Forced rejection is
+  covered by the separate real-socket contract, not by these performance arms.
+
+Remaining gates: the regression has a verified green result but no execution
+of the identical regression on the pre-fix implementation yet. Its explicit
+raw-kernel EINVAL assertion is useful negative-path evidence, not a substitute
+for that red/green requirement. No merge or deployment is authorized by this
+result. The bounded-TUN comparison and original-host performance acceptance
+remain separate outstanding work; previous unpaced ICMP failures remain FAIL.
+
+Current cursor: no CI run is live for this batch. Preserve this exact artifact.
+Next close the pre-fix red/green evidence using the existing experiment path,
+without weakening assertions, introducing a new workflow, or widening the
+production patch. Then reconcile the minimal implementation with current Core
+before requesting production integration; do not restart rejected receive
+batching experiments.
+
+### One-time pre-fix behavioral control dispatched
+
+Negative-control branch `codex/issue4-gso-fallback-red`, commit `f2123fd3`,
+restores only `send_frames` from `0cb5c1fb` while retaining the exact green
+candidate's test module and diagnostic field declarations. Source test-suffix
+SHA-256 is `c4a0964f236caa5f6337dbc0a7f3c41f61d61756ae2e43c64ca2e5d40d7f62fa`;
+restored function SHA-256 is
+`654ee2a0ba41a05937b3f9ebe91206a0302bc90beb7c340af0bcde3baec7936a`.
+No test assertions or workflow files changed. Pre-commit and template rustfmt
+syntax checks passed. Run `36211303677` uses the existing experiment workflow.
+Only an executed regression failing on the old sender's propagated EINVAL,
+with the other eight contracts passing, qualifies as the expected negative
+control. An infrastructure or compilation failure does not qualify.
+
+The green candidate and production branches are unchanged. This negative
+control must not be merged/deployed/released. Current unique next step is to
+collect run `36211303677`; do not rebuild the successful green candidate.
+
+### Closed: one-time pre-fix regression control
+
+Negative-control run `36211303677` completed FAILURE at
+`f2123fd3083079516435a04f49d1f61a8fea1c9b`. This is the intended test failure,
+not a compilation or infrastructure failure: all nine tests executed, eight
+passed, and only `issue4_flush_real_kernel_rejection_falls_back_without_replay`
+failed. The preserved original error is `Os { code: 22, kind: InvalidInput,
+message: "Invalid argument" }`, returned by the restored pre-fix sender and
+unwrapped by the unchanged test. Exit code was 101. The sender counters recorded
+one successful prefix datagram, one rejected GSO attempt and zero fallbacks.
+
+The same regression passed with the fix in run `36209030843` (nine passed).
+Together these runs close the behavioral red/green requirement for this
+specific regression. The green execution preceded the one-time reverted-code
+control; this is not a claim about chronological red-first development.
+No test assertion was weakened and no workflow was changed for the control.
+The failing negative-control branch remains non-shipping evidence.
+
+### Integration reconciliation and remaining narrow checks
+
+The inspected canonical tracked HEAD is still
+`c6772dbfef2395ff96b39bd4801945d92212dffb`, identical to the experiment base.
+There are no committed UDP/TUN changes to reconcile between those revisions.
+An unrelated untracked research document was left untouched; this observation
+is not permission to stage or remove other work.
+
+Issue #8 records an existing small Tokio fixture that extracts `group_end`,
+`send_group` and `send_frames` verbatim. That fixture should be used for further
+send-path error/readiness checks instead of another cold Core compilation.
+Its dependency versions include the exact Tokio 1.52.1 used by this Core base.
+Its current fixture containers lack the new writer-local downgrade fields and
+its MTU checks still assume EINVAL. Prior run `35699982270` already proves the
+runner returns EMSGSIZE for that MTU case. Preserve that failure and correct
+any future fixture expectations explicitly against the observed kernel contract,
+not by accepting arbitrary errors. The checksum-disabled EINVAL case remains
+a distinct capability-rejection scenario. No fixture assertions were changed
+in this evidence batch.
+
+The existing workflow is push-triggered, not workflow_dispatch. Do not invent
+a dispatch command for it. A future related fixture batch should use its actual
+entry point, preserve IPv4/IPv6 EAGAIN/cancel/shared checks, and separately prove
+ordinary-send error propagation and unaffected writer state. This must not
+relabel full Core owner-drop, relay, mixed-version, physical IPv6 or endurance
+coverage as completed.
+
+Current cursor: both green and negative-control runs are terminal; none is live.
+The fallback regression is closed. Production adoption remains unapproved and
+unvalidated. Next bounded work is the existing lightweight fixture's compatibility
+and remaining writer-local failure contracts, not another performance model or
+rebuild of the already-green Core candidate.
