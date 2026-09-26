@@ -22,6 +22,8 @@ struct WriterStats {
     gso_calls: u64,
     eagain: u64,
     packets: u64,
+    gso_disabled: bool,
+    capability_fallbacks: u64,
 }
 impl WriterStats {
     fn new() -> Self {
@@ -31,6 +33,8 @@ impl WriterStats {
             gso_calls: 0,
             eagain: 0,
             packets: 0,
+            gso_disabled: false,
+            capability_fallbacks: 0,
         }
     }
 }
@@ -168,7 +172,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if mode.starts_with("reject-") {
         return timeout(
             Duration::from_secs(8),
-            characterize_rejection(bind, destination, mode),
+            characterize_rejection(bind, destination, mode, second),
         )
         .await?
         .map_err(Into::into);
@@ -223,6 +227,7 @@ async fn characterize_rejection(
     bind: SocketAddr,
     destination: SocketAddr,
     mode: &str,
+    second: SocketAddr,
 ) -> io::Result<()> {
     let socket = UdpSocket::bind(bind).await?;
     let checksum_case = mode == "reject-checksum";
@@ -252,7 +257,8 @@ async fn characterize_rejection(
         }
     }
     let mut stats = WriterStats::new();
-    let error = send_frames(&socket, destination, &rejected, &mut stats)
+    // Characterize the kernel separately from the adapter's downgrade policy.
+    let error = send_group(&socket, destination, &rejected, &mut stats)
         .await
         .expect_err("kernel must reject this GSO request");
     eprintln!(
@@ -260,27 +266,78 @@ async fn characterize_rejection(
         error.raw_os_error()
     );
     require(
-        error.raw_os_error() == Some(libc::EINVAL),
+        error.raw_os_error()
+            == Some(if checksum_case {
+                libc::EINVAL
+            } else {
+                libc::EMSGSIZE
+            }),
         "unexpected GSO rejection errno",
     )?;
     require(stats.packets == 0, "rejected group was recorded as sent")?;
     let ordinary_errno;
     let delivered;
+    let other_gso_calls;
     if checksum_case {
-        for frame in &rejected {
-            require(
-                socket.send_to(&frame.bytes, destination).await? == frame.bytes.len(),
-                "short ordinary datagram",
-            )?;
-        }
+        require(
+            send_frames(&socket, destination, &rejected, &mut stats).await?,
+            "checksum rejection did not fall back",
+        )?;
+        require(
+            stats.gso_disabled && stats.capability_fallbacks == 1 && stats.packets == 4,
+            "downgrade was not local and bounded",
+        )?;
         socket_option(&socket, libc::SOL_SOCKET, libc::SO_NO_CHECK, 0)?;
         require(
             send_frames(&socket, destination, &frames(4), &mut stats).await?,
-            "GSO did not recover after restoring checksum",
+            "disabled writer did not continue with ordinary datagrams",
         )?;
-        ordinary_errno = 0;
+        require(
+            stats.gso_calls == 2 && stats.capability_fallbacks == 1 && stats.packets == 8,
+            "disabled writer retried GSO or lost datagrams",
+        )?;
+        let oversized = [Frame {
+            bytes: Bytes::from(vec![0; 65536]),
+            batchable: false,
+        }];
+        let error = send_frames(&socket, destination, &oversized, &mut stats)
+            .await
+            .expect_err("ordinary-send failure must not be swallowed after downgrade");
+        eprintln!("UDP rejection observation: phase=disabled-ordinary error={error:?}");
+        require(
+            error.raw_os_error() == Some(libc::EMSGSIZE)
+                && stats.packets == 8
+                && stats.capability_fallbacks == 1,
+            "ordinary-send error or accounting changed after downgrade",
+        )?;
+        let mut other = WriterStats::new();
+        require(
+            send_frames(&socket, second, &frames(0), &mut other).await?,
+            "another writer on the same socket did not progress",
+        )?;
+        require(
+            !other.gso_disabled
+                && other.capability_fallbacks == 0
+                && other.gso_calls == 1
+                && other.packets == 4,
+            "writer-local downgrade contaminated the second destination",
+        )?;
+        finish(&socket, second, 4).await?;
+        other_gso_calls = other.gso_calls;
+        ordinary_errno = libc::EMSGSIZE;
         delivered = 8;
     } else {
+        let adapter_error = send_frames(&socket, destination, &rejected, &mut stats)
+            .await
+            .expect_err("adapter must preserve MTU rejection");
+        eprintln!("UDP rejection observation: phase=adapter-mtu error={adapter_error:?}");
+        require(
+            adapter_error.raw_os_error() == Some(libc::EMSGSIZE)
+                && !stats.gso_disabled
+                && stats.capability_fallbacks == 0
+                && stats.packets == 0,
+            "MTU rejection was swallowed or incorrectly disabled GSO",
+        )?;
         let error = socket
             .send_to(&rejected[0].bytes, destination)
             .await
@@ -299,16 +356,23 @@ async fn characterize_rejection(
         )?;
         ordinary_errno = libc::EMSGSIZE;
         delivered = 4;
+        other_gso_calls = 0;
+        require(
+            stats.packets == 4 && stats.gso_calls == 3,
+            "post-MTU smaller GSO control did not run",
+        )?;
     }
-    require(
-        stats.packets == 4 && stats.gso_calls >= 2,
-        "post-error GSO control did not run",
-    )?;
     finish(&socket, destination, delivered).await?;
     println!(
-        "{{\"kernel_eagain\":false,\"gso_rejection_errno\":{},\"ordinary_errno\":{ordinary_errno},\"gso_calls\":{},\"gso_after_error\":true,\"sent_datagrams\":{delivered},\"mode\":\"{mode}\"}}",
-        libc::EINVAL,
-        stats.gso_calls
+        "{{\"kernel_eagain\":false,\"gso_rejection_errno\":{},\"ordinary_errno\":{ordinary_errno},\"gso_calls\":{},\"gso_after_error\":true,\"gso_disabled\":{},\"capability_fallbacks\":{},\"other_gso_calls\":{other_gso_calls},\"sent_datagrams\":{delivered},\"mode\":\"{mode}\"}}",
+        if checksum_case {
+            libc::EINVAL
+        } else {
+            libc::EMSGSIZE
+        },
+        stats.gso_calls,
+        stats.gso_disabled,
+        stats.capability_fallbacks
     );
     Ok(())
 }

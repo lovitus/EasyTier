@@ -9,5 +9,8 @@ bytes = "=1.9.0"
 libc = "=0.2.186"
 socket2 = { version = "=0.5.10", features = ["all"] }
 tokio = { version = "=1.52.1", features = ["full"] }
+tracing = { version = "=0.1.41", default-features = false, features = ["std"] }
+# Match the Core lockfile for the extracted sender's diagnostic call.
+tracing-core = "=0.1.33"
 
 [workspace]

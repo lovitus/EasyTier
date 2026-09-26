@@ -90,7 +90,7 @@ def run(args):
                     command(["ip", "-n", ns, "link", "set", "under0", "mtu", str(mtu)])
                 label = f"{family}-{mode}"
                 receivers = []
-                for port in ([35906, 35907] if mode == "shared" else [35906]):
+                for port in ([35906, 35907] if mode in ("shared", "reject-checksum") else [35906]):
                     proc = subprocess.Popen(["ip", "netns", "exec", names[1], sys.executable,
                                              str(Path(__file__).resolve()), "receive", destination, str(port)],
                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -116,8 +116,13 @@ def run(args):
                     assert rx["received"] == (tx["sent_datagrams"] if index == 0 else 4)
                     received.append(rx)
                 if mode.startswith("reject-"):
-                    assert not tx["kernel_eagain"] and tx["gso_rejection_errno"] == 22
-                    assert tx["ordinary_errno"] == (90 if mode == "reject-mtu" else 0)
+                    checksum_case = mode == "reject-checksum"
+                    assert not tx["kernel_eagain"]
+                    assert tx["gso_rejection_errno"] == (22 if checksum_case else 90)
+                    assert tx["ordinary_errno"] == 90
+                    assert tx["gso_disabled"] == checksum_case
+                    assert tx["capability_fallbacks"] == int(checksum_case)
+                    assert tx["other_gso_calls"] == int(checksum_case)
                     assert tx["gso_after_error"] and tx["gso_calls"] >= 2
                 elif args.adapter:
                     assert tx["kernel_eagain"]
