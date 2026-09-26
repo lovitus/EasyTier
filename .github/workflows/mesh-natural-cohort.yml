@@ -26,6 +26,10 @@ name: Mesh natural-cohort kernel mechanism
         description: Reuse the packages for a bounded three-peer relay check only
         type: boolean
         default: false
+      artifact_profile_only:
+        description: Reuse the packages for bounded idle resources and CPU call stacks only
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths:
@@ -224,17 +228,22 @@ jobs:
           ARTIFACT_PAIR: ${{ inputs.artifact_pair }}
           COMPATIBILITY_ONLY: ${{ inputs.artifact_compatibility_only }}
           RELAY_ONLY: ${{ inputs.artifact_relay_only }}
+          PROFILE_ONLY: ${{ inputs.artifact_profile_only }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p exact-evidence
-          if [[ "$COMPATIBILITY_ONLY" == 'true' && "$RELAY_ONLY" == 'true' ]]; then
+          modes=0
+          for mode in "$COMPATIBILITY_ONLY" "$RELAY_ONLY" "$PROFILE_ONLY"; do
+            if [[ "$mode" == 'true' ]]; then modes=$((modes + 1)); fi
+          done
+          if (( modes > 1 )); then
             printf '%s\n' 'Choose one artifact-only validation mode.' >&2
             exit 1
           fi
           sudo apt-get update -qq
           sudo apt-get install -y -qq iproute2 iputils-ping ethtool strace binutils
-          python3 -m py_compile tools/mesh-udp-flush/exact_artifact_lab.py
+          python3 -m py_compile tools/mesh-udp-flush/exact_artifact_lab.py tools/mesh-udp-flush/lab.py
           python3 tools/mesh-udp-flush/exact_artifact_lab.py prepare --output exact-evidence
           if [[ "$COMPATIBILITY_ONLY" != 'true' && "$RELAY_ONLY" != 'true' ]]; then
             rustup toolchain install 1.95.0 --profile minimal
@@ -243,20 +252,32 @@ jobs:
           fi
           uname -a > exact-evidence/kernel.txt
           lscpu > exact-evidence/cpu.txt
+      - name: Prepare a recorded userspace perf tool without changing the runner kernel
+        if: ${{ inputs.artifact_profile_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq linux-tools-common linux-tools-generic-hwe-22.04
+          perf_path="$(find /usr/lib -maxdepth 3 -type f -path '/usr/lib/linux-tools-*/perf' -executable | sort -V | tail -n 1)"
+          test -n "$perf_path"
+          printf '%s\n' "$perf_path" > exact-evidence/perf-path.txt
+          "$perf_path" version --build-options > exact-evidence/perf-version.txt
+          dpkg-query -W 'linux-tools*' > exact-evidence/perf-packages.txt
+          sudo "$perf_path" stat -e cpu-clock -- true 2> exact-evidence/perf-preflight.txt
       - name: Interleaved fixed-load, dual-stack overlay and Stealth checks
-        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only }}
+        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only }}
         shell: bash
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py fixed --output exact-evidence
       - name: Separate low-rate syscall activation evidence
-        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only }}
+        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only }}
         shell: bash
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 240s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py trace --output exact-evidence
       - name: Unpaced comparison with unchanged control-progress assertions
-        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only }}
+        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only }}
         shell: bash
         run: |
           set -euo pipefail
@@ -273,6 +294,12 @@ jobs:
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py relay --output exact-evidence
+      - name: Bounded idle resources and separate CPU call stacks
+        if: ${{ inputs.artifact_profile_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py profile --output exact-evidence --probe exact-evidence/probe --perf-path "$(cat exact-evidence/perf-path.txt)"
       - name: Preserve scoped evidence
         if: always()
         shell: bash

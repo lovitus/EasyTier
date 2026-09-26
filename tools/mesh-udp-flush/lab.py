@@ -120,8 +120,27 @@ def run(args):
             high_water=next(int(line.split()[1])*1024 for line in status if line.startswith('VmHWM:'))
             result.append({'pid':p.pid,'start':int(fields[19]),'cpu':(int(fields[11])+int(fields[12]))/os.sysconf('SC_CLK_TCK'),
                            'rss':int(fields[21])*os.sysconf('SC_PAGESIZE'),
+                           'threads':int(fields[17]),'fds':sum(1 for _ in Path(f'/proc/{p.pid}/fd').iterdir()),
                            'lifetime_rss_high_water_bytes':high_water})
         return result
+    def observe_idle(processes,round_id,phase):
+        if not args.idle_observe:return
+        previous=snapshot(processes);started=time.monotonic()
+        # Finite observations, not a background poller or a leak-free claim.
+        # Bounds match the existing profiling smoke guard, not an idle CPU SLO.
+        for interval in (30,60):
+            time.sleep(interval)
+            current=snapshot(processes);now=time.monotonic();elapsed=now-started
+            assert [(x['pid'],x['start']) for x in previous]==[(x['pid'],x['start']) for x in current]
+            cpu_percent=100*sum(b['cpu']-a['cpu'] for a,b in zip(previous,current))/elapsed
+            log_bytes=sum(path.stat().st_size for path in out.glob('*.log'))
+            record('idle_observation',round=round_id,phase=phase,elapsed_seconds=elapsed,
+                   cpu_percent=cpu_percent,before=previous,after=current,log_bytes=log_bytes)
+            assert sum(x['rss'] for x in current)<=1024**3,'idle RSS safety bound exceeded'
+            assert all(x['fds']<=512 and x['threads']<=128 for x in current),'idle FD/thread safety bound exceeded'
+            assert log_bytes<=16*1024**2,'idle log safety bound exceeded'
+            assert 0<=cpu_percent<=180,'idle CPU safety bound exceeded'
+            previous=current;started=now
     def host_cpu():
         with open('/proc/stat') as f:return host_cpu_values(f.readline(),os.sysconf('SC_CLK_TCK'))
     def network_counters(label):
@@ -282,6 +301,7 @@ def run(args):
             time.sleep(8)
             assert all(p.poll() is None for p in cores),'startup failure'
             peers(cli,round_id,'before')
+            observe_idle(cores,round_id,'before-traffic')
             for i,ns in enumerate(names):
                 link=json.loads(command(['ip','-j','-d','link','show','tun0'],ns).stdout)
                 assert link and link[0]['mtu']==1360 and link[0]['linkinfo']['info_data']['vnet_hdr']
@@ -317,8 +337,8 @@ def run(args):
                 if args.profile:
                     ctl_read,ctl_write=os.pipe();ack_read,ack_write=os.pipe()
                     control_fds.extend([ctl_read,ctl_write,ack_read,ack_write])
-                    profiler=spawn(['perf','record','--delay=-1',f'--control=fd:{ctl_read},{ack_write}',
-                                    '-e','cpu-clock','-F','99','--call-graph','fp',
+                    profiler=spawn([args.perf_path,'record','--delay=-1',f'--control=fd:{ctl_read},{ack_write}',
+                                    '-e','cpu-clock','-F','99','--call-graph',args.profile_call_graph,
                                     '-p',','.join(str(p.pid) for p in cores),'-o',out/(label+'.perf.data')],
                                    label+'-perf',names[0],pass_fds=(ctl_read,ack_write))
                     for fd in [ctl_read,ack_write]:os.close(fd);control_fds.remove(fd)
@@ -357,15 +377,15 @@ def run(args):
                     profiler.wait(timeout=10)
                     assert profiler.returncode==0,'perf recording failed'
                     for fd in [ctl_write,ack_read]:os.close(fd);control_fds.remove(fd)
-                    samples=command(['perf','script','-i',out/(label+'.perf.data'),'-F','pid'],timeout=60)
+                    samples=command([args.perf_path,'script','-i',out/(label+'.perf.data'),'-F','pid'],timeout=60)
                     (out/(label+'-sample-pids.txt')).write_text(samples.stdout)
                     counts={p.pid:sum(line.strip()==str(p.pid) for line in samples.stdout.splitlines()) for p in cores}
                     record('profile_samples',round=round_id,direction=direction,counts=counts)
                     assert all(counts.values()),'profile missing samples for a Core endpoint'
-                    report=command(['perf','report','--stdio','--no-children','--sort','comm,pid,dso,symbol',
+                    report=command([args.perf_path,'report','--stdio','--no-children','--sort','comm,pid,dso,symbol',
                                     '-i',out/(label+'.perf.data')],timeout=60)
                     (out/(label+'-perf-report.txt')).write_text(report.stdout)
-                    callgraph=command(['perf','report','--stdio','--children','--sort','pid,symbol',
+                    callgraph=command([args.perf_path,'report','--stdio','--children','--sort','pid,symbol',
                                        '-g','graph,0.5,caller','-i',out/(label+'.perf.data')],timeout=60)
                     (out/(label+'-perf-callgraph.txt')).write_text(callgraph.stdout)
                 (out/(label+'-client.json')).write_text(result.stdout)
@@ -398,6 +418,7 @@ def run(args):
                 assert stopped['exit']==0 and not stopped['killed']
                 assert '0 packets dropped by kernel' in capture_log,'ICMP capture incomplete'
             peers(cli,round_id,'after')
+            observe_idle(cores,round_id,'after-traffic')
             exits=[stop(p) for p in cores];record('core_stop',round=round_id,arm=arm,values=exits)
             assert all(x['exit']==0 and not x['killed'] for x in exits)
             if args.packet_trace:
@@ -494,6 +515,9 @@ if __name__=='__main__':
         parser.add_argument('--paced-mbps',type=int,default=200,help='diagnostic cap per flow; never replaces unpaced acceptance')
         parser.add_argument('--transfer-bytes',type=int,default=1073741824)
         parser.add_argument('--profile',action='store_true',help='separate diagnostic run; rates are not comparison evidence')
+        parser.add_argument('--perf-path',default='perf',help='verified userspace perf executable')
+        parser.add_argument('--profile-call-graph',choices=['fp','dwarf,8192'],default='fp')
+        parser.add_argument('--idle-observe',action='store_true',help='bounded 30s/60s resource observations before and after traffic')
         parser.add_argument('--tun-trace',action='store_true',help='bounded write trace; rates are not comparison evidence')
         parser.add_argument('--tun-head-capacity',type=int,choices=[0,4096,8192],help='requires isolated TUN overlay; records per-endpoint metrics')
         run(parser.parse_args())

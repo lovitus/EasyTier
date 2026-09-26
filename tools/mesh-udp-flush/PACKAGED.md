@@ -265,3 +265,36 @@ the earlier full Test workflow's leaky passing test remains a separate caveat.
 Next action: reuse the symbol-bearing packages for bounded idle/resource samples
 and actual Core CPU profiles to identify the remaining cost, rather than add
 another speculative production optimization or rebuild the same Core.
+
+## Active cursor: exact-package CPU and idle-resource observation
+
+The 24-case relay milestone is complete. The next observation reuses the same
+baseline `c6772dbfef2395ff96b39bd4801945d92212dffb` and candidate
+`3a1f3d9fc840a37a7649448a042bf44035bfaf7b` packages. No Core rebuild, source overlay,
+policy engine, operational-host deployment, or production edit is part of it.
+
+- Run one baseline pair and one candidate pair on an isolated hosted Linux
+  runner: direct UDP, IPv4 underlay/overlay, AES-GCM, Stealth off, native TUN.
+- Before and after traffic, record two idle intervals (30 and 60 seconds),
+  including per-process CPU time, RSS/high-water RSS, FD count and thread count.
+  These are bounded observations, not proof of long-term leak freedom.
+- Reuse the existing perf attachment/acknowledgement and per-PID sample checks.
+  Sample both Cores at 99 Hz during each 2 GiB upload/download using an 8 KiB
+  DWARF stack dump; retain raw perf data, flat reports and call graphs.
+- Preserve integrity/half-close, UDP echo, ICMP progress, clean process exit,
+  namespace cleanup and unchanged root-route assertions. Profiled throughput is
+  diagnostic only and must not replace the completed unprofiled comparison.
+- At each idle observation, abort above the existing smoke guard's bounds:
+  1 GiB total RSS, 512 FDs or 128 threads per Core, 16 MiB log output, or 180%
+  aggregate Core CPU. These are safety bounds, not claimed acceptance SLOs.
+- Install Ubuntu's HWE 6.8 userspace tools without installing/changing a kernel;
+  select the actual perf executable, record its package/build metadata and
+  require the cpu-clock preflight to succeed. Unsupported sampling is a blocker,
+  never a reason to fabricate a profile or weaken functional assertions.
+
+References: [Ubuntu package](https://packages.ubuntu.com/jammy/linux-tools-generic-hwe-22.04)
+and [perf record call-graph options](https://man7.org/linux/man-pages/man1/perf-record.1.html).
+
+Status: implementation prepared; no CPU profile or idle result claimed yet.
+The unique next step is this artifact-only observation, followed by hotspot
+analysis against the exact source and an evidence update to issues #4/#8 and PR #9.

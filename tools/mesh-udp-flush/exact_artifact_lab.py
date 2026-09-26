@@ -116,7 +116,7 @@ def prepare(root):
     }, indent=2))
 
 
-def run(root, phase, probe):
+def run(root, phase, probe, perf_path):
     lab = Path(__file__).with_name('lab.py').resolve()
     suite = root / phase
     suite.mkdir(exist_ok=False)
@@ -128,6 +128,8 @@ def run(root, phase, probe):
              for stealth in ((False, True) if phase == 'fixed' else (False,)) for label in order]
     if phase == 'trace':
         cases = [(4, 4, True, 'candidate', 'candidate', None)]
+    if phase == 'profile':
+        cases = [(4, 4, False, label, label, None) for label in ('baseline', 'candidate')]
     if phase == 'compatibility':
         cases = [(outer, inner, stealth, client, server, None)
                  for outer in (4, 6) for inner in (4, 6) for stealth in (False, True)
@@ -161,9 +163,13 @@ def run(root, phase, probe):
             command.append('--inner-ipv6')
         if stealth:
             command.append('--stealth')
-        if phase == 'saturation':
+        if phase in ('saturation', 'profile'):
             assert probe and probe.is_file()
             command += ['--unpaced-probe', str(probe.resolve())]
+        if phase == 'profile':
+            assert perf_path and perf_path.is_file()
+            command += ['--profile', '--idle-observe', '--perf-path', str(perf_path.resolve()),
+                        '--profile-call-graph', 'dwarf,8192', '--transfer-bytes', '2147483648']
         if phase == 'trace':
             command += ['--paced-mbps', '50']
             command = ['strace', '-ff', '-qq', '-s', '1', '-e', 'trace=sendmsg',
@@ -189,13 +195,14 @@ def run(root, phase, probe):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('phase', choices=['prepare', 'fixed', 'trace', 'saturation', 'compatibility', 'relay'])
+    parser.add_argument('phase', choices=['prepare', 'fixed', 'trace', 'saturation', 'compatibility', 'relay', 'profile'])
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--probe', type=Path)
+    parser.add_argument('--perf-path', type=Path)
     args = parser.parse_args()
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=True)
     if args.phase == 'prepare':
         prepare(root)
     else:
-        run(root, args.phase, args.probe)
+        run(root, args.phase, args.probe, args.perf_path)
