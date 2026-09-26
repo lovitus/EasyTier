@@ -1,6 +1,6 @@
 # Linux Core UDP GSO integration draft
 
-Status: UNCOMMITTED / NOT COMPILED / NOT DEPLOYED.
+Status: DRAFT PR #9 / INTEGRATION VALIDATION INCOMPLETE / NOT DEPLOYED.
 Base: c6772dbfef2395ff96b39bd4801945d92212dffb, checked against origin/codex/current.
 Parent research: issues #4 and #8, experiment PR #7.
 
@@ -47,6 +47,14 @@ Existing nine experimental contract tests are carried into the private module,
 with experiment mode arguments/counters removed or test-gated. They have NOT
 been executed against this integration draft. The imported regression's historical
 red/green pair is evidence for the bug, not fresh integration acceptance.
+
+Integration run 36214089572 at 738d48d8 failed the unchanged `-D warnings`
+gate: Linux production retained an unused StreamExt import and a test-only
+send_group counter parameter. The follow-up scopes the import to its consumers,
+marks the test-only parameter accordingly, and places helpers before the test
+module. No send behavior, fallback condition or test assertion changes. Local
+formatting and the maintained pre-commit gate passed; fresh CI remains required.
+The failed run remains failure evidence, not an infrastructure retry or a pass.
 
 Next: one coherent integration review and focused GitHub compilation/tests before
 any candidate deployment. Then one frozen exact-Core candidate for direct/relay,

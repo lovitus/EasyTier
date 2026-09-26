@@ -9,7 +9,9 @@ use anyhow::Context;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use dashmap::DashMap;
-use futures::{StreamExt, stream::FuturesUnordered};
+#[cfg(any(not(target_os = "linux"), test))]
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use rand::{Rng, SeedableRng};
 use zerocopy::{AsBytes, FromBytes};
 
@@ -1451,6 +1453,38 @@ impl super::TunnelConnector for UdpTunnelConnector {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[path = "udp_gso.rs"]
+mod udp_gso;
+
+#[cfg(target_os = "linux")]
+const UDP_SEND_RING_CAPACITY: usize = udp_gso::RING;
+#[cfg(not(target_os = "linux"))]
+const UDP_SEND_RING_CAPACITY: usize = 128;
+
+fn make_udp_send_sink(ring: Arc<RingTunnel>) -> Box<dyn crate::tunnel::ZCPacketSink + Unpin> {
+    #[cfg(target_os = "linux")]
+    {
+        udp_gso::make(ring)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Box::new(RingSink::new(ring))
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[instrument]
+async fn forward_from_ring_to_udp(
+    ring_recv: RingStream,
+    socket: &Arc<UdpSocket>,
+    addr: &SocketAddr,
+    conn_id: u32,
+    stealth: &std::sync::Arc<crate::tunnel::stealth::OuterSessionState>,
+) -> Option<TunnelError> {
+    udp_gso::forward(ring_recv, socket, addr, conn_id, stealth).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::{net::IpAddr, time::Duration};
@@ -2241,36 +2275,4 @@ mod tests {
             .expect("Timeout waiting for v4 hole punch packet")
             .unwrap();
     }
-}
-
-#[cfg(target_os = "linux")]
-#[path = "udp_gso.rs"]
-mod udp_gso;
-
-#[cfg(target_os = "linux")]
-const UDP_SEND_RING_CAPACITY: usize = udp_gso::RING;
-#[cfg(not(target_os = "linux"))]
-const UDP_SEND_RING_CAPACITY: usize = 128;
-
-fn make_udp_send_sink(ring: Arc<RingTunnel>) -> Box<dyn crate::tunnel::ZCPacketSink + Unpin> {
-    #[cfg(target_os = "linux")]
-    {
-        udp_gso::make(ring)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Box::new(RingSink::new(ring))
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[instrument]
-async fn forward_from_ring_to_udp(
-    ring_recv: RingStream,
-    socket: &Arc<UdpSocket>,
-    addr: &SocketAddr,
-    conn_id: u32,
-    stealth: &std::sync::Arc<crate::tunnel::stealth::OuterSessionState>,
-) -> Option<TunnelError> {
-    udp_gso::forward(ring_recv, socket, addr, conn_id, stealth).await
 }

@@ -159,7 +159,7 @@ async fn send_group(
     socket: &UdpSocket,
     address: SocketAddr,
     frames: &[Frame],
-    stats: &mut WriterStats,
+    _stats: &mut WriterStats,
 ) -> io::Result<usize> {
     let expected: usize = frames.iter().map(|p| p.bytes.len()).sum();
     let segment = frames[0].bytes.len() as u16;
@@ -170,11 +170,8 @@ async fn send_group(
             .async_io(Interest::WRITABLE, || {
                 #[cfg(test)]
                 {
-                    #[cfg(test)]
-                    {
-                        stats.calls += 1;
-                    }
-                    stats.gso_calls += 1;
+                    _stats.calls += 1;
+                    _stats.gso_calls += 1;
                 }
                 let destination = socket2::SockAddr::from(address);
                 let mut vectors = [libc::iovec {
@@ -216,7 +213,7 @@ async fn send_group(
                     let error = io::Error::last_os_error();
                     #[cfg(test)]
                     {
-                        stats.eagain += u64::from(error.kind() == io::ErrorKind::WouldBlock);
+                        _stats.eagain += u64::from(error.kind() == io::ErrorKind::WouldBlock);
                     }
                     Err(error)
                 } else {
