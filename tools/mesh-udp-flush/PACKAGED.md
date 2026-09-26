@@ -551,3 +551,22 @@ in a profile does not justify discarding those prior comparisons.
   cancellation and error boundaries; verify exact code before artifact A/B.
   No protocol rewrite, queue growth, sleep, ICMP exemption or whole-batch replay.
   PR #9 remains independently reviewable and unchanged.
+
+## 2026-09-26: production TUN-head package, gains and relay log blocker
+
+The frozen TUN integration `6e90dbf1` has now completed exact Test, direct A/B,
+mixed-version/IPv6-underlay, short idle/profile and relay traffic runs.
+[Consolidated report](TUN_HEAD_PACKAGED.md) records the exact binaries, both
+endpoint roles, three-sample medians, resource limits and hashes.
+
+On top of the UDP candidate, fixed-rate CPU/GiB fell 14.46%-18.75%; unpaced
+throughput medians rose 8.58%-12.23% in the stated EPYC 7763 namespace lab.
+No memory-reduction, WAN or all-platform claim is made.
+
+**Relay resource acceptance is not closed:** Stealth-on cases produced about
+2.76 GB of packet-dumping warning logs on both parent and candidate despite
+successful traffic. The missing next-hop destination guard matches B01 from
+upstream `425a2427`; this is the sole next production fix to investigate, not a
+reason to change encryption, GC or locking architecture. The linked report
+supersedes any inference that the earlier relay functional PASS also proved
+healthy log/CPU behavior. Both production PRs remain draft and unmerged.
