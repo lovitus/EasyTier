@@ -1,6 +1,7 @@
 # Retained-package TUN write-cost follow-up
 
-Status: prepared observation; no new runtime result or Core change yet.
+Status: syscall observation completed; no Core change or performance-gain claim.
+The research-harness mixed-flow labeling defect is disclosed below.
 
 The control-head eligibility correction has no measured fixed-load CPU benefit
 in run 36295644707. It must not be expanded merely to obtain a positive result.
@@ -66,3 +67,126 @@ a production machine or enables the root tracing instance.
 
 This is an evidence discriminator, not an additional release gate. Previous
 failures stay FAIL; none is waived or retried by this observation.
+
+
+## Completed observation: current Core already coalesces, but small writes remain
+
+[Run 36297832614](https://github.com/lovitus/EasyTier/actions/runs/36297832614)
+completed SUCCESS at harness `aad76ba58ea394d7dfd9be540b1bc9b9b5a561f7`.
+The source/package and both endpoint roles match the scope above. No Core was
+rebuilt or deployed. The candidate package is fetched by the shared preparation
+contract but is not started in this observation.
+
+The runner was AMD EPYC 7763, four logical CPUs, two physical cores with two
+threads/core, Linux `6.8.0-1064-azure`. Both endpoints were namespace processes
+on that same runner, not separate physical machines.
+
+Evidence artifact `10924288053` is 4,350,061 bytes. Its complete ZIP SHA-256 was
+independently verified:
+`b0d71424da34c052286c84dc7725841a02454d83a4234311b76b7fceb4457640`.
+The publisher has no per-file manifest; none is claimed. The endpoint Core
+SHA-256 in provenance is
+`46ab646adbac5eaea1c008f23b1b2340b25ac6ffb80018b1d5b41d6ec404fb86`.
+
+### Trace audit
+
+All four traces have stable before/after Core TIDs and TUN FDs. Their 667,158
+events match the summed per-CPU entry counts. Entries/exits pair exactly by
+TID, with no unmatched boundary event, overlapping syscall, trace overrun,
+commit overrun or dropped event. Non-TUN writes are excluded by the actual
+per-process descriptor mapping.
+
+There are **321,452 successful TUN writes**, each returning its requested
+length, with no short or failed TUN write. The table sums both endpoints and
+both epochs within each inner family. Both endpoints carry data and reverse
+traffic; neither is labeled an ACK-only endpoint.
+
+| Inner family | TUN writes | Size <=128 bytes | Exactly 1,370 bytes | Size >1,370 bytes | Share of written bytes in >1,370-byte writes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| IPv4 | 160,742 | 45,057 (28.03%) | 90,084 (56.04%) | 21,596 (13.44%) | 54.38% |
+| IPv6 | 160,710 | 44,058 (27.41%) | 91,160 (56.72%) | 21,516 (13.39%) | 52.65% |
+
+The maximum is 7,910 bytes for IPv4 and 7,810 bytes for IPv6; no write exceeds
+8,192 bytes. The four endpoint/epoch counts at that maximum are
+`3734/3786/3818/3673` for IPv4 and `3749/3431/3710/3690` for IPv6.
+These sizes are consistent with the six-segment limit for this fixture's TCP
+headers and payloads. They are not proof of how many individual flushes hit
+a capacity rejection: syscall records do not expose the pending cohort or
+GRO rejection reason.
+
+Across families, exactly-one-MTU writes are 56.38% of
+calls, and <=128-byte writes are 27.72%. Larger writes
+carry 53.51% of the recorded bytes. Thus
+**GRO is already functioning**; neither a total GRO failure nor universal
+single-packet flushing is supported. Short write size alone does not prove
+TCP ACK flags, and increasing capacity cannot be assumed to merge them.
+
+The trace starts immediately before the primary client command; the existing
+lab starts the opposite client before tracer attachment. Complete pairing
+describes the recorded interval, not guaranteed coverage of every byte of
+both transfers. Instrumented rates/CPU are not performance measurements.
+
+### Actual traffic and disclosed metadata defect
+
+The observation phase explicitly passes `--mixed-flow`, but the outer
+`provenance.json` and `runs.json` still reflect the default input field
+`mixed_flow=false`. This is a new research-harness labeling bug. Raw records
+are not rewritten and this report does not treat that field as authoritative.
+The production Core is unaffected. The labeling repair is not silently included
+in this evidence-only update.
+
+Independent child `results.jsonl` records contain, for each family, two
+successful primary transfers with `mixed_flow=true` and two successful
+opposite-direction transfers, all exactly 67,108,864 bytes. Their directions
+cover upload and download in each role. Total bulk delivery is 512 MiB,
+not a single-flow observation relabeled as mixed.
+
+Four integrity/half-close checks, 60 UDP echo datagrams, and all four complete
+120/120 ICMP windows pass. The 480 replies include 212 during the measured
+load windows. All four Core exits are zero, four namespaces are removed,
+all 30 cleanup records are clean, and root routes are unchanged. Maximum
+individual Core log size is 3,988 bytes. No claim about long-duration leaks
+or saturated control delivery follows.
+
+## Next bounded question, not an implementation decision
+
+The repeated full-MTU writes and observed six-segment-sized emissions justify
+comparing **one** reusable 8/16/32 KiB head in the existing locked-library tool.
+Keep packet bytes/order, ready cohorts, scratch count and all queue budgets
+unchanged. Cover ordinary data, mixed flows and nonmergeable control/short
+packets, preserving byte/multiplicity and allocation ownership checks.
+
+This is separate from changing the rejected control-head selector experiment.
+No new pool, per-flow buffer, wait-to-batch policy, bigger receive ring or
+production default is proposed. A larger head would add 8 or 24 KiB per TUN
+sink relative to the current head, not per connection; whether that trade-off
+is worthwhile remains unmeasured.
+
+The small tool can establish emission/copy/ownership behavior, not Core
+throughput or saturated-loss repair. Only a subsequent same-source actual-Core
+comparison could support a performance claim. Existing saturation failures
+and the separate Test subnet timeout remain open; this observation changes
+neither their status nor any acceptance assertion.
+
+### Small-tool comparison prepared
+
+The existing locked-library contract tool now includes 84 capacity/pattern
+observations: both IP families, capacities 8/16/32 KiB, data cohorts of
+0/1/2/4/8/16/32/64 packets, two-flow interleaving, leading/trailing ACK and a
+short PSH tail. It deliberately retains the parent head selector, isolating
+capacity from the separate eligibility correction. A leading ACK is a negative
+case where capacity alone must not help.
+
+Each arm reconstructs the same fixture bytes/order, runs the real locked
+`handle_gro` and `gso_split`, checks every byte and multiplicity, and retains
+the exact single scratch allocation. Added per-flow order checks use this
+fixture's fixed address pair and distinct source ports; they are not a general
+packet classifier. Existing reverse/prepend fixtures retain their existing
+byte/allocation checks rather than acquiring an inappropriate global-order
+assertion. Existing 8 KiB checks still require exactly 8 KiB on reclamation.
+
+These are controlled 1,320-byte-payload fixture packets, not a captured-packet
+replay, kernel write measurement, CPU benchmark or actual-Core regression.
+The prepared run uses the existing capacity-only workflow and compiles only
+the small Rust tool. No dependency, lockfile, production constant or queue
+changes. Its execution and observed counts are pending at this checkpoint.

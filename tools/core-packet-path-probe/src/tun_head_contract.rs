@@ -18,8 +18,9 @@ fn promote(
     if packets.len() < 2 || scratch.is_none() {
         return None;
     }
+    let head_capacity = scratch.as_ref().unwrap().capacity();
     let index = packets.iter().position(|frame| {
-        if frame.len() >= HEAD_CAPACITY || frame.capacity() >= HEAD_CAPACITY {
+        if frame.len() >= head_capacity || frame.capacity() >= head_capacity {
             return false;
         }
         let Some(packet) = frame.get(VIRTIO_NET_HDR_LEN..) else {
@@ -47,14 +48,14 @@ fn promote(
     Some((identity, index))
 }
 
-fn reclaim(packets: &mut Vec<BytesMut>, identity: usize) -> BytesMut {
+fn reclaim(packets: &mut Vec<BytesMut>, identity: usize, capacity: usize) -> BytesMut {
     let index = packets
         .iter()
         .position(|packet| packet.as_ptr() as usize == identity)
         .expect("GRO lost or reallocated the reusable head");
     let mut head = packets.swap_remove(index);
     head.clear();
-    assert_eq!(head.capacity(), HEAD_CAPACITY);
+    assert_eq!(head.capacity(), capacity);
     head
 }
 
@@ -119,6 +120,8 @@ fn frame(v6: bool, ordinal: u32, flow: u16, payload: usize, flags: u8, wide: boo
 
 struct Observation {
     writes: usize,
+    max_frame_bytes: usize,
+    per_flow_order_unchanged: bool,
     promoted_index: Option<usize>,
     recovered_index: Option<usize>,
     original_slot_matches: bool,
@@ -130,6 +133,7 @@ fn exercise(
     mut packets: Vec<BytesMut>,
     scratch: &mut Option<BytesMut>,
 ) -> Observation {
+    let scratch_capacity = scratch.as_ref().map(BytesMut::capacity);
     let original: Vec<Vec<u8>> = packets
         .iter()
         .map(|packet| packet[VIRTIO_NET_HDR_LEN..].to_vec())
@@ -183,6 +187,28 @@ fn exercise(
             }
         }
     }
+    // These fixtures use one fixed address pair per IP family and distinct
+    // source ports for each flow. Check order within that real fixture key;
+    // GRO may legitimately change interleaving between different flows.
+    fn per_flow(packets: &[Vec<u8>]) -> std::collections::BTreeMap<(u8, u16), Vec<&[u8]>> {
+        let mut flows = std::collections::BTreeMap::<_, Vec<_>>::new();
+        for packet in packets {
+            let family = packet[0] >> 4;
+            let ip_len = if family == 4 { 20 } else { 40 };
+            let port = u16::from_be_bytes([packet[ip_len], packet[ip_len + 1]]);
+            flows
+                .entry((family, port))
+                .or_default()
+                .push(packet.as_slice());
+        }
+        flows
+    }
+    let per_flow_order_unchanged = per_flow(&original) == per_flow(&output);
+    let max_frame_bytes = to_write
+        .iter()
+        .map(|&index| packets[index].len())
+        .max()
+        .unwrap_or(0);
     let mut expected = original;
     expected.sort();
     output.sort();
@@ -200,7 +226,7 @@ fn exercise(
     let original_slot_matches =
         promoted.is_some_and(|(identity, index)| packets[index].as_ptr() as usize == identity);
     if let Some((identity, _)) = promoted {
-        *scratch = Some(reclaim(&mut packets, identity));
+        *scratch = Some(reclaim(&mut packets, identity, scratch_capacity.unwrap()));
     }
     if !name.is_empty() {
         println!(
@@ -211,6 +237,8 @@ fn exercise(
     }
     Observation {
         writes: to_write.len(),
+        max_frame_bytes,
+        per_flow_order_unchanged,
         promoted_index: promoted.map(|(_, index)| index),
         recovered_index,
         original_slot_matches,
@@ -438,7 +466,7 @@ pub(super) fn run() {
     )
     .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    scratch = Some(reclaim(&mut malformed, promoted.0));
+    scratch = Some(reclaim(&mut malformed, promoted.0, HEAD_CAPACITY));
     println!(
         "{{\"contract\":\"tun-head\",\"case\":\"gro-error-recovery\",\"original_error\":\"InvalidInput\",\"reclaimed\":true}}"
     );
@@ -462,4 +490,86 @@ pub(super) fn run() {
     println!(
         "{{\"contract\":\"tun-head\",\"case\":\"reuse\",\"iterations\":1000,\"same_allocation\":true,\"head_capacity\":8192}}"
     );
+    run_capacity_comparison();
+}
+
+fn run_capacity_comparison() {
+    // A bounded mechanism comparison, not replayed Core packets or a CPU
+    // benchmark. Retain the parent selector so capacity is the only variable.
+    let cases = [0, 1, 2, 4, 8, 16, 32, 64]
+        .into_iter()
+        .map(|count| ("data", count))
+        .chain([8, 16, 32].into_iter().map(|count| ("two-flows", count)))
+        .chain([
+            ("leading-ack", 32),
+            ("trailing-ack", 32),
+            ("short-psh-tail", 32),
+        ])
+        .collect::<Vec<_>>();
+    for v6 in [false, true] {
+        let family = if v6 { 6 } else { 4 };
+        for &(pattern, count) in &cases {
+            let mut baseline_writes = None;
+            let mut previous_writes = usize::MAX;
+            for capacity in [8192, 16384, 32768] {
+                let mut packets: Vec<_> = (0..count)
+                    .map(|index| {
+                        let (ordinal, flow) = if pattern == "two-flows" {
+                            ((index / 2) as u32, (index % 2) as u16)
+                        } else {
+                            (index as u32, 0)
+                        };
+                        let tail = pattern == "short-psh-tail" && index + 1 == count;
+                        frame(
+                            v6,
+                            ordinal,
+                            flow,
+                            if tail { 111 } else { PAYLOAD },
+                            if tail { 0x18 } else { 0x10 },
+                            false,
+                        )
+                    })
+                    .collect();
+                if matches!(pattern, "leading-ack" | "trailing-ack") {
+                    let index = if pattern == "leading-ack" {
+                        0
+                    } else {
+                        packets.len()
+                    };
+                    packets.insert(index, frame(v6, 0, 1, 0, 0x10, false));
+                }
+                let input_packets = packets.len();
+                let mut scratch = Some(BytesMut::with_capacity(capacity));
+                let identity = scratch.as_ref().unwrap().as_ptr();
+                let result = exercise(false, "", packets, &mut scratch);
+                assert!(result.per_flow_order_unchanged);
+                assert_eq!(scratch.as_ref().unwrap().capacity(), capacity);
+                assert_eq!(scratch.as_ref().unwrap().as_ptr(), identity);
+                assert!(scratch.as_ref().unwrap().is_empty());
+                assert!(result.writes <= previous_writes);
+                previous_writes = result.writes;
+                let baseline = *baseline_writes.get_or_insert(result.writes);
+                if pattern == "data" {
+                    let header = VIRTIO_NET_HDR_LEN + if v6 { 60 } else { 40 };
+                    let segments = (capacity - header) / PAYLOAD;
+                    let expected = if count == 0 {
+                        0
+                    } else {
+                        1 + count.saturating_sub(segments)
+                    };
+                    assert_eq!(result.writes, expected);
+                    if count >= 8 && capacity > HEAD_CAPACITY {
+                        assert!(result.writes < baseline);
+                    }
+                } else if pattern == "leading-ack" {
+                    // Larger storage cannot repair an ineligible head choice.
+                    assert_eq!(result.writes, input_packets);
+                }
+                println!(
+                    "{{\"contract\":\"tun-capacity-followup\",\"family\":{family},\"pattern\":\"{pattern}\",\"head_capacity\":{capacity},\"input_packets\":{input_packets},\"writes\":{},\"baseline_writes\":{baseline},\"max_frame_bytes\":{},\"byte_roundtrip\":true,\"per_flow_order\":true,\"single_head_identity_retained\":true,\"performance_evidence\":false}}",
+                    result.writes, result.max_frame_bytes,
+                );
+            }
+        }
+    }
 }
