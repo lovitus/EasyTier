@@ -75,7 +75,7 @@ bridges, downstream work, timer and task teardown, not a receiver-only cost.
 Timers use Tokio's millisecond clock; they are fairness indicators rather
 than a microsecond-accurate networking latency benchmark.
 
-Evidence status at submission: **NOT RUN**. A favorable model is permission
-to design a bounded actual-Core experiment, not proof of a fix or permission
-to merge production scheduling changes. An unfavorable model rules out that
-arm at this stage. The original saturated Core acceptance remains open.
+Evidence status: **72 model trials completed**, with important negative
+results in the multi-worker overload cases. See `PRODUCER_QUANTUM_RESULTS.md`.
+Unconditional service quanta are not accepted as a production loss fix.
+The original saturated Core acceptance remains open.
