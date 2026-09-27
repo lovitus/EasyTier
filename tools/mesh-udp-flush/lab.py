@@ -301,7 +301,8 @@ def run(args):
                 if arm!='stock':env.update({'ET_ISSUE4_FLUSH_MODE':arm,'ET_ISSUE4_EXPERIMENT':'ISOLATED_LAB_ONLY',
                                              'ET_ISSUE4_FLUSH_METRICS_DIR':str(metrics_dir)})
                 if args.tun_head_capacity is not None:
-                    env.update({'ET_ISSUE4_TUN_HEAD_CAPACITY':str(args.tun_head_capacity),
+                    env.update({'ET_ISSUE4_EXPERIMENT':'ISOLATED_LAB_ONLY',
+                                'ET_ISSUE4_TUN_HEAD_CAPACITY':str(args.tun_head_capacity),
                                 'ET_ISSUE4_TUN_METRICS_DIR':str(tun_metrics_dir)})
                 if args.packet_trace:
                     env.update({'ET_ISSUE4_PACKET_TRACE':'1',
@@ -565,5 +566,5 @@ if __name__=='__main__':
         parser.add_argument('--profile-call-graph',choices=['fp','dwarf,8192'],default='fp')
         parser.add_argument('--idle-observe',action='store_true',help='bounded 30s/60s resource observations before and after traffic')
         parser.add_argument('--tun-trace',action='store_true',help='bounded write trace; rates are not comparison evidence')
-        parser.add_argument('--tun-head-capacity',type=int,choices=[0,4096,8192],help='requires isolated TUN overlay; records per-endpoint metrics')
+        parser.add_argument('--tun-head-capacity',type=int,choices=[0,4096,8192,16384,32768],help='requires isolated TUN overlay; records per-endpoint metrics')
         run(parser.parse_args())

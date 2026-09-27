@@ -1,0 +1,73 @@
+// Research-only counters. No production API, timer, log stream or hot-path I/O.
+#[derive(Default)]
+struct TunCapacityObservation {
+    directory: std::path::PathBuf,
+    capacity: usize,
+    cohorts: Vec<u64>,
+    input_packets: u64,
+    promoted: u64,
+    completed: u64,
+    failed_flushes: u64,
+    scratch_lost: u64,
+    head_before_bytes: usize,
+    head_grew: u64,
+    max_head_bytes: usize,
+    head_length_kib: Vec<u64>,
+}
+
+impl TunCapacityObservation {
+    fn configure() -> (usize, Option<Self>) {
+        if std::env::var("ET_ISSUE4_EXPERIMENT").as_deref() != Ok("ISOLATED_LAB_ONLY") {
+            return (GRO_HEAD_CAPACITY, None);
+        }
+        let capacity = std::env::var("ET_ISSUE4_TUN_HEAD_CAPACITY")
+            .expect("missing isolated TUN capacity")
+            .parse::<usize>()
+            .expect("invalid isolated TUN capacity");
+        assert!(matches!(capacity, 8192 | 16384 | 32768));
+        let directory = std::env::var_os("ET_ISSUE4_TUN_METRICS_DIR")
+            .expect("missing isolated TUN metrics directory")
+            .into();
+        (
+            capacity,
+            Some(Self {
+                directory,
+                capacity,
+                cohorts: vec![0; IDEAL_BATCH_SIZE + 1],
+                head_length_kib: vec![0; capacity / 1024 + 2],
+                ..Self::default()
+            }),
+        )
+    }
+}
+
+impl Drop for LinuxTunOffloadSink {
+    fn drop(&mut self) {
+        if let Some(observation) = &self.capacity_observation {
+            let value = serde_json::json!({
+                "capacity": observation.capacity,
+                "cohorts": observation.cohorts,
+                "input_packets": observation.input_packets,
+                "promoted": observation.promoted,
+                "completed": observation.completed,
+                "failed_flushes": observation.failed_flushes,
+                "scratch_lost": observation.scratch_lost,
+                "scratch_capacity": self.gro_head.as_ref().map(BytesMut::capacity),
+                "head_grew": observation.head_grew,
+                "max_head_bytes": observation.max_head_bytes,
+                "head_length_kib": observation.head_length_kib,
+                "unfinished_flush": self.flush_future.is_some(),
+                "pending_packets": self.pending.len(),
+                "scope": "head lengths, not emission counts or proof of capacity rejection",
+            });
+            if let Err(error) = std::fs::write(
+                observation
+                    .directory
+                    .join(format!("tun-{}.json", std::process::id())),
+                value.to_string(),
+            ) {
+                eprintln!("isolated TUN observation write failed: {error}");
+            }
+        }
+    }
+}

@@ -304,3 +304,50 @@ The other priority remains the previously observed receive-ring rejection under
 saturation. Neither a larger head nor a producer yield is claimed as its cure.
 No head-capacity Core build, new deployment or performance acceptance was done
 in this repair batch.
+
+## Retained-parent actual-Core capacity experiment (prepared, not yet run)
+
+The next lane is `mesh-udp-flush.yml: tun_capacity_current`. It builds one
+runner-only diagnostic Core based on `3166ab67`, not the obsolete `c6772dbf`
+TUN template. The only generated Core diff is `linux_tun_offload.rs`: head
+allocation/eligibility use 8/16/32 KiB, with the parent selector, stored flush
+future, exact allocation reclaim, error result and no-replay semantics retained.
+No receive ring, packet class, routing, encryption, dependency or retry changes.
+
+The existing lab explicitly passes the isolated capacity marker through its
+ET-environment allowlist. The existing historical 0/4/8 KiB lanes remain intact.
+The diagnostic binary defaults to the retained 8 KiB behavior without that
+marker. This is not a production configuration option or a deployment artifact.
+
+The fixed lane covers IPv4 and IPv6 inner packets over IPv4 UDP, opposing flows
+at 250 and 500 Mbit/s per direction, three interleaved samples per capacity, and
+256 MiB per flow per transfer epoch. That is 36 cases, not WAN throughput.
+The six separate syscall cases use 64 MiB flows capped at 100 Mbit/s each;
+their CPU and rates cannot enter the performance table. The saturation lane is
+bounded and stops at the first unchanged functional/progress failure. All lanes
+retain the lab's full-transfer ICMP option, TCP integrity/half-close, UDP echo,
+resource, process, namespace, route and log-size checks.
+
+Counters are present in every arm and perform no per-packet I/O. They report
+cohort sizes and the recovered head's length/growth, not invented emission counts
+or a claim that a specific packet was rejected for lack of capacity. Real TUN
+emissions come from the separate existing syscall tracer. Any CPU results will
+be same-instrumented-binary comparisons, not a comparison against the previous
+musl release package. Head memory increases are 8/24 KiB per sink, not per flow;
+observation histogram memory is separately research-only.
+
+Failure checklist before execution:
+
+- Refuse a changed base, modified source anchor, extra generated Core file or lock change.
+- Compile and run existing TUN ownership/round-trip regressions; no new weakened tests.
+- Missing metrics, no growing head, wrong capacity, lost scratch or failed flush fails observation.
+- Trace loss, short writes and actual byte/order evidence require artifact audit; a green job alone is insufficient.
+- Compare observed aggregate rates before interpreting CPU/GiB; unmatched load is not a gain.
+- Preserve any saturation loss; neither the capacity tool nor fixed-load success closes it.
+- Keep the existing bounded logs/processes and scoped cleanup; never deploy this overlay to a user host.
+
+The dependency stays pinned to `tun-rs 2.8.7`. Current upstream 2.8.11 still
+exposes `GROTable` internals privately and documents `send_multiple`'s return as
+bytes, not an emission count; no dependency fork is introduced for observation.
+References: [GROTable](https://docs.rs/tun-rs/latest/tun_rs/struct.GROTable.html),
+[send_multiple](https://docs.rs/tun-rs/latest/tun_rs/struct.DeviceImpl.html#method.send_multiple).
