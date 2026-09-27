@@ -679,9 +679,16 @@ single-segment retransmissions off and four on in total; corresponding peers
 reported DSACK-old-sent. No fast-retransmit/SACK-recovery clusters were recorded.
 DSACK alone does not prove harmless tail probes or identify the cause. This
 does not erase the substantially worse saturation counters in run 36279752505.
-Kernel UDP/IP error/drop deltas were zero. Separately, all 2,352 link error/drop
-deltas across 112 before/after snapshot pairs were zero; internal ring rejection
-is not covered by those counters.
+UDP receive error/drop deltas were zero. The initial broader statement that IP
+error/drop deltas were all zero was incorrect: a subsequent complete NoRoutes
+audit found 56 nonzero endpoint windows and 198 total `Ip.OutNoRoutes` increments
+in this run, including activation. The earlier saturation run 36279752505 had
+92 nonzero windows and 300 increments. These counters were present in the raw
+artifacts but omitted by the earlier reporting filter. Their traffic source has
+not been attributed; do not silently classify them as harmless background work.
+This corrects the preceding run's broad IP-error summary too. Separately, all
+2,352 link error/drop deltas across 112 before/after snapshot pairs were zero;
+internal ring rejection is not covered by those counters.
 
 All 48 complete transfer-control windows delivered 120/120 timestamped echoes,
 5,760 total, with 2,388 replies during actual load. Their first/last replies
@@ -736,3 +743,24 @@ establish that each TCP retransmission came from the ring. It is intended to
 localize the next change, not justify an unmeasured ring enlargement or extra
 yield. Original combined failure 36260893872, original-host/WAN acceptance and
 production GRO acceptance remain OPEN.
+
+## Ring observation result: reproduced with GRO off, not a passed matrix
+
+Diagnostic run 36284039979 failed its unchanged ICMP-progress assertion in the
+first mixed-load off case. It compiled successfully, passed all 39 UDP and four
+hole-punch contracts, and passed the four independent activation cases. The
+remaining five pressure cases were not run. This is a functional failure with
+useful localization, not an infrastructure failure or performance acceptance.
+
+IPv6 echo request ID 24907, sequence 11, ciphertext fingerprint
+`13650756ab3e7264` appears at A `encrypted_tx`, B `udp_rx`, then B `ring_reject`.
+It does not appear at B `peer_rx` or B's matching `nic_enqueue`. Ping recorded
+119/120 replies, with exactly sequence 11 absent. Thus the missing request was
+received by the underlay socket and rejected by Core's existing receive ring
+before decryption/TUN delivery. GRO was off, so enabling GRO is not necessary
+for this loss. This is not proof that GRO cannot worsen pressure elsewhere.
+
+The full evidence, cleanup, counter limitations and next narrow research boundary
+are in [RING_REJECTION_LOCALIZATION.md](RING_REJECTION_LOCALIZATION.md). No
+production queue policy was changed. The original acceptance failure remains
+open; the new evidence identifies a matching failure mechanism, not a repair.
