@@ -1,7 +1,8 @@
 # GSO supply and UDP GRO receive: bounded mechanism research
 
-Status: standalone mechanism and 43 Core contracts completed; actual-Core GRO
-comparison is incomplete because the experiment driver lost its activation option.
+Status: 43 Core contracts and the actual-Core off/on comparison completed.
+CPU/goodput benefit is measured; saturation retransmission and latency trade-offs
+remain unresolved. Workflow success is not production acceptance.
 No production Core change, merge or release.
 The original combined saturation failure remains open.
 
@@ -400,8 +401,197 @@ Removing that table check based on the counter alone would violate the current
 contract. The samples also do not isolate how much of the closure's self time
 comes from that check versus other inlined work.
 
-The evidence-based order remains: obtain a valid actual-Core GRO comparison;
-only then consider a focused mechanism experiment for inactive filter or queue
-cost. No crypto/stack replacement, queue enlargement, filter bypass or production
-patch is justified by this profile alone. The original combined saturation
-failure and original-host acceptance remain open.
+This profile justified obtaining a valid actual-Core GRO comparison before a
+separate inactive-filter or queue experiment. The following result supplies that
+comparison, not permission for crypto/stack replacement, queue enlargement or
+filter bypass. Original-host acceptance and the older saturation failure remain
+open.
+
+## Actual-Core result: benefit confirmed, pressure trade-off remains open
+
+[Run 36279752505](https://github.com/lovitus/EasyTier/actions/runs/36279752505)
+completed with **SUCCESS**, at harness commit
+`10f4e9bbd6aa9af7c4275501fc938f498ec85a42`. Only the explicit experiment-option
+handoff was repaired. The receive adapter and frozen production source were not
+changed. The run reused binary artifact `10915569351`; it did not compile Core.
+The 39 UDP and four hole-punch contract results belong to run `36271631477`,
+not to a fictitious test re-execution in this reuse-only run.
+
+### Exact identity and both endpoints
+
+- Source base: `3166ab672d347cdcc5a6768bc77056cd8ec38323`, with the unchanged
+  disposable GRO receiver introduced by harness `4e14d18a`.
+- Core SHA-256: `ae0d57a5c1c7d9568ff3158fcfd0c8b544a0a1cf236aab4b36706ca28d6b7777`.
+- Core Build ID: `7e874215b5dcf724df2af1461d1814eb75eedd9b`.
+- Original binary artifact ZIP SHA-256:
+  `9532c659b5c51e280bc88f5af7d9afe5f4cdfd3a8d2695471282c4133f550cb3`.
+  The reuse job checked the archive and each executable on GitHub. The large
+  archive was not downloaded to the maintainer machine.
+- Endpoint A and endpoint B were Core processes in two separate Linux network
+  namespaces on the **same GitHub-hosted runner**, joined by a veth pair. This
+  is a real Core/TUN/UDP/crypto path, but is neither two physical hosts nor WAN.
+- Runner: Intel Xeon Platinum 8370C, 2.80 GHz, four logical CPUs / two cores;
+  Linux `6.8.0-1064-azure`, x86_64. AES-GCM remained enabled. No Leaf or Mihomo
+  path was involved.
+- Evidence artifact `10919035320`: 2,041,889 bytes; ZIP SHA-256
+  `5fb93544ac74d49d114b81759702171b53fa36bff57d2146e2344e484bf99caa`.
+  All 2,355 members passed CRC, and all 2,354 manifest hashes matched.
+
+Four traced activation cases are excluded from performance statistics. The
+untraced phases contain 24 fixed-load, six saturation and six mixed-load cases.
+Each matched group uses three samples per arm, interleaved
+`off/on/on/off/off/on`. Both arms execute identical Core bytes. These short
+runner samples are not a confidence interval or a sustained capacity guarantee.
+
+### Activation is now demonstrated, not inferred from a label
+
+For each of IPv4 and IPv6, the on case records three successful UDP_GRO enables.
+Aggregated receives larger than one frame occur from **both endpoint sources**:
+1,523/1,379 for IPv4 and 1,469/1,507 for IPv6. Both off cases record zero enables
+and zero GRO aggregates. Stealth is enabled in these activation cases.
+
+The old failed on case in run `36273977755` and this corrected on case form the
+runtime failing/passing evidence for the **lab environment wiring defect**.
+They are not evidence of a bug in production's GRO-disabled reader. Tracing
+results must not be used as throughput or CPU samples.
+
+### Fixed offered rate: three-sample medians
+
+The cap is 200 Mbit/s; delivered rates are approximately 193 Mbit/s in both
+arms. CPU is the sum of both Core processes' user and system CPU seconds per
+delivered GiB. It is not total runner CPU or a single endpoint's consumption.
+
+| Outer / inner family | Stealth | Direction | Off CPU s/GiB | On CPU s/GiB | Change |
+| --- | --- | --- | ---: | ---: | ---: |
+| IPv4 / IPv4 | off | A to B | 14.72 | 13.44 | -8.70% |
+| IPv4 / IPv4 | off | B to A | 14.72 | 13.28 | -9.78% |
+| IPv4 / IPv4 | on | A to B | 16.64 | 15.68 | -5.77% |
+| IPv4 / IPv4 | on | B to A | 16.32 | 15.68 | -3.92% |
+| IPv6 / IPv6 | off | A to B | 14.56 | 13.60 | -6.59% |
+| IPv6 / IPv6 | off | B to A | 14.72 | 13.44 | -8.70% |
+| IPv6 / IPv6 | on | A to B | 16.32 | 15.36 | -5.88% |
+| IPv6 / IPv6 | on | B to A | 16.64 | 15.36 | -7.69% |
+
+All fixed-load cases have zero recorded TCP retransmissions. The shorter
+32 MiB Stealth trials have coarse CPU-tick resolution and some overlapping
+sample ranges; their small percentage differences should not be overinterpreted.
+Plain cases transfer 64 MiB in each direction.
+
+### Saturation and simultaneous opposite-direction load
+
+These cases use UDP/IPv4 underlay, IPv6 overlay and Stealth off. Each flow
+delivers 1 GiB. Mixed cases carry two simultaneous, opposite-direction flows.
+
+| Load / primary direction | Off Mbit/s median [range] | On Mbit/s median [range] | Goodput change | Core CPU s/GiB off / on |
+| --- | ---: | ---: | ---: | ---: |
+| Single A to B | 2213.87 [2201.17, 2229.43] | 2546.06 [2519.82, 2582.76] | +15.01% | 11.02 / 9.95 |
+| Single B to A | 2239.52 [2012.32, 2242.22] | 2494.20 [2425.86, 2523.69] | +11.37% | 10.93 / 10.00 |
+| Mixed, primary A to B | 1198.17 [1193.89, 1203.00] | 1331.52 [1329.68, 1376.20] | +11.13% | 11.01 / 9.87 |
+| Mixed, primary B to A | 1200.49 [1192.34, 1218.05] | 1330.38 [1318.13, 1339.01] | +10.82% | 11.01 / 9.89 |
+
+The mixed Mbit/s columns show only the primary flow, **not aggregate throughput**.
+Secondary-flow medians are respectively 1215.23 / 1334.47 and
+1206.20 / 1342.60 Mbit/s, off / on. Mixed CPU denominators include both flows'
+delivered bytes. Single-flow CPU/GiB improves 8.51-9.71%; mixed improves
+10.17-10.35%. These are incremental comparisons within this exact run. Do not
+add them to previous GSO or TUN-head percentages from other candidates/hosts.
+Lower CPU per delivered byte does not promise lower peak CPU under saturation:
+the faster arm also processes more traffic per second.
+
+### Important adverse result: TCP recovery work increases
+
+Kernel UDP/IP and link error/drop counters remain zero in the recorded windows,
+but this is **not a loss-free path**. TCP retransmissions occur in both saturation
+arms and increase with GRO. The table uses namespace counter deltas summed over
+both endpoints, normalized by delivered bytes. `TCPFastRetrans` counts the same
+retransmits here and is not added to `Tcp.RetransSegs`.
+
+| Load / primary direction | Off retransmits/GiB median [range] | On retransmits/GiB median [range] | Retransmits / original data segments, off / on |
+| --- | ---: | ---: | ---: |
+| Single A to B | 273 [192, 382] | 464 [417, 487] | 0.03387% / 0.05470% |
+| Single B to A | 253 [218, 258] | 540 [357, 666] | 0.02915% / 0.06250% |
+| Mixed, primary A to B | 355.5 [336.5, 469] | 835 [766, 891.5] | 0.04642% / 0.09966% |
+| Mixed, primary B to A | 333.5 [321.5, 415] | 771.5 [706, 816] | 0.04278% / 0.09170% |
+
+The percentages use each group's sum of `Tcp.RetransSegs` divided by
+`TcpExt.TCPOrigDataSent`, not an application UDP loss rate. The Linux
+[SNMP counter documentation](https://docs.kernel.org/networking/snmp_counter.html)
+distinguishes original data segments from ACK-inclusive outgoing segments and
+GRO-sensitive incoming segment counts. Counter locations do not identify the
+point of packet loss inside Core.
+
+Recovery episodes and retransmitted segments must also be distinguished. Across
+the three samples, `TCPSackRecovery` falls from 169 to 77 (single A to B),
+160 to 84 (single B to A), 461 to 258 (mixed primary A to B), and 473 to 257
+(mixed primary B to A). More segments are retransmitted in fewer recovery
+episodes. This is consistent with larger loss/recovery bursts, but is **not
+proof** that the Core ring is their cause. No DSACK or spurious-retransmission
+counter increase was observed in these snapshots. Ten `TCPLostRetransmit`
+increments occurred across all saturation/mixed samples; seven belong to one
+GRO-on single-download case. These are retained, not waived by workflow success.
+
+Saturation also has different achieved loads between arms. A matched-rate
+comparison near the baseline capacity is needed before claiming a causal
+same-load regression. The existing 200 Mbit/s points alone cannot answer that.
+
+### Control progress, resources and cleanup
+
+All 1,600 ICMP probes were answered, but the probe is only 20 echoes near the
+start of each transfer, not continuous full-transfer control-latency coverage.
+The 32 MiB fixed-load transfer can finish before its ping series. Do not turn
+these samples into a sustained fairness or production tail-latency guarantee.
+
+| Load / primary direction | Median of per-case ICMP p95, off / on, ms | Worst observed RTT, off / on, ms |
+| --- | ---: | ---: |
+| Single A to B | 1.150 / 1.210 | 1.440 / 1.720 |
+| Single B to A | 0.899 / 1.040 | 1.480 / 1.270 |
+| Mixed, primary A to B | 1.270 / 1.770 | 1.570 / 1.920 |
+| Mixed, primary B to A | 1.360 / 1.740 | 1.610 / 1.950 |
+
+Only 20 replies underlie each per-case percentile. Mixed-load latency is higher;
+there is no basis for calling this a zero-latency-cost optimization.
+
+The full run completed 92 bulk transfers / 38.5 GiB, 80 independent byte-integrity
+checks, and 1,200 UDP echo datagrams. The UDP/integrity checks occur before bulk
+load, not as saturation UDP delivery evidence. All 80 Core processes exited
+cleanly, all 80 namespaces were removed, all 536 recorded cleanup checks passed,
+and host routes were unchanged. No forced kill was required.
+
+Observed per-process RSS ranges were 25.8-27.8 MiB at fixed load,
+26.1-28.4 MiB at saturation, and 26.0-29.2 MiB at mixed load, across both arms.
+Snapshots show 13-14 threads and 26-29 FDs; maximum Core log size was 5,689 bytes.
+These short pre/post snapshots do not establish peak memory or long-term leak
+freedom. The enabled adapter still adds one 64 KiB scratch buffer per receive
+owner; there is no demonstrated memory reduction. This run has no measured idle
+phase and makes no idle-power claim.
+
+### Source reconciliation and next discriminator
+
+At frozen `3166ab67`, `UdpConnection::handle_packet_from_remote()` in
+`easytier/src/tunnel/udp.rs` uses `RingSink::try_send()` for lossy Data. The
+receive ring has capacity 128; `try_send()` in `tunnel/ring.rs` rejects when
+occupancy reaches capacity minus the existing four reserved entries. Non-lossy
+traffic uses `force_send()` and still fails when the ring is full. The shared
+listener must not await one peer's ring indefinitely and stall all other peers.
+
+The exact locked Tokio 1.52.1 `Registration::async_io()` already consumes
+cooperative budget; its poll-read path does too. The experimental receiver also
+calls `consume_budget()` for every returned segment. A missing cooperative yield
+has therefore **not** been established. Larger GRO bursts, scheduler placement,
+ring pressure and downstream processing remain hypotheses, not demonstrated
+causes of this run's retransmissions.
+
+Next investigation is narrowly bounded: reuse these exact binaries for a
+matched-rate high-load off/on comparison, record control progress throughout
+the transfer, and distinguish kernel, receiver parsing and per-peer ring losses
+before changing packet flow. Any diagnostic instrumentation must be separated
+from performance samples. No larger ring, unbounded staging, timer-based batch
+delay, packet-class priority or blanket yield is approved by these results.
+
+The successful workflow closes the lab-option wiring failure and proves a real
+Linux Core CPU/goodput benefit. It does **not** close the old missing IPv6 echo
+in run `36260893872`, original-host validation, physical NIC/WAN behavior,
+cross-platform fallback, long-duration memory, or saturated Stealth coverage.
+Keep the adapter experimental and the production candidate unchanged while the
+pressure trade-off is investigated. No merge, release or completed-performance
+goal is implied.
