@@ -351,3 +351,45 @@ exposes `GROTable` internals privately and documents `send_multiple`'s return as
 bytes, not an emission count; no dependency fork is introduced for observation.
 References: [GROTable](https://docs.rs/tun-rs/latest/tun_rs/struct.GROTable.html),
 [send_multiple](https://docs.rs/tun-rs/latest/tun_rs/struct.DeviceImpl.html#method.send_multiple).
+
+## Actual-Core attempt: test execution privilege failure, no traffic result
+
+[Run 36300227079](https://github.com/lovitus/EasyTier/actions/runs/36300227079)
+failed at harness `25115ab08252f3dbcf4744d89f648695be4e0b58`.
+The original failure is retained; no retry, assertion change or production
+repair was applied.
+
+The overlay/source gate passed and the optimized Core/CLI build completed in
+8m 58s. The existing test executable also compiled. Its two pure GRO/reclaim
+tests passed; the two real-device lifecycle tests failed in
+`in_test_netns()` at `unshare(CLONE_NEWNET)` with `EPERM`, before their test
+bodies. The result is **2 passed, 2 failed**, not a complete ownership PASS.
+The new workflow ran `cargo test` as the ordinary runner user, unlike the
+existing formal Test workflow's privileged test-executable execution. This is
+a newly introduced experiment-launcher omission, not evidence of a TUN capacity
+or production lifecycle regression and not a flaky-test claim.
+
+No trace, fixed-load or saturation phase ran. There is no new Core throughput,
+CPU, memory or loss result to report.
+
+Evidence artifact `10925273342` is 94,069 bytes, with complete archive SHA-256
+`f0df82ce2e49484d8acc4679e29613ccd15562463bbcd9ccecfc5ac9787842c3`.
+The archive and all 11 manifest-listed files were verified. The source record
+pins `3166ab67`, and the changed-file record contains only
+`easytier/src/instance/linux_tun_offload.rs`. The runner was AMD EPYC 9V74 with
+four logical CPUs; there are no runtime measurements to compare with other CPUs.
+
+Binary artifact `10925233924` retains the already built Core and CLI. Its GitHub
+metadata reports 64,706,813 bytes and SHA-256
+`fa49baaf4e2193bd6c2d4b6aa52332c5e9a1b009da2e46242bbb4b3f00990999`.
+It has not been downloaded or independently hashed locally. The test executable
+was not copied into that artifact before the failure; the later probe, build-info
+and binary-hash commands were not reached either. This limitation must not be
+hidden when reusing the retained binaries.
+
+Proposed repair, awaiting the maintainer's decision after disclosure: reuse and
+verify the exact Core/CLI archive, compile only the missing test executable from
+the same pinned source/overlay, save its identity before execution, and run the
+unchanged namespace tests with the existing CI privilege model. Only after all
+four tests pass may the existing planned traffic phases run. Do not rebuild or
+modify the Core, relax the namespace requirement, or skip either failed test.
