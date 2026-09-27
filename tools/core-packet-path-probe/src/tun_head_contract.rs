@@ -496,7 +496,7 @@ pub(super) fn run() {
 fn run_capacity_comparison() {
     // A bounded mechanism comparison, not replayed Core packets or a CPU
     // benchmark. Retain the parent selector so capacity is the only variable.
-    let cases = [0, 1, 2, 4, 8, 16, 32, 64]
+    let cases = [0_usize, 1, 2, 4, 8, 16, 32, 64]
         .into_iter()
         .map(|count| ("data", count))
         .chain([8, 16, 32].into_iter().map(|count| ("two-flows", count)))

@@ -215,3 +215,21 @@ The proposed repair is only an explicit `usize` cohort-table type, with every
 assertion unchanged. The outer mixed-flow labeling defect is also disclosed
 above. Both were reported to the maintainer for the requested decision; no
 silent code repair or replacement run has been made at this checkpoint.
+
+## Authorized research-tool repair (2026-09-27)
+
+The maintainer requested continued repair and research after the failed run was
+reported. The capacity table now explicitly infers `usize`; no case, expected
+value, assertion, buffer size, or production Core code was changed.
+
+The package harness now names the input flag `requested_mixed_flow` in provenance
+and records the effective phase-specific value in each `runs.json` row. The
+forced opposing-flow TUN observation is therefore recorded as `mixed_flow: true`.
+Reading older provenance remains supported. The original artifacts and their
+incorrect outer labels remain unchanged; their independently recorded child
+transfers are the evidence for the already completed bidirectional observation.
+
+Only the existing locked small-tool capacity workflow is to be repeated. No Core
+rebuild or repeated package trace is needed for these repairs. At this checkpoint
+the repaired tool has not run; the prior compile failure remains a failure, and
+no capacity or CPU result is claimed.

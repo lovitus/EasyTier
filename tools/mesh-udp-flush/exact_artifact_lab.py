@@ -114,14 +114,15 @@ def prepare(root):
     (root / 'provenance.json').write_text(json.dumps({
         'harness_sha': os.environ['GITHUB_SHA'], 'cores': identities,
         'cli_artifact': CLI_ARTIFACT, 'cli_sha256': CLI_SHA,
-        'mixed_flow': mixed_flow,
+        'requested_mixed_flow': mixed_flow,
         'scope': 'unmodified packages; namespace lab; no WAN or original-host claim'
     }, indent=2))
 
 
 def run(root, phase, probe, perf_path):
     lab = Path(__file__).with_name('lab.py').resolve()
-    mixed_flow = json.loads((root / 'provenance.json').read_text()).get('mixed_flow', False)
+    provenance = json.loads((root / 'provenance.json').read_text())
+    mixed_flow = provenance.get('requested_mixed_flow', provenance.get('mixed_flow', False))
     assert not mixed_flow or phase in ('fixed', 'trace', 'saturation'), 'mixed-flow input requires the ordinary comparison lane'
     suite = root / phase
     suite.mkdir(exist_ok=False)
@@ -196,7 +197,7 @@ def run(root, phase, probe, perf_path):
         with (suite / f'{index:02d}.log').open('w') as log:
             completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=360)
         row = {'label': label, 'server_label': server_label, 'relay_label': relay_label, 'inner_ip_family': family, 'underlay_ip_family': outer,
-               'stealth': stealth, 'mixed_flow': mixed_flow and phase in ('fixed', 'saturation'),
+               'stealth': stealth, 'mixed_flow': phase == 'tun-observation' or (mixed_flow and phase in ('fixed', 'saturation')),
                'exit_code': completed.returncode, 'output': str(output.relative_to(root))}
         results.append(row)
         (suite / 'runs.json').write_text(json.dumps(results, indent=2))
