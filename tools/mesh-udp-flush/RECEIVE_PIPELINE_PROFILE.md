@@ -1,6 +1,6 @@
 # Exact receive-pipeline CPU diagnosis
 
-Current status: **SAMPLER SETUP REPAIRED; MIXED-FLOW CAPTURE PENDING**.
+Current status: **CAPTURE COMPLETE; RECEIVE OVERLOAD REMAINS OPEN**.
 The first attempt failed before Core started, as preserved below. This is a
 diagnostic follow-up, not an optimization or release candidate.
 
@@ -150,3 +150,82 @@ Check nonempty and executable paths with separate mandatory commands and
 retain package/path provenance. This changes only sampling setup, not Core,
 the binary identity, workload, cleanup or functional assertions. A failed
 capture remains a failure; the historical setup failure below is retained.
+
+## Reused mixed-flow capture completed
+
+[Run 36289395042](https://github.com/lovitus/EasyTier/actions/runs/36289395042)
+succeeded at harness `699b4b3aaa4f01606c7044f57342efb6e5bbe529`.
+Artifact `10922075360` is 1,114,058 bytes, SHA-256
+`53bbcb8cc055e2096e248fb974f529c8fe0ce246a2dbed14a40573f812cef4fb`.
+Archive CRC/path checks and all 108 evidence manifest entries matched.
+Core bytes/Build ID remain the immutable diagnostic payload above; no Core
+was rebuilt. Old contract results were reused, not newly executed.
+
+Both endpoints ran on one AMD EPYC 9V74 hosted VM (four logical CPUs/two
+cores), Linux 6.8.0-1064-azure. Endpoint 0 was TGID 2548, endpoint 1 TGID 2549.
+Each measured phase had opposing TCP flows, not one receive-only endpoint.
+All four one-GiB transfers completed; separate byte-integrity checks and
+30 UDP echo datagrams passed. Both full-transfer ICMP windows returned
+120/120 replies (107 and 88 during load). Maximum RTT was 4.351/2.450 ms.
+
+This does NOT close the original loss. Each endpoint still rejected
+[1024, 2048) ordinary Data packets at ring admission over the complete case.
+TCP retransmission deltas were 340/349 in the first window and 356/331 in
+the second. UDP error and link-drop counters did not rise, but IPv4
+`Ip.OutNoRoutes` rose by 4/5 in the first window, still unattributed.
+Do not report all network error counters as zero.
+
+Both Core processes exited without forced kill; all 17 cleanup records
+passed, both namespaces disappeared and root routes were unchanged. Logs
+stayed at 79,320/79,094 bytes below the 2 MiB bound. Observed per-process RSS
+was 26.25-27.875 MiB; this short capture is not a memory-leak/idle-CPU test.
+
+### Counted stacks, not summed callgraph percentages
+
+| Phase | Endpoint | Raw samples | Kernel self | TUN-write stack | UDP-send stack | UDP-receive stack |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Primary upload + reverse flow | 0 | 1231 | 705 (57.27%) | 234 | 213 | 117 |
+| Primary upload + reverse flow | 1 | 1235 | 727 (58.87%) | 247 | 200 | 140 |
+| Primary download + reverse flow | 0 | 1212 | 696 (57.43%) | 226 | 206 | 130 |
+| Primary download + reverse flow | 1 | 1218 | 727 (59.69%) | 243 | 210 | 144 |
+
+Raw perf SAMPLE totals equal the endpoint stack totals: 2466 + 2430 = 4896,
+with no LOST records. There are nine unresolved self symbols and 38
+single-frame stacks; zero lost samples does not imply perfect unwinding.
+Percentages here use raw sample counts; perf's period-weighted display may
+differ. Stack incidence is non-additive: TUN/kernel/user callers overlap.
+TUN-write, UDP-send and UDP-receive appear in 19.40%, 16.93% and 10.85% of
+all stacks, respectively. TUN-write includes kernel IPv6/TCP delivery, so
+19.40% is not removable syscall overhead or a promised optimization gain.
+
+`sccp` self samples account for 321/4896 (6.56%). The musl target's symbol
+and its syscall-entry descendants match the
+[musl syscall trampoline](https://git.musl-libc.org/cgit/musl/tree/src/thread/__syscall_cp.c?h=v1.2.5),
+not a new EasyTier protocol/crypto routine. This reference does not identify
+the exact musl build revision inside the retained Rust sysroot.
+
+### Narrow follow-up selected from source
+
+The existing `NicCtx::do_forward_peers_to_nic_with_mode` already feeds up to
+64 ready packets before flushing. `LinuxTunOffloadSink` already calls real
+`tun_rs::AsyncDevice::send_multiple`; another batching layer is not justified.
+Its one reusable 8 KiB head, however, goes to the first eligible TCP header,
+including pure ACK/SYN/RST/FIN packets. Locked tun-rs 2.8.7 `tcp_gro` rejects
+non-ACK/PSH-ACK flags and empty TCP payload. Thus a leading control packet
+can occupy the sole roomy buffer without contributing a merge; following
+small-capacity data frames can lose that opportunity.
+
+This is a concrete mechanism hypothesis, NOT proof that it caused the
+observed ring loss or dominates traffic on the original machine. Extend only
+the existing standalone capacity probe with paired control/data fixtures and
+a payload-head placement alternative. Keep packet order/bytes, one 8 KiB
+allocation, cancellation/error ownership, queues and deadlines unchanged.
+No production change is accepted until the real locked API reproduces the
+miss and confirms byte/allocation invariants. Actual-Core performance still
+requires a subsequent exact-artifact comparison.
+
+The dependency archive matches locked checksum
+`ea75f145e8f32c72b1afdf137f2181810b0232be9930519e8d82071b4a3b3bdf`.
+[Docs.rs lists 2.8.11 as latest](https://docs.rs/crate/tun-rs/2.8.11) at this
+review; no dependency upgrade is included. Head selection is owned by this
+fork, not by the library. A broader dependency/allocation audit is separate.

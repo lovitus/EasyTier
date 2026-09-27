@@ -69,3 +69,22 @@ kernel partial-write test, runtime cancellation test, memory-leak proof or new
 performance result. The async sink's existing partial-write/error/cancellation
 semantics are audited separately in `../mesh-udp-flush/PACKAGED.md`. A future
 production patch still needs exact-artifact acceptance.
+
+## Mixed control/data head placement
+
+The same capacity-contract entry now compares the retained first-TCP selector
+with a probe-only payload-bearing ACK/PSH-ACK selector. Each arm receives the
+same three packets in the same order and the same one 8 KiB reusable head.
+IPv4/IPv6, a control packet at each of three positions, and ACK/SYN/RST/FIN
+flags produce 24 paired cases. Two all-control cases must avoid promotion.
+The expected negative control is a leading control packet: current selection
+uses three GRO emissions while payload-head placement should use two. Later
+control positions should remain two in both arms. Results are pending until
+the existing `capacity_only=true` workflow completes.
+
+Both arms retain real `handle_gro`/`gso_split`, complete IP-byte/multiplicity
+checks and allocation-identity recovery. The predicate must be false for the
+leading-control baseline and true for the alternative, not a compilation
+failure. No workflow, dependency pin, Core code, queue, wait or buffer limit
+changes. This is mechanism evidence only, not actual-Core speedup or a claim
+that the original receive-ring loss is fixed.

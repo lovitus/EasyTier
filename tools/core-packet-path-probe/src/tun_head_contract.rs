@@ -10,7 +10,11 @@ const AEAD_TAIL: usize = 28;
 
 // Same selection and allocation-identity recovery as tun_capacity.rs.in.
 // The dependency, not this helper, decides whether packets can be coalesced.
-fn promote(packets: &mut [BytesMut], scratch: &mut Option<BytesMut>) -> Option<(usize, usize)> {
+fn promote(
+    packets: &mut [BytesMut],
+    scratch: &mut Option<BytesMut>,
+    prefer_data: bool,
+) -> Option<(usize, usize)> {
     if packets.len() < 2 || scratch.is_none() {
         return None;
     }
@@ -21,11 +25,19 @@ fn promote(packets: &mut [BytesMut], scratch: &mut Option<BytesMut>) -> Option<(
         let Some(packet) = frame.get(VIRTIO_NET_HDR_LEN..) else {
             return false;
         };
-        match packet.first().map(|byte| byte >> 4) {
-            Some(4) => packet.len() >= 40 && packet[0] & 15 == 5 && packet[9] == 6,
-            Some(6) => packet.len() >= 60 && packet[6] == 6,
-            _ => false,
+        let ip_len = match packet.first().map(|byte| byte >> 4) {
+            Some(4) if packet.len() >= 40 && packet[0] & 15 == 5 && packet[9] == 6 => 20,
+            Some(6) if packet.len() >= 60 && packet[6] == 6 => 40,
+            _ => return false,
+        };
+        if !prefer_data {
+            return true; // Retain the current Core selector as the control arm.
         }
+        // Experimental placement only. The locked GRO library still owns all
+        // checksum, sequence, options, fragmentation and merge validation.
+        let tcp = &packet[ip_len..];
+        let header_len = usize::from(tcp[12] >> 4) * 4;
+        (20..=60).contains(&header_len) && tcp.len() > header_len && matches!(tcp[13], 0x10 | 0x18)
     })?;
     let mut head = scratch.take().expect("scratch checked above");
     head.clear();
@@ -112,13 +124,18 @@ struct Observation {
     original_slot_matches: bool,
 }
 
-fn exercise(name: &str, mut packets: Vec<BytesMut>, scratch: &mut Option<BytesMut>) -> Observation {
+fn exercise(
+    prefer_data: bool,
+    name: &str,
+    mut packets: Vec<BytesMut>,
+    scratch: &mut Option<BytesMut>,
+) -> Observation {
     let original: Vec<Vec<u8>> = packets
         .iter()
         .map(|packet| packet[VIRTIO_NET_HDR_LEN..].to_vec())
         .collect();
     let largest = original.iter().map(Vec::len).max().unwrap_or(1);
-    let promoted = promote(&mut packets, scratch);
+    let promoted = promote(&mut packets, scratch, prefer_data);
     // Record allocation identity/capacity before the real library mutates frames.
     let mut allocations: Vec<_> = packets
         .iter()
@@ -211,12 +228,17 @@ pub(super) fn run() {
                 frame(v6, 1, 0, PAYLOAD, 0x10, false),
             ]
         };
-        let red = exercise(&format!("ipv{family}-no-head-control"), pair(), &mut None);
+        let red = exercise(
+            false,
+            &format!("ipv{family}-no-head-control"),
+            pair(),
+            &mut None,
+        );
         assert_ne!(
             red.writes, 1,
             "negative control must fail the one-write contract"
         );
-        let green = exercise(&format!("ipv{family}-head"), pair(), &mut scratch);
+        let green = exercise(false, &format!("ipv{family}-head"), pair(), &mut scratch);
         assert_eq!(
             green.writes, 1,
             "bounded head must satisfy the same one-write contract"
@@ -230,6 +252,7 @@ pub(super) fn run() {
                 .map(|ordinal| frame(v6, ordinal, 0, PAYLOAD, 0x10, false))
                 .collect();
             let result = exercise(
+                false,
                 &format!("ipv{family}-cohort-{count}"),
                 packets,
                 &mut scratch,
@@ -240,6 +263,7 @@ pub(super) fn run() {
             }
         }
         let prepend = exercise(
+            false,
             &format!("ipv{family}-prepend-two-wide-allocations"),
             vec![
                 frame(v6, 1, 0, PAYLOAD, 0x10, true),
@@ -255,6 +279,7 @@ pub(super) fn run() {
             "fixed-index recovery negative control must fail"
         );
         exercise(
+            false,
             &format!("ipv{family}-reverse-narrow"),
             vec![
                 frame(v6, 1, 0, PAYLOAD, 0x10, false),
@@ -263,6 +288,7 @@ pub(super) fn run() {
             &mut scratch,
         );
         exercise(
+            false,
             &format!("ipv{family}-interleaved-flows"),
             (0..4)
                 .flat_map(|ordinal| {
@@ -275,6 +301,7 @@ pub(super) fn run() {
             &mut scratch,
         );
         exercise(
+            false,
             &format!("ipv{family}-short-psh-tail"),
             vec![
                 frame(v6, 0, 0, PAYLOAD, 0x10, false),
@@ -284,6 +311,7 @@ pub(super) fn run() {
         );
         for flags in [0x02, 0x04, 0x11, 0x18] {
             exercise(
+                false,
                 &format!("ipv{family}-flags-{flags}"),
                 vec![
                     frame(v6, 0, 0, PAYLOAD, flags, false),
@@ -293,6 +321,7 @@ pub(super) fn run() {
             );
         }
         exercise(
+            false,
             &format!("ipv{family}-ack-only"),
             vec![
                 frame(v6, 0, 0, 0, 0x10, false),
@@ -300,9 +329,56 @@ pub(super) fn run() {
             ],
             &mut scratch,
         );
+        // Same three packet bytes/order in both arms. Only the one reusable
+        // head's placement changes; a leading control packet must not steal it.
+        for flags in [0x10, 0x02, 0x04, 0x11] {
+            for control_index in 0..3 {
+                let cohort = || {
+                    let mut packets = pair();
+                    packets.insert(control_index, frame(v6, 0, 1, 0, flags, false));
+                    packets
+                };
+                let stock = exercise(
+                    false,
+                    &format!("ipv{family}-control-{flags}-at-{control_index}-stock"),
+                    cohort(),
+                    &mut scratch,
+                );
+                let selected = exercise(
+                    true,
+                    &format!("ipv{family}-control-{flags}-at-{control_index}-payload-head"),
+                    cohort(),
+                    &mut scratch,
+                );
+                assert_eq!(stock.writes, if control_index == 0 { 3 } else { 2 });
+                assert_eq!(selected.writes, 2);
+                assert_eq!(
+                    selected.promoted_index,
+                    Some(if control_index == 0 { 1 } else { 0 })
+                );
+                println!(
+                    "{{\"contract\":\"tun-head-data-selection\",\"family\":{family},\"flags\":{flags},\"control_index\":{control_index},\"stock_writes\":{},\"payload_head_writes\":{},\"same_two_write_predicate_stock\":{},\"same_two_write_predicate_selected\":true}}",
+                    stock.writes,
+                    selected.writes,
+                    stock.writes == 2,
+                );
+            }
+        }
+        let controls_only = exercise(
+            true,
+            &format!("ipv{family}-all-controls-no-promotion"),
+            vec![
+                frame(v6, 0, 0, 0, 0x10, false),
+                frame(v6, 0, 1, 0, 0x10, false),
+            ],
+            &mut scratch,
+        );
+        assert_eq!(controls_only.writes, 2);
+        assert!(controls_only.promoted_index.is_none());
         let mut corrupt = frame(v6, 0, 0, PAYLOAD, 0x10, false);
         *corrupt.last_mut().unwrap() ^= 1;
         let bad = exercise(
+            false,
             &format!("ipv{family}-bad-checksum"),
             vec![corrupt, frame(v6, 1, 0, PAYLOAD, 0x10, false)],
             &mut scratch,
@@ -312,6 +388,7 @@ pub(super) fn run() {
             "invalid checksum must not be repaired or merged"
         );
         let oversized = exercise(
+            false,
             &format!("ipv{family}-larger-than-head"),
             vec![
                 frame(v6, 0, 0, HEAD_CAPACITY, 0x10, false),
@@ -338,6 +415,7 @@ pub(super) fn run() {
             })
             .collect();
         exercise(
+            false,
             &format!("ipv{family}-shared-receive-slab"),
             packets,
             &mut scratch,
@@ -349,7 +427,7 @@ pub(super) fn run() {
         frame(false, 0, 0, PAYLOAD, 0x10, false),
         BytesMut::from(&[0_u8; VIRTIO_NET_HDR_LEN][..]),
     ];
-    let promoted = promote(&mut malformed, &mut scratch).unwrap();
+    let promoted = promote(&mut malformed, &mut scratch, false).unwrap();
     let error = handle_gro(
         &mut malformed,
         VIRTIO_NET_HDR_LEN,
@@ -368,6 +446,7 @@ pub(super) fn run() {
     for iteration in 0..1000 {
         let v6 = iteration % 2 == 0;
         exercise(
+            false,
             "",
             vec![
                 frame(v6, 0, 0, PAYLOAD, 0x10, false),
