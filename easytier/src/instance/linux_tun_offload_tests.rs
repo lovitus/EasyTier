@@ -142,6 +142,66 @@ fn round_trip(mut packets: Vec<BytesMut>, head: &mut Option<BytesMut>) -> usize 
     to_write.len()
 }
 
+fn control_frame(v6: bool, flags: u8) -> BytesMut {
+    let ip_len = if v6 { 40 } else { 20 };
+    let mut packet = tcp_frame(v6, 0, false);
+    packet.truncate(VIRTIO_NET_HDR_LEN + ip_len + 20);
+    let ip = &mut packet[VIRTIO_NET_HDR_LEN..VIRTIO_NET_HDR_LEN + ip_len];
+    let mut pseudo = if v6 {
+        ip[4..6].copy_from_slice(&20_u16.to_be_bytes());
+        let mut pseudo = ip[8..40].to_vec();
+        pseudo.extend_from_slice(&20_u32.to_be_bytes());
+        pseudo
+    } else {
+        ip[2..4].copy_from_slice(&40_u16.to_be_bytes());
+        ip[10..12].fill(0);
+        let sum = checksum(&[ip]);
+        ip[10..12].copy_from_slice(&sum.to_be_bytes());
+        ip[12..20].to_vec()
+    };
+    if v6 {
+        pseudo.extend_from_slice(&[0, 0, 0, 6]);
+    } else {
+        pseudo.extend_from_slice(&[0, 6, 0, 20]);
+    }
+    let tcp = &mut packet[VIRTIO_NET_HDR_LEN + ip_len..];
+    // A separate flow: the control packet must not affect the data-flow merge.
+    tcp[0..2].copy_from_slice(&40001_u16.to_be_bytes());
+    tcp[13] = flags;
+    tcp[16..18].fill(0);
+    let sum = checksum(&[&pseudo, tcp]);
+    tcp[16..18].copy_from_slice(&sum.to_be_bytes());
+    packet
+}
+
+#[test]
+fn gro_head_skips_control_packets_without_changing_packet_bytes() {
+    let mut head = Some(BytesMut::with_capacity(GRO_HEAD_CAPACITY));
+    let identity = head.as_ref().unwrap().as_ptr() as usize;
+    for v6 in [false, true] {
+        for flags in [0x10, 0x02, 0x04, 0x11] {
+            for position in 0..=2 {
+                let mut packets = vec![tcp_frame(v6, 0, false), tcp_frame(v6, 1, false)];
+                packets.insert(position, control_frame(v6, flags));
+                // Before the fix a leading control consumes the roomy buffer:
+                // all three packets are emitted, instead of control + data GSO.
+                assert_eq!(
+                    round_trip(packets, &mut head),
+                    2,
+                    "v6={v6}, control flags={flags:#x}, position={position}"
+                );
+                assert_eq!(head.as_ref().unwrap().as_ptr() as usize, identity);
+            }
+        }
+        let mut controls = vec![control_frame(v6, 0x10), control_frame(v6, 0x02)];
+        let original = controls.clone();
+        assert_eq!(promote_gro_head(&mut controls, &mut head), None);
+        assert_eq!(controls, original, "control-only batches remain untouched");
+        assert_eq!(head.as_ref().unwrap().as_ptr() as usize, identity);
+        assert_eq!(round_trip(controls, &mut head), 2);
+    }
+}
+
 #[test]
 fn bounded_gro_head_preserves_packets_and_allocation() {
     let mut head = Some(BytesMut::with_capacity(GRO_HEAD_CAPACITY));

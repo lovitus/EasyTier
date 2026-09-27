@@ -35,11 +35,17 @@ fn promote_gro_head(packets: &mut [BytesMut], head: &mut Option<BytesMut>) -> Op
         let Some(packet) = frame.get(VIRTIO_NET_HDR_LEN..) else {
             return false;
         };
-        match packet.first().map(|byte| byte >> 4) {
-            Some(4) => packet.len() >= 40 && packet[0] & 15 == 5 && packet[9] == 6,
-            Some(6) => packet.len() >= 60 && packet[6] == 6,
-            _ => false,
-        }
+        let ip_len = match packet.first().map(|byte| byte >> 4) {
+            Some(4) if packet.len() >= 40 && packet[0] & 15 == 5 && packet[9] == 6 => 20,
+            Some(6) if packet.len() >= 60 && packet[6] == 6 => 40,
+            _ => return false,
+        };
+        let tcp = &packet[ip_len..];
+        let header_len = usize::from(tcp[12] >> 4) * 4;
+        // tun-rs cannot coalesce payload-free/control TCP packets. Leave them
+        // untouched instead of spending the only roomy buffer on a pure ACK
+        // ahead of data. Full packet/flow/checksum validation remains in tun-rs.
+        (20..=60).contains(&header_len) && tcp.len() > header_len && matches!(tcp[13], 0x10 | 0x18)
     })?;
     let mut buffer = head.take()?;
     buffer.clear();
