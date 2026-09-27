@@ -14,9 +14,9 @@ import zipfile
 
 
 PREFIX = 'easytier-no-leaf-comparator-linux-x86_64-musl'
-CLI_ARTIFACT = 10895437417
-CLI_ARCHIVE_SHA = 'e321fcb6e1fe1b1937f98fdc170f0865510effd23ab1fa004312520916647a06'
-CLI_SHA = '4367176ed12dcee87f177f0faeb6c03a9e60f6a96fa47edf60da2756fbb6341e'
+CLI_ARTIFACT = 10912354766
+CLI_ARCHIVE_SHA = 'b6c7fd95e007339644d16a104bc9a70a1e5f449f86937cddaa0c02d3f46be165'
+CLI_SHA = 'b462eb22b7a9d54b0eab6c69892c4af6c5f499d78a7ce492087963f2a92b27e0'
 
 
 def digest(path):
@@ -96,14 +96,14 @@ def prepare(root):
         archive.unlink()
         tar_path.unlink()
     assert identities['baseline']['rustc'] == identities['candidate']['rustc']
-    # The UDP-only integration does not change the RPC contract. Reuse the
-    # independently checksummed base CLI rather than rebuilding Core for a CLI.
+    # The integrations do not change the CLI/RPC contract. Reuse the independently
+    # checksummed CLI from the preserved integrated diagnostic package.
     archive = root / 'cli-artifact.zip'
     download(CLI_ARTIFACT, archive, CLI_ARCHIVE_SHA)
     with zipfile.ZipFile(archive) as zipped:
         matches = [name for name in zipped.namelist()
-                   if name == 'stock/easytier-cli' or name.endswith('/stock/easytier-cli')]
-        assert len(matches) == 1, 'missing or ambiguous immutable stock CLI'
+                   if name == 'easytier-cli']
+        assert len(matches) == 1, 'missing or ambiguous immutable CLI'
         for label in pair:
             target = root / 'binaries' / label / 'easytier-cli'
             with zipped.open(matches[0]) as source, target.open('wb') as destination:

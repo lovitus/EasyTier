@@ -76,3 +76,23 @@ kernel, both binary identities, actual rates, CPU/GiB and RSS before interpretin
 results. No physical-host, WAN, original-device or whole-project speedup claim
 is supported by this setup. No merge, production deployment or release follows
 from this research run. Full-suite and receive-ring acceptance remain open.
+
+## First experiment stopped on a missing historical CLI artifact
+
+[36295269376](https://github.com/lovitus/EasyTier/actions/runs/36295269376)
+failed during preparation: GitHub returned HTTP 404 for CLI artifact
+`10895437417`. Both Core-package validation loops had completed, but no traffic
+case ran. This is an artifact-availability failure, not performance evidence.
+The failed run remains failed; no Core was rebuilt and no integrity gate bypassed.
+
+The replacement is the preserved integrated diagnostic artifact `10912354766`
+from run `36263145990`, with complete ZIP SHA-256
+`b6c7fd95e007339644d16a104bc9a70a1e5f449f86937cddaa0c02d3f46be165`.
+Its root `easytier-cli` has independently measured SHA-256
+`b462eb22b7a9d54b0eab6c69892c4af6c5f499d78a7ce492087963f2a92b27e0`.
+Only that CLI is extracted for use; its diagnostic Core is not substituted for
+either comparison endpoint. The integrated diagnostic source uses `3166ab67`;
+the CLI source and `easytier/src/proto` are unchanged between the old base
+`c6772dbf` and that integrated parent. The two endpoint packages, source SHAs,
+new regression, traffic cases and assertions remain frozen. Results of the
+corrected preparation and actual mixed-load execution are still pending.
