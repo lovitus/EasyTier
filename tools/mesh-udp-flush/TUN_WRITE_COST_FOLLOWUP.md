@@ -190,3 +190,28 @@ replay, kernel write measurement, CPU benchmark or actual-Core regression.
 The prepared run uses the existing capacity-only workflow and compiles only
 the small Rust tool. No dependency, lockfile, production constant or queue
 changes. Its execution and observed counts are pending at this checkpoint.
+
+### Small-tool run failed before execution
+
+[Run 36298397195](https://github.com/lovitus/EasyTier/actions/runs/36298397195)
+at `af8c234e7e3585f9fb29c87c8f91836ffa0c2890` failed with Cargo exit 101.
+The retained `build.log` reports `E0689` at
+`src/tun_head_contract.rs:558`: `count.saturating_sub(segments)` has an
+ambiguous integer receiver because the new cohort table lacks an explicit
+`usize` type. This is an error introduced in the research tool, not a Core
+failure or an infrastructure diagnosis. Formatting/static checks passed but
+did not typecheck this standalone tool.
+
+`results.jsonl` is empty. None of the 84 new observations or the old contracts
+executed in this run, so no capacity result, behavioral red/green, or CPU gain
+is claimed. The prior exact-package TUN observation and earlier contract
+results are separate and remain unchanged.
+
+Evidence artifact `10924157690` is 5,558 bytes. Its complete ZIP SHA-256 was
+verified: `100157f9893b1c585fd5c2bd1efb961e355353d6ce8e6ce94d15802f7965c9fc`.
+The original compiler error, empty result and source SHA are retained.
+
+The proposed repair is only an explicit `usize` cohort-table type, with every
+assertion unchanged. The outer mixed-flow labeling defect is also disclosed
+above. Both were reported to the maintainer for the requested decision; no
+silent code repair or replacement run has been made at this checkpoint.
