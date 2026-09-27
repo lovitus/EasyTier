@@ -233,3 +233,74 @@ Only the existing locked small-tool capacity workflow is to be repeated. No Core
 rebuild or repeated package trace is needed for these repairs. At this checkpoint
 the repaired tool has not run; the prior compile failure remains a failure, and
 no capacity or CPU result is claimed.
+
+## Terminal small-tool result and bounded next decision (2026-09-27)
+
+Run [36299280759](https://github.com/lovitus/EasyTier/actions/runs/36299280759)
+succeeded at `64aa2c1d6408193daaf2ae2e0dfa19fe08bc3090`.
+This supersedes the pending repaired-tool checkpoint above, not the earlier
+failed run. The only compiler correction was the explicit `usize` table
+annotation. No expected value or assertion changed.
+
+Artifact `10925087847` is 7,168 bytes; its complete downloaded archive SHA-256 is
+`ec2363923fc7dbceb2f0926dcf124f73f688090b73312ea9ae3e6dc66fc493c4`.
+The artifact source record agrees with the workflow SHA. The executable emitted
+222 JSON observations, including all 84 new capacity comparisons, 92 existing
+`tun-head` rows, 24 existing selection rows and 22 earlier observations.
+These are observations from one tool invocation, not 222 independent CI tests.
+
+All 84 capacity cases completed their byte round-trip, per-flow order,
+single-buffer allocation identity, retained capacity and empty-buffer assertions.
+The unchanged baseline and larger capacities were exercised within the same
+executable and invocation. The preceding compiler failure is NOT a functional
+red/green regression result.
+
+### Library emissions, not measured kernel syscalls or CPU
+
+IPv4 and IPv6 have the same emission counts in this fixture. Each ordinary
+payload is 1,320 bytes; this is generated input, not packet replay.
+
+| Pattern | Input packets | 8 KiB | 16 KiB | 32 KiB |
+| --- | ---: | ---: | ---: | ---: |
+| data | 8 | 3 | 1 | 1 |
+| data | 16 | 11 | 5 | 1 |
+| data | 32 | 27 | 21 | 9 |
+| data | 64 | 59 | 53 | 41 |
+| two-flows | 8 | 5 | 5 | 5 |
+| two-flows | 16 | 11 | 9 | 9 |
+| two-flows | 32 | 27 | 21 | 17 |
+| leading-ack | 33 | 33 | 33 | 33 |
+
+The single promoted head explains the shape of these results: the 8 KiB head
+holds six full fixture segments, the 16 KiB head twelve, and the 32 KiB head
+twenty-four. Once that head fills, other original packet allocations still lack
+spare capacity. Even 32 KiB therefore emits 41 buffers for 64 same-flow packets;
+it is not whole-batch coalescing. Interleaved unrelated flows and a leading pure
+ACK limit the benefit further.
+
+The earlier retained-package trace remains the real-device evidence:
+321,452 successful TUN writes, no short/failed writes, and 53.51% of written bytes
+already in larger-than-one-MTU writes. Its size histogram does not identify
+individual ACK packets, capacity-hit events, or natural per-flush cohorts.
+Consequently this table cannot convert that histogram into a CPU-saving claim.
+
+### Decision
+
+Do not change production buffer capacity or merge the separate ACK-head selector
+from this mechanism result. The selector already has a no-measurable-gain actual
+Core comparison; increasing capacity does not close the saturation loss gate.
+
+If the capacity hypothesis is pursued, the narrow experiment is a single
+existing-runner Core experiment with 8/16/32 KiB arms and the retained parent
+selector, not a pool or per-flow allocation redesign. Each larger arm would add
+only 8/24 KiB to that sink's one reusable head, not an enlarged receive ring.
+It must record actual promoted/full heads, merge lengths and emitted TUN frames;
+use untraced, rate-matched opposing flows for CPU/GiB; and retain ICMP, data
+integrity, shutdown, RSS and error gates. Tracing and performance samples must
+remain separate. No new production option, dependency or platform promise is
+justified yet.
+
+The other priority remains the previously observed receive-ring rejection under
+saturation. Neither a larger head nor a producer yield is claimed as its cure.
+No head-capacity Core build, new deployment or performance acceptance was done
+in this repair batch.
