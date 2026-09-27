@@ -1,7 +1,8 @@
 # Exact receive-pipeline CPU diagnosis
 
-Status: **SAMPLER SETUP FAILED; NO CORE SAMPLES**. This is a diagnostic
-follow-up, not an optimization or release candidate.
+Current status: **SAMPLER SETUP REPAIRED; MIXED-FLOW CAPTURE PENDING**.
+The first attempt failed before Core started, as preserved below. This is a
+diagnostic follow-up, not an optimization or release candidate.
 
 ## First execution, preserved failure
 
@@ -28,7 +29,9 @@ The repository already contains a working package-file based locator in
 files with `dpkg-query`, then select the actual perf executable. That is the
 proposed correction, together with separate mandatory nonempty/executable
 checks. Do not rerun the unchanged failing harness or rebuild Core. The
-correction has not been applied in this evidence update.
+correction was not applied in that failure-evidence update; the subsequent
+minimal repair is described below.
+
 
 The locked producer-quantum model completed 72 trials but did not establish
 an unconditional-yield fix. Its source and limitations are recorded in
@@ -92,3 +95,58 @@ The deliverable is an endpoint-separated bottleneck assessment with symbol
 and source evidence, followed by a narrowly justified optimization choice.
 If the profile does not resolve the receive stage, record that limitation
 rather than naming a bottleneck from source structure alone.
+
+## Endpoint cost evidence from the retained earlier capture
+
+This is a separate, single-flow IPv4 capture, not a reproduction of the
+mixed-flow IPv6 failure. Run `36235812507`, artifact `10904457128`, archive
+SHA-256 `535f0f80d919aaee7abd05bc4f471ee0860394e00c5f4595c713349bf17650af`
+used harness `55508eff5cab2955c482576a97c0ed7634d76646` and candidate Core
+`6e90dbf102e5c93d56c531b87eea1858c4a8e61e` (GSO plus the 8 KiB TUN head).
+Both endpoints were Core processes in separate namespaces on one hosted
+runner, connected through veth/UDP4, AES-GCM, Stealth off. It is not WAN data.
+
+The receive-manager, traffic-metrics and UDP source blobs are identical to
+`3166ab672d347cdcc5a6768bc77056cd8ec38323`. This permits source-based cost
+interpretation, not an assertion that the two complete binaries are equal.
+
+The saved `Pid:Command` field identifies worker TIDs. Raw perf COMM/FORK
+records map those workers to endpoint 0/TGID 2910 and endpoint 1/TGID 2911.
+All flat self-sample rows were reconstructed as integer counts; endpoint
+sums match the saved sample identifiers exactly, with no lost samples.
+The Linux record format is documented in the
+[perf file header](https://github.com/torvalds/linux/blob/v6.8/tools/perf/util/header.h)
+and [event ABI](https://github.com/torvalds/linux/blob/v6.8/include/uapi/linux/perf_event.h).
+
+| Capture / endpoint | Bulk role | Samples | Kernel self | Channel/sync self | Gateway/filter self | TUN/offload self |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Upload / 0 | Sender | 456 | 208 (45.61%) | 33 (7.24%) | 5 (1.10%) | 11 (2.41%) |
+| Upload / 1 | Receiver | 576 | 260 (45.14%) | 40 (6.94%) | 38 (6.60%) | 31 (5.38%) |
+| Download / 0 | Receiver | 571 | 260 (45.53%) | 35 (6.13%) | 35 (6.13%) | 37 (6.48%) |
+| Download / 1 | Sender | 482 | 241 (50.00%) | 34 (7.05%) | 6 (1.24%) | 13 (2.70%) |
+
+Each endpoint still processes reverse ACK/control traffic. Categories use
+disjoint self symbols, not summed cumulative call graphs. Candidate-wide
+kernel counts are 468/1032 (45.35%) upload and 501/1053 (47.58%) download;
+these exact counts supersede the earlier rounded aggregate estimates.
+On the bulk receivers, `Socks5Server::try_process_packet_from_peer` accounts
+for 30/576 (5.21%) and 29/571 (5.08%) self samples; the receive-manager task
+itself accounts for 24/576 (4.17%) and 20/571 (3.50%). These are small,
+single-capture observations, not repeated performance acceptance.
+
+The evidence does not support attributing the whole CPU cost to crypto,
+metrics resolution, or one busy-loop task. It supports measuring both
+kernel crossings and receive handoff/filter work. Removing the SOCKS filter
+is not justified: Core-owned data-plane routes still need that path without
+Leaf. Increasing ring capacity or adding unconditional yields is also not
+accepted; the producer-quantum model did not close multi-worker overload.
+
+## Minimal sampler repair
+
+The maintainer's continuation authorizes fixing the sampling entry point.
+Reuse the already successful HWE-tools `dpkg-query` locator from
+`mesh-natural-cohort.yml` instead of searching the wrong filesystem tree.
+Check nonempty and executable paths with separate mandatory commands and
+retain package/path provenance. This changes only sampling setup, not Core,
+the binary identity, workload, cleanup or functional assertions. A failed
+capture remains a failure; the historical setup failure below is retained.

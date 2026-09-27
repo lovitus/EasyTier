@@ -802,9 +802,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get install -y -qq linux-tools-generic
-          perf_path="$(find /usr/lib/linux-tools -type f -name perf -perm -111 | sort -V | tail -n 1)"
-          test -n "$perf_path" && test -x "$perf_path"
+          sudo apt-get install -y -qq linux-tools-common linux-tools-generic-hwe-22.04
+          dpkg-query -W -f='${binary:Package}\n' 'linux-hwe-6.8-tools-*' > gro-evidence/perf-package-names.txt
+          while IFS= read -r package; do
+            dpkg-query -L "$package"
+          done < gro-evidence/perf-package-names.txt > gro-evidence/perf-package-files.txt
+          perf_path="$(awk '/\/perf$/ { print }' gro-evidence/perf-package-files.txt | sort -V | tail -n 1)"
+          test -n "$perf_path"
+          test -x "$perf_path"
+          printf '%s\n' "$perf_path" > gro-evidence/perf-path.txt
+          dpkg-query -W 'linux-tools*' > gro-evidence/perf-packages.txt
           "$perf_path" --version > gro-evidence/perf-version.txt
           sudo sysctl kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 | tee gro-evidence/perf-access.txt
           sudo "$perf_path" stat -e cpu-clock -- sleep 0.1 2>&1 | tee gro-evidence/perf-access-smoke.txt
