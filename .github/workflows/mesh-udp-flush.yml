@@ -62,6 +62,10 @@ name: Actual Core UDP flush-boundary experiment
         description: With udp_gro_current, build bounded ring-loss diagnostics; no performance acceptance
         type: boolean
         default: false
+      udp_gro_loss_profile:
+        description: With udp_gro_loss and udp_gro_reuse, profile the retained failing-path diagnostic binary without rebuilding
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
@@ -73,7 +77,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   core-flush:
-    if: ${{ !inputs.udp_gro_loss && !inputs.udp_gro_reuse && !inputs.udp_gro_current && !inputs.profile_only && !inputs.paced_tun && !inputs.packet_trace_current && !inputs.packet_trace_reuse }}
+    if: ${{ !inputs.udp_gro_loss_profile && !inputs.udp_gro_loss && !inputs.udp_gro_reuse && !inputs.udp_gro_current && !inputs.profile_only && !inputs.paced_tun && !inputs.packet_trace_current && !inputs.packet_trace_reuse }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -585,7 +589,7 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
   gro-contract-and-core:
-    if: ${{ inputs.udp_gro_current || inputs.udp_gro_reuse || inputs.udp_gro_loss }}
+    if: ${{ inputs.udp_gro_current || inputs.udp_gro_reuse || inputs.udp_gro_loss || inputs.udp_gro_loss_profile }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -603,12 +607,18 @@ jobs:
         with:
           python-version: '3.12'
       - name: Reject incompatible loss-observation inputs before building
-        if: ${{ inputs.udp_gro_loss }}
+        if: ${{ inputs.udp_gro_loss || inputs.udp_gro_loss_profile }}
         shell: bash
         run: |
-          test '${{ inputs.udp_gro_current }}' = true
-          test '${{ inputs.udp_gro_reuse }}' = false
+          test '${{ inputs.udp_gro_loss }}' = true
           test '${{ inputs.udp_gro_pressure }}' = false
+          if [[ '${{ inputs.udp_gro_loss_profile }}' == true ]]; then
+            test '${{ inputs.udp_gro_current }}' = false
+            test '${{ inputs.udp_gro_reuse }}' = true
+          else
+            test '${{ inputs.udp_gro_current }}' = true
+            test '${{ inputs.udp_gro_reuse }}' = false
+          fi
       - uses: ./.github/actions/prepare-build
         if: ${{ !inputs.udp_gro_reuse }}
         with:
@@ -704,6 +714,7 @@ jobs:
         if: ${{ inputs.udp_gro_reuse }}
         env:
           GH_TOKEN: ${{ github.token }}
+          GRO_LOSS_PROFILE: ${{ inputs.udp_gro_loss_profile }}
         shell: bash
         run: |
           set -euo pipefail
@@ -723,9 +734,24 @@ jobs:
               'probe': '62596a8dd4f53e538c0696e3f746d6010e03758f62fe00822510bc8d15c61ab0',
               'udp-contract-tests': '0fffba25a65f0a8ddb5570d14ff6aa8881d3529a1bf239b83f887829f42d2f42',
           }
+          binary_id, binary_digest = 10915569351, '9532c659b5c51e280bc88f5af7d9afe5f4cdfd3a8d2695471282c4133f550cb3'
+          evidence_id, evidence_digest = 10916103565, '4ec18e240a098ad011e11160b171982e915e360be4daa71461813a42a8820737'
+          original_run = 36271631477
+          loss_profile = os.environ.get('GRO_LOSS_PROFILE') == 'true'
+          if loss_profile:
+              original = '2956e72cdb9df06c56183e02cb467508b27b30f2'
+              original_run = 36284039979
+              binary_id, binary_digest = 10920492391, '7cc0f399e6759d10e7ec48f37a48fc9c91e6d2f026eb97ca305994bcc3611a43'
+              evidence_id, evidence_digest = 10920377665, '99cdf21189136fdab956ed26aed385f9c3312e1cc54873cfefb3b4ec5452c6e0'
+              expected = {
+                  'easytier-core': '12d53e5d8ddbd89252c254aa37df2be7740cf98b6d6538180fe5a28b641b25f5',
+                  'easytier-cli': 'dd9d607895457fcd662fd17314cee131cbca29bc859a39ed9fedf496970bbad4',
+                  'probe': '62596a8dd4f53e538c0696e3f746d6010e03758f62fe00822510bc8d15c61ab0',
+                  'udp-contract-tests': '22916f30e4d0b2e7018bcfcd2b9f7cfb94fd89e7c8b87a7adb4b83c5f2286a40',
+              }
           archive = root / 'reused-binaries.zip'
-          meta = download(10915569351, archive, '9532c659b5c51e280bc88f5af7d9afe5f4cdfd3a8d2695471282c4133f550cb3')
-          assert meta['workflow_run']['id'] == 36271631477 and meta['workflow_run']['head_sha'] == original
+          meta = download(binary_id, archive, binary_digest)
+          assert meta['workflow_run']['id'] == original_run and meta['workflow_run']['head_sha'] == original
           with zipfile.ZipFile(archive) as z:
               assert set(z.namelist()) == set(expected)
               for name, sha in expected.items():
@@ -737,8 +763,8 @@ jobs:
                   target.chmod(0o755)
           archive.unlink()
           archive = root / 'reused-evidence.zip'
-          meta = download(10916103565, archive, '4ec18e240a098ad011e11160b171982e915e360be4daa71461813a42a8820737')
-          assert meta['workflow_run']['id'] == 36271631477 and meta['workflow_run']['head_sha'] == original
+          meta = download(evidence_id, archive, evidence_digest)
+          assert meta['workflow_run']['id'] == original_run and meta['workflow_run']['head_sha'] == original
           with zipfile.ZipFile(archive) as z:
               assert z.read('core-source-sha.txt').decode().strip() == os.environ['SOURCE_SHA']
               assert z.read('harness-sha.txt').decode().strip() == original
@@ -750,14 +776,17 @@ jobs:
                            'udp_gro_experiment.rs', 'udp-tests.log', 'hole-punch-tests.log',
                            'binaries.sha256', 'build-id.txt', 'toolchain.txt', 'Cargo.lock'):
                   (build / name).write_bytes(z.read(name))
+              if loss_profile:
+                  (build / 'loss-overlay.json').write_bytes(z.read('loss-overlay.json'))
           archive.unlink()
           (root / 'reuse.json').write_text(json.dumps({
               'source': os.environ['SOURCE_SHA'], 'original_harness': original,
-              'harness': os.environ['GITHUB_SHA'], 'binary_artifact': 10915569351,
-              'evidence_artifact': 10916103565, 'binaries': expected, 'core_rebuilt': False,
+              'harness': os.environ['GITHUB_SHA'], 'binary_artifact': binary_id,
+              'evidence_artifact': evidence_id, 'binaries': expected, 'core_rebuilt': False,
+              'loss_profile': loss_profile, 'original_run': original_run,
           }, indent=2))
           PY
-          python3 -m py_compile tools/mesh-udp-flush/{lab,gro_lab}.py
+          python3 -m py_compile tools/mesh-udp-flush/{lab,gro_lab,gro_loss_lab}.py
           uname -a > gro-evidence/kernel.txt
           lscpu > gro-evidence/cpu.txt
           sha256sum gro-binaries/* > gro-evidence/binaries.sha256
@@ -765,13 +794,27 @@ jobs:
           printf '%s\n' "$SOURCE_SHA" > gro-evidence/core-source-sha.txt
           printf '%s\n' "$GITHUB_SHA" > gro-evidence/harness-sha.txt
       - name: Prepare external activation observer only
+        if: ${{ !inputs.udp_gro_loss_profile }}
         shell: bash
         run: sudo apt-get install -y -qq strace
+      - name: Prepare bounded CPU sampling of reused diagnostic Core
+        if: ${{ inputs.udp_gro_loss_profile }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq linux-tools-generic
+          perf_path="$(find /usr/lib/linux-tools -type f -name perf -perm -111 | sort -V | tail -n 1)"
+          test -n "$perf_path" && test -x "$perf_path"
+          "$perf_path" --version > gro-evidence/perf-version.txt
+          sudo sysctl kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 | tee gro-evidence/perf-access.txt
+          sudo "$perf_path" stat -e cpu-clock -- sleep 0.1 2>&1 | tee gro-evidence/perf-access-smoke.txt
+          printf 'PERF_PATH=%s\n' "$perf_path" >> "$GITHUB_ENV"
       - name: Interleaved actual Core CPU and functional comparisons
         env:
           GRO_REUSE: ${{ inputs.udp_gro_reuse }}
           GRO_PRESSURE: ${{ inputs.udp_gro_pressure }}
           GRO_LOSS: ${{ inputs.udp_gro_loss }}
+          GRO_LOSS_PROFILE: ${{ inputs.udp_gro_loss_profile }}
         shell: bash
         run: |
           set -euo pipefail
@@ -783,13 +826,20 @@ jobs:
           if [[ "$GRO_LOSS" == true ]]; then
             phases="activation"
           fi
+          if [[ "$GRO_LOSS_PROFILE" == true ]]; then
+            phases=""
+          fi
           for phase in $phases; do
             sudo timeout --signal=TERM --kill-after=15s 1200s python3 tools/mesh-udp-flush/gro_lab.py \
               --binaries gro-binaries --phase "$phase" --output "gro-evidence/$phase"
           done
           if [[ "$GRO_LOSS" == true ]]; then
+            profile_args=()
+            if [[ "$GRO_LOSS_PROFILE" == true ]]; then
+              profile_args=(--profile --perf-path "$PERF_PATH")
+            fi
             sudo timeout --signal=TERM --kill-after=15s 1200s python3 tools/mesh-udp-flush/gro_loss_lab.py \
-              --binaries gro-binaries --output gro-evidence/ring-loss
+              --binaries gro-binaries --output gro-evidence/ring-loss "${profile_args[@]}"
           fi
       - name: Preserve the first failure and exact experimental identity
         if: always()
