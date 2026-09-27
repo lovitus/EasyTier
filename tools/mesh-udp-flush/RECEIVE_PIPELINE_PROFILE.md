@@ -264,3 +264,78 @@ ready-only batching, packet order, routing, encryption and platform fallback
 unchanged. Required before acceptance: actual-Core regression coverage and
 an exact-artifact matched mixed-flow CPU/emission/control comparison.
 No production code, existing PR, merge or release was changed in this batch.
+
+
+## Follow-up: separate allocator, copy and clock costs
+
+This is a further analysis of the already verified artifact from
+[run 36289395042](https://github.com/lovitus/EasyTier/actions/runs/36289395042),
+not another execution or performance comparison. The exact diagnostic Core is
+still based on `3166ab672d347cdcc5a6768bc77056cd8ec38323`. Both endpoints are
+separate Core processes/namespaces on one AMD EPYC 9V74 hosted runner, joined by
+veth, with UDP4 underlay, IPv6 overlay, AES-GCM, Stealth/GRO off and opposing TCP
+flows. These are not independent physical hosts or WAN measurements.
+
+All four endpoint/phase stack files reconcile to 4,896 raw samples. The following
+counts use the sampled self symbol, not inclusive call-graph percentages:
+
+| Observed self-symbol category | Samples | Share |
+| --- | ---: | ---: |
+| memcpy/memmove/copy_nonoverlapping matches | 67 | 1.3685% |
+| memset/write_bytes matches | 67 | 1.3685% |
+| quanta::get_now | 70 | 1.4297% |
+| User-space allocator-symbol matches | 35 | 0.7149% |
+| Kernel allocator-symbol matches | 51 | 1.0417% |
+
+The initial broad allocator match totaled 86, but 51 are kernel samples.
+Do not label all 86 as Rust heap-allocation overhead. Symbol matching does not
+recover every inlined copy, zeroing or allocation. These are observed categories,
+not bounds on all related costs and not predicted speedups.
+
+### Source/caller reconciliation
+
+- 66 of the 67 memset samples have the NIC-to-peers task as their immediate
+  recorded caller; they must not be attributed to the UDP receive consumer.
+  The Linux offload stream allocates and initializes replacement output buffers
+  before handing completed packets to that task.
+- 26 copy samples have the Linux offload stream as their immediate caller.
+  Other samples include the TUN sink, GRO lookup/insert and encryption call sites.
+  There is no evidence here for one universal redundant-copy fix.
+- The locked `tun-rs 2.8.7` `gso_split` requires initialized output slices large
+  enough for a full segment. Removing the replacement `resize(..., 0)` is not a
+  safe one-line optimization: it would change the length/safety contract.
+  No uninitialized buffer, new pool or changed maximum packet size is proposed.
+- `CounterHandle::add/inc` call `touch`, and StatsManager retains active counters
+  while periodically expiring unreferenced old counters. Logical traffic metrics
+  already cache resolved per-peer counters. Do not replace this with a new cache,
+  remove activity tracking, or declare every clock sample removable.
+- Thirteen stacks contain anyhow construction/drop/backtrace functions. Nine
+  have the peer-receive task in their recorded chain; four drop stacks do not.
+  The source call site is not proven by these optimized stacks. RingCipher's
+  regular decrypt errors are typed, and DefaultCompressor returns early for
+  uncompressed packets. The eager unknown-compression-algorithm error expression
+  occurs after the compressed-packet guard. None of this proves a repeated
+  runtime failure, log storm, or the cause of the sampled error allocations.
+
+The source inspection used the exact candidate parent, not a default branch.
+Two initial read-only source lookup commands had missing-path/no-match exits;
+those are retained privately as tooling failures, not test failures or passes.
+They caused no source edit, build, deployment or test retry.
+
+### Decision
+
+Keep the current control-head selector candidate limited to its existing three
+files (implementation, real-Core regression fixture and scope note). Its local
+format/static gate passes, but it remains uncommitted and not deployed. Actual
+Core red/green and optimized-artifact CPU/throughput acceptance are NOT RUN.
+The maintainer's choice for the two existing Test runs is still pending; no
+workflow definition was changed to create a special testing route.
+
+The larger measured costs remain in kernel packet paths. The previously reported
+TUN-write/UDP-send/UDP-receive stack incidences remain non-additive and include
+necessary kernel work. The next useful production evidence is the bounded
+selector's exact-artifact comparison, not a broad allocator/metrics rewrite.
+
+Receive-ring rejection and the previous saturation missing-echo acceptance
+failure remain open. Neither this analysis nor the selector fixture is evidence
+that they are fixed. No new whole-Core, all-platform, idle/leak or WAN claim is made.
