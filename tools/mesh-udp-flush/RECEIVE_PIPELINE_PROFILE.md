@@ -1,7 +1,34 @@
 # Exact receive-pipeline CPU diagnosis
 
-Status at submission: **NOT RUN**. This is a diagnostic follow-up, not an
-optimization or release candidate.
+Status: **SAMPLER SETUP FAILED; NO CORE SAMPLES**. This is a diagnostic
+follow-up, not an optimization or release candidate.
+
+## First execution, preserved failure
+
+[Run 36288378865](https://github.com/lovitus/EasyTier/actions/runs/36288378865)
+used harness `16b48f63a138129968d633563a15c51b02ac72d7`. Verified reuse
+completed, but the new `perf` executable search returned an empty path.
+The compound `test -n ... && test -x ...` guard did not terminate the script
+before it tried to execute that empty string; setup exited 127.
+
+This is an error in the newly added sampling harness, not a Core failure or
+an environment-based excuse to bypass a gate. Core was not started, no
+traffic case ran, and no CPU profile was produced. Neither the original
+loss nor the consumer bottleneck is resolved by this run.
+
+- Evidence artifact: `10921281411`, 99,027 bytes.
+- Archive SHA-256: `9d994cb33c8d46b7f9c4191793c82f2c4c820015aa38021e1df738739e2cfea4`.
+- ZIP CRC/member checks and all 20 manifest file hashes passed.
+- Reused Core hash and Build ID match the intended diagnostic binary.
+- Prior 39 UDP / four hole-punch results were preserved, not rerun.
+- Core compilation, deployment and measurement counts are all zero.
+
+The repository already contains a working package-file based locator in
+`mesh-natural-cohort.yml`: install the HWE tools package, enumerate its
+files with `dpkg-query`, then select the actual perf executable. That is the
+proposed correction, together with separate mandatory nonempty/executable
+checks. Do not rerun the unchanged failing harness or rebuild Core. The
+correction has not been applied in this evidence update.
 
 The locked producer-quantum model completed 72 trials but did not establish
 an unconditional-yield fix. Its source and limitations are recorded in
