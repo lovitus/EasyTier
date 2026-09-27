@@ -595,3 +595,35 @@ cross-platform fallback, long-duration memory, or saturated Stealth coverage.
 Keep the adapter experimental and the production candidate unchanged while the
 pressure trade-off is investigated. No merge, release or completed-performance
 goal is implied.
+
+## Next bounded run: matched higher-load pressure, no Core rebuild
+
+The existing reuse lane now has an optional `udp_gro_pressure=true` scope,
+used together with `udp_gro_reuse=true`. It repeats independent activation
+observation, then runs 24 untraced cases instead of repeating the old full
+matrix. Source, receiver, binary hashes, socket buffers, ring capacity, protocol
+and all pre-existing traffic/cleanup assertions are unchanged.
+
+Each case carries 256 MiB per flow, using the existing no-catch-up paced probe.
+Total target rates are 500 and 1,000 Mbit/s. A single flow uses that cap; mixed
+opposite-direction flows each use half. Each rate/topology has three off and
+three on samples in `off/on/on/off/off/on` order. Both directions and both mixed
+flow roles are reported separately. Actual delivered-rate medians must match
+within 2% in each group before the run supports an equal-load CPU comparison.
+The cap is not substituted for measured goodput. Python pacing remains part of
+the existing load generator, not a new production timer or rate controller.
+
+The optional control observer uses 120 timestamped echoes at the existing
+100 ms spacing. Every reply is required. Its first/last replies must bracket
+the complete measured transfer, including the secondary flow, with at least
+20 replies inside that interval. Only in-load samples inform latency analysis;
+pre/post-load samples are retained but not mixed into that analysis. A transfer
+which outlasts observation fails coverage rather than obtaining a partial PASS.
+Existing short-window callers and transfer sizes retain their defaults.
+
+This run can establish whether the retransmission/latency trade-off persists
+under matched higher load. It cannot by itself identify an internal ring drop
+or clear the earlier saturation failure. Higher rates are not necessarily near
+the capacity of a different hosted runner. Preserve kernel counters, raw errors,
+resource identities and scoped cleanup even if rate matching or coverage fails.
+No production receive-flow patch is included. Results are pending.

@@ -43,6 +43,9 @@ def echo(role,host='10.88.0.2'):
 def run(args):
     assert 0 < args.paced_mbps <= 1000
     assert not (args.unpaced_probe and args.paced_mbps != 200), 'rate control cannot apply to unpaced probe'
+    if args.paced_transfer_bytes is not None:
+        assert not args.unpaced_probe and 0 < args.paced_transfer_bytes <= 1073741824
+    assert not (args.full_transfer_control and args.icmp_capture), 'fixed-size capture is a separate diagnostic'
     inner_host='fd88::2' if args.inner_ipv6 else '10.88.0.2'
     inner_target=f'[{inner_host}]:35902' if args.inner_ipv6 else f'{inner_host}:35902'
     mixed_target=f'[{inner_host}]:35906' if args.inner_ipv6 else f'{inner_host}:35906'
@@ -352,7 +355,7 @@ def run(args):
                 result=command([sys.executable,integrity,'integrity','client',direction,inner_host],names[0]);server.wait(timeout=4)
                 assert server.returncode==0
                 record('integrity',round=round_id,arm=arm,stealth=stealth,direction=direction,result=json.loads(result.stdout))
-                amount=args.transfer_bytes if args.unpaced_probe else (33554432 if stealth else 67108864)
+                amount=args.transfer_bytes if args.unpaced_probe else (args.paced_transfer_bytes or (33554432 if stealth else 67108864))
                 env={**os.environ,'ET_PACED_MBPS':str(args.paced_mbps)}
                 profiler=None
                 if args.profile:
@@ -369,9 +372,11 @@ def run(args):
                 if args.mixed_flow:
                     mixed_server=spawn(load_command+['server','--listen',mixed_target,'--sessions','1','--timeout-seconds',str(transfer_timeout)],label+'-mixed-server',names[1],env)
                 time.sleep(.2)
-                ping=spawn(['ping']+(['-6'] if args.inner_ipv6 else [])+['-c','20','-i','0.1','-W','1',inner_host],label+'-ping',names[0])
+                ping_count=120 if args.full_transfer_control else 20
+                ping=spawn(['ping']+(['-D'] if args.full_transfer_control else [])+(['-6'] if args.inner_ipv6 else [])+['-c',str(ping_count),'-i','0.1','-W','1',inner_host],label+'-ping',names[0])
                 if args.network_counters:network_counters(label+'-before')
                 before=snapshot(cores);host_before=host_cpu()
+                load_started=time.time()
                 if args.mixed_flow:
                     other_direction='download' if direction=='upload' else 'upload'
                     mixed_client=spawn(load_command+['client','--target',mixed_target,'--direction',other_direction,'--bytes',str(amount),'--timeout-seconds',str(transfer_timeout)],label+'-mixed-client',names[0],env)
@@ -385,6 +390,7 @@ def run(args):
                     mixed_data=json.loads((out/(label+'-mixed-client.log')).read_text())
                     assert mixed_data['ok'] and mixed_data['bytes']==amount
                     record('mixed_transfer',round=round_id,arm=arm,stealth=stealth,direction=other_direction,result=mixed_data)
+                load_finished=time.time()
                 if tun_trace:
                     tun_trace.finish()
                     tun_trace.close()
@@ -416,9 +422,19 @@ def run(args):
                 data=json.loads(result.stdout);assert data['ok'] and data['bytes']==amount
                 if not args.unpaced_probe:assert data['rate_cap_mbps']==args.paced_mbps
                 for first,last in zip(before,after):assert(first['pid'],first['start'])==(last['pid'],last['start'])
-                ping.wait(timeout=5);text=(out/(label+'-ping.log')).read_text()
+                ping.wait(timeout=15 if args.full_transfer_control else 5);text=(out/(label+'-ping.log')).read_text()
                 loss=re.search(r'([0-9.]+)% packet loss',text)
                 assert ping.returncode==0 and loss and float(loss[1])==0,'ICMP progress failed'
+                if args.full_transfer_control:
+                    replies=[(float(stamp),int(sequence),float(latency)) for stamp,sequence,latency in
+                             re.findall(r'\[([0-9.]+)\].*icmp_seq=([0-9]+).*time[=<]([0-9.]+) ms',text)]
+                    assert len(replies)==ping_count and sorted(r[1] for r in replies)==list(range(1,ping_count+1)), 'incomplete timed ICMP evidence'
+                    during=[r for r in replies if load_started<=r[0]<=load_finished]
+                    covered=replies[0][0]<=load_started and replies[-1][0]>=load_finished
+                    record('control_window',round=round_id,arm=arm,direction=direction,
+                           load_started=load_started,load_finished=load_finished,covered=covered,
+                           samples_during_load=len(during),replies=replies)
+                    assert covered and len(during)>=20, 'ICMP window did not cover the complete transfer; no partial-coverage PASS'
                 record('transfer',round=round_id,arm=arm,stealth=stealth,direction=direction,result=data,profiled=args.profile,tun_traced=args.tun_trace,
                        mixed_flow=args.mixed_flow,inner_ipv6=args.inner_ipv6,
                        core_cpu_s_GiB=sum(y['cpu']-x['cpu'] for x,y in zip(before,after))/(amount*(2 if args.mixed_flow else 1)/1024**3),
@@ -541,6 +557,8 @@ if __name__=='__main__':
         parser.add_argument('--udp-gro-mode',choices=['off','on'],help='isolated GRO receiver only; explicit selector after Core environment isolation')
         parser.add_argument('--unpaced-probe',help='existing compiled easytier-perf-probe; no Core rebuild required')
         parser.add_argument('--paced-mbps',type=int,default=200,help='diagnostic cap per flow; never replaces unpaced acceptance')
+        parser.add_argument('--paced-transfer-bytes',type=int,help='explicit longer fixed-load sample; existing default sizes stay unchanged')
+        parser.add_argument('--full-transfer-control',action='store_true',help='120 timestamped echoes must span the entire transfer, including a mixed secondary flow')
         parser.add_argument('--transfer-bytes',type=int,default=1073741824)
         parser.add_argument('--profile',action='store_true',help='separate diagnostic run; rates are not comparison evidence')
         parser.add_argument('--perf-path',default='perf',help='verified userspace perf executable')

@@ -54,6 +54,10 @@ name: Actual Core UDP flush-boundary experiment
         description: Reuse immutable d06292a4 GRO Core/test binaries; observe activation and compare without compiling
         type: boolean
         default: false
+      udp_gro_pressure:
+        description: With udp_gro_reuse only, compare matched higher rates with full-transfer control observation
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
@@ -744,10 +748,18 @@ jobs:
         shell: bash
         run: sudo apt-get install -y -qq strace
       - name: Interleaved actual Core CPU and functional comparisons
+        env:
+          GRO_REUSE: ${{ inputs.udp_gro_reuse }}
+          GRO_PRESSURE: ${{ inputs.udp_gro_pressure }}
         shell: bash
         run: |
           set -euo pipefail
-          for phase in activation fixed saturation mixed; do
+          phases="activation fixed saturation mixed"
+          if [[ "$GRO_PRESSURE" == true ]]; then
+            test "$GRO_REUSE" == true
+            phases="activation pressure"
+          fi
+          for phase in $phases; do
             sudo timeout --signal=TERM --kill-after=15s 1200s python3 tools/mesh-udp-flush/gro_lab.py \
               --binaries gro-binaries --phase "$phase" --output "gro-evidence/$phase"
           done
