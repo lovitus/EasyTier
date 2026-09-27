@@ -626,4 +626,113 @@ under matched higher load. It cannot by itself identify an internal ring drop
 or clear the earlier saturation failure. Higher rates are not necessarily near
 the capacity of a different hosted runner. Preserve kernel counters, raw errors,
 resource identities and scoped cleanup even if rate matching or coverage fails.
-No production receive-flow patch is included. Results are pending.
+No production receive-flow patch is included. The result is recorded below.
+
+## Matched higher-load result: CPU benefit persists, not a loss fix
+
+[Run 36281869121](https://github.com/lovitus/EasyTier/actions/runs/36281869121)
+completed successfully at harness
+`7473503e6287ecedf1ad39909a352a9eb4d8fd4a`. It reused binary artifact
+`10915569351`; no Core compilation or contract-test rerun occurred. Core SHA-256
+remains `ae0d57a5c1c7d9568ff3158fcfd0c8b544a0a1cf236aab4b36706ca28d6b7777`,
+with base `3166ab672d347cdcc5a6768bc77056cd8ec38323` and the unchanged disposable
+receive adapter. The earlier 39 UDP and four hole-punch contracts are earlier
+evidence, not tests executed by this run.
+
+Endpoint A and B were separate Core processes/network namespaces connected by
+veth on one GitHub-hosted runner: Intel Xeon Platinum 8573C, four logical CPUs,
+two cores, Linux 6.8.0-1064-azure. Pressure traffic used UDP/IPv4 underlay,
+IPv6 overlay, AES-GCM and Stealth off. This is neither physical-host/WAN evidence
+nor Leaf/Mihomo measurement. The previous saturation runner used an 8370C;
+cross-run differences are not a controlled experiment on saturation alone.
+
+The small evidence artifact `10919382367` is 1,687,005 bytes, SHA-256
+`23ba50b4e6acd62c5418ed28d7e2b8a84fc64f1f562f221b4e9bdc176c35b70f`.
+All 1,790 ZIP members passed CRC, and all 1,789 manifest hashes matched. Independent
+activation traces again showed actual GRO receives from both IPv4/IPv6 peers;
+off had no enables/aggregates. Activation traces are excluded from performance.
+
+There were 24 untraced cases, with three interleaved off/on samples for each
+total cap/topology. Each flow transferred 256 MiB. Mixed flows each received
+half the configured total cap. All 12 direction/flow-role groups met the
+two-percent actual-rate matching gate. CPU below is the sum of both Core
+processes' user+system seconds per delivered GiB; mixed CPU includes both flows.
+
+| Total cap Mbit/s | Load / primary direction | Actual off / on Mbit/s | Core CPU s/GiB off / on | CPU change |
+|---|---|---:|---:|---:|
+| 500 | Single A to B | 465.132 / 464.511 | 12.96 / 11.88 | -8.33% |
+| 500 | Single B to A | 465.022 / 464.948 | 12.96 / 11.84 | -8.64% |
+| 500 | Mixed, primary A to B | 239.973 / 239.958 | 13.04 / 12.04 | -7.67% |
+| 500 | Mixed, primary B to A | 239.984 / 239.956 | 13.04 / 11.96 | -8.28% |
+| 1000 | Single A to B | 872.721 / 872.840 | 12.52 / 11.60 | -7.35% |
+| 1000 | Single B to A | 872.693 / 872.862 | 12.36 / 11.44 | -7.44% |
+| 1000 | Mixed, primary A to B | 463.135 / 462.827 | 12.56 / 11.78 | -6.21% |
+| 1000 | Mixed, primary B to A | 463.064 / 462.837 | 12.62 / 11.74 | -6.97% |
+
+Mixed rates are primary-flow rates, not aggregates. The existing no-catch-up
+pacer delivers less than its configured ceiling; this is not evidence of
+achieving a literal 1 Gbit/s load. Do not add these savings to results from
+different machines or parent candidates.
+
+Single-flow cases recorded zero TCP retransmissions. Mixed cases recorded two
+single-segment retransmissions off and four on in total; corresponding peers
+reported DSACK-old-sent. No fast-retransmit/SACK-recovery clusters were recorded.
+DSACK alone does not prove harmless tail probes or identify the cause. This
+does not erase the substantially worse saturation counters in run 36279752505.
+Kernel UDP/IP error/drop deltas were zero. Separately, all 2,352 link error/drop
+deltas across 112 before/after snapshot pairs were zero; internal ring rejection
+is not covered by those counters.
+
+All 48 complete transfer-control windows delivered 120/120 timestamped echoes,
+5,760 total, with 2,388 replies during actual load. Their first/last replies
+bracketed complete primary and secondary transfers. One GRO-on mixed 1000-cap
+sample reached 4.07 ms maximum latency, versus 1.01 ms maximum in the matching
+off group. The opposite primary direction reached 1.17 ms on versus 0.40 ms off.
+The per-case in-load p95 medians were broadly similar; the outliers are retained,
+not rounded into a no-latency-regression claim.
+
+Including activation: 80 bulk transfers/18.25 GiB, 56 independent integrity
+checks, 840 UDP echoes and 5,920/5,920 ICMP replies completed. UDP echoes preceded
+bulk traffic and are not saturated application-UDP evidence. All 56 Core exits,
+56 namespace removals and 356 cleanup records passed; host routes were unchanged
+and no forced kill was required. Maximum Core log size was 5,692 bytes.
+
+Pressure RSS snapshots were 25.61-27.25 MiB off and 25.75-28.99 MiB on per Core,
+with 13-14 threads and 25-29 FDs. No memory reduction or long-duration leak claim
+is made. The adapter still owns 64 KiB per enabled reader. Idle power is untested.
+
+Measurement caveat: some short single-flow host `/proc/stat` CPU deltas were
+slightly below the summed per-process deltas. The helper arithmetic was inspected
+and no arithmetic defect established, but the samples are not simultaneous and
+the cause is not proven. Host totals remain diagnostic, not precise additive
+machine-CPU acceptance. The table uses the separately identified Core processes.
+
+## Next discriminator: bounded internal rejection observation
+
+The same-load CPU benefit justifies further research, not a production merge.
+The remaining question is whether the saturated receive path rejects packets at
+the existing ring and whether a missing echo can be correlated to that stage.
+At the frozen source, lossy data calls `try_send()` on a 128-entry ring with four
+reserved entries. Broad UDP TRACE logging would print normal packets as well;
+it is not an acceptable way to count rejection under load.
+
+The next isolated build layers the existing bounded ICMP ciphertext correlation
+over the unchanged GRO adapter, plus counters only after lossy/non-lossy ring
+rejection. It emits only power-of-two bounds, at most 64 lines per rejection
+class per x86_64 process. Final totals are intervals, not exact counts. No report
+is interpreted as zero unless diagnostic stages and complete clean logs are
+present. There is no packet retention, retry, new queue, scheduling change,
+priority bypass or logging of keys/payloads.
+
+Six interleaved off/on mixed-load cases reuse the original lab, 1 GiB per flow,
+UDP4/inner IPv6, Stealth off, and full-transfer echo observation. Existing
+integrity, loss, CPU identity, log-cap and cleanup assertions stay unchanged;
+the first failure stops the run and is preserved. Both comparison arms contain
+identical observation code. These samples are explicitly excluded from CPU or
+throughput acceptance because instrumentation can perturb scheduling.
+
+This narrow census does not measure every possible parser/decrypt drop or
+establish that each TCP retransmission came from the ring. It is intended to
+localize the next change, not justify an unmeasured ring enlargement or extra
+yield. Original combined failure 36260893872, original-host/WAN acceptance and
+production GRO acceptance remain OPEN.

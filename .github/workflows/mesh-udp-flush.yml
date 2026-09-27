@@ -58,6 +58,10 @@ name: Actual Core UDP flush-boundary experiment
         description: With udp_gro_reuse only, compare matched higher rates with full-transfer control observation
         type: boolean
         default: false
+      udp_gro_loss:
+        description: With udp_gro_current, build bounded ring-loss diagnostics; no performance acceptance
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths: ['tools/mesh-udp-flush/**', '.github/workflows/mesh-udp-flush.yml']
@@ -69,7 +73,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   core-flush:
-    if: ${{ !inputs.udp_gro_reuse && !inputs.udp_gro_current && !inputs.profile_only && !inputs.paced_tun && !inputs.packet_trace_current && !inputs.packet_trace_reuse }}
+    if: ${{ !inputs.udp_gro_loss && !inputs.udp_gro_reuse && !inputs.udp_gro_current && !inputs.profile_only && !inputs.paced_tun && !inputs.packet_trace_current && !inputs.packet_trace_reuse }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -581,7 +585,7 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
   gro-contract-and-core:
-    if: ${{ inputs.udp_gro_current || inputs.udp_gro_reuse }}
+    if: ${{ inputs.udp_gro_current || inputs.udp_gro_reuse || inputs.udp_gro_loss }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -598,6 +602,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - name: Reject incompatible loss-observation inputs before building
+        if: ${{ inputs.udp_gro_loss }}
+        shell: bash
+        run: |
+          test '${{ inputs.udp_gro_current }}' = true
+          test '${{ inputs.udp_gro_reuse }}' = false
+          test '${{ inputs.udp_gro_pressure }}' = false
       - uses: ./.github/actions/prepare-build
         if: ${{ !inputs.udp_gro_reuse }}
         with:
@@ -607,6 +618,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Prepare the immutable source and receive-only experiment
         if: ${{ !inputs.udp_gro_reuse }}
+        env:
+          GRO_LOSS: ${{ inputs.udp_gro_loss }}
         shell: bash
         run: |
           set -euo pipefail
@@ -623,8 +636,12 @@ jobs:
           rustup component add --toolchain 1.95 rustfmt
           timeout 90 git fetch --no-tags --depth=1 origin "$SOURCE_SHA"
           git worktree add --detach "$RUNNER_TEMP/gro-source" "$SOURCE_SHA"
-          python3 -m py_compile tools/mesh-udp-flush/{lab,gro_prepare,gro_lab}.py
+          python3 -m py_compile tools/mesh-udp-flush/{lab,gro_prepare,gro_lab,gro_loss_prepare,gro_loss_lab}.py
           python3 tools/mesh-udp-flush/gro_prepare.py "$RUNNER_TEMP/gro-source" > gro-evidence/overlay.json
+          if [[ "$GRO_LOSS" == true ]]; then
+            python3 tools/mesh-udp-flush/gro_loss_prepare.py "$RUNNER_TEMP/gro-source" > gro-evidence/loss-overlay.json
+            rustfmt +1.95 --edition 2024 "$RUNNER_TEMP/gro-source/easytier/src/peers/peer_manager.rs"
+          fi
           rustfmt +1.95 --edition 2024 --check "$RUNNER_TEMP/gro-source/easytier/src/tunnel/udp_gro_experiment.rs"
           rustfmt +1.95 --edition 2024 "$RUNNER_TEMP/gro-source/easytier/src/tunnel/udp.rs"
           git -C "$RUNNER_TEMP/gro-source" diff --check
@@ -638,6 +655,9 @@ jobs:
           lscpu > gro-evidence/cpu.txt
           rustc +1.95 -Vv > gro-evidence/toolchain.txt
           printf '%s\n' 'Experimental receive adapter only; one binary off/on, 64 KiB per enabled reader. No queue/crypto/wire/TUN changes. Prior integrated saturation FAIL remains open.' > gro-evidence/BOUNDARY.txt
+          if [[ "$GRO_LOSS" == true ]]; then
+            printf '%s\n' 'Includes bounded ICMP correlation and ring-rejection census. All load results are diagnostic, NOT performance acceptance. Rejection totals are intervals, not exact counts.' >> gro-evidence/BOUNDARY.txt
+          fi
       - uses: Swatinem/rust-cache@v2
         if: ${{ !inputs.udp_gro_reuse }}
         with:
@@ -751,6 +771,7 @@ jobs:
         env:
           GRO_REUSE: ${{ inputs.udp_gro_reuse }}
           GRO_PRESSURE: ${{ inputs.udp_gro_pressure }}
+          GRO_LOSS: ${{ inputs.udp_gro_loss }}
         shell: bash
         run: |
           set -euo pipefail
@@ -759,10 +780,17 @@ jobs:
             test "$GRO_REUSE" == true
             phases="activation pressure"
           fi
+          if [[ "$GRO_LOSS" == true ]]; then
+            phases="activation"
+          fi
           for phase in $phases; do
             sudo timeout --signal=TERM --kill-after=15s 1200s python3 tools/mesh-udp-flush/gro_lab.py \
               --binaries gro-binaries --phase "$phase" --output "gro-evidence/$phase"
           done
+          if [[ "$GRO_LOSS" == true ]]; then
+            sudo timeout --signal=TERM --kill-after=15s 1200s python3 tools/mesh-udp-flush/gro_loss_lab.py \
+              --binaries gro-binaries --output gro-evidence/ring-loss
+          fi
       - name: Preserve the first failure and exact experimental identity
         if: always()
         shell: bash
