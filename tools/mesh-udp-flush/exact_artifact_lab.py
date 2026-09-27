@@ -46,6 +46,8 @@ def download(artifact_id, destination, expected_sha=None):
 
 def prepare(root):
     pair = json.loads(os.environ['ARTIFACT_PAIR'])
+    mixed_flow = pair.pop('mixed_flow', False)
+    assert isinstance(mixed_flow, bool), 'mixed_flow must be a JSON boolean'
     assert set(pair) == {'baseline', 'candidate'}
     identities = {}
     for label, spec in pair.items():
@@ -112,12 +114,15 @@ def prepare(root):
     (root / 'provenance.json').write_text(json.dumps({
         'harness_sha': os.environ['GITHUB_SHA'], 'cores': identities,
         'cli_artifact': CLI_ARTIFACT, 'cli_sha256': CLI_SHA,
+        'mixed_flow': mixed_flow,
         'scope': 'unmodified packages; namespace lab; no WAN or original-host claim'
     }, indent=2))
 
 
 def run(root, phase, probe, perf_path):
     lab = Path(__file__).with_name('lab.py').resolve()
+    mixed_flow = json.loads((root / 'provenance.json').read_text()).get('mixed_flow', False)
+    assert not mixed_flow or phase in ('fixed', 'trace', 'saturation'), 'mixed-flow input requires the ordinary comparison lane'
     suite = root / phase
     suite.mkdir(exist_ok=False)
     results = []
@@ -163,6 +168,13 @@ def run(root, phase, probe, perf_path):
             command.append('--inner-ipv6')
         if stealth:
             command.append('--stealth')
+        if mixed_flow and phase in ('fixed', 'saturation'):
+            command.append('--mixed-flow')
+            if phase == 'fixed':
+                # Both directions run concurrently: 100 Mbit/s per flow, not
+                # 200 per flow. Reuse the lab's full-transfer control assertions.
+                command += ['--paced-mbps', '100', '--paced-transfer-bytes', '67108864',
+                            '--full-transfer-control']
         if phase in ('saturation', 'profile'):
             assert probe and probe.is_file()
             command += ['--unpaced-probe', str(probe.resolve())]
@@ -177,7 +189,8 @@ def run(root, phase, probe, perf_path):
         with (suite / f'{index:02d}.log').open('w') as log:
             completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=360)
         row = {'label': label, 'server_label': server_label, 'relay_label': relay_label, 'inner_ip_family': family, 'underlay_ip_family': outer,
-               'stealth': stealth, 'exit_code': completed.returncode, 'output': str(output.relative_to(root))}
+               'stealth': stealth, 'mixed_flow': mixed_flow and phase in ('fixed', 'saturation'),
+               'exit_code': completed.returncode, 'output': str(output.relative_to(root))}
         results.append(row)
         (suite / 'runs.json').write_text(json.dumps(results, indent=2))
         assert completed.returncode == 0, f'{phase} {label} failed; original assertions and logs retained'
