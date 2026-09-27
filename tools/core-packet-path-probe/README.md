@@ -79,8 +79,11 @@ IPv4/IPv6, a control packet at each of three positions, and ACK/SYN/RST/FIN
 flags produce 24 paired cases. Two all-control cases must avoid promotion.
 The expected negative control is a leading control packet: current selection
 uses three GRO emissions while payload-head placement should use two. Later
-control positions should remain two in both arms. Results are pending until
-the existing `capacity_only=true` workflow completes.
+control positions should remain two in both arms. Run `36290522251` passed
+at `1059caaa8d83379eefa137db9b0226b89c1c0526`: all eight leading-control
+cases changed from three emissions to two; the other 16 stayed at two.
+Both all-control cases avoided promotion. All 90 reported byte/allocation
+cases and the existing 1000-reuse identity check passed.
 
 Both arms retain real `handle_gro`/`gso_split`, complete IP-byte/multiplicity
 checks and allocation-identity recovery. The predicate must be false for the
@@ -88,3 +91,11 @@ leading-control baseline and true for the alternative, not a compilation
 failure. No workflow, dependency pin, Core code, queue, wait or buffer limit
 changes. This is mechanism evidence only, not actual-Core speedup or a claim
 that the original receive-ring loss is fixed.
+
+Evidence artifact `10922096988` (6434 bytes), SHA-256
+`0aceafb62bf224ecbc7c886d40c2504b6cfa34b0efd6dad278b87c5f452f1d5d`,
+retains the unchanged lockfile, source SHA, build log and all 138 result
+records. Record count is not a unit-test count. This missed opportunity in
+the recently added head optimization does not explain performance problems
+that predate that optimization. No actual-Core regression test or packaged
+performance acceptance is claimed for the alternative yet.

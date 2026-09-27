@@ -229,3 +229,38 @@ The dependency archive matches locked checksum
 [Docs.rs lists 2.8.11 as latest](https://docs.rs/crate/tun-rs/2.8.11) at this
 review; no dependency upgrade is included. Head selection is owned by this
 fork, not by the library. A broader dependency/allocation audit is separate.
+
+## Locked-library follow-up result
+
+[Run 36290522251](https://github.com/lovitus/EasyTier/actions/runs/36290522251)
+passed at `1059caaa8d83379eefa137db9b0226b89c1c0526` using the unchanged
+capacity-only workflow. It compiled only the standalone Rust tool, not Core.
+Artifact `10922096988` is 6434 bytes, SHA-256
+`0aceafb62bf224ecbc7c886d40c2504b6cfa34b0efd6dad278b87c5f452f1d5d`.
+Archive identity/CRC/path checks passed; recorded bytes/tun-rs pins match.
+
+- Eight leading-control cases (IPv4/IPv6 x ACK/SYN/RST/FIN) reproduced three
+  emissions with the current selector and two with payload-head selection.
+  The identical two-emission predicate is false then true in the real locked
+  GRO API; the negative control is behavioral, not a missing-symbol error.
+- Sixteen cases with the control packet later in the same cohort stayed at
+  two emissions in both arms. Packet order presented to the library is the
+  same between arms; no input reordering produces the improvement.
+- Two all-control cases preserved two emissions without promoting a head.
+- All 90 explicitly reported byte/allocation cases and 1000 existing buffer
+  identity reuses passed. Output contains 138 records, not 138 unit tests.
+
+This confirms a missed GRO opportunity in the existing head selector, not
+packet corruption, a proven real-traffic regression, or the whole Core CPU
+root cause. The original performance problem predates that head optimization.
+The three-to-two result is limited to the fixture's GRO emissions; it does
+not mean a one-third Core CPU saving. The experiment neither changes the
+producer's lossy-ring policy nor demonstrates elimination of overload loss.
+
+The next production-sized candidate is limited to the existing head
+selection predicate and its regression coverage. Keep the 8 KiB single-head
+bound, allocation-identity reclamation, partial-write/cancellation behavior,
+ready-only batching, packet order, routing, encryption and platform fallback
+unchanged. Required before acceptance: actual-Core regression coverage and
+an exact-artifact matched mixed-flow CPU/emission/control comparison.
+No production code, existing PR, merge or release was changed in this batch.
