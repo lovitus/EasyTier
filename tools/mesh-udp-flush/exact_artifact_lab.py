@@ -135,6 +135,10 @@ def run(root, phase, probe, perf_path):
         cases = [(4, 4, True, 'candidate', 'candidate', None)]
     if phase == 'profile':
         cases = [(4, 4, False, label, label, None) for label in ('baseline', 'candidate')]
+    if phase == 'tun-observation':
+        # Observe the retained parent, not another selector A/B or performance
+        # claim. Both endpoints use its exact package; no Core overlay is built.
+        cases = [(4, family, False, 'baseline', 'baseline', None) for family in (4, 6)]
     if phase == 'compatibility':
         cases = [(outer, inner, stealth, client, server, None)
                  for outer in (4, 6) for inner in (4, 6) for stealth in (False, True)
@@ -182,6 +186,9 @@ def run(root, phase, probe, perf_path):
             assert perf_path and perf_path.is_file()
             command += ['--profile', '--idle-observe', '--perf-path', str(perf_path.resolve()),
                         '--profile-call-graph', 'fp', '--transfer-bytes', '2147483648']
+        if phase == 'tun-observation':
+            command += ['--tun-trace', '--mixed-flow', '--full-transfer-control',
+                        '--paced-mbps', '100', '--paced-transfer-bytes', '67108864']
         if phase == 'trace':
             command += ['--paced-mbps', '50']
             command = ['strace', '-ff', '-qq', '-s', '1', '-e', 'trace=sendmsg',
@@ -208,7 +215,7 @@ def run(root, phase, probe, perf_path):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('phase', choices=['prepare', 'fixed', 'trace', 'saturation', 'compatibility', 'relay', 'profile'])
+    parser.add_argument('phase', choices=['prepare', 'fixed', 'trace', 'saturation', 'compatibility', 'relay', 'profile', 'tun-observation'])
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--probe', type=Path)
     parser.add_argument('--perf-path', type=Path)

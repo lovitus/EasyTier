@@ -40,6 +40,10 @@ name: Mesh natural-cohort kernel mechanism
         description: Reuse the packages for bounded idle resources and CPU call stacks only
         type: boolean
         default: false
+      artifact_tun_observation_only:
+        description: Observe retained parent TUN write sizes only; no Core build or performance claim
+        type: boolean
+        default: false
   push:
     branches: ['codex/issue4-natural-cohort']
     paths:
@@ -250,12 +254,13 @@ jobs:
           COMPATIBILITY_ONLY: ${{ inputs.artifact_compatibility_only }}
           RELAY_ONLY: ${{ inputs.artifact_relay_only }}
           PROFILE_ONLY: ${{ inputs.artifact_profile_only }}
+          TUN_OBSERVATION_ONLY: ${{ inputs.artifact_tun_observation_only }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p exact-evidence
           modes=0
-          for mode in "$COMPATIBILITY_ONLY" "$RELAY_ONLY" "$PROFILE_ONLY"; do
+          for mode in "$COMPATIBILITY_ONLY" "$RELAY_ONLY" "$PROFILE_ONLY" "$TUN_OBSERVATION_ONLY"; do
             if [[ "$mode" == 'true' ]]; then modes=$((modes + 1)); fi
           done
           if (( modes > 1 )); then
@@ -266,7 +271,7 @@ jobs:
           sudo apt-get install -y -qq iproute2 iputils-ping ethtool strace binutils
           python3 -m py_compile tools/mesh-udp-flush/exact_artifact_lab.py tools/mesh-udp-flush/lab.py
           python3 tools/mesh-udp-flush/exact_artifact_lab.py prepare --output exact-evidence
-          if [[ "$COMPATIBILITY_ONLY" != 'true' && "$RELAY_ONLY" != 'true' ]]; then
+          if [[ "$COMPATIBILITY_ONLY" != 'true' && "$RELAY_ONLY" != 'true' && "$TUN_OBSERVATION_ONLY" != 'true' ]]; then
             rustup toolchain install 1.95.0 --profile minimal
             rustc +1.95.0 --edition 2024 -O tools/easytier-perf-probe.rs -o exact-evidence/probe
             sha256sum exact-evidence/probe > exact-evidence/probe.sha256
@@ -298,19 +303,19 @@ jobs:
           unzip -p exact-evidence/previous-profile.zip profile/00-baseline-v4-stealth0/r0-stock-upload.perf.data > exact-evidence/previous-baseline.perf.data
           timeout --signal=TERM --kill-after=5s 60s "$perf_path" report --stdio --no-children --no-inline -g none --sort comm,pid,dso,symbol -i exact-evidence/previous-baseline.perf.data > exact-evidence/previous-baseline-flat.txt 2> exact-evidence/previous-baseline-flat.stderr
       - name: Interleaved fixed-load, dual-stack overlay and Stealth checks
-        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only }}
+        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only && !inputs.artifact_tun_observation_only }}
         shell: bash
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py fixed --output exact-evidence
       - name: Separate low-rate syscall activation evidence
-        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only }}
+        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only && !inputs.artifact_tun_observation_only }}
         shell: bash
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 240s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py trace --output exact-evidence
       - name: Unpaced comparison with unchanged control-progress assertions
-        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only }}
+        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only && !inputs.artifact_tun_observation_only }}
         shell: bash
         run: |
           set -euo pipefail
@@ -333,6 +338,23 @@ jobs:
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py profile --output exact-evidence --probe exact-evidence/probe --perf-path "$(cat exact-evidence/perf-path.txt)"
+      - name: Bounded TUN write-size observation on the retained parent
+        if: ${{ inputs.artifact_tun_observation_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mounted_here=false
+          if ! mountpoint -q /sys/kernel/tracing; then
+            sudo mount -t tracefs tracefs /sys/kernel/tracing
+            mounted_here=true
+          fi
+          cleanup_tracefs() {
+            if [[ "$mounted_here" == 'true' ]]; then
+              sudo umount /sys/kernel/tracing
+            fi
+          }
+          trap cleanup_tracefs EXIT
+          sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 360s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py tun-observation --output exact-evidence
       - name: Preserve scoped evidence
         if: always()
         shell: bash
