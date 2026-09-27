@@ -10,6 +10,11 @@ name: Mesh natural-cohort kernel mechanism
         description: Run the exact-Core-version bounded receive scheduling model only
         type: boolean
         default: false
+      recv_budget_mode:
+        description: "Isolated receive model: existing consumer batching or producer service quantum"
+        type: choice
+        options: [consumer, producer]
+        default: consumer
       udp_receive_only:
         description: Compare real nonblocking UDP receive syscalls without Core
         type: boolean
@@ -173,9 +178,16 @@ jobs:
           printf '%s\n' "$GITHUB_SHA" > recv-evidence/source-sha.txt
           lscpu > recv-evidence/cpu.txt
           cp tools/mesh-recv-budget/Cargo.lock recv-evidence/Cargo.lock
-          timeout 300 cargo +1.95.0 build --locked --release --manifest-path tools/mesh-recv-budget/Cargo.toml 2>&1 | tee recv-evidence/build.log
-          timeout 300 tools/mesh-recv-budget/target/release/mesh-recv-budget > recv-evidence/results.jsonl 2> recv-evidence/offered-load.log
-          sha256sum tools/mesh-recv-budget/target/release/mesh-recv-budget > recv-evidence/binary.sha256
+          case "${{ inputs.recv_budget_mode }}" in
+            producer) probe=producer-quantum ;;
+            consumer|'') probe=mesh-recv-budget ;;
+            *) printf 'Unknown receive model\n' >&2; exit 1 ;;
+          esac
+          printf '%s\n' "$probe" > recv-evidence/model.txt
+          cp tools/mesh-recv-budget/Cargo.toml recv-evidence/Cargo.toml
+          timeout 300 cargo +1.95.0 build --locked --release --manifest-path tools/mesh-recv-budget/Cargo.toml --bin "$probe" 2>&1 | tee recv-evidence/build.log
+          timeout 300 "tools/mesh-recv-budget/target/release/$probe" > recv-evidence/results.jsonl 2> recv-evidence/offered-load.log
+          sha256sum "tools/mesh-recv-budget/target/release/$probe" > recv-evidence/binary.sha256
       - uses: actions/upload-artifact@v5
         if: always()
         with:
