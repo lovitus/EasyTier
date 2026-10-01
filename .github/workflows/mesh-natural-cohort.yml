@@ -32,6 +32,10 @@ name: Mesh natural-cohort kernel mechanism
         description: Reuse the packages for IPv6-underlay and mixed-version checks only
         type: boolean
         default: false
+      artifact_saturation_only:
+        description: Reuse frozen packages for full-window saturation acceptance only; skip completed fixed-load and trace phases
+        type: boolean
+        default: false
       artifact_relay_only:
         description: Reuse the packages for a bounded three-peer relay check only
         type: boolean
@@ -252,6 +256,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ARTIFACT_PAIR: ${{ inputs.artifact_pair }}
           COMPATIBILITY_ONLY: ${{ inputs.artifact_compatibility_only }}
+          SATURATION_ONLY: ${{ inputs.artifact_saturation_only }}
           RELAY_ONLY: ${{ inputs.artifact_relay_only }}
           PROFILE_ONLY: ${{ inputs.artifact_profile_only }}
           TUN_OBSERVATION_ONLY: ${{ inputs.artifact_tun_observation_only }}
@@ -260,7 +265,7 @@ jobs:
           set -euo pipefail
           mkdir -p exact-evidence
           modes=0
-          for mode in "$COMPATIBILITY_ONLY" "$RELAY_ONLY" "$PROFILE_ONLY" "$TUN_OBSERVATION_ONLY"; do
+          for mode in "$COMPATIBILITY_ONLY" "$SATURATION_ONLY" "$RELAY_ONLY" "$PROFILE_ONLY" "$TUN_OBSERVATION_ONLY"; do
             if [[ "$mode" == 'true' ]]; then modes=$((modes + 1)); fi
           done
           if (( modes > 1 )); then
@@ -303,13 +308,13 @@ jobs:
           unzip -p exact-evidence/previous-profile.zip profile/00-baseline-v4-stealth0/r0-stock-upload.perf.data > exact-evidence/previous-baseline.perf.data
           timeout --signal=TERM --kill-after=5s 60s "$perf_path" report --stdio --no-children --no-inline -g none --sort comm,pid,dso,symbol -i exact-evidence/previous-baseline.perf.data > exact-evidence/previous-baseline-flat.txt 2> exact-evidence/previous-baseline-flat.stderr
       - name: Interleaved fixed-load, dual-stack overlay and Stealth checks
-        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only && !inputs.artifact_tun_observation_only }}
+        if: ${{ !inputs.artifact_saturation_only && !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only && !inputs.artifact_tun_observation_only }}
         shell: bash
         run: |
           set -euo pipefail
           sudo --preserve-env=LD_LIBRARY_PATH timeout --signal=TERM --kill-after=10s 1000s "$(command -v python3)" tools/mesh-udp-flush/exact_artifact_lab.py fixed --output exact-evidence
       - name: Separate low-rate syscall activation evidence
-        if: ${{ !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only && !inputs.artifact_tun_observation_only }}
+        if: ${{ !inputs.artifact_saturation_only && !inputs.artifact_compatibility_only && !inputs.artifact_relay_only && !inputs.artifact_profile_only && !inputs.artifact_tun_observation_only }}
         shell: bash
         run: |
           set -euo pipefail

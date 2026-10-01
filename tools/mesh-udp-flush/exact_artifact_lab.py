@@ -183,6 +183,10 @@ def run(root, phase, probe, perf_path):
         if phase in ('saturation', 'profile'):
             assert probe and probe.is_file()
             command += ['--unpaced-probe', str(probe.resolve())]
+        if phase == 'saturation':
+            # Reuse the existing time/sequence coverage assertions. A short
+            # observation window must fail closed, never become a partial PASS.
+            command.append('--full-transfer-control')
         if phase == 'profile':
             assert perf_path and perf_path.is_file()
             command += ['--profile', '--idle-observe', '--perf-path', str(perf_path.resolve()),
