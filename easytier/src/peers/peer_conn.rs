@@ -175,15 +175,17 @@ impl TunnelFilter for PeerSessionTunnelFilter {
             return Some(data);
         };
 
+        let my_peer_id = self.my_peer_id.load();
+        // RelayPeerMap owns encryption for the final destination. A next-hop
+        // connection must not use its unrelated session on that relay payload.
+        if my_peer_id != hdr.from_peer_id.get() || hdr.to_peer_id.get() != peer_id {
+            return Some(data);
+        }
+
         let mut guard = self.session.lock().unwrap();
         let Some(session) = guard.as_mut() else {
             return Some(data);
         };
-
-        let my_peer_id = self.my_peer_id.load();
-        if my_peer_id != hdr.from_peer_id.get() {
-            return Some(data);
-        }
 
         if let Err(e) = session.encrypt_payload(my_peer_id, peer_id, &mut data) {
             tracing::warn!(
@@ -1830,6 +1832,96 @@ pub mod tests {
     };
     use futures::SinkExt;
     use tokio_util::task::AbortOnDropHandle;
+
+    #[test]
+    fn peer_session_filter_preserves_destination_owned_relay_packets() {
+        let make_session = |peer_id, root_key| {
+            Arc::new(PeerSession::new(
+                peer_id,
+                root_key,
+                1,
+                0,
+                "aes-gcm".to_owned(),
+                "aes-gcm".to_owned(),
+                None,
+            ))
+        };
+        let make_packet = |from, to, packet_type: PacketType| {
+            let mut packet = ZCPacket::new_with_payload(b"destination-owned payload");
+            packet.fill_peer_manager_hdr(from, to, packet_type as u8);
+            packet
+        };
+
+        // Exercise both crypto directions, with a distinct end-to-end key and
+        // a next-hop key. Do not manufacture ciphertext by setting a flag.
+        for (source, next_hop, destination) in [(10, 20, 30), (30, 20, 10)] {
+            for invalid_next_hop in [false, true] {
+                let next_hop_key = PeerSession::new_root_key();
+                let next_hop_session = make_session(next_hop, next_hop_key);
+                let next_hop_receiver = make_session(source, next_hop_key);
+                let filter = PeerSessionTunnelFilter::new_with_peer(source, true);
+                filter.set_peer_id(next_hop);
+                filter.set_session(next_hop_session.clone());
+
+                // A directly addressed packet still uses the connection's
+                // session, and the other endpoint can authenticate/decrypt it.
+                let mut direct = filter
+                    .before_send(make_packet(source, next_hop, PacketType::Data))
+                    .expect("direct packet should be encrypted");
+                assert!(direct.peer_manager_header().unwrap().is_encrypted());
+                next_hop_receiver
+                    .decrypt_payload(source, next_hop, &mut direct)
+                    .unwrap();
+                assert_eq!(direct.payload(), b"destination-owned payload");
+
+                if invalid_next_hop {
+                    next_hop_session.invalidate();
+                }
+                let destination_key = PeerSession::new_root_key();
+                let sender = make_session(destination, destination_key);
+                let receiver = make_session(source, destination_key);
+                let mut relay = make_packet(source, destination, PacketType::Data);
+                sender
+                    .encrypt_payload(source, destination, &mut relay)
+                    .unwrap();
+                assert!(relay.peer_manager_header().unwrap().is_encrypted());
+                let ciphertext = relay.clone().into_bytes();
+
+                let mut forwarded = filter
+                    .before_send(relay)
+                    .expect("relay payload must bypass the unrelated next-hop session");
+                assert_eq!(forwarded.clone().into_bytes(), ciphertext);
+                receiver
+                    .decrypt_payload(source, destination, &mut forwarded)
+                    .unwrap();
+                assert_eq!(forwarded.payload(), b"destination-owned payload");
+
+                // Retain existing ownership and control-packet bypasses even
+                // when the connection's own session can no longer encrypt.
+                for packet in [
+                    make_packet(destination, next_hop, PacketType::Data),
+                    make_packet(source, next_hop, PacketType::NoiseHandshakeMsg1),
+                    make_packet(source, next_hop, PacketType::NoiseHandshakeMsg2),
+                    make_packet(source, next_hop, PacketType::NoiseHandshakeMsg3),
+                    make_packet(source, next_hop, PacketType::RelayHandshake),
+                    make_packet(source, next_hop, PacketType::RelayHandshakeAck),
+                    make_packet(source, next_hop, PacketType::Ping),
+                    make_packet(source, next_hop, PacketType::Pong),
+                ] {
+                    let original = packet.clone().into_bytes();
+                    assert_eq!(filter.before_send(packet).unwrap().into_bytes(), original);
+                }
+                if invalid_next_hop {
+                    assert!(
+                        filter
+                            .before_send(make_packet(source, next_hop, PacketType::Data))
+                            .is_none(),
+                        "invalid directly addressed sessions must still fail closed"
+                    );
+                }
+            }
+        }
+    }
 
     pub fn set_secure_mode_cfg(global_ctx: &GlobalCtx, enabled: bool) {
         if !enabled {
