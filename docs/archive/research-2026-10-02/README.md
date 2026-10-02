@@ -107,8 +107,9 @@ pushed and fetched back with matching commit/tree identities and PRs closed.
 
 The 11 experimental worktrees are removed after preservation. Only the five
 identified generated Python bytecode files are discarded; their source remains
-in Git. The previously untracked upstream TODO is preserved in this archive,
-with an unchanged original also retained privately. Existing release tags,
+in Git. The previously untracked upstream TODO is preserved in this archive;
+the public copy adds an archival banner and redacts one private-host reference.
+The unchanged original is retained privately. Existing release tags,
 release branches, older recovery archives, stash objects, canonical build
 caches and private diagnostic evidence are not deleted by this batch.
 
@@ -121,3 +122,26 @@ No proposed follow-up is converted into a mandatory release gate or a PASS.
 Closure is administrative and evidentiary: **research stopped, source retained,
 unaccepted work unmerged, no further action scheduled**. It is not a statement
 that the fork's throughput, CPU and memory concerns have all been solved.
+
+## Devin closeout review (2026-10-02)
+
+Devin returned a read-only review of the archive at
+`4a42e703feef29e4c440b936d40934e78a215468`: no concrete archival omission,
+data-loss risk or factual contradiction was found. Administrative closeout was
+accepted without further experiments. Its optional wording clarification about
+the public TODO copy's banner and redaction is incorporated above.
+
+Independently checked in that review: the clean canonical checkout and
+documentation-only diff; all 15 local/remote-tracking commit and tree identities
+against `refs.tsv`; absence of the old local and remote-tracking branch names;
+one remaining worktree and one retained stash; live GitHub states for all eight
+closed, unmerged PRs and four NOT_PLANNED issues, with zero open PRs/issues; and
+the private original TODO's recorded SHA-256 and its two public-copy changes.
+
+Inherited, not independently revalidated in that review: historical workflow
+outcomes and performance measurements, artifact IDs/hashes, each closed PR's
+head OID, the deletion history and former worktree count, bytecode contents and
+other private evidence. No test, build, CI query/dispatch or code edit was made
+by the advisor. The reply is advisory review, not formal GitHub approval or
+production acceptance. Future task start/end communication is recorded in
+`AGENTS.md`; this does not reopen the archived research.

@@ -14,6 +14,23 @@ runbooks, not in this file.
 - After publication, record evidence with [skip ci], fast-forward codex/current, and
   remove obsolete clean worktrees.
 
+## Devin advisor communication
+
+- Communicate with the existing EasyTier Devin advisor at both the start and end
+  of every task. Confirm the project and session; do not use another project's
+  Devin window or create a fresh review session for each small change.
+- Start with the exact baseline/ref, requested scope, planned actions and prohibited
+  actions. End with the delivered commit/ref, actual results, unresolved or untested
+  boundaries, and a bounded request for read-only closeout review.
+- Devin is an advisor only: do not delegate code/file edits, tests, builds, CI writes,
+  commits, merges or releases. Advisory feedback is not formal GitHub approval,
+  exact-artifact evidence or maintainer authorization.
+- Claim Devin review only after receiving its actual reply. Distinguish what it
+  independently checked from inherited evidence; an unavailable reply is unreviewed,
+  not approval. Keep private evidence private and follow bounded waiting rules.
+- A maintainer stop/archive decision takes precedence. Review must not restart
+  experiments or turn optional suggestions into tasks without a new user request.
+
 ## Development
 
 - Batch related code, tests, platform configuration, generated files, dependency pins,
